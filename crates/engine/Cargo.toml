@@ -1,0 +1,8 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+command-api = { path = "../command-api" }

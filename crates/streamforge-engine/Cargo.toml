@@ -1,0 +1,17 @@
+[package]
+name = "streamforge-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "streamforge-engine"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+control-protocol = { path = "../control-protocol" }
+engine = { path = "../engine" }
+
+[dev-dependencies]
+serde_json.workspace = true

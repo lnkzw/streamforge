@@ -1,0 +1,113 @@
+# Roadmap and Acceptance Criteria
+
+## M0 — Workspace foundation
+
+- [x] Cargo workspace builds in principle
+- [x] CLI returns structured status
+- [x] Basic timestamp type and tests
+- [ ] CI runs format, clippy, and tests on Linux, Windows, macOS (workflow: `.github/workflows/ci.yml`; check off only after a green run on all three runners)
+
+Acceptance:
+- `cargo build --workspace`
+- `cargo test --workspace`
+- `cargo run -p streamforge-cli -- status --json`
+
+## M1 — Command boundary
+
+- [x] Define a command registry and structured result/error types (`command-api`).
+- [x] Add a headless engine process (`streamforge-engine`, stdio).
+- [x] Add a local JSON-lines protocol with request IDs (`control-protocol`, `docs/protocol.md`).
+- [x] Keep the transport replaceable; do not expose internal Rust types as an accidental permanent protocol (ADR 0002).
+
+Acceptance:
+- [x] Integration test sends `get_status` and receives a correlated JSON response (`crates/streamforge-engine/tests/stdio_protocol.rs`).
+- [x] Invalid commands return structured errors and do not crash the process (same file; contract cases in `crates/control-protocol/tests/contract.rs`).
+
+Known limitations, deferred to later milestones:
+- Only `get_status` and `list_commands` exist; status fields are static until a media graph exists.
+- stdio only: one controlling client per engine process. A socket/named-pipe transport for a shared engine is not implemented.
+- Requests are handled sequentially on the main thread; no controller thread or bounded command queue yet.
+- Permission classes are declared but not enforced (M8).
+- Tests run on Linux only so far. Clippy passes locally for `x86_64-pc-windows-msvc` and `x86_64-pc-windows-gnu`, which proves compilation, not behavior. macOS is unchecked. CI covers all three once the repository is hosted.
+
+## M2 — Capture spike
+
+- Implement Linux screen capture through XDG ScreenCast portal + PipeWire.
+- Enumerate and capture audio input through PipeWire.
+- Record runtime capability information.
+- Document Hyprland-specific backend requirements.
+
+Acceptance:
+- Manual test captures a selected screen/window.
+- Capture diagnostics report dimensions, timestamps, FPS and drops.
+- Unsupported capabilities fail with a useful message.
+
+## M3 — First video compositor
+
+- Composite two sources with position, scale and alpha.
+- Keep render loop independent from UI.
+- Add deterministic tests for transform and scene graph logic.
+
+Acceptance:
+- Test pattern + captured source render correctly.
+- Target: 1080p/60 FPS on the development machine, measured and reported rather than assumed.
+
+## M4 — Audio mixer
+
+- Mix at least two inputs.
+- Add gain, mute and peak/RMS meters.
+- Define clipping and resampling policy.
+
+Acceptance:
+- Offline deterministic test tone mixing.
+- Live test shows no unbounded latency growth during a 10-minute run.
+
+## M5 — First recording
+
+- Encode video and audio using FFmpeg libraries.
+- Mux into a local container.
+- Finalize files correctly on stop and on recoverable errors.
+
+Acceptance:
+- Produce a playable recording with synchronized audio/video.
+- Automated test checks duration, stream metadata, and A/V timestamp drift.
+
+## M6 — Live output
+
+- Add RTMP output.
+- Handle reconnect, network errors, encoder failure and shutdown.
+- Keep recording and streaming as separate output consumers.
+
+Acceptance:
+- Stream to a local test server.
+- Recording can continue if streaming output fails, where the graph configuration allows it.
+
+## M7 — Desktop UI
+
+- Add scenes/sources, preview, audio mixer, recording/stream controls.
+- UI calls the same command handlers as CLI/protocol adapters.
+
+Acceptance:
+- UI can create a scene, add a source, and start/stop a recording without direct business logic in UI widgets.
+
+## M8 — Agent integration
+
+- Expose safe read-only status and diagnostics first.
+- Add MCP tools over the same command API.
+- Require explicit authorization for sensitive actions and credentials.
+- Never expose stream keys in logs or default tool responses.
+
+Acceptance:
+- Agent can inspect status and create a test scene.
+- Destructive and credential-related operations are permission-gated.
+
+## M9 — Cross-platform backends
+
+- Windows capture/audio backend.
+- macOS capture/audio backend.
+- Hardware encoding paths where beneficial.
+- Document capability matrix and run platform CI.
+
+Acceptance:
+- CI builds on all three operating systems.
+- Capture/recording integration tests run on available native runners; limitations are explicit.

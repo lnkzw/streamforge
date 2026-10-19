@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - run: cargo fmt --all -- --check
+
+  check:
+    name: clippy + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+      - name: Record toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: "M0 acceptance: CLI status"
+        run: cargo run --locked -q -p streamforge-cli -- status --json
+      - name: "M1 smoke: headless engine over a shell pipe"
+        run: |
+          printf '%s\n' '{"id":1,"command":"get_status"}' \
+            | cargo run --locked -q -p streamforge-engine \
+            | tee engine-response.json
+          grep -F '"id":1,"ok":true' engine-response.json

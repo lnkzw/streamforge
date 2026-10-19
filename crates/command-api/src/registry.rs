@@ -65,7 +65,7 @@ const PROBE_SCREEN_CAPTURE: CommandDescriptor = CommandDescriptor {
     summary: "Capture a user-selected screen or window and report format, timestamps, FPS and drops. \
               Params: duration_ms (100..=60000, default 5000), source_types ([\"monitor\",\"window\",\"virtual\"], \
               default [\"monitor\",\"window\"]), cursor (\"hidden\"|\"embedded\"|\"metadata\", default \"embedded\").",
-    access: CommandAccess::Control,
+    access: CommandAccess::Sensitive,
 };
 
 const PROBE_AUDIO_CAPTURE: CommandDescriptor = CommandDescriptor {
@@ -441,7 +441,10 @@ mod tests {
             Some(CommandAccess::ReadOnly)
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
-        assert_eq!(access("probe_screen_capture"), Some(CommandAccess::Control));
+        assert_eq!(
+            access("probe_screen_capture"),
+            Some(CommandAccess::Sensitive)
+        );
         assert_eq!(
             access("probe_audio_capture"),
             Some(CommandAccess::Sensitive)

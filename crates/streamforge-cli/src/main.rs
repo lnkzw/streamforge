@@ -1,7 +1,6 @@
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
-use capture_api::CaptureBackend;
 use clap::{Parser, Subcommand};
 use command_api::{Command, CommandHandler, CommandOutput};
 use engine::Engine;
@@ -64,7 +63,7 @@ fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     // In-process engine; the CLI shares command handlers with the protocol
     // server instead of computing results itself.
-    let mut engine = Engine::with_capture(capture_backend());
+    let mut engine = Engine::with_capture(capture_platform::backend());
 
     match cli.command {
         Commands::Status { json } => {
@@ -145,18 +144,6 @@ fn run_command(engine: &mut Engine, name: &str, params: Map<String, Value>) -> R
             }
             Ok(ExitCode::FAILURE)
         }
-    }
-}
-
-/// Platform capture backend for this build.
-fn capture_backend() -> Box<dyn CaptureBackend> {
-    #[cfg(target_os = "linux")]
-    {
-        Box::new(capture_linux::LinuxCapture::new())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Box::new(capture_api::UnsupportedCapture::for_current_platform())
     }
 }
 

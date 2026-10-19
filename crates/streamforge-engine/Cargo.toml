@@ -10,12 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-capture-api = { path = "../capture-api" }
+capture-platform = { path = "../capture-platform" }
 control-protocol = { path = "../control-protocol" }
 engine = { path = "../engine" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-capture-linux = { path = "../capture-linux" }
 
 [dev-dependencies]
 serde_json.workspace = true

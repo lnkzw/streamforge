@@ -36,15 +36,16 @@
 | `media-core` | lib | Platform-neutral media types and time model | — |
 | `capture-api` | lib | Platform-neutral capture interface: capabilities, requests, reports, `CaptureError`, `CaptureBackend` trait, allocation-free diagnostics accumulators | `media-core` |
 | `capture-linux` | lib | Linux `CaptureBackend`: XDG ScreenCast portal + PipeWire (`docs/capture-linux.md`); empty on other OSes | `capture-api` (Linux only: `ashpd`, `pipewire`) |
+| `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends | `capture-api`, `capture-linux` (Linux) |
 | `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api` (types only) |
 | `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` | `command-api`, `capture-api` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
-| `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-linux` (Linux) |
-| `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-linux` (Linux) |
+| `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
+| `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
 
 `engine` and `control-protocol` do not depend on each other. Only the binaries combine them. A future socket transport, JSON-RPC or MCP adapter would be another crate that calls `CommandHandler`, next to `control-protocol`.
 
-The binaries are the composition roots. Each picks the platform capture backend with `cfg(target_os)` and injects it with `Engine::with_capture`. Other OSes get `capture_api::UnsupportedCapture`, which reports a reason instead of failing to build. `engine` never depends on a platform crate.
+The binaries are the composition roots. Each injects `capture_platform::backend()` with `Engine::with_capture`, so CLI and protocol server always use the same backend. On OSes without a backend, `capture-platform` returns `capture_api::UnsupportedCapture`, which reports a reason instead of failing to build. `engine` never depends on a platform crate.
 
 ## Command boundary
 

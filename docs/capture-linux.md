@@ -115,5 +115,6 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 - Audio `frame_deficit` is estimated from arrival times and is accurate to about one buffer.
 - The audio default-source hint relies on WirePlumber's error text ("no target node"). Other failures are reported as `backend_error` with the original message.
 - An audio input selected by name is checked against the registry before connecting. A device removed in between may still make PipeWire fall back to the default source.
-- If the portal call times out, the half-open portal session is not closed explicitly. The portal cleans it up when the D-Bus connection closes.
-- Microphone access is not consent-gated on the desktop (outside Flatpak). `probe_audio_capture` is classified `sensitive`; enforcement arrives with M8.
+- The portal session is closed on every failure path: cancellation, a selection timeout, errors after `Start`, and capture errors. Because ashpd shares one D-Bus connection per process, an unclosed session would keep the compositor sharing until the process exits. One case remains: if *creating* the session itself times out, there is no handle to close.
+- Microphone access is not consent-gated on the desktop (outside Flatpak). Both probes are classified `sensitive`; enforcement arrives with M8.
+- ScreenCast portals older than interface version 2 cannot select a cursor mode. The request's `cursor` is then ignored with a warning instead of failing.

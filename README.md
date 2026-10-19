@@ -49,6 +49,7 @@ The first version deliberately has no capture or streaming functionality. Do not
 - `crates/media-core`: platform-independent media types and time model
 - `crates/capture-api`: platform-neutral capture interface and diagnostics
 - `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
+- `crates/capture-platform`: selects the capture backend for the target OS
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

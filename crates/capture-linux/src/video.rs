@@ -11,14 +11,14 @@ use capture_api::{
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
-use pw::stream::{StreamBox, StreamFlags, StreamState};
+use pw::stream::{StreamBox, StreamFlags};
 use spa::buffer::ChunkFlags;
 use spa::buffer::meta::{MetaHeader, MetaHeaderFlags};
 use spa::param::ParamType;
 use spa::pod::Pod;
 
 use crate::formats;
-use crate::pw::Connection;
+use crate::pw::{Connection, StreamWatch};
 
 pub(crate) struct VideoRun {
     pub format: Option<VideoFormatInfo>,
@@ -32,8 +32,6 @@ struct State {
     stats: VideoStatsAccumulator,
     format: Option<VideoFormatInfo>,
     buffer_memory: Option<&'static str>,
-    reached_streaming: bool,
-    error: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -58,42 +56,10 @@ pub(crate) fn capture(
         },
     )
     .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
-
-    let _core_listener = connection
-        .core
-        .add_listener_local()
-        .error({
-            let state = Rc::clone(&state);
-            let main_loop = connection.main_loop.clone();
-            move |id, _seq, res, message| {
-                state.borrow_mut().error =
-                    Some(format!("PipeWire error on object {id}: {message} ({res})"));
-                main_loop.quit();
-            }
-        })
-        .register();
+    let watch = StreamWatch::attach(&connection, &stream)?;
 
     let _listener = stream
         .add_local_listener_with_user_data(())
-        .state_changed({
-            let state = Rc::clone(&state);
-            let main_loop = connection.main_loop.clone();
-            move |_, _, _old, new| {
-                let mut state = state.borrow_mut();
-                match new {
-                    StreamState::Streaming => state.reached_streaming = true,
-                    StreamState::Error(message) => {
-                        state.error = Some(format!("PipeWire stream error: {message}"));
-                        main_loop.quit();
-                    }
-                    StreamState::Unconnected if state.reached_streaming => {
-                        // The user stopped sharing or the source disappeared.
-                        main_loop.quit();
-                    }
-                    _ => {}
-                }
-            }
-        })
         .param_changed({
             let state = Rc::clone(&state);
             move |stream, _, id, param| {
@@ -181,32 +147,10 @@ pub(crate) fn capture(
             CaptureError::backend(format!("cannot connect to PipeWire node {node_id}: {err}"))
         })?;
 
-    let ran_full_duration = connection.run_for(duration)?;
-    let elapsed = start.elapsed();
-    // Disconnecting emits a final state change; the loop is no longer running.
-    let disconnect = stream.disconnect();
-
+    let outcome = watch.run(&connection, &stream, duration, start)?;
     let mut state = state.take();
-    if let Err(err) = disconnect {
-        state
-            .warnings
-            .push(format!("disconnecting the stream failed: {err}"));
-    }
-    if let Some(message) = state.error {
-        return Err(CaptureError::backend(message));
-    }
-    if !state.reached_streaming {
-        return Err(CaptureError::timeout(format!(
-            "the screen stream did not start within {} ms; the portal backend may not support \
-             shared-memory buffers for this source",
-            duration.as_millis()
-        )));
-    }
-    if !ran_full_duration {
-        state
-            .warnings
-            .push("the stream ended before the probe duration elapsed".to_owned());
-    }
+    let elapsed = outcome.finish("screen", &mut state.warnings, CaptureError::backend)?;
+
     let stats = state.stats.finish(elapsed);
     if stats.frames == 0 {
         state.warnings.push(

@@ -51,7 +51,7 @@ pub(crate) fn query(timeout: Duration) -> Result<PortalInfo, CaptureError> {
 
 /// A started screen cast; close it with [`Cast::close`].
 pub(crate) struct Cast {
-    proxy: Screencast,
+    // Carries its own D-Bus proxy, so the ScreenCast proxy is not kept.
     session: Session<Screencast>,
     pub node_id: u32,
     pub kind: Option<VideoSourceKind>,
@@ -59,75 +59,116 @@ pub(crate) struct Cast {
     pub remote: OwnedFd,
 }
 
+struct Selection {
+    node_id: u32,
+    kind: Option<VideoSourceKind>,
+    size: Option<(u32, u32)>,
+    remote: OwnedFd,
+}
+
 /// Create a session, let the user pick one source and open its PipeWire remote.
+///
+/// `cursor` is `None` for portals that cannot select a cursor mode (v1).
+/// The session is closed again on every failure after it was created,
+/// including cancellation and `selection_timeout`; ashpd shares one D-Bus
+/// connection per process, so an unclosed session would otherwise keep the
+/// compositor sharing until the process exits.
 pub(crate) fn start(
     kinds: &[VideoSourceKind],
-    cursor: CursorMode,
-    timeout: Duration,
+    cursor: Option<CursorMode>,
+    selection_timeout: Duration,
+    close_timeout: Duration,
 ) -> Result<Cast, CaptureError> {
     let sources = kinds
         .iter()
         .map(|kind| portal_source_type(*kind))
         .collect::<BitFlags<_>>();
-    block_on_timeout(timeout, "the screen cast portal dialog", async move {
-        let proxy = Screencast::new()
-            .await
-            .map_err(|err| map_error("cannot open the ScreenCast portal", err))?;
-        let session = proxy
-            .create_session(Default::default())
-            .await
-            .map_err(|err| map_error("cannot create a screen cast session", err))?;
-        proxy
-            .select_sources(
-                &session,
-                SelectSourcesOptions::default()
-                    .set_cursor_mode(portal_cursor_mode(cursor))
-                    .set_sources(sources)
-                    .set_multiple(false)
-                    .set_persist_mode(PersistMode::DoNot),
-            )
-            .await
-            .and_then(|request| request.response())
-            .map_err(|err| map_error("cannot select screen cast sources", err))?;
-        let streams = proxy
-            .start(&session, None, Default::default())
-            .await
-            .and_then(|request| request.response())
-            .map_err(|err| map_error("screen cast was not started", err))?;
-        let stream = streams.streams().first().cloned().ok_or_else(|| {
-            CaptureError::backend("the portal started a screen cast without any stream")
+    let (proxy, session) =
+        block_on_timeout(close_timeout, "creating a screen cast session", async {
+            let proxy = Screencast::new()
+                .await
+                .map_err(|err| map_error("cannot open the ScreenCast portal", err))?;
+            let session = proxy
+                .create_session(Default::default())
+                .await
+                .map_err(|err| map_error("cannot create a screen cast session", err))?;
+            Ok((proxy, session))
         })?;
-        let remote = proxy
-            .open_pipe_wire_remote(&session, Default::default())
-            .await
-            .map_err(|err| map_error("cannot open the PipeWire remote", err))?;
-        let size = stream
-            .size()
-            .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)));
-        Ok(Cast {
-            node_id: stream.pipe_wire_node_id(),
-            kind: stream.source_type().map(video_source_kind),
-            size,
-            remote,
-            proxy,
+    let selection = block_on_timeout(
+        selection_timeout,
+        "the screen cast portal dialog",
+        select(&proxy, &session, sources, cursor),
+    );
+    match selection {
+        Ok(selection) => Ok(Cast {
             session,
-        })
+            node_id: selection.node_id,
+            kind: selection.kind,
+            size: selection.size,
+            remote: selection.remote,
+        }),
+        Err(error) => Err(match close_session(&session, close_timeout) {
+            Ok(()) => error,
+            Err(close) => error.with_detail("session_close_error", close.message),
+        }),
+    }
+}
+
+async fn select(
+    proxy: &Screencast,
+    session: &Session<Screencast>,
+    sources: BitFlags<SourceType>,
+    cursor: Option<CursorMode>,
+) -> Result<Selection, CaptureError> {
+    proxy
+        .select_sources(
+            session,
+            SelectSourcesOptions::default()
+                .set_cursor_mode(cursor.map(portal_cursor_mode))
+                .set_sources(sources)
+                .set_multiple(false)
+                .set_persist_mode(PersistMode::DoNot),
+        )
+        .await
+        .and_then(|request| request.response())
+        .map_err(|err| map_error("cannot select screen cast sources", err))?;
+    let streams = proxy
+        .start(session, None, Default::default())
+        .await
+        .and_then(|request| request.response())
+        .map_err(|err| map_error("screen cast was not started", err))?;
+    let stream = streams.streams().first().cloned().ok_or_else(|| {
+        CaptureError::backend("the portal started a screen cast without any stream")
+    })?;
+    let remote = proxy
+        .open_pipe_wire_remote(session, Default::default())
+        .await
+        .map_err(|err| map_error("cannot open the PipeWire remote", err))?;
+    let size = stream
+        .size()
+        .and_then(|(w, h)| Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?)));
+    Ok(Selection {
+        node_id: stream.pipe_wire_node_id(),
+        kind: stream.source_type().map(video_source_kind),
+        size,
+        remote,
     })
 }
 
 impl Cast {
     /// End the screen cast session so the compositor stops sharing.
     pub fn close(self, timeout: Duration) -> Result<(), CaptureError> {
-        let Self { proxy, session, .. } = self;
-        block_on_timeout(timeout, "closing the screen cast session", async move {
-            let result = session
-                .close()
-                .await
-                .map_err(|err| map_error("cannot close the screen cast session", err));
-            drop(proxy);
-            result
-        })
+        close_session(&self.session, timeout)
     }
+}
+
+fn close_session(session: &Session<Screencast>, timeout: Duration) -> Result<(), CaptureError> {
+    block_on_timeout(timeout, "closing the screen cast session", async {
+        session
+            .close()
+            .await
+            .map_err(|err| map_error("cannot close the screen cast session", err))
+    })
 }
 
 fn block_on_timeout<T>(

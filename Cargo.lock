@@ -301,6 +301,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "capture-platform"
+version = "0.1.0"
+dependencies = [
+ "capture-api",
+ "capture-linux",
+]
+
+[[package]]
 name = "cc"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1038,8 +1046,7 @@ name = "streamforge-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "capture-api",
- "capture-linux",
+ "capture-platform",
  "clap",
  "command-api",
  "engine",
@@ -1050,8 +1057,7 @@ dependencies = [
 name = "streamforge-engine"
 version = "0.1.0"
 dependencies = [
- "capture-api",
- "capture-linux",
+ "capture-platform",
  "clap",
  "control-protocol",
  "engine",

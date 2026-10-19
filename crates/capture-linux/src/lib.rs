@@ -25,7 +25,9 @@ use capture_api::{
 };
 use serde_json::json;
 
-/// Upper bound for capability queries; keeps `get_status` responsive.
+/// Upper bound for each capability query. Screen and audio are queried in
+/// parallel, so `capabilities()` (and the first `get_status`) waits at most
+/// this long.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Upper bound for the user to pick a source in the portal dialog.
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -46,7 +48,18 @@ impl LinuxCapture {
 
 impl CaptureBackend for LinuxCapture {
     fn capabilities(&mut self) -> CaptureCapabilities {
-        let screen = match portal::query(QUERY_TIMEOUT) {
+        let (portal, audio) = std::thread::scope(|scope| {
+            let portal = scope.spawn(|| portal::query(QUERY_TIMEOUT));
+            // PipeWire objects are !Send; they stay on this thread.
+            let audio = pw::server_version(QUERY_TIMEOUT);
+            let portal = portal.join().unwrap_or_else(|_| {
+                Err(CaptureError::backend(
+                    "the portal capability query panicked",
+                ))
+            });
+            (portal, audio)
+        });
+        let screen = match portal {
             Ok(info) => ScreenCaptureCapability {
                 backend: Some(SCREEN_BACKEND.to_owned()),
                 available: !info.source_kinds.is_empty(),
@@ -60,7 +73,7 @@ impl CaptureBackend for LinuxCapture {
             },
             Err(err) => ScreenCaptureCapability::unavailable(Some(SCREEN_BACKEND), err.message),
         };
-        let audio = match pw::server_version(QUERY_TIMEOUT) {
+        let audio = match audio {
             Ok(version) => AudioCaptureCapability {
                 backend: Some(pw::BACKEND.to_owned()),
                 available: true,
@@ -96,7 +109,24 @@ impl CaptureBackend for LinuxCapture {
             cursor_modes: info.cursor_modes,
         })?;
 
-        let cast = portal::start(&request.source_kinds, request.cursor, SELECTION_TIMEOUT)?;
+        let mut warnings = Vec::new();
+        // ScreenCast v1 has no cursor modes; the request's cursor is ignored there.
+        let cursor = if info.version >= 2 {
+            Some(request.cursor)
+        } else {
+            warnings.push(format!(
+                "portal interface version {} cannot select a cursor mode; `{}` was ignored",
+                info.version,
+                request.cursor.as_str()
+            ));
+            None
+        };
+        let cast = portal::start(
+            &request.source_kinds,
+            cursor,
+            SELECTION_TIMEOUT,
+            CLOSE_TIMEOUT,
+        )?;
         let source = VideoSourceInfo {
             kind: cast.kind,
             width: cast.size.map(|(w, _)| w),
@@ -109,13 +139,20 @@ impl CaptureBackend for LinuxCapture {
             .and_then(|remote| video::capture(remote, cast.node_id, cast.size, request.duration));
         // Always end the portal session, even if capturing failed.
         let closed = cast.close(CLOSE_TIMEOUT);
-        let mut run = run?;
-        if let Err(err) = closed {
-            run.warnings.push(err.message);
-        }
-        if let Some(warning) = source_kind_mismatch(&request.source_kinds, source.kind) {
-            run.warnings.insert(0, warning);
-        }
+        let mut run = match (run, closed) {
+            (Ok(run), Ok(())) => run,
+            (Ok(mut run), Err(close)) => {
+                run.warnings.push(close.message);
+                run
+            }
+            (Err(error), Ok(())) => return Err(error),
+            (Err(error), Err(close)) => {
+                return Err(error.with_detail("session_close_error", close.message));
+            }
+        };
+        warnings.extend(source_kind_mismatch(&request.source_kinds, source.kind));
+        warnings.append(&mut run.warnings);
+        run.warnings = warnings;
         Ok(VideoCaptureReport {
             backend: SCREEN_BACKEND.to_owned(),
             source,

@@ -139,6 +139,9 @@ pub struct ScreenCaptureRequest {
 
 impl ScreenCaptureRequest {
     /// Reject source kinds or cursor modes the backend did not advertise.
+    /// An empty `cursor_modes` list means the backend cannot select a cursor
+    /// mode at all (e.g. ScreenCast portal v1); the cursor request is then
+    /// not checked and the backend reports that it was ignored.
     pub fn check_supported(
         &self,
         capability: &ScreenCaptureCapability,
@@ -159,7 +162,7 @@ impl ScreenCaptureRequest {
                 "available": capability.source_kinds,
             })));
         }
-        if !capability.cursor_modes.contains(&self.cursor) {
+        if !capability.cursor_modes.is_empty() && !capability.cursor_modes.contains(&self.cursor) {
             return Err(CaptureError::unsupported(format!(
                 "screen capture backend does not offer cursor mode `{}`",
                 self.cursor.as_str()
@@ -278,6 +281,15 @@ mod tests {
         assert_eq!(
             err.details.expect("details")["available"],
             json!(["monitor"])
+        );
+    }
+
+    #[test]
+    fn backend_without_cursor_selection_accepts_any_cursor_request() {
+        let caps = capability(&[VideoSourceKind::Monitor], &[]);
+        assert_eq!(
+            request(&[VideoSourceKind::Monitor], CursorMode::Metadata).check_supported(&caps),
+            Ok(())
         );
     }
 

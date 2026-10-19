@@ -461,6 +461,7 @@ dependencies = [
  "capture-api",
  "command-api",
  "media-core",
+ "serde",
  "serde_json",
  "video-compositor",
 ]

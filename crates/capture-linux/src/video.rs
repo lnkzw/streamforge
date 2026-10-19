@@ -43,6 +43,8 @@ struct State {
     /// Set when the negotiated format can be converted for delivery.
     layout: Option<PixelLayout>,
     buffer_memory: Option<&'static str>,
+    /// Frames arrived with bottom-up rows (negative stride); not supported.
+    saw_bottom_up: bool,
     warnings: Vec<String>,
 }
 
@@ -164,17 +166,28 @@ pub(crate) fn capture(
                 let Some(delivery) = &delivery else {
                     return;
                 };
+                // SPA: a negative stride means rows are stored bottom-up.
+                let Ok(stride) = usize::try_from(stride) else {
+                    state.saw_bottom_up = true;
+                    state.stats.frame_discarded();
+                    return;
+                };
                 let geometry = state.format.as_ref().map(|f| (f.width, f.height));
                 let delivered = match (state.layout, geometry, data.data()) {
-                    (Some(layout), Some((width, height)), Some(memory)) => deliver(
-                        delivery,
-                        &memory[offset.min(memory.len())..],
-                        stride,
-                        width,
-                        height,
-                        layout,
-                        pts_ns,
-                    ),
+                    (Some(layout), Some((width, height)), Some(memory)) => {
+                        // Only the chunk's valid bytes; a short chunk fails conversion.
+                        let start = offset.min(memory.len());
+                        let end = start.saturating_add(size as usize).min(memory.len());
+                        deliver(
+                            delivery,
+                            &memory[start..end],
+                            stride,
+                            width,
+                            height,
+                            layout,
+                            pts_ns,
+                        )
+                    }
                     _ => false,
                 };
                 if !delivered {
@@ -203,6 +216,12 @@ pub(crate) fn capture(
     let mut state = state.take();
     let elapsed = outcome.finish("screen", &mut state.warnings, CaptureError::backend)?;
 
+    if state.saw_bottom_up {
+        state.warnings.push(
+            "frames with bottom-up row order (negative stride) are not supported and were discarded"
+                .to_owned(),
+        );
+    }
     let stats = state.stats.finish(elapsed);
     if stats.frames == 0 {
         state.warnings.push(
@@ -229,7 +248,7 @@ pub(crate) fn capture(
 fn deliver(
     delivery: &Delivery,
     source: &[u8],
-    stride: i32,
+    stride: usize,
     width: u32,
     height: u32,
     layout: PixelLayout,
@@ -237,11 +256,8 @@ fn deliver(
 ) -> bool {
     let (w, h) = (width as usize, height as usize);
     let row = w * media_core::PixelFormat::BYTES_PER_PIXEL;
-    // A non-positive chunk stride means "tightly packed".
-    let stride = usize::try_from(stride)
-        .ok()
-        .filter(|s| *s > 0)
-        .unwrap_or(row);
+    // A zero chunk stride means "tightly packed".
+    let stride = if stride == 0 { row } else { stride };
     let Some(mut buffer) = delivery.pool.acquire(row * h) else {
         return false;
     };

@@ -3,7 +3,7 @@
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::geometry::Transform;
+use crate::geometry::{Rect, Transform};
 
 /// Identifies the frame source a layer draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -13,7 +13,12 @@ pub struct SourceId(pub u32);
 pub struct Layer {
     pub name: String,
     pub source: SourceId,
+    /// Placement; ignored while `fit` is set.
     pub transform: Transform,
+    /// Fit each frame into this canvas rectangle (aspect preserved, centered).
+    /// The transform is derived from the actual frame size at render time,
+    /// so sources whose size is unknown in advance or changes still fit.
+    pub fit: Option<Rect>,
     /// Multiplier applied to the source alpha, `0.0..=1.0`.
     pub opacity: f32,
     pub visible: bool,
@@ -25,8 +30,25 @@ impl Layer {
             name: name.into(),
             source,
             transform,
+            fit: None,
             opacity: 1.0,
             visible: true,
+        }
+    }
+
+    /// Layer whose frames are scaled to fit inside `area`.
+    pub fn fitted(name: impl Into<String>, source: SourceId, area: Rect) -> Self {
+        Self {
+            fit: Some(area),
+            ..Self::new(name, source, Transform::IDENTITY)
+        }
+    }
+
+    /// Placement for a `width` x `height` frame.
+    pub fn transform_for(&self, width: u32, height: u32) -> Transform {
+        match self.fit {
+            Some(area) => Transform::fit(width, height, area),
+            None => self.transform,
         }
     }
 
@@ -56,6 +78,8 @@ pub enum SceneError {
     InvalidPosition { layer: String },
     #[error("layer `{layer}` has opacity {opacity}, expected 0.0..=1.0")]
     InvalidOpacity { layer: String, opacity: f32 },
+    #[error("layer `{layer}` has a fit area that is empty or non-finite")]
+    InvalidFitArea { layer: String },
 }
 
 impl Scene {
@@ -87,6 +111,16 @@ impl Scene {
                 return Err(SceneError::InvalidPosition {
                     layer: layer.name.clone(),
                 });
+            }
+            if let Some(area) = layer.fit {
+                let finite = [area.x, area.y, area.width, area.height]
+                    .iter()
+                    .all(|v| v.is_finite());
+                if !finite || area.width <= 0.0 || area.height <= 0.0 {
+                    return Err(SceneError::InvalidFitArea {
+                        layer: layer.name.clone(),
+                    });
+                }
             }
             if !(0.0..=1.0).contains(&layer.opacity) {
                 return Err(SceneError::InvalidOpacity {
@@ -139,6 +173,16 @@ mod tests {
                 ..base.clone()
             },
             base.clone().with_opacity(1.5),
+            Layer::fitted(
+                "bad",
+                SourceId(0),
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 10.0,
+                },
+            ),
         ];
         for layer in cases {
             let mut scene = Scene::new(10, 10);

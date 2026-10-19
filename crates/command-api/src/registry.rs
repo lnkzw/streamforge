@@ -81,7 +81,8 @@ const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
     summary: "Composite a 1920x1080@60 test scene (color bars, moving overlay, optional live screen) \
               and report render time, late frames and source drops. Params: duration_ms (100..=60000, \
               default 5000), screen (bool, default false; opens the system picker), source_types and \
-              cursor (only with screen), snapshot_path (new .ppm file for the last frame).",
+              cursor (only with screen), snapshot_path (plain .ppm file name, written to the engine's output \
+              directory, never overwritten).",
     access: CommandAccess::Sensitive,
 };
 
@@ -218,16 +219,24 @@ fn decode_composite_probe(
     })
 }
 
-/// Snapshots are restricted to new `.ppm` files; the engine never overwrites.
+/// Snapshots are plain `.ppm` file names. The engine writes them into its
+/// own output directory and never overwrites, so a remote client cannot
+/// choose where files land.
 fn snapshot_path(command: &str, path: String) -> Result<PathBuf, CommandError> {
     let path = PathBuf::from(path);
+    let mut components = path.components();
+    let plain_name = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
     let is_ppm = path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"));
-    if !is_ppm || path.file_stem().is_none() {
+    if !plain_name || !is_ppm || path.file_stem().is_none() {
         return Err(invalid_params(
             command,
-            "`snapshot_path` must name a file ending in .ppm",
+            "`snapshot_path` must be a plain file name ending in .ppm \
+             (no directories); it is written to the engine's output directory",
         ));
     }
     Ok(path)
@@ -530,7 +539,7 @@ mod tests {
             "duration_ms": 2000,
             "screen": true,
             "source_types": ["window"],
-            "snapshot_path": "out/frame.PPM",
+            "snapshot_path": "frame.PPM",
         });
         assert_eq!(
             Command::decode("probe_composite", Some(&params)),
@@ -540,7 +549,7 @@ mod tests {
                     source_kinds: vec![VideoSourceKind::Window],
                     cursor: CursorMode::Embedded,
                 }),
-                snapshot_path: Some(PathBuf::from("out/frame.PPM")),
+                snapshot_path: Some(PathBuf::from("frame.PPM")),
             }))
         );
     }
@@ -551,6 +560,10 @@ mod tests {
             json!({"source_types": ["monitor"]}),
             json!({"cursor": "hidden"}),
             json!({"snapshot_path": "frame.png"}),
+            json!({"snapshot_path": "/tmp/frame.ppm"}),
+            json!({"snapshot_path": "../frame.ppm"}),
+            json!({"snapshot_path": "out/frame.ppm"}),
+            json!({"snapshot_path": "./frame.ppm"}),
             json!({"snapshot_path": ".ppm"}),
             json!({"snapshot_path": ""}),
             json!({"screen": "yes"}),

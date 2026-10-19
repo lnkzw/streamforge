@@ -6,6 +6,8 @@
 
 mod composite;
 
+use std::path::PathBuf;
+
 use capture_api::{
     CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
 };
@@ -17,6 +19,8 @@ use command_api::{
 pub struct Engine {
     status: EngineStatus,
     capture: Box<dyn CaptureBackend>,
+    /// Where commands may create files (snapshots); clients only name files.
+    output_dir: PathBuf,
     /// Last capability query; `get_status` derives `capture_available` from it.
     capture_capabilities: Option<CaptureCapabilities>,
 }
@@ -41,8 +45,15 @@ impl Engine {
                 recording_active: false,
             },
             capture,
+            output_dir: PathBuf::from("."),
             capture_capabilities: None,
         }
+    }
+
+    /// Directory for files created by commands; defaults to the working directory.
+    pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.output_dir = dir.into();
+        self
     }
 
     fn refresh_capabilities(&mut self) -> &CaptureCapabilities {
@@ -96,8 +107,10 @@ impl CommandHandler for Engine {
                 .probe_audio(&request)
                 .map(CommandOutput::AudioCaptureReport)
                 .map_err(command_error),
-            Command::ProbeComposite(request) => composite::probe(self.capture.as_mut(), &request)
-                .map(|report| CommandOutput::CompositeReport(Box::new(report))),
+            Command::ProbeComposite(request) => {
+                composite::probe(self.capture.as_mut(), &self.output_dir, &request)
+                    .map(|report| CommandOutput::CompositeReport(Box::new(report)))
+            }
         }
     }
 }
@@ -462,19 +475,21 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("streamforge-engine-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("snapshot.ppm");
-        let params = json!({"duration_ms": 100, "snapshot_path": path.to_str().expect("utf-8")});
+        let mut engine = engine().with_output_dir(&dir);
+        let params = json!({"duration_ms": 100, "snapshot_path": "snapshot.ppm"});
 
-        let first = composite(&mut engine(), params.clone())
+        let first = composite(&mut engine, params.clone())
             .snapshot
             .expect("snapshot");
         assert!(first.written, "{first:?}");
+        assert!(first.path.ends_with("snapshot.ppm"), "{}", first.path);
+        let path = dir.join("snapshot.ppm");
         let bytes = std::fs::read(&path).expect("read snapshot");
         let header = b"P6\n1920 1080\n255\n";
         assert!(bytes.starts_with(header));
         assert_eq!(bytes.len(), header.len() + 1920 * 1080 * 3);
 
-        let second = composite(&mut engine(), params).snapshot.expect("snapshot");
+        let second = composite(&mut engine, params).snapshot.expect("snapshot");
         assert!(!second.written);
         assert!(second.error.is_some());
         assert_eq!(

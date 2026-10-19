@@ -52,7 +52,7 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
 ## Performance measurements
 
 - `cargo run --release -p video-compositor --example render_bench [frames]`: per-frame render time of the reference scene with 1 thread and the default thread count.
-- `cargo run --release -p streamforge-cli -- compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.
+- `cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.
 - Record CPU model, OS, build profile and thread count with every result (see ADR 0003).
 
 ## Reliability requirements

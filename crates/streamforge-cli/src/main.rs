@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
@@ -13,6 +14,9 @@ use serde_json::{Map, Value};
     about = "Agent-friendly cross-platform streaming engine"
 )]
 struct Cli {
+    /// Directory for files created by commands (snapshots).
+    #[arg(long, global = true, default_value = ".")]
+    output_dir: PathBuf,
     #[command(subcommand)]
     command: Commands,
 }
@@ -42,7 +46,8 @@ enum Commands {
         /// With --screen: cursor mode (hidden, embedded, metadata).
         #[arg(long, requires = "screen")]
         cursor: Option<String>,
-        /// Write the last composited frame to this new .ppm file.
+        /// Write the last composited frame to this new .ppm file. A plain file
+        /// name (no directories), created in --output-dir; never overwritten.
         #[arg(long)]
         snapshot: Option<String>,
     },
@@ -81,7 +86,8 @@ fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     // In-process engine; the CLI shares command handlers with the protocol
     // server instead of computing results itself.
-    let mut engine = Engine::with_capture(capture_platform::backend());
+    let mut engine =
+        Engine::with_capture(capture_platform::backend()).with_output_dir(cli.output_dir);
 
     match cli.command {
         Commands::Status { json } => {

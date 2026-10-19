@@ -4,9 +4,12 @@
 //!   Pixel-aligned layers (scale 1, integer position) are copied 1:1.
 //! - Blending: premultiplied alpha "over", in integer math. The output is
 //!   identical for any thread count.
-//! - Work is split into row bands across scoped threads for large layers.
-//!   After warm-up a render does not allocate (the column table is reused),
-//!   apart from spawning the scoped worker threads.
+//! - Work is split into row bands across scoped threads for large layers;
+//!   the calling thread renders one band itself. After warm-up a render does
+//!   not allocate (the column table is reused), apart from spawning the
+//!   `threads - 1` scoped workers per large layer. Measured cost is well
+//!   inside the 60 FPS budget (ADR 0003); a persistent pool is the next
+//!   step if profiling shows spawn jitter.
 
 use std::thread;
 
@@ -123,7 +126,7 @@ impl CpuRenderer {
         if opacity == 0 {
             return false;
         }
-        let transform = layer.transform;
+        let transform = layer.transform_for(source.width(), source.height());
         let rect = transform.rect(source.width(), source.height());
         let Some(bounds) = pixel_bounds(rect, target.width(), target.height()) else {
             return false;
@@ -195,12 +198,14 @@ fn fill_background(target: &mut VideoFrame, background: [u8; 4]) {
     let pixel = [background[0], background[1], background[2], 255];
     let stride = target.stride();
     let row_bytes = target.width() as usize * BPP;
+    let rows = target.height() as usize;
     let data = target.data_mut();
     for px in data[..row_bytes].as_chunks_mut::<BPP>().0 {
         *px = pixel;
     }
     let (first, rest) = data.split_at_mut(stride.min(data.len()));
-    for row in rest.chunks_mut(stride) {
+    // `take` ignores trailing bytes past the last row in oversized buffers.
+    for row in rest.chunks_mut(stride).take(rows - 1) {
         row[..row_bytes].copy_from_slice(&first[..row_bytes]);
     }
 }
@@ -228,10 +233,16 @@ where
         return;
     }
     let band_rows = row_count.div_ceil(threads);
+    let mut bands = rows.chunks_mut(band_rows * stride).enumerate();
+    // The calling thread renders the first band itself: one spawn fewer.
+    let own = bands.next();
     thread::scope(|scope| {
-        for (band, chunk) in rows.chunks_mut(band_rows * stride).enumerate() {
+        for (band, chunk) in bands {
             let run_band = &run_band;
             scope.spawn(move || run_band(y0 + band * band_rows, chunk));
+        }
+        if let Some((_, chunk)) = own {
+            run_band(y0, chunk);
         }
     });
 }
@@ -539,6 +550,44 @@ mod tests {
         let single = render(&s, &[(SourceId(0), &src)], 1);
         let parallel = render(&s, &[(SourceId(0), &src)], 7);
         assert_eq!(single.data(), parallel.data());
+    }
+
+    #[test]
+    fn fitted_layer_follows_the_actual_frame_size() {
+        let area = crate::geometry::Rect {
+            x: 0.0,
+            y: 2.0,
+            width: 8.0,
+            height: 4.0,
+        };
+        for (w, h) in [(2, 1), (4, 2), (16, 8)] {
+            let src = frame(w, h, PixelFormat::Bgrx8, &vec![RED; (w * h) as usize]);
+            let s = scene(8, 8, vec![Layer::fitted("fit", SourceId(0), area)]);
+            let out = render(&s, &[(SourceId(0), &src)], 1);
+            assert_eq!(out.pixel(0, 2), RED, "{w}x{h}");
+            assert_eq!(out.pixel(7, 5), RED, "{w}x{h}");
+            assert_eq!(out.pixel(0, 1), [10, 20, 30, 255], "{w}x{h}");
+            assert_eq!(out.pixel(0, 6), [10, 20, 30, 255], "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn oversized_target_buffer_does_not_panic() {
+        let s = scene(2, 2, vec![]);
+        // Two 8-byte rows plus 4 trailing bytes.
+        let mut target = VideoFrame::new(
+            2,
+            2,
+            8,
+            PixelFormat::Bgra8,
+            None,
+            FrameBuffer::unpooled(vec![0; 20]),
+        )
+        .expect("target");
+        CpuRenderer::new(1)
+            .render(&s, |_| None, &mut target)
+            .expect("render");
+        assert_eq!(target.pixel(1, 1), [10, 20, 30, 255]);
     }
 
     #[test]

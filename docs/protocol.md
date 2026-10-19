@@ -150,7 +150,7 @@ It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_pat
 | `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
 | `screen`        | boolean | `false` | Add the live screen layer; opens the system picker. |
 | `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
-| `snapshot_path` | string ending in `.ppm` | none | Write the last frame as binary PPM. Relative to the engine's working directory. An existing file is never overwritten; the report records the error instead. |
+| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. Directories, `..` and absolute paths are rejected with `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
 
 Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
 

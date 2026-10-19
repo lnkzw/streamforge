@@ -43,7 +43,7 @@ cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens t
 cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
 
 # Compositor (1920x1080@60 test scene; --screen adds a live capture layer)
-cargo run --release -p streamforge-cli -- compose --duration-ms 5000 --snapshot frame.ppm
+cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 --snapshot frame.ppm
 ```
 
 The first version deliberately has no capture or streaming functionality. Do not expect it to replace OBS yet.

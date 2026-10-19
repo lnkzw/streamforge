@@ -10,7 +10,8 @@ use video_compositor::RenderStats;
 
 /// Composite the reference scene for `duration` and report render
 /// diagnostics. `duration` is validated by `Command::decode`; a
-/// `snapshot_path` ends in `.ppm` and is never overwritten.
+/// `snapshot_path` is a plain `.ppm` file name inside the engine's output
+/// directory and is never overwritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeRequest {
     pub duration: Duration,
@@ -48,6 +49,7 @@ impl From<CaptureError> for ErrorSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SnapshotResult {
+    /// Full path of the file in the engine's output directory.
     pub path: String,
     pub written: bool,
     pub error: Option<String>,

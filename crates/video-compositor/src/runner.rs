@@ -101,9 +101,11 @@ pub struct CompositorRun {
 }
 
 /// A running render loop; call [`Compositor::stop`] to end it.
+///
+/// Dropping it without `stop` still stops and joins the render thread.
 pub struct Compositor {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<Result<CompositorRun, CompositorError>>,
+    thread: Option<JoinHandle<Result<CompositorRun, CompositorError>>>,
 }
 
 impl Compositor {
@@ -122,13 +124,32 @@ impl Compositor {
                 move || run(config, target, &stop)
             })
             .map_err(CompositorError::Spawn)?;
-        Ok(Self { stop, thread })
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// The render thread ended on its own (it failed or panicked).
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
     /// Stop after the frame in progress and return the run's statistics.
-    pub fn stop(self) -> Result<CompositorRun, CompositorError> {
+    pub fn stop(mut self) -> Result<CompositorRun, CompositorError> {
         self.stop.store(true, Ordering::Release);
-        self.thread.join().map_err(|_| CompositorError::Panicked)?
+        let thread = self.thread.take().ok_or(CompositorError::Panicked)?;
+        thread.join().map_err(|_| CompositorError::Panicked)?
+    }
+}
+
+impl Drop for Compositor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            // The run result is not wanted when dropping.
+            let _ = thread.join();
+        }
     }
 }
 
@@ -330,6 +351,24 @@ mod tests {
             Compositor::spawn(bad),
             Err(CompositorError::Scene(_))
         ));
+    }
+
+    #[test]
+    fn dropping_without_stop_ends_the_render_thread() {
+        let mailbox = Arc::new(FrameMailbox::new());
+        let compositor = Compositor::spawn(config(
+            vec![SourceConfig {
+                id: SourceId(0),
+                name: "live".into(),
+                input: SourceInput::Live(Arc::clone(&mailbox)),
+            }],
+            vec![],
+        ))
+        .expect("spawn");
+        assert!(!compositor.is_finished());
+        drop(compositor);
+        // The thread has been joined, so it released its mailbox handle.
+        assert_eq!(Arc::strong_count(&mailbox), 1);
     }
 
     #[test]

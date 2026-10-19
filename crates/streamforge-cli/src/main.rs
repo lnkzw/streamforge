@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -32,6 +33,37 @@ enum Commands {
     /// Inspect and test screen/audio capture. Output is JSON.
     #[command(subcommand)]
     Capture(CaptureCommand),
+    /// Record the 1920x1080@60 reference scene and the audio mix to a new Matroska file
+    /// (H.264 + AAC), then print the report. Output is JSON.
+    Record {
+        /// Plain .mkv file name, created in --output-dir; never overwritten.
+        #[arg(long)]
+        file: String,
+        /// Recording length in milliseconds.
+        #[arg(long, default_value_t = 10_000)]
+        duration_ms: u64,
+        /// Add a live screen layer (opens the system picker).
+        #[arg(long)]
+        screen: bool,
+        /// With --screen: offered source type (monitor, window, virtual). Repeatable.
+        #[arg(long = "source", requires = "screen")]
+        sources: Vec<String>,
+        /// With --screen: cursor mode (hidden, embedded, metadata).
+        #[arg(long, requires = "screen")]
+        cursor: Option<String>,
+        /// Live input as NAME or NAME=GAIN_DB. Repeatable.
+        #[arg(long = "input")]
+        inputs: Vec<String>,
+        /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS. Repeatable; default one 1 kHz tone at -20 dBFS.
+        #[arg(long = "tone", conflicts_with = "no_tone")]
+        tones: Vec<String>,
+        /// Record without the default test tone.
+        #[arg(long)]
+        no_tone: bool,
+        /// Master gain in dB (default 0).
+        #[arg(long)]
+        master_gain_db: Option<f32>,
+    },
     /// Mix audio inputs and test tones at 48 kHz stereo; reports meters and buffering. Output is JSON.
     Mix {
         /// Live input as NAME or NAME=GAIN_DB (name from `capture inputs`). Repeatable.
@@ -142,6 +174,39 @@ fn main() -> Result<ExitCode> {
                 Ok(ExitCode::FAILURE)
             }
         },
+        Commands::Record {
+            file,
+            duration_ms,
+            screen,
+            sources,
+            cursor,
+            inputs,
+            tones,
+            no_tone,
+            master_gain_db,
+        } => {
+            let mut params = match mix_params(&inputs, &tones, master_gain_db, None) {
+                Ok(params) => params,
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            params.insert("file_name".into(), file.into());
+            if no_tone {
+                params.insert("tones".into(), Value::Array(Vec::new()));
+            }
+            if screen {
+                params.insert("screen".into(), true.into());
+            }
+            if !sources.is_empty() {
+                params.insert("source_types".into(), sources.into());
+            }
+            if let Some(cursor) = cursor {
+                params.insert("cursor".into(), cursor.into());
+            }
+            record(&mut engine, params, Duration::from_millis(duration_ms))
+        }
         Commands::Compose {
             duration_ms,
             screen,
@@ -275,6 +340,40 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
     (name, params)
 }
 
+/// Start a recording, wait, stop it and print the report. Progress goes to
+/// stderr so stdout carries only the JSON report.
+fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -> Result<ExitCode> {
+    let started = Command::decode("start_recording", Some(&Value::Object(params)))
+        .and_then(|command| engine.handle(command));
+    match started {
+        Ok(CommandOutput::RecordingStarted(started)) => {
+            eprintln!(
+                "recording {} for {:.1} s ...",
+                started.path,
+                duration.as_secs_f64()
+            );
+        }
+        Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
+        Err(err) => return Ok(report_error(&err)),
+    }
+    std::thread::sleep(duration);
+    match engine.handle(Command::StopRecording) {
+        Ok(output) => {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(err) => Ok(report_error(&err)),
+    }
+}
+
+fn report_error(err: &command_api::CommandError) -> ExitCode {
+    eprintln!("error: {err}");
+    if let Some(details) = &err.details {
+        eprintln!("details: {details}");
+    }
+    ExitCode::FAILURE
+}
+
 fn run_command(engine: &mut Engine, name: &str, params: Map<String, Value>) -> Result<ExitCode> {
     let result = Command::decode(name, Some(&Value::Object(params)))
         .and_then(|command| engine.handle(command));
@@ -283,13 +382,7 @@ fn run_command(engine: &mut Engine, name: &str, params: Map<String, Value>) -> R
             println!("{}", serde_json::to_string_pretty(&output)?);
             Ok(ExitCode::SUCCESS)
         }
-        Err(err) => {
-            eprintln!("error: {err}");
-            if let Some(details) = &err.details {
-                eprintln!("details: {details}");
-            }
-            Ok(ExitCode::FAILURE)
-        }
+        Err(err) => Ok(report_error(&err)),
     }
 }
 

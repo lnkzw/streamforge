@@ -8,11 +8,13 @@
 mod composite;
 mod error;
 mod mix;
+mod recording;
 mod registry;
 
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
+pub use recording::{RecordingReport, RecordingRequest, RecordingStarted};
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
 
 use capture_api::{
@@ -43,6 +45,10 @@ pub enum Command {
     ProbeComposite(CompositeRequest),
     /// Mix live inputs and test tones and report meters and buffering.
     ProbeAudioMix(MixRequest),
+    /// Start recording to a new file; returns immediately.
+    StartRecording(RecordingRequest),
+    /// Stop the running recording and finalize its file.
+    StopRecording,
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -60,6 +66,8 @@ pub enum CommandOutput {
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
     MixReport(Box<MixReport>),
+    RecordingStarted(RecordingStarted),
+    RecordingReport(Box<RecordingReport>),
 }
 
 /// Result of `list_audio_inputs`.

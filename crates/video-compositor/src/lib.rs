@@ -15,8 +15,8 @@ pub mod stats;
 pub use geometry::{Rect, Transform};
 pub use render::{CpuRenderer, RenderError, RenderOutcome};
 pub use runner::{
-    Animation, Compositor, CompositorConfig, CompositorError, CompositorRun, RenderStats,
-    SourceConfig, SourceInput, SourceStats,
+    Animation, Compositor, CompositorConfig, CompositorError, CompositorRun, FrameSink,
+    RenderStats, SourceConfig, SourceInput, SourceStats,
 };
 pub use scene::{Layer, Scene, SceneError, SourceId};
 pub use stats::LatencySummary;

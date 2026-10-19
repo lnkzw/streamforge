@@ -6,6 +6,7 @@
 
 mod composite;
 mod mix;
+mod recording;
 
 use std::path::PathBuf;
 
@@ -24,6 +25,8 @@ pub struct Engine {
     output_dir: PathBuf,
     /// Last capability query; `get_status` derives `capture_available` from it.
     capture_capabilities: Option<CaptureCapabilities>,
+    /// Running recording; dropping the engine finalizes its file.
+    recording: Option<recording::RecordingSession>,
 }
 
 impl Engine {
@@ -48,6 +51,7 @@ impl Engine {
             capture,
             output_dir: PathBuf::from("."),
             capture_capabilities: None,
+            recording: None,
         }
     }
 
@@ -87,6 +91,7 @@ impl CommandHandler for Engine {
                 if self.capture_capabilities.is_none() {
                     self.refresh_capabilities();
                 }
+                self.status.recording_active = self.recording.is_some();
                 Ok(CommandOutput::Status(self.status.clone()))
             }
             Command::ListCommands => Ok(CommandOutput::Commands(CommandList::all())),
@@ -114,6 +119,32 @@ impl CommandHandler for Engine {
             }
             Command::ProbeAudioMix(request) => mix::probe(self.capture.as_mut(), &request)
                 .map(|report| CommandOutput::MixReport(Box::new(report))),
+            Command::StartRecording(request) => {
+                if let Some(running) = &self.recording {
+                    return Err(CommandError::new(
+                        ErrorCode::InvalidState,
+                        "a recording is already running; stop it first",
+                    )
+                    .with_details(serde_json::json!({
+                        "path": running.path().display().to_string()
+                    })));
+                }
+                let (session, started) = recording::RecordingSession::start(
+                    self.capture.as_mut(),
+                    &self.output_dir,
+                    &request,
+                )?;
+                self.recording = Some(session);
+                Ok(CommandOutput::RecordingStarted(started))
+            }
+            Command::StopRecording => {
+                let session = self.recording.take().ok_or_else(|| {
+                    CommandError::new(ErrorCode::InvalidState, "no recording is running")
+                })?;
+                session
+                    .stop()
+                    .map(|report| CommandOutput::RecordingReport(Box::new(report)))
+            }
         }
     }
 }
@@ -389,18 +420,135 @@ mod tests {
 
     #[test]
     fn every_registered_command_is_handled_without_panicking() {
-        for engine in [&mut Engine::new(), &mut engine()] {
+        let dir = TempDir::new("all-commands");
+        for (index, engine) in [Engine::new(), engine()].into_iter().enumerate() {
+            let mut engine = engine.with_output_dir(&dir.0);
             for descriptor in registry() {
-                // Keep probes short; their defaults run for seconds.
-                let params = descriptor
-                    .name
-                    .starts_with("probe_")
-                    .then(|| json!({"duration_ms": 100}));
+                let params = match descriptor.name {
+                    // Keep probes short; their defaults run for seconds.
+                    name if name.starts_with("probe_") => Some(json!({"duration_ms": 100})),
+                    "start_recording" => Some(json!({"file_name": format!("all-{index}.mkv")})),
+                    _ => None,
+                };
                 let command = Command::decode(descriptor.name, params.as_ref()).expect("decode");
                 // Unsupported capture is a structured error, not a panic.
                 let _ = engine.handle(command);
             }
         }
+    }
+
+    /// Temporary directory removed when the test ends.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("streamforge-engine-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn status(engine: &mut Engine) -> EngineStatus {
+        match engine.handle(Command::GetStatus).expect("status") {
+            CommandOutput::Status(status) => status,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn start(
+        engine: &mut Engine,
+        params: serde_json::Value,
+    ) -> Result<CommandOutput, CommandError> {
+        engine.handle(Command::decode("start_recording", Some(&params)).expect("decode"))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recording_lifecycle_produces_a_finalized_file() {
+        let dir = TempDir::new("lifecycle");
+        let mut engine = engine().with_output_dir(&dir.0);
+        assert!(!status(&mut engine).recording_active);
+
+        let started = start(
+            &mut engine,
+            json!({"file_name": "take.mkv", "inputs": [{"input": "mic"}]}),
+        )
+        .expect("start");
+        let CommandOutput::RecordingStarted(started) = started else {
+            panic!("unexpected output");
+        };
+        assert!(started.path.ends_with("take.mkv"));
+        assert_eq!(
+            (started.width, started.height, started.fps),
+            (1920, 1080, 60)
+        );
+        assert!(status(&mut engine).recording_active);
+
+        let again = start(&mut engine, json!({"file_name": "other.mkv"})).unwrap_err();
+        assert_eq!(again.code, ErrorCode::InvalidState);
+        assert!(!dir.0.join("other.mkv").exists());
+
+        std::thread::sleep(Duration::from_millis(700));
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        let recording = &report.recording;
+        assert!(recording.video.frames_encoded > 10, "{recording:?}");
+        assert!(recording.audio.samples_encoded > 10_000, "{recording:?}");
+        assert!(recording.file_bytes.is_some_and(|bytes| bytes > 1_000));
+        assert_eq!(report.audio_captures.len(), 1);
+        assert!(report.render.is_some() && report.mix.is_some());
+        // Video and audio cover the same span (within a frame and an AAC frame).
+        let video_end = recording.video.last_pts_ms.expect("video") + 1000.0 / 60.0;
+        let audio_end = recording.audio.last_pts_ms.expect("audio");
+        assert!(
+            (video_end - audio_end).abs() < 60.0,
+            "{video_end} vs {audio_end}"
+        );
+        assert!(!status(&mut engine).recording_active);
+
+        let stop_again = engine.handle(Command::StopRecording).unwrap_err();
+        assert_eq!(stop_again.code, ErrorCode::InvalidState);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn existing_files_are_never_overwritten() {
+        let dir = TempDir::new("no-overwrite");
+        std::fs::write(dir.0.join("keep.mkv"), b"precious").expect("write");
+        let mut engine = engine().with_output_dir(&dir.0);
+        let err = start(&mut engine, json!({"file_name": "keep.mkv"})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            std::fs::read(dir.0.join("keep.mkv")).expect("read"),
+            b"precious"
+        );
+        assert!(!status(&mut engine).recording_active);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_the_engine_finalizes_the_recording() {
+        let dir = TempDir::new("drop");
+        let mut engine = engine().with_output_dir(&dir.0);
+        start(&mut engine, json!({"file_name": "dropped.mkv"})).expect("start");
+        std::thread::sleep(Duration::from_millis(300));
+        drop(engine);
+        let bytes = std::fs::metadata(dir.0.join("dropped.mkv"))
+            .expect("file")
+            .len();
+        assert!(bytes > 1_000, "{bytes}");
     }
 
     #[test]

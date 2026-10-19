@@ -36,12 +36,21 @@ pub struct SourceConfig {
 /// Mutates the scene before frame `tick` is rendered (e.g. moves a layer).
 pub type Animation = fn(&mut Scene, u64);
 
+/// Receives every rendered canvas on the compositor thread, with the tick's
+/// nominal presentation time (so timestamps are exactly frame-spaced).
+/// Must not block: copy what is needed and hand it off.
+pub trait FrameSink: Send {
+    fn frame(&mut self, frame: &VideoFrame, presented_at: Instant);
+}
+
 pub struct CompositorConfig {
     pub scene: Scene,
     pub fps: u32,
     pub sources: Vec<SourceConfig>,
     pub animation: Option<Animation>,
     pub renderer: CpuRenderer,
+    /// Optional consumer of rendered frames, e.g. a recorder.
+    pub sink: Option<Box<dyn FrameSink>>,
 }
 
 #[derive(Debug, Error)]
@@ -221,6 +230,7 @@ fn run(
         sources,
         animation,
         mut renderer,
+        mut sink,
     } = config;
     let mut sources: Vec<SourceState> = sources
         .into_iter()
@@ -280,6 +290,9 @@ fn run(
             },
             &mut target,
         )?;
+        if let Some(sink) = &mut sink {
+            sink.frame(&target, due(start, tick));
+        }
         let finished = Instant::now();
         render_times.record(finished - render_start);
         rendered += 1;
@@ -332,6 +345,7 @@ mod tests {
             sources,
             animation: None,
             renderer: CpuRenderer::new(1),
+            sink: None,
         }
     }
 
@@ -351,6 +365,33 @@ mod tests {
             Compositor::spawn(bad),
             Err(CompositorError::Scene(_))
         ));
+    }
+
+    struct CountingSink(Arc<std::sync::Mutex<Vec<Instant>>>);
+
+    impl FrameSink for CountingSink {
+        fn frame(&mut self, frame: &VideoFrame, presented_at: Instant) {
+            assert_eq!(frame.width(), 64);
+            self.0.lock().expect("lock").push(presented_at);
+        }
+    }
+
+    #[test]
+    fn sink_receives_frames_at_exact_frame_spacing() {
+        let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut config = config(vec![], vec![]);
+        config.sink = Some(Box::new(CountingSink(Arc::clone(&times))));
+        let compositor = Compositor::spawn(config).expect("spawn");
+        thread::sleep(Duration::from_millis(100));
+        let run = compositor.stop().expect("stop");
+        let times = times.lock().expect("lock");
+        assert_eq!(times.len() as u64, run.stats.frames_rendered);
+        // 100 FPS: nominal times are multiples of 10 ms apart.
+        for pair in times.windows(2) {
+            let step = pair[1] - pair[0];
+            assert_eq!(step.as_nanos() % 10_000_000, 0, "{step:?}");
+            assert!(step >= Duration::from_millis(10));
+        }
     }
 
     #[test]

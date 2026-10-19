@@ -39,11 +39,19 @@ pub struct MixerInput {
     pub strip: StripConfig,
 }
 
+/// Receives every mixed block on the mixer thread, with the block's nominal
+/// start time on the mixer clock. Must not block or allocate.
+pub trait BlockSink: Send {
+    fn block(&mut self, samples: &[f32], at: Instant);
+}
+
 pub struct MixerConfig {
     pub inputs: Vec<MixerInput>,
     pub master_gain_db: f32,
     /// Sizes the latency trend buffer up front so the loop never allocates.
     pub expected_duration: Duration,
+    /// Optional consumer of the master output, e.g. a recorder.
+    pub sink: Option<Box<dyn BlockSink>>,
 }
 
 #[derive(Debug, Error)]
@@ -235,6 +243,7 @@ struct InputState {
 }
 
 fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
+    let mut sink = config.sink;
     let channels = CHANNELS as usize;
     let windows = (config.expected_duration.as_secs() / 10 + 2) as usize;
     let strips: Vec<StripConfig> = config.inputs.iter().map(|input| input.strip).collect();
@@ -302,6 +311,9 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
                 *view = &input.scratch;
             }
             mixer.mix(&views[..inputs.len().min(MAX_INPUTS)], &mut out);
+        }
+        if let Some(sink) = &mut sink {
+            sink.block(&out, due(start, block));
         }
         let finished = Instant::now();
         mix_times.record(finished - mix_start);
@@ -398,6 +410,7 @@ mod tests {
             ],
             master_gain_db: 0.0,
             expected_duration: Duration::from_secs(1),
+            sink: None,
         })
         .expect("spawn");
         for _ in 0..30 {
@@ -421,6 +434,38 @@ mod tests {
         assert!(live.buffer.is_some());
     }
 
+    struct RecordingSink(Arc<std::sync::Mutex<Vec<(usize, Instant)>>>);
+
+    impl BlockSink for RecordingSink {
+        fn block(&mut self, samples: &[f32], at: Instant) {
+            self.0.lock().expect("lock").push((samples.len(), at));
+        }
+    }
+
+    #[test]
+    fn sink_receives_every_block_at_exact_spacing() {
+        let blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mixer = MixerThread::spawn(MixerConfig {
+            inputs: vec![MixerInput {
+                name: "tone".into(),
+                source: InputSource::Tone(Tone::new(440.0, -6.0, RATE)),
+                strip: unity(),
+            }],
+            master_gain_db: 0.0,
+            expected_duration: Duration::from_secs(1),
+            sink: Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
+        })
+        .expect("spawn");
+        thread::sleep(Duration::from_millis(120));
+        let stats = mixer.stop().expect("stop");
+        let blocks = blocks.lock().expect("lock");
+        assert_eq!(blocks.len() as u64, stats.blocks_mixed);
+        assert!(blocks.iter().all(|(len, _)| *len == BLOCK_FRAMES * 2));
+        for pair in blocks.windows(2) {
+            assert_eq!(pair[1].1 - pair[0].1, Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn channel_mismatch_is_rejected() {
         let result = MixerThread::spawn(MixerConfig {
@@ -431,6 +476,7 @@ mod tests {
             }],
             master_gain_db: 0.0,
             expected_duration: Duration::from_secs(1),
+            sink: None,
         });
         assert!(matches!(result, Err(MixerError::ChannelMismatch { .. })));
     }

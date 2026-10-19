@@ -15,7 +15,7 @@ use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
 
 use crate::{
     Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_MIX_DURATION,
-    MixRequest, ToneSpec,
+    MixRequest, RecordingRequest, ToneSpec,
 };
 
 /// Permission class of a command.
@@ -101,6 +101,22 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
     access: CommandAccess::Sensitive,
 };
 
+const START_RECORDING: CommandDescriptor = CommandDescriptor {
+    name: "start_recording",
+    summary: "Start recording the 1920x1080@60 reference scene (optionally with a live screen layer) \
+              and the audio mix (live inputs and tones; one -20 dBFS 1 kHz tone by default) to \
+              H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
+              output directory, never overwritten), screen, source_types, cursor, inputs, tones, \
+              master_gain_db. Returns immediately; recording continues until stop_recording.",
+    access: CommandAccess::Sensitive,
+};
+
+const STOP_RECORDING: CommandDescriptor = CommandDescriptor {
+    name: "stop_recording",
+    summary: "Stop the running recording, finalize the file and report its statistics.",
+    access: CommandAccess::Control,
+};
+
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
     LIST_COMMANDS,
@@ -110,6 +126,8 @@ const COMMANDS: &[CommandDescriptor] = &[
     PROBE_AUDIO_CAPTURE,
     PROBE_COMPOSITE,
     PROBE_AUDIO_MIX,
+    START_RECORDING,
+    STOP_RECORDING,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -154,6 +172,8 @@ impl Command {
             "probe_audio_capture" => decode_audio_probe(name, params).map(Self::ProbeAudioCapture),
             "probe_composite" => decode_composite_probe(name, params).map(Self::ProbeComposite),
             "probe_audio_mix" => decode_mix_probe(name, params).map(Self::ProbeAudioMix),
+            "start_recording" => decode_start_recording(name, params).map(Self::StartRecording),
+            "stop_recording" => expect_no_params(name, params).map(|()| Self::StopRecording),
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -175,6 +195,8 @@ impl Command {
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
             Self::ProbeComposite(_) => &PROBE_COMPOSITE,
             Self::ProbeAudioMix(_) => &PROBE_AUDIO_MIX,
+            Self::StartRecording(_) => &START_RECORDING,
+            Self::StopRecording => &STOP_RECORDING,
         }
     }
 
@@ -240,7 +262,29 @@ fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest,
             mute: None,
         });
     }
-    let sources = params.inputs.len() + params.tones.len();
+    let sources = mix_sources(command, params.inputs, params.tones, params.master_gain_db)?;
+    Ok(MixRequest {
+        duration: duration_within(command, params.duration_ms, MAX_MIX_DURATION)?,
+        inputs: sources.inputs,
+        tones: sources.tones,
+        master_gain_db: sources.master_gain_db,
+    })
+}
+
+struct MixSources {
+    inputs: Vec<LiveInputSpec>,
+    tones: Vec<ToneSpec>,
+    master_gain_db: f32,
+}
+
+/// Validate live inputs, tones and gains shared by mixing commands.
+fn mix_sources(
+    command: &str,
+    inputs: Vec<LiveInputParams>,
+    tones: Vec<ToneParams>,
+    master_gain_db: Option<f32>,
+) -> Result<MixSources, CommandError> {
+    let sources = inputs.len() + tones.len();
     if sources > MAX_INPUTS {
         return Err(invalid_params(
             command,
@@ -258,20 +302,20 @@ fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest,
             ))
         }
     };
-    let mut inputs = Vec::with_capacity(params.inputs.len());
-    for input in params.inputs {
+    let mut live = Vec::with_capacity(inputs.len());
+    for input in inputs {
         if input.input.as_deref().is_some_and(str::is_empty) {
             return Err(invalid_params(command, "`input` must not be empty"));
         }
-        inputs.push(LiveInputSpec {
+        live.push(LiveInputSpec {
             input: input.input,
             gain_db: gain("gain_db", input.gain_db)?,
             muted: input.mute.unwrap_or(false),
         });
     }
     let nyquist = f64::from(audio_engine::RATE) / 2.0;
-    let mut tones = Vec::with_capacity(params.tones.len());
-    for tone in params.tones {
+    let mut generated = Vec::with_capacity(tones.len());
+    for tone in tones {
         if !(tone.frequency_hz.is_finite()
             && tone.frequency_hz > 0.0
             && tone.frequency_hz < nyquist)
@@ -288,18 +332,56 @@ fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest,
                 format!("`level_dbfs` must be between {MIN_GAIN_DB} and 0"),
             ));
         }
-        tones.push(ToneSpec {
+        generated.push(ToneSpec {
             frequency_hz: tone.frequency_hz,
             level_dbfs: level,
             gain_db: gain("gain_db", tone.gain_db)?,
             muted: tone.mute.unwrap_or(false),
         });
     }
-    Ok(MixRequest {
-        duration: duration_within(command, params.duration_ms, MAX_MIX_DURATION)?,
-        inputs,
-        tones,
-        master_gain_db: gain("master_gain_db", params.master_gain_db)?,
+    Ok(MixSources {
+        inputs: live,
+        tones: generated,
+        master_gain_db: gain("master_gain_db", master_gain_db)?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartRecordingParams {
+    file_name: String,
+    screen: Option<bool>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+    #[serde(default)]
+    inputs: Vec<LiveInputParams>,
+    /// Absent: one quiet test tone; `[]`: no tones.
+    tones: Option<Vec<ToneParams>>,
+    master_gain_db: Option<f32>,
+}
+
+const DEFAULT_RECORDING_TONE_DBFS: f64 = -20.0;
+
+fn decode_start_recording(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<RecordingRequest, CommandError> {
+    let params: StartRecordingParams = decode_params(command, params)?;
+    let tones = params.tones.unwrap_or_else(|| {
+        vec![ToneParams {
+            frequency_hz: DEFAULT_TONE_HZ,
+            level_dbfs: Some(DEFAULT_RECORDING_TONE_DBFS),
+            gain_db: None,
+            mute: None,
+        }]
+    });
+    let sources = mix_sources(command, params.inputs, tones, params.master_gain_db)?;
+    Ok(RecordingRequest {
+        file_name: output_file(command, "file_name", params.file_name, "mkv")?,
+        screen: optional_screen(command, params.screen, params.source_types, params.cursor)?,
+        inputs: sources.inputs,
+        tones: sources.tones,
+        master_gain_db: sources.master_gain_db,
     })
 }
 
@@ -318,48 +400,61 @@ fn decode_composite_probe(
     params: Option<&Value>,
 ) -> Result<CompositeRequest, CommandError> {
     let params: CompositeProbeParams = decode_params(command, params)?;
-    let screen = if params.screen.unwrap_or(false) {
-        Some(screen_selection(
-            command,
-            params.source_types,
-            params.cursor,
-        )?)
-    } else if params.source_types.is_some() || params.cursor.is_some() {
-        return Err(invalid_params(
-            command,
-            "`source_types` and `cursor` require `screen: true`",
-        ));
-    } else {
-        None
-    };
+    let screen = optional_screen(command, params.screen, params.source_types, params.cursor)?;
     Ok(CompositeRequest {
         duration: probe_duration(command, params.duration_ms)?,
         screen,
         snapshot_path: params
             .snapshot_path
-            .map(|path| snapshot_path(command, path))
+            .map(|path| output_file(command, "snapshot_path", path, "ppm"))
             .transpose()?,
     })
 }
 
-/// Snapshots are plain `.ppm` file names. The engine writes them into its
-/// own output directory and never overwrites, so a remote client cannot
-/// choose where files land.
-fn snapshot_path(command: &str, path: String) -> Result<PathBuf, CommandError> {
+/// `Some(selection)` with `screen: true`; selection fields without it are an error.
+fn optional_screen(
+    command: &str,
+    screen: Option<bool>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+) -> Result<Option<ScreenSelection>, CommandError> {
+    if screen.unwrap_or(false) {
+        return screen_selection(command, source_types, cursor).map(Some);
+    }
+    if source_types.is_some() || cursor.is_some() {
+        return Err(invalid_params(
+            command,
+            "`source_types` and `cursor` require `screen: true`",
+        ));
+    }
+    Ok(None)
+}
+
+/// Files a command creates are plain file names with a fixed extension. The
+/// engine writes them into its own output directory and never overwrites, so
+/// a remote client cannot choose where files land.
+fn output_file(
+    command: &str,
+    field: &str,
+    path: String,
+    extension: &str,
+) -> Result<PathBuf, CommandError> {
     let path = PathBuf::from(path);
     let mut components = path.components();
     let plain_name = matches!(
         (components.next(), components.next()),
         (Some(std::path::Component::Normal(_)), None)
     );
-    let is_ppm = path
+    let has_extension = path
         .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"));
-    if !plain_name || !is_ppm || path.file_stem().is_none() {
+        .is_some_and(|found| found.eq_ignore_ascii_case(extension));
+    if !plain_name || !has_extension || path.file_stem().is_none() {
         return Err(invalid_params(
             command,
-            "`snapshot_path` must be a plain file name ending in .ppm \
-             (no directories); it is written to the engine's output directory",
+            format!(
+                "`{field}` must be a plain file name ending in .{extension} \
+                 (no directories); it is written to the engine's output directory"
+            ),
         ));
     }
     Ok(path)
@@ -516,10 +611,15 @@ mod tests {
         }
     }
 
+    /// Minimal valid params for commands with required parameters.
+    pub(crate) fn sample_params(name: &str) -> Option<Value> {
+        (name == "start_recording").then(|| json!({"file_name": "sample.mkv"}))
+    }
+
     #[test]
     fn every_registered_command_decodes_to_its_descriptor() {
         for descriptor in registry() {
-            let command = Command::decode(descriptor.name, None)
+            let command = Command::decode(descriptor.name, sample_params(descriptor.name).as_ref())
                 .unwrap_or_else(|err| panic!("{} does not decode: {err}", descriptor.name));
             assert_eq!(command.descriptor(), descriptor);
         }
@@ -769,6 +869,45 @@ mod tests {
     }
 
     #[test]
+    fn start_recording_params() {
+        let Ok(Command::StartRecording(request)) = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "take1.MKV", "inputs": [{"input": "mic"}]})),
+        ) else {
+            panic!("decode");
+        };
+        assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
+        assert_eq!(request.screen, None);
+        assert_eq!(request.inputs.len(), 1);
+        // Default: one quiet tone.
+        assert_eq!(request.tones.len(), 1);
+        assert_eq!(request.tones[0].level_dbfs, -20.0);
+        let Ok(Command::StartRecording(silent)) = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "a.mkv", "tones": []})),
+        ) else {
+            panic!("decode");
+        };
+        assert!(silent.tones.is_empty() && silent.inputs.is_empty());
+    }
+
+    #[test]
+    fn invalid_start_recording_params_are_rejected() {
+        for params in [
+            json!({}),
+            json!({"file_name": "a.mp4"}),
+            json!({"file_name": "../a.mkv"}),
+            json!({"file_name": "/tmp/a.mkv"}),
+            json!({"file_name": "a.mkv", "cursor": "hidden"}),
+            json!({"file_name": "a.mkv", "tones": [{"frequency_hz": 0.0}]}),
+        ] {
+            let err = Command::decode("start_recording", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+        }
+        assert!(Command::decode("stop_recording", Some(&json!({"now": true}))).is_err());
+    }
+
+    #[test]
     fn access_classes_match_risk() {
         let access = |name| registry().iter().find(|d| d.name == name).map(|d| d.access);
         assert_eq!(
@@ -786,6 +925,8 @@ mod tests {
         );
         assert_eq!(access("probe_composite"), Some(CommandAccess::Sensitive));
         assert_eq!(access("probe_audio_mix"), Some(CommandAccess::Sensitive));
+        assert_eq!(access("start_recording"), Some(CommandAccess::Sensitive));
+        assert_eq!(access("stop_recording"), Some(CommandAccess::Control));
     }
 
     #[test]

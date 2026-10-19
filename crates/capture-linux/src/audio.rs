@@ -4,11 +4,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioStats, AudioStatsAccumulator,
-    AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind, StreamPosition,
+    AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput, AudioStats,
+    AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
+    StreamPosition,
 };
 use media_core::AudioRing;
 use pipewire as pw;
@@ -23,7 +24,6 @@ use crate::formats;
 use crate::pw::{BACKEND, Connection, RunUntil, StreamWatch};
 
 const BYTES_PER_SAMPLE: usize = std::mem::size_of::<f32>();
-const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Ring capacity of a continuous stream, in seconds of audio.
 const STREAM_RING_SECONDS: usize = 1;
 
@@ -239,13 +239,8 @@ pub(crate) fn capture(
     })
 }
 
-/// PipeWire falls back to the default input for an unknown target, so
-/// check names explicitly first.
-fn verify_input(name: Option<&str>) -> Result<(), CaptureError> {
-    let Some(name) = name else {
-        return Ok(());
-    };
-    let inputs = crate::pw::audio_inputs(QUERY_TIMEOUT)?;
+/// `NotFound` with the available names unless `name` is in `inputs`.
+pub(crate) fn verify_input(name: &str, inputs: &[AudioInput]) -> Result<(), CaptureError> {
     if inputs.iter().any(|input| input.name == name) {
         return Ok(());
     }
@@ -269,8 +264,8 @@ fn report(input: Option<String>, run: AudioRun) -> AudioCaptureReport {
     }
 }
 
+/// Callers check named inputs first (see `LinuxCapture::check_input`).
 pub(crate) fn probe(request: &AudioCaptureRequest) -> Result<AudioCaptureReport, CaptureError> {
-    verify_input(request.input.as_deref())?;
     let run = capture(
         request.input.as_deref(),
         RunUntil::Elapsed(request.duration),
@@ -288,7 +283,6 @@ pub(crate) fn start_stream(
             request.rate, request.channels
         )));
     }
-    verify_input(request.input.as_deref())?;
     let ring = Arc::new(AudioRing::new(
         request.channels,
         request.rate as usize * STREAM_RING_SECONDS,

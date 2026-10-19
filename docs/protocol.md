@@ -185,6 +185,7 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
   - `name`, `kind` (`live`/`tone`), `gain_db`, `muted`
   - `meter`
   - `warmup_frames`, `underrun_frames`, `trimmed_frames`
+  - `drift_ppm` (live inputs): the input clock's offset against the mixer clock, as tracked by the adaptive resampler
   - `ring` (`{"capacity_frames", "pushed_frames", "pulled_frames", "overrun_frames", "discarded_frames", "max_push_frames"}`)
   - `buffer` (`{"target_ms", "min_ms", "mean_ms", "max_ms", "windows_ms"}`), where `windows_ms` is the mean fill per 10 s window, oldest first
 

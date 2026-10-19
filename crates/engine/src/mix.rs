@@ -4,7 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use audio_engine::{
-    CHANNELS, InputSource, MixerConfig, MixerInput, MixerThread, RATE, StripConfig, Tone,
+    CHANNELS, InputSource, MAX_CORRECTION, MixerConfig, MixerInput, MixerThread, RATE, StripConfig,
+    Tone,
 };
 use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend};
 use command_api::{CaptureOutcome, CommandError, ErrorCode, ErrorSummary, MixReport, MixRequest};
@@ -99,6 +100,22 @@ pub(crate) fn probe(
 
     let mut warnings = Vec::new();
     for input in &mix.inputs {
+        if input.kind == "live" && input.ring.is_none_or(|ring| ring.pulled_frames == 0) {
+            warnings.push(format!(
+                "input `{}` delivered no audio during the probe (it stayed in warm-up); \
+                 see `captures` for its negotiated format and errors",
+                input.name
+            ));
+        }
+        if input
+            .drift_ppm
+            .is_some_and(|ppm| ppm.abs() >= 0.9 * MAX_CORRECTION * 1e6)
+        {
+            warnings.push(format!(
+                "input `{}` drifts at the resampler's correction limit; expect underruns or trims",
+                input.name
+            ));
+        }
         let overrun = input.ring.map_or(0, |ring| ring.overrun_frames);
         if input.underrun_frames > 0 || input.trimmed_frames > 0 || overrun > 0 {
             warnings.push(format!(

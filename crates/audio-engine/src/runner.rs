@@ -1,19 +1,10 @@
-//! Mixer thread with a fixed block clock and bounded input buffering.
+//! Mixer thread with a fixed block clock.
 //!
 //! Every live input is an [`AudioRing`] filled by a producer running on its
-//! own clock. Each input keeps a buffer that is bounded on both sides:
-//! - **Warm-up:** an input is silent until its ring reaches the target fill.
-//!   The target is two blocks, or the largest producer push plus one block.
-//!   Silence emitted while warming up is counted as `warmup_frames`.
-//! - **Underrun:** when the ring holds too few frames, the block is padded
-//!   with silence (`underrun_frames`). A ring that runs completely dry goes
-//!   back to warm-up.
-//! - **Drift:** when the fill exceeds target + 4 blocks (producer clock
-//!   faster than the mixer clock), the oldest frames are trimmed back to the
-//!   target (`trimmed_frames`). Latency therefore stays bounded.
-//!
-//! When the thread falls behind, it mixes missed blocks back to back, up to
-//! [`MAX_CATCH_UP_BLOCKS`]; anything beyond that is skipped and counted.
+//! own clock; [`crate::live`] keeps each input's buffering bounded and
+//! compensates clock drift by adaptive resampling. Tones are generated in
+//! place. When the thread falls behind, it mixes missed blocks back to back,
+//! up to [`MAX_CATCH_UP_BLOCKS`]; anything beyond that is skipped and counted.
 //! The loop does not allocate after start-up.
 
 use std::sync::Arc;
@@ -25,6 +16,7 @@ use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::live::LiveInput;
 use crate::mixer::{MeterReading, Mixer, StripConfig};
 use crate::tone::Tone;
 
@@ -89,6 +81,9 @@ pub struct InputStats {
     pub warmup_frames: u64,
     pub underrun_frames: u64,
     pub trimmed_frames: u64,
+    /// Producer clock offset against the mixer clock, as tracked by the
+    /// adaptive resampler (live inputs only).
+    pub drift_ppm: Option<f64>,
     pub ring: Option<AudioRingStats>,
     pub buffer: Option<BufferLatency>,
 }
@@ -167,10 +162,8 @@ impl Drop for MixerThread {
     }
 }
 
-/// Buffering state of one live input.
-struct LiveBuffer {
-    ring: Arc<AudioRing>,
-    warming_up: bool,
+/// Buffer fill statistics of one live input.
+struct LatencyTrend {
     min_fill: usize,
     max_fill: usize,
     fill_sum: u128,
@@ -179,14 +172,11 @@ struct LiveBuffer {
     window_blocks: u64,
     /// Preallocated; holds at most its initial capacity.
     windows: Vec<f64>,
-    target: usize,
 }
 
-impl LiveBuffer {
-    fn new(ring: Arc<AudioRing>, windows: usize) -> Self {
+impl LatencyTrend {
+    fn new(windows: usize) -> Self {
         Self {
-            ring,
-            warming_up: true,
             min_fill: usize::MAX,
             max_fill: 0,
             fill_sum: 0,
@@ -194,46 +184,10 @@ impl LiveBuffer {
             window_sum: 0,
             window_blocks: 0,
             windows: Vec::with_capacity(windows),
-            target: 2 * BLOCK_FRAMES,
         }
     }
 
-    /// Fill `out` with one block; returns (warm-up, underrun, trimmed) frames.
-    fn read_block(&mut self, out: &mut [f32]) -> (u64, u64, u64) {
-        let channels = CHANNELS as usize;
-        let block = out.len() / channels;
-        let max_push = usize::try_from(self.ring.stats().max_push_frames).unwrap_or(usize::MAX);
-        self.target = (2 * block).max(max_push.saturating_add(block));
-        let mut fill = self.ring.fill_frames();
-
-        if self.warming_up {
-            if fill < self.target {
-                out.fill(0.0);
-                return (block as u64, 0, 0);
-            }
-            self.warming_up = false;
-        }
-        let mut trimmed = 0;
-        if fill > self.target + 4 * block {
-            trimmed = self.ring.discard(fill - self.target) as u64;
-            fill = self.ring.fill_frames();
-        }
-        self.record_fill(fill);
-
-        let got = self.ring.pull(out);
-        let mut underrun = 0;
-        if got < block {
-            out[got * channels..].fill(0.0);
-            underrun = (block - got) as u64;
-            if got == 0 {
-                // The producer stalled; rebuild the cushion before playing again.
-                self.warming_up = true;
-            }
-        }
-        (0, underrun, trimmed)
-    }
-
-    fn record_fill(&mut self, fill: usize) {
+    fn record(&mut self, fill: usize) {
         self.min_fill = self.min_fill.min(fill);
         self.max_fill = self.max_fill.max(fill);
         self.fill_sum += fill as u128;
@@ -251,9 +205,9 @@ impl LiveBuffer {
         }
     }
 
-    fn latency(&self) -> Option<BufferLatency> {
+    fn latency(&self, target: usize) -> Option<BufferLatency> {
         (self.fill_samples > 0).then(|| BufferLatency {
-            target_ms: frames_to_ms(self.target as f64),
+            target_ms: frames_to_ms(target as f64),
             min_ms: frames_to_ms(self.min_fill as f64),
             mean_ms: frames_to_ms(self.fill_sum as f64 / self.fill_samples as f64),
             max_ms: frames_to_ms(self.max_fill as f64),
@@ -267,13 +221,12 @@ fn frames_to_ms(frames: f64) -> f64 {
 }
 
 enum Source {
-    Live(LiveBuffer),
+    Live(Box<LiveInput>, LatencyTrend),
     Tone(Tone),
 }
 
 struct InputState {
     name: String,
-    strip: StripConfig,
     source: Source,
     scratch: Vec<f32>,
     warmup: u64,
@@ -291,9 +244,10 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
         .into_iter()
         .map(|input| InputState {
             name: input.name,
-            strip: input.strip,
             source: match input.source {
-                InputSource::Live(ring) => Source::Live(LiveBuffer::new(ring, windows)),
+                InputSource::Live(ring) => {
+                    Source::Live(Box::new(LiveInput::new(ring)), LatencyTrend::new(windows))
+                }
                 InputSource::Tone(tone) => Source::Tone(tone),
             },
             scratch: vec![0.0; BLOCK_FRAMES * channels],
@@ -329,11 +283,14 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
         let mix_start = Instant::now();
         for input in &mut inputs {
             match &mut input.source {
-                Source::Live(buffer) => {
-                    let (warmup, underrun, trimmed) = buffer.read_block(&mut input.scratch);
-                    input.warmup += warmup;
-                    input.underrun += underrun;
-                    input.trimmed += trimmed;
+                Source::Live(live, trend) => {
+                    let (fill, outcome) = live.read_block(&mut input.scratch);
+                    if let Some(fill) = fill {
+                        trend.record(fill);
+                    }
+                    input.warmup += outcome.warmup;
+                    input.underrun += outcome.underrun;
+                    input.trimmed += outcome.trimmed;
                 }
                 Source::Tone(tone) => tone.fill(&mut input.scratch, channels),
             }
@@ -372,15 +329,24 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
             .iter()
             .enumerate()
             .map(|(index, input)| {
-                let (kind, ring, buffer) = match &input.source {
-                    Source::Live(buffer) => ("live", Some(buffer.ring.stats()), buffer.latency()),
-                    Source::Tone(_) => ("tone", None, None),
+                let (kind, ring, buffer, drift_ppm) = match &input.source {
+                    Source::Live(live, trend) => (
+                        "live",
+                        Some(live.ring().stats()),
+                        trend.latency(live.target()),
+                        Some(live.drift_ppm()),
+                    ),
+                    Source::Tone(_) => ("tone", None, None, None),
                 };
+                let strip = mixer.input_config(index).unwrap_or(StripConfig {
+                    gain_db: 0.0,
+                    muted: false,
+                });
                 InputStats {
                     name: input.name.clone(),
                     kind,
-                    gain_db: input.strip.gain_db,
-                    muted: input.strip.muted,
+                    gain_db: strip.gain_db,
+                    muted: strip.muted,
                     meter: mixer.input_meter(index).unwrap_or(MeterReading {
                         peak_dbfs: None,
                         rms_dbfs: None,
@@ -388,6 +354,7 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
                     warmup_frames: input.warmup,
                     underrun_frames: input.underrun,
                     trimmed_frames: input.trimmed,
+                    drift_ppm,
                     ring,
                     buffer,
                 }
@@ -408,57 +375,6 @@ mod tests {
             gain_db: 0.0,
             muted: false,
         }
-    }
-
-    #[test]
-    fn live_buffer_warms_up_then_plays() {
-        let ring = Arc::new(AudioRing::new(2, 48_000));
-        let mut buffer = LiveBuffer::new(Arc::clone(&ring), 4);
-        let mut out = vec![1.0; BLOCK_FRAMES * 2];
-        // Empty ring: silent warm-up.
-        assert_eq!(buffer.read_block(&mut out), (BLOCK_FRAMES as u64, 0, 0));
-        assert!(out.iter().all(|s| *s == 0.0));
-        // One push of 1024 frames: target = 1024 + 480.
-        ring.push(std::iter::repeat_n(0.5, 1024 * 2));
-        assert_eq!(buffer.read_block(&mut out).0, BLOCK_FRAMES as u64);
-        ring.push(std::iter::repeat_n(0.5, 1024 * 2));
-        assert_eq!(buffer.read_block(&mut out), (0, 0, 0));
-        assert!(out.iter().all(|s| *s == 0.5));
-    }
-
-    #[test]
-    fn excess_fill_is_trimmed_back_to_target() {
-        let ring = Arc::new(AudioRing::new(2, 48_000));
-        let mut buffer = LiveBuffer::new(Arc::clone(&ring), 4);
-        // Small pushes keep the target at two blocks (960 frames).
-        for _ in 0..20 {
-            ring.push(std::iter::repeat_n(0.1, 480 * 2));
-        }
-        let mut out = vec![0.0; BLOCK_FRAMES * 2];
-        let (warmup, underrun, trimmed) = buffer.read_block(&mut out);
-        assert_eq!((warmup, underrun), (0, 0));
-        assert_eq!(trimmed, 20 * 480 - 960);
-        assert_eq!(ring.fill_frames(), 960 - 480);
-    }
-
-    #[test]
-    fn underrun_pads_with_silence_and_rewarms_when_dry() {
-        let ring = Arc::new(AudioRing::new(2, 48_000));
-        let mut buffer = LiveBuffer::new(Arc::clone(&ring), 4);
-        ring.push(std::iter::repeat_n(0.5, 1200 * 2));
-        let mut out = vec![0.0; BLOCK_FRAMES * 2];
-        // max_push 1200 -> target 1680 > 1200: still warming up.
-        assert_eq!(buffer.read_block(&mut out).0, BLOCK_FRAMES as u64);
-        ring.push(std::iter::repeat_n(0.5, 600 * 2));
-        assert_eq!(buffer.read_block(&mut out), (0, 0, 0)); // 1800 -> 1320
-        assert_eq!(buffer.read_block(&mut out), (0, 0, 0)); // -> 840
-        assert_eq!(buffer.read_block(&mut out), (0, 0, 0)); // -> 360
-        let (_, underrun, _) = buffer.read_block(&mut out);
-        assert_eq!(underrun, (BLOCK_FRAMES - 360) as u64);
-        assert!(out[360 * 2..].iter().all(|s| *s == 0.0));
-        let (_, underrun, _) = buffer.read_block(&mut out);
-        assert_eq!(underrun, BLOCK_FRAMES as u64);
-        assert!(buffer.warming_up);
     }
 
     #[test]

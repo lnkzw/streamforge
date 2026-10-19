@@ -88,13 +88,14 @@ Acceptance:
   - the sum is bit-exact and the RMS matches theory
   - output is bit-identical across runs
   - gain, mute and clipping counts are exact
-- [x] Live test shows no unbounded latency growth during a 10-minute run (2026-10-19, built-in input + 1 kHz tone, release):
+- [x] Live test shows no unbounded latency growth during a 10-minute run (2026-10-19, built-in input + 1 kHz tone, release, adaptive resampling):
   - 60 000/60 000 blocks, 0 late
-  - buffer latency per 10 s window from 31.3 ms falling to a stable 20.3 ms, never growing
-  - 0 overruns and 0 trims; 768 frames (16 ms) of underrun padding caused by a device clock ≈ 46 ppm slow (ADR 0004)
+  - buffer latency settled within about 50 s and stayed flat at 30.30–30.56 ms for 9 minutes
+  - 0 underruns, 0 trims, 0 overruns
+  - device drift tracked at about −40 ppm (ADR 0004; the earlier pad/trim run is recorded there for comparison)
 
 Known limitations, deferred:
-- Clock drift is corrected by padding and trimming, which is audible. Adaptive resampling or sample slipping is next (ADR 0004).
+- Drift resampling uses linear interpolation, which slightly modulates high frequencies (up to about −2 dB at 10 kHz). Recordings in M5 should use a windowed-sinc or polyphase resampler (ADR 0004).
 - The master bus uses a hard limit with counting, no limiter.
 - The mixer output has no consumer yet; recording comes in M5.
 - Desktop audio (sink monitor) capture is not implemented.

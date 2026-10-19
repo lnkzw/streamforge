@@ -18,7 +18,7 @@ mod pw;
 mod screen;
 mod video;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream,
@@ -26,14 +26,17 @@ use capture_api::{
     ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoStream,
 };
 
-/// Upper bound for each capability query. Screen and audio are queried in
-/// parallel, so `capabilities()` (and the first `get_status`) waits at most
-/// this long.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Upper bound for each portal or PipeWire query. Screen and audio
+/// capabilities are queried in parallel, so `capabilities()` (and the first
+/// `get_status`) waits at most this long.
+pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a listing of audio inputs is reused for name checks, so starting
+/// several streams does not rescan the PipeWire registry each time.
+const INPUT_CACHE_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct LinuxCapture {
-    _private: (),
+    input_cache: Option<(Instant, Vec<AudioInput>)>,
 }
 
 impl LinuxCapture {
@@ -88,7 +91,9 @@ impl CaptureBackend for LinuxCapture {
     }
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        pw::audio_inputs(QUERY_TIMEOUT)
+        let inputs = pw::audio_inputs(QUERY_TIMEOUT)?;
+        self.input_cache = Some((Instant::now(), inputs.clone()));
+        Ok(inputs)
     }
 
     fn probe_screen(
@@ -109,6 +114,7 @@ impl CaptureBackend for LinuxCapture {
         &mut self,
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError> {
+        self.check_input(request.input.as_deref())?;
         audio::probe(request)
     }
 
@@ -116,6 +122,29 @@ impl CaptureBackend for LinuxCapture {
         &mut self,
         request: &AudioStreamRequest,
     ) -> Result<Box<dyn AudioStream>, CaptureError> {
+        self.check_input(request.input.as_deref())?;
         audio::start_stream(request)
+    }
+}
+
+impl LinuxCapture {
+    /// PipeWire falls back to the default input for an unknown target, so
+    /// named inputs are checked against a (briefly cached) listing first.
+    fn check_input(&mut self, name: Option<&str>) -> Result<(), CaptureError> {
+        let Some(name) = name else {
+            return Ok(());
+        };
+        let fresh = self
+            .input_cache
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < INPUT_CACHE_TTL);
+        if !fresh {
+            self.audio_inputs()?;
+        }
+        let inputs = self
+            .input_cache
+            .as_ref()
+            .map_or(&[][..], |(_, inputs)| inputs);
+        audio::verify_input(name, inputs)
     }
 }

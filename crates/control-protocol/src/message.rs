@@ -41,6 +41,13 @@ pub enum ErrorCode {
     UnknownCommand,
     InvalidParams,
     InvalidState,
+    Unsupported,
+    Unavailable,
+    Cancelled,
+    PermissionDenied,
+    NotFound,
+    Timeout,
+    BackendError,
     Internal,
 }
 
@@ -50,6 +57,13 @@ impl From<command_api::ErrorCode> for ErrorCode {
             command_api::ErrorCode::UnknownCommand => Self::UnknownCommand,
             command_api::ErrorCode::InvalidParams => Self::InvalidParams,
             command_api::ErrorCode::InvalidState => Self::InvalidState,
+            command_api::ErrorCode::Unsupported => Self::Unsupported,
+            command_api::ErrorCode::Unavailable => Self::Unavailable,
+            command_api::ErrorCode::Cancelled => Self::Cancelled,
+            command_api::ErrorCode::PermissionDenied => Self::PermissionDenied,
+            command_api::ErrorCode::NotFound => Self::NotFound,
+            command_api::ErrorCode::Timeout => Self::Timeout,
+            command_api::ErrorCode::BackendError => Self::BackendError,
             command_api::ErrorCode::Internal => Self::Internal,
         }
     }
@@ -204,6 +218,13 @@ mod tests {
             (ErrorCode::UnknownCommand, "unknown_command"),
             (ErrorCode::InvalidParams, "invalid_params"),
             (ErrorCode::InvalidState, "invalid_state"),
+            (ErrorCode::Unsupported, "unsupported"),
+            (ErrorCode::Unavailable, "unavailable"),
+            (ErrorCode::Cancelled, "cancelled"),
+            (ErrorCode::PermissionDenied, "permission_denied"),
+            (ErrorCode::NotFound, "not_found"),
+            (ErrorCode::Timeout, "timeout"),
+            (ErrorCode::BackendError, "backend_error"),
             (ErrorCode::Internal, "internal"),
         ];
         for (code, name) in codes {
@@ -213,12 +234,7 @@ mod tests {
 
     #[test]
     fn command_error_codes_keep_their_names_on_the_wire() {
-        for code in [
-            command_api::ErrorCode::UnknownCommand,
-            command_api::ErrorCode::InvalidParams,
-            command_api::ErrorCode::InvalidState,
-            command_api::ErrorCode::Internal,
-        ] {
+        for code in command_api::ErrorCode::ALL {
             let wire = serde_json::to_value(ErrorCode::from(code)).expect("serialize");
             assert_eq!(wire, code.as_str());
         }

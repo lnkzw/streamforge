@@ -244,3 +244,44 @@ fn exits_cleanly_when_stdin_closes() {
     let engine = EngineProcess::spawn();
     assert!(engine.finish().success());
 }
+
+#[test]
+fn capture_capabilities_are_structured_on_every_platform() {
+    // Must answer on CI runners without a desktop session as well: unavailable
+    // capabilities are reported with a reason, not as a crash or hang.
+    let mut engine = EngineProcess::spawn();
+    let response = engine.request(r#"{"id":"caps","command":"get_capture_capabilities"}"#);
+    assert_eq!(response["id"], "caps", "{response}");
+    assert_eq!(response["ok"], true, "{response}");
+    let caps = &response["result"];
+    assert_eq!(caps["platform"], std::env::consts::OS);
+    for kind in ["screen", "audio"] {
+        let capability = &caps[kind];
+        let available = capability["available"].as_bool().expect("available flag");
+        if !available {
+            assert!(
+                capability["unavailable_reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()),
+                "{kind} unavailable without reason: {response}"
+            );
+        }
+    }
+    let status = engine.request(r#"{"id":"status","command":"get_status"}"#);
+    let any_available = caps["screen"]["available"] == true || caps["audio"]["available"] == true;
+    assert_eq!(status["result"]["capture_available"], any_available);
+    assert!(engine.finish().success());
+}
+
+#[test]
+fn invalid_capture_params_are_rejected_before_any_device_access() {
+    let mut engine = EngineProcess::spawn();
+    let response = engine.request(
+        r#"{"id":1,"command":"probe_screen_capture","params":{"source_types":["printer"]}}"#,
+    );
+    assert_error(&response, &json!(1), "invalid_params");
+    let response =
+        engine.request(r#"{"id":2,"command":"probe_audio_capture","params":{"duration_ms":0}}"#);
+    assert_error(&response, &json!(2), "invalid_params");
+    assert!(engine.finish().success());
+}

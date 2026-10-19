@@ -7,6 +7,7 @@
 use std::io;
 use std::process::ExitCode;
 
+use capture_api::CaptureBackend;
 use clap::Parser;
 use engine::Engine;
 
@@ -21,12 +22,24 @@ struct Args {}
 
 fn main() -> ExitCode {
     let Args {} = Args::parse();
-    let mut engine = Engine::new();
+    let mut engine = Engine::with_capture(capture_backend());
     match control_protocol::serve(io::stdin().lock(), io::stdout().lock(), &mut engine) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("streamforge-engine: control channel I/O error: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Platform capture backend for this build.
+fn capture_backend() -> Box<dyn CaptureBackend> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(capture_linux::LinuxCapture::new())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Box::new(capture_api::UnsupportedCapture::for_current_platform())
     }
 }

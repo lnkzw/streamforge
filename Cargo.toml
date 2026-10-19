@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/media-core",
     "crates/command-api",
+    "crates/capture-api",
+    "crates/capture-linux",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",

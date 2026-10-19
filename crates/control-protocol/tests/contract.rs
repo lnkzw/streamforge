@@ -2,6 +2,7 @@
 
 use command_api::{
     Command, CommandError, CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode,
+    registry,
 };
 use control_protocol::{MAX_REQUEST_BYTES, handle_line, serve};
 use serde_json::{Value, json};
@@ -29,6 +30,12 @@ impl CommandHandler for FakeHandler {
                 recording_active: true,
             }),
             Command::ListCommands => CommandOutput::Commands(CommandList::all()),
+            other => {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    format!("fake handler does not implement `{}`", other.name()),
+                ));
+            }
         })
     }
 }
@@ -103,12 +110,18 @@ fn list_commands_result_shape() {
     let commands = response["result"]["commands"]
         .as_array()
         .expect("commands array");
-    let names: Vec<_> = commands.iter().map(|c| c["name"].clone()).collect();
-    assert_eq!(names, vec![json!("get_status"), json!("list_commands")]);
-    for command in commands {
-        assert_eq!(command["access"], "read_only");
-        assert!(command["summary"].is_string());
+    assert_eq!(commands.len(), registry().len());
+    for (command, descriptor) in commands.iter().zip(registry()) {
+        assert_eq!(command["name"], descriptor.name);
+        assert_eq!(command["summary"], descriptor.summary);
+        assert!(
+            ["read_only", "control", "sensitive"]
+                .contains(&command["access"].as_str().unwrap_or("")),
+            "{command}"
+        );
     }
+    assert_eq!(commands[0]["name"], "get_status");
+    assert_eq!(commands[0]["access"], "read_only");
 }
 
 #[test]
@@ -191,10 +204,8 @@ fn error_details_are_structured() {
     let mut handler = FakeHandler::default();
     let unknown = respond(&mut handler, r#"{"id":1,"command":"nope"}"#);
     assert_eq!(unknown["error"]["details"]["command"], "nope");
-    assert_eq!(
-        unknown["error"]["details"]["available"],
-        json!(["get_status", "list_commands"])
-    );
+    let available: Vec<_> = registry().iter().map(|d| d.name).collect();
+    assert_eq!(unknown["error"]["details"]["available"], json!(available));
 
     let version = respond(&mut handler, r#"{"v":3,"id":2,"command":"get_status"}"#);
     assert_eq!(
@@ -263,4 +274,27 @@ fn serve_answers_each_request_in_order_and_stops_at_eof() {
             Command::GetStatus
         ]
     );
+}
+
+#[test]
+fn probe_params_are_validated_before_the_handler() {
+    let mut handler = FakeHandler::default();
+    let response = respond(
+        &mut handler,
+        r#"{"id":"p","command":"probe_screen_capture","params":{"duration_ms":5}}"#,
+    );
+    assert_error(&response, &json!("p"), "invalid_params");
+    assert_eq!(response["error"]["details"]["min_ms"], 100);
+    assert!(handler.calls.is_empty());
+}
+
+#[test]
+fn backend_error_codes_reach_the_wire() {
+    let mut handler = FakeHandler::default();
+    let response = respond(
+        &mut handler,
+        r#"{"id":"c","command":"get_capture_capabilities"}"#,
+    );
+    assert_error(&response, &json!("c"), "unsupported");
+    assert_eq!(handler.calls, vec![Command::GetCaptureCapabilities]);
 }

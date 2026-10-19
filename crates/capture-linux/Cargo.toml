@@ -1,0 +1,16 @@
+[package]
+name = "capture-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Everything is Linux-only; on other targets this crate compiles to nothing so
+# `cargo build --workspace` keeps working there.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screencast"] }
+async-io = "2"
+futures-lite = "2"
+# `target.object` (PW_KEY_TARGET_OBJECT) needs PipeWire >= 0.3.44.
+pipewire = { version = "0.10", features = ["v0_3_44"] }
+serde_json.workspace = true
+capture-api = { path = "../capture-api" }

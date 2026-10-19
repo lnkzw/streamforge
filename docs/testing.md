@@ -32,6 +32,8 @@ cargo test --workspace
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
+On Linux, CI installs `libpipewire-0.3-dev` and `libclang-dev` for `capture-linux`. The runners have no desktop session, so capture capability tests there exercise the "unavailable with reason" paths.
+
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
 ## Where tests live
@@ -40,6 +42,9 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
 - `crates/control-protocol/src/*`: unit tests for bounded line reading and envelope encoding.
 - `crates/control-protocol/tests/contract.rs`: wire-contract tests against a fake `CommandHandler`. These cover every error code, ID echoing, ordering and oversized lines.
 - `crates/engine`: unit tests showing that every registered command is handled.
+- `crates/capture-api`: unit tests for diagnostics math (FPS, intervals, sequence gaps, levels, frame deficit) and capability checks.
+- `crates/capture-linux/src/*`: unit tests for SPA pod construction, format names and portal flag mapping. They run without a desktop session.
+- `crates/capture-linux/tests/live.rs`: tests against the running session, `#[ignore]` by default. Run them with `cargo test -p capture-linux --test live -- --ignored --test-threads=1`; each one prints a skip reason when no PipeWire session exists. Screen capture needs a human in the picker, so it follows the manual procedure in `docs/capture-linux.md`.
 - `crates/streamforge-engine/tests/stdio_protocol.rs`: process integration tests. They spawn the real binary and talk JSON lines over pipes, with a 10 s timeout on every wait, and kill the child on failure.
 
 ## Reliability requirements

@@ -59,29 +59,92 @@ Requests are handled one at a time, and responses come back in request order. Cl
 | `unsupported_version` | protocol | `v` is not supported. `details.requested` and `details.supported` give the versions. |
 | `unknown_command`     | command  | No such command. `details.available` lists the valid names. |
 | `invalid_params`      | command  | `params` has the wrong shape or contains unexpected fields. `details.unexpected` lists unexpected names. |
-| `invalid_state`       | command  | The command is not allowed in the current engine state. Reserved; no M1 command returns it. |
+| `invalid_state`       | command  | The command is not allowed in the current engine state. Reserved; no current command returns it. |
+| `unsupported`         | command  | The platform or backend does not offer the requested capability, e.g. a cursor mode the portal lacks. `details.available` lists alternatives where known. |
+| `unavailable`         | command  | A required system service (portal, PipeWire, D-Bus) is missing or not running. The message names a remedy. |
+| `cancelled`           | command  | The user dismissed an interactive step, such as the screen selection dialog. |
+| `permission_denied`   | command  | The system refused access. |
+| `not_found`           | command  | A referenced device does not exist, e.g. an unknown audio `input`. `details.available` lists valid names. |
+| `timeout`             | command  | A system service, or the user in a dialog, did not respond in time. |
+| `backend_error`       | command  | A media backend failed. The message carries the backend's error. |
 | `internal`            | command  | The engine failed while executing the command or encoding its result. |
 
 A bad request never terminates the engine. After any error the engine keeps reading the next line.
 
 ## Commands (v1)
 
-| Command         | Params | Access      | Result |
-|-----------------|--------|-------------|--------|
-| `get_status`    | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "recording_active"}` |
-| `list_commands` | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
+| Command                    | Params | Access      | Result |
+|----------------------------|--------|-------------|--------|
+| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "recording_active"}` |
+| `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
+| `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
+| `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
+| `probe_screen_capture`     | see below | `control`   | Video capture report |
+| `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 
-`access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8; every M1 command is `read_only`.
+`access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. `probe_audio_capture` is `sensitive` because it opens a microphone without a system consent dialog.
+
+`capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`.
+
+### Capabilities
+
+`screen` and `audio` each carry `backend`, `available` and `unavailable_reason`. The reason is a string when the capability is unavailable, otherwise `null`. In addition:
+
+- `screen` has `portal_version`, `source_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`).
+- `audio` has `server_version`.
+
+### Capture probes
+
+Probes capture briefly and return diagnostics. No media is stored or returned. A probe **blocks the engine** for its duration plus any user interaction: the screen probe opens the system's source picker and waits up to 120 s. Other requests on the same connection are answered afterwards.
+
+`probe_screen_capture` params (all optional):
+
+| Param          | Type | Default | Meaning |
+|----------------|------|---------|---------|
+| `duration_ms`  | integer 100..=60000 | 5000 | Capture time after the source is selected. |
+| `source_types` | array of `"monitor"`, `"window"`, `"virtual"` | `["monitor","window"]` | Source types offered in the picker; duplicates are ignored. |
+| `cursor`       | `"hidden"`, `"embedded"`, `"metadata"` | `"embedded"` | Cursor handling; must be one of `cursor_modes`. |
+
+`probe_audio_capture` params (all optional):
+
+| Param         | Type | Default | Meaning |
+|---------------|------|---------|---------|
+| `input`       | string | system default | `name` from `list_audio_inputs`. |
+| `duration_ms` | integer 100..=60000 | 5000 | Capture time. |
+
+Video report: `{"backend", "source": {"kind", "width", "height"}, "format": {"pixel_format", "width", "height", "framerate": {"num", "den"}}, "buffer_memory", "stats", "warnings"}`. The `stats` fields:
+
+- **Counters:** `elapsed_ms`, `frames`, `empty_buffers`, `corrupted_buffers`.
+- **Drop metrics:**
+  - `dropped_frames`: gaps in the source sequence number.
+  - `buffer_starvation`: process callbacks that found no buffer.
+- **Rate:** `measured_fps`, `frame_interval` (`{"min_ms", "mean_ms", "max_ms"}`).
+- **Timestamps:** `first_pts` and `last_pts`, as `{"ticks", "time_base_num", "time_base_den"}`.
+- **Timestamp quality:** `non_monotonic_pts`, `frames_without_pts`.
+
+A frame rate of `0/1` means variable (damage-driven) delivery.
+
+Audio report: `{"backend", "input", "format": {"sample_format", "rate", "channels"}, "stats", "warnings"}`. The `stats` fields:
+
+- **Counters:** `elapsed_ms`, `buffers`, `frames`, `empty_buffers`.
+- **Drop metrics:**
+  - `expected_frames` and `frame_deficit`: estimated from arrival times, accurate to about one buffer.
+  - `buffer_starvation`.
+- **Sample quality:** `invalid_samples`, `clipped_samples`.
+- **Levels:** `peak_dbfs` and `rms_dbfs`; `null` means digital silence.
+- **Stream positions:** `first_position` and `last_position`, in the backend's time base.
+
+`warnings` lists non-fatal observations, e.g. "no frames received" on a static screen.
 
 ## Example session
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":false,"media_engine_ready":false,"recording_active":false,"streaming_active":false,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","list_commands"],"command":"nope"}}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"recording_active":false,"streaming_active":false,"version":"0.1.0"}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","list_commands","get_capture_capabilities","list_audio_inputs","probe_screen_capture","probe_audio_capture"],"command":"nope"}}}
 ```
 
-Key order inside `result` and `details` is not part of the contract.
+Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.
 
 ## Versioning policy
 

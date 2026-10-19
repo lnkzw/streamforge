@@ -34,13 +34,17 @@
 | Crate | Kind | Responsibility | Depends on |
 |-------|------|----------------|------------|
 | `media-core` | lib | Platform-neutral media types and time model | — |
-| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | — |
-| `engine` | lib | Engine controller; owns engine state and implements `CommandHandler` | `command-api` |
+| `capture-api` | lib | Platform-neutral capture interface: capabilities, requests, reports, `CaptureError`, `CaptureBackend` trait, allocation-free diagnostics accumulators | `media-core` |
+| `capture-linux` | lib | Linux `CaptureBackend`: XDG ScreenCast portal + PipeWire (`docs/capture-linux.md`); empty on other OSes | `capture-api` (Linux only: `ashpd`, `pipewire`) |
+| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api` (types only) |
+| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` | `command-api`, `capture-api` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
-| `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol` |
-| `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine` |
+| `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-linux` (Linux) |
+| `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-linux` (Linux) |
 
 `engine` and `control-protocol` do not depend on each other. Only the binaries combine them. A future socket transport, JSON-RPC or MCP adapter would be another crate that calls `CommandHandler`, next to `control-protocol`.
+
+The binaries are the composition roots. Each picks the platform capture backend with `cfg(target_os)` and injects it with `Engine::with_capture`. Other OSes get `capture_api::UnsupportedCapture`, which reports a reason instead of failing to build. `engine` never depends on a platform crate.
 
 ## Command boundary
 
@@ -54,14 +58,12 @@ adapter input ──decode──▶ Command ──CommandHandler::handle──�
 - Adapters must not compute results themselves; they translate input into a `Command` and output back to their medium.
 - Wire formats map `command_api::ErrorCode` to their own codes explicitly, so internal renames do not silently change a protocol.
 
-The headless process currently runs the engine and the protocol loop on the main thread and handles requests sequentially. Once commands can block on devices or encoders, the engine controller moves to its own thread behind a bounded command queue. See ADR 0002.
+The headless process currently runs the engine and the protocol loop on the main thread and handles requests sequentially. Capture probes (M2) run their PipeWire loop on that same thread and block it for the probe duration. That is acceptable for diagnostics, but not for continuous capture. Before continuous capture (M3), the engine controller and capture loops move to their own threads behind bounded command and frame queues. See ADR 0002.
 
 ## Suggested future crates
 
 Add only when a milestone needs them (the socket transport, if needed, extends `control-protocol` or becomes a sibling adapter crate):
 
-- `capture-api`
-- `capture-linux`
 - `capture-windows`
 - `capture-macos`
 - `video-compositor`

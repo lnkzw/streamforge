@@ -4,13 +4,18 @@ An experimental, cross-platform, agent-friendly streaming application. The proje
 
 ## Current status
 
-This repository is an **architecture and workflow scaffold**, not a working streaming engine yet. M0 (workspace) and M1 (command boundary) are in place: typed commands, a headless engine process, and a local JSON-lines control protocol. Capture, audio, compositing, encoding, and streaming are not implemented.
+This repository is an **architecture and workflow scaffold**, not a working streaming engine yet. In place so far:
+
+- M0 (workspace) and M1 (command boundary): typed commands, a headless engine process, and a local JSON-lines control protocol.
+- M2 (Linux capture spike): screen capture through the XDG portal and PipeWire, plus audio input capture. Both run as short diagnostic probes.
+
+Compositing, mixing, encoding, recording, and streaming are not implemented.
 
 ## Prerequisites
 
 - Rust stable toolchain (`rustup`, `cargo`, `rustfmt`, `clippy`)
 - Git
-- Platform-specific multimedia development dependencies will be documented when their implementation is introduced.
+- Linux: PipeWire headers (≥ 0.3.44), `clang`/libclang and `pkg-config`, for `capture-linux`. Runtime needs PipeWire and xdg-desktop-portal with a ScreenCast backend. See `docs/capture-linux.md`.
 
 Install Rust using the official instructions: <https://www.rust-lang.org/tools/install>
 
@@ -28,18 +33,29 @@ printf '%s\n' '{"id":1,"command":"get_status"}' | cargo run -q -p streamforge-en
 
 The protocol is specified in `docs/protocol.md`.
 
+Capture diagnostics (Linux; output is JSON):
+
+```bash
+cargo run -p streamforge-cli -- capture caps
+cargo run -p streamforge-cli -- capture inputs
+cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker
+cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
+```
+
 The first version deliberately has no capture or streaming functionality. Do not expect it to replace OBS yet.
 
 ## Repository layout
 
 - `crates/media-core`: platform-independent media types and time model
+- `crates/capture-api`: platform-neutral capture interface and diagnostics
+- `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)
 - `crates/streamforge-engine`: headless engine process serving the protocol on stdio
 - `crates/streamforge-cli`: CLI entry point (calls the same command handlers)
 - `.github/workflows/ci.yml`: CI (fmt, clippy, tests on Linux/Windows/macOS)
-- `docs/`: architecture, media model, control protocol, roadmap, testing strategy, decisions (ADRs)
+- `docs/`: architecture, media model, control protocol, Linux capture, roadmap, testing strategy, decisions (ADRs)
 - `AGENTS.md`: instructions for coding agents
 
 ## Development rules

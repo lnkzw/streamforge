@@ -5,7 +5,7 @@
 - [x] Cargo workspace builds in principle
 - [x] CLI returns structured status
 - [x] Basic timestamp type and tests
-- [ ] CI runs format, clippy, and tests on Linux, Windows, macOS (workflow: `.github/workflows/ci.yml`; check off only after a green run on all three runners)
+- [x] CI runs format, clippy, and tests on Linux, Windows, macOS (`.github/workflows/ci.yml`). First green run on `ubuntu-latest`, `windows-latest` and `macos-15-intel` (x64) on 2026-10-19, run 39309549487. macOS arm64 was not covered: `macos-latest` jobs were not scheduled for lack of runner capacity.
 
 Acceptance:
 - `cargo build --workspace`

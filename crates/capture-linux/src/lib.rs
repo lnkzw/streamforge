@@ -21,7 +21,7 @@ use std::time::Duration;
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureBackend,
     CaptureCapabilities, CaptureError, CaptureErrorKind, ScreenCaptureCapability,
-    ScreenCaptureRequest, VideoCaptureReport, VideoSourceInfo,
+    ScreenCaptureRequest, VideoCaptureReport, VideoSourceInfo, VideoSourceKind,
 };
 use serde_json::json;
 
@@ -102,16 +102,19 @@ impl CaptureBackend for LinuxCapture {
             width: cast.size.map(|(w, _)| w),
             height: cast.size.map(|(_, h)| h),
         };
-        let remote = cast
+        let run = cast
             .remote
             .try_clone()
-            .map_err(|err| CaptureError::backend(format!("cannot duplicate PipeWire fd: {err}")))?;
-        let run = video::capture(remote, cast.node_id, cast.size, request.duration);
+            .map_err(|err| CaptureError::backend(format!("cannot duplicate PipeWire fd: {err}")))
+            .and_then(|remote| video::capture(remote, cast.node_id, cast.size, request.duration));
         // Always end the portal session, even if capturing failed.
         let closed = cast.close(CLOSE_TIMEOUT);
         let mut run = run?;
         if let Err(err) = closed {
             run.warnings.push(err.message);
+        }
+        if let Some(warning) = source_kind_mismatch(&request.source_kinds, source.kind) {
+            run.warnings.insert(0, warning);
         }
         Ok(VideoCaptureReport {
             backend: SCREEN_BACKEND.to_owned(),
@@ -150,5 +153,50 @@ impl CaptureBackend for LinuxCapture {
             stats: run.stats,
             warnings: run.warnings,
         })
+    }
+}
+
+/// Some portal pickers (e.g. xdph) offer every source type regardless of the
+/// requested ones; make a mismatch visible instead of silently reporting it.
+fn source_kind_mismatch(
+    requested: &[VideoSourceKind],
+    delivered: Option<VideoSourceKind>,
+) -> Option<String> {
+    let delivered = delivered?;
+    if requested.contains(&delivered) {
+        return None;
+    }
+    let requested: Vec<_> = requested.iter().map(|kind| kind.as_str()).collect();
+    Some(format!(
+        "requested source type(s) {} but the portal delivered a {} source; \
+         the picker does not restrict the offered types",
+        requested.join(", "),
+        delivered.as_str()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mismatched_source_kind_is_reported() {
+        let warning =
+            source_kind_mismatch(&[VideoSourceKind::Window], Some(VideoSourceKind::Monitor))
+                .expect("warning");
+        assert!(
+            warning.contains("window") && warning.contains("monitor"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn matching_or_unknown_source_kind_is_silent() {
+        let requested = [VideoSourceKind::Monitor, VideoSourceKind::Window];
+        assert_eq!(
+            source_kind_mismatch(&requested, Some(VideoSourceKind::Window)),
+            None
+        );
+        assert_eq!(source_kind_mismatch(&requested, None), None);
     }
 }

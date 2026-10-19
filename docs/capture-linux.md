@@ -40,6 +40,7 @@ On other operating systems, `capture-linux` compiles to an empty crate. The bina
   Then restart the portals with `systemctl --user restart xdg-desktop-portal-hyprland xdg-desktop-portal`, or log in again.
 - **Damage-driven frames:** Hyprland only sends a frame when the captured content changes. A static screen yields few or no frames, and the negotiated frame rate is `0/1` (variable). Move something on screen during a probe.
 - **Buffers:** StreamForge offers no DMA-BUF modifiers, so xdph sends shared-memory (`memfd`) buffers in a packed RGB format (BGRx observed).
+- **Picker ignores requested types:** `hyprland-share-picker` shows its screen, window and region tabs whatever `source_types` asks for. The report's `source.kind` shows what was actually selected, and a warning is added when it is not one of the requested types.
 - **Cursor modes:** this xdph version offers `hidden` and `embedded`, but not `metadata`. Asking for `metadata` fails with `unsupported`.
 
 ### Measured on the development machine (2026-10-19)
@@ -78,7 +79,7 @@ Run each command from the workspace root.
 2. Screen, monitor: `cargo run -p streamforge-cli -- capture screen --source monitor --duration-ms 5000`
    - The picker appears. Choose a monitor and move a window around for 5 s.
    - The report should show the source size, the negotiated `format`, `stats.frames > 0`, `measured_fps`, and `first_pts`/`last_pts` with time base 1/1000000000. Under load, `dropped_frames` and `buffer_starvation` may be non-zero.
-3. Screen, window: repeat step 2 with `--source window` and pick a window.
+3. Screen, window: repeat step 2 with `--source window` and pick an entry in the picker's **window** tab. Check that `source.kind` is `window` and the size matches the window.
 4. Cancel: run step 2 again and close the picker without choosing. The command must exit with code 1 and print `cancelled`.
 5. Audio inputs: `cargo run -p streamforge-cli -- capture inputs`
 6. Audio probe: `cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000`

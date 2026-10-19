@@ -2,8 +2,12 @@
 //!
 //! Keep this crate free of UI, capture, device, encoder, and OS-specific APIs.
 
+pub mod audio;
+pub mod metrics;
 pub mod video;
 
+pub use audio::{AudioRing, AudioRingStats};
+pub use metrics::{LatencyHistogram, LatencySummary};
 pub use video::{
     FrameBuffer, FrameMailbox, FramePool, MailboxStats, PixelFormat, VideoFrame, VideoFrameError,
 };

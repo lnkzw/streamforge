@@ -11,7 +11,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{Command, CommandError, CompositeRequest, ErrorCode};
+use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
+
+use crate::{
+    Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_MIX_DURATION,
+    MixRequest, ToneSpec,
+};
 
 /// Permission class of a command.
 ///
@@ -86,6 +91,16 @@ const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
     access: CommandAccess::Sensitive,
 };
 
+const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
+    name: "probe_audio_mix",
+    summary: "Mix live audio inputs and test tones at 48 kHz stereo and report meters, buffer \
+              latency over time, underruns and clipping; no audio is stored. Params: duration_ms \
+              (100..=900000, default 5000), inputs ([{input, gain_db, mute}]), tones \
+              ([{frequency_hz, level_dbfs, gain_db, mute}]), master_gain_db; up to 8 sources, \
+              default one 1 kHz test tone.",
+    access: CommandAccess::Sensitive,
+};
+
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
     LIST_COMMANDS,
@@ -94,6 +109,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
     PROBE_COMPOSITE,
+    PROBE_AUDIO_MIX,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -137,6 +153,7 @@ impl Command {
             }
             "probe_audio_capture" => decode_audio_probe(name, params).map(Self::ProbeAudioCapture),
             "probe_composite" => decode_composite_probe(name, params).map(Self::ProbeComposite),
+            "probe_audio_mix" => decode_mix_probe(name, params).map(Self::ProbeAudioMix),
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -157,6 +174,7 @@ impl Command {
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
             Self::ProbeComposite(_) => &PROBE_COMPOSITE,
+            Self::ProbeAudioMix(_) => &PROBE_AUDIO_MIX,
         }
     }
 
@@ -178,6 +196,111 @@ struct ScreenProbeParams {
 struct AudioProbeParams {
     input: Option<String>,
     duration_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixProbeParams {
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    inputs: Vec<LiveInputParams>,
+    #[serde(default)]
+    tones: Vec<ToneParams>,
+    master_gain_db: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveInputParams {
+    input: Option<String>,
+    gain_db: Option<f32>,
+    mute: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToneParams {
+    frequency_hz: f64,
+    level_dbfs: Option<f64>,
+    gain_db: Option<f32>,
+    mute: Option<bool>,
+}
+
+const DEFAULT_TONE_LEVEL_DBFS: f64 = -12.0;
+const DEFAULT_TONE_HZ: f64 = 1000.0;
+
+fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest, CommandError> {
+    let mut params: MixProbeParams = decode_params(command, params)?;
+    if params.inputs.is_empty() && params.tones.is_empty() {
+        // Zero-config diagnostic: one test tone, no device access.
+        params.tones.push(ToneParams {
+            frequency_hz: DEFAULT_TONE_HZ,
+            level_dbfs: None,
+            gain_db: None,
+            mute: None,
+        });
+    }
+    let sources = params.inputs.len() + params.tones.len();
+    if sources > MAX_INPUTS {
+        return Err(invalid_params(
+            command,
+            format!("at most {MAX_INPUTS} sources in `inputs` and `tones`, got {sources}"),
+        ));
+    }
+    let gain = |name: &str, db: Option<f32>| {
+        let db = db.unwrap_or(0.0);
+        if db.is_finite() && (MIN_GAIN_DB..=MAX_GAIN_DB).contains(&db) {
+            Ok(db)
+        } else {
+            Err(invalid_params(
+                command,
+                format!("`{name}` must be between {MIN_GAIN_DB} and {MAX_GAIN_DB} dB"),
+            ))
+        }
+    };
+    let mut inputs = Vec::with_capacity(params.inputs.len());
+    for input in params.inputs {
+        if input.input.as_deref().is_some_and(str::is_empty) {
+            return Err(invalid_params(command, "`input` must not be empty"));
+        }
+        inputs.push(LiveInputSpec {
+            input: input.input,
+            gain_db: gain("gain_db", input.gain_db)?,
+            muted: input.mute.unwrap_or(false),
+        });
+    }
+    let nyquist = f64::from(audio_engine::RATE) / 2.0;
+    let mut tones = Vec::with_capacity(params.tones.len());
+    for tone in params.tones {
+        if !(tone.frequency_hz.is_finite()
+            && tone.frequency_hz > 0.0
+            && tone.frequency_hz < nyquist)
+        {
+            return Err(invalid_params(
+                command,
+                format!("`frequency_hz` must be between 0 and {nyquist} (exclusive)"),
+            ));
+        }
+        let level = tone.level_dbfs.unwrap_or(DEFAULT_TONE_LEVEL_DBFS);
+        if !(level.is_finite() && (f64::from(MIN_GAIN_DB)..=0.0).contains(&level)) {
+            return Err(invalid_params(
+                command,
+                format!("`level_dbfs` must be between {MIN_GAIN_DB} and 0"),
+            ));
+        }
+        tones.push(ToneSpec {
+            frequency_hz: tone.frequency_hz,
+            level_dbfs: level,
+            gain_db: gain("gain_db", tone.gain_db)?,
+            muted: tone.mute.unwrap_or(false),
+        });
+    }
+    Ok(MixRequest {
+        duration: duration_within(command, params.duration_ms, MAX_MIX_DURATION)?,
+        inputs,
+        tones,
+        master_gain_db: gain("master_gain_db", params.master_gain_db)?,
+    })
 }
 
 #[derive(Deserialize)]
@@ -289,8 +412,16 @@ fn decode_audio_probe(
 }
 
 fn probe_duration(command: &str, duration_ms: Option<u64>) -> Result<Duration, CommandError> {
+    duration_within(command, duration_ms, MAX_PROBE_DURATION)
+}
+
+fn duration_within(
+    command: &str,
+    duration_ms: Option<u64>,
+    max: Duration,
+) -> Result<Duration, CommandError> {
     let duration = duration_ms.map_or(DEFAULT_PROBE_DURATION, Duration::from_millis);
-    if (MIN_PROBE_DURATION..=MAX_PROBE_DURATION).contains(&duration) {
+    if (MIN_PROBE_DURATION..=max).contains(&duration) {
         return Ok(duration);
     }
     Err(CommandError::new(
@@ -575,6 +706,69 @@ mod tests {
     }
 
     #[test]
+    fn mix_probe_params_are_decoded_with_defaults() {
+        let params = json!({
+            "duration_ms": 600_000,
+            "inputs": [{"input": "mic", "gain_db": -6.0}, {}],
+            "tones": [{"frequency_hz": 440.0}],
+        });
+        assert_eq!(
+            Command::decode("probe_audio_mix", Some(&params)),
+            Ok(Command::ProbeAudioMix(MixRequest {
+                duration: Duration::from_secs(600),
+                inputs: vec![
+                    LiveInputSpec {
+                        input: Some("mic".into()),
+                        gain_db: -6.0,
+                        muted: false,
+                    },
+                    LiveInputSpec {
+                        input: None,
+                        gain_db: 0.0,
+                        muted: false,
+                    },
+                ],
+                tones: vec![ToneSpec {
+                    frequency_hz: 440.0,
+                    level_dbfs: -12.0,
+                    gain_db: 0.0,
+                    muted: false,
+                }],
+                master_gain_db: 0.0,
+            }))
+        );
+    }
+
+    #[test]
+    fn mix_probe_without_sources_uses_one_test_tone() {
+        let Ok(Command::ProbeAudioMix(request)) = Command::decode("probe_audio_mix", None) else {
+            panic!("decode");
+        };
+        assert!(request.inputs.is_empty());
+        assert_eq!(request.tones.len(), 1);
+        assert_eq!(request.tones[0].frequency_hz, 1000.0);
+    }
+
+    #[test]
+    fn invalid_mix_params_are_rejected() {
+        let nine_tones: Vec<_> = (0..9).map(|_| json!({"frequency_hz": 100.0})).collect();
+        for params in [
+            json!({"tones": nine_tones}),
+            json!({"tones": [{"frequency_hz": 0.0}]}),
+            json!({"tones": [{"frequency_hz": 24_000.0}]}),
+            json!({"tones": [{"frequency_hz": 440.0, "level_dbfs": 3.0}]}),
+            json!({"tones": [{"frequency_hz": 440.0}], "master_gain_db": 30.0}),
+            json!({"inputs": [{"input": "", "gain_db": 0.0}]}),
+            json!({"inputs": [{"gain_db": -200.0}]}),
+            json!({"inputs": [{"volume": 1}]}),
+            json!({"tones": [{"frequency_hz": 440.0}], "duration_ms": 900_001}),
+        ] {
+            let err = Command::decode("probe_audio_mix", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+        }
+    }
+
+    #[test]
     fn access_classes_match_risk() {
         let access = |name| registry().iter().find(|d| d.name == name).map(|d| d.access);
         assert_eq!(
@@ -591,6 +785,7 @@ mod tests {
             Some(CommandAccess::Sensitive)
         );
         assert_eq!(access("probe_composite"), Some(CommandAccess::Sensitive));
+        assert_eq!(access("probe_audio_mix"), Some(CommandAccess::Sensitive));
     }
 
     #[test]

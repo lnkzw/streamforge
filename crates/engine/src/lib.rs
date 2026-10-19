@@ -5,6 +5,7 @@
 //! capture is injected as a [`CaptureBackend`] by the composition root.
 
 mod composite;
+mod mix;
 
 use std::path::PathBuf;
 
@@ -111,6 +112,8 @@ impl CommandHandler for Engine {
                 composite::probe(self.capture.as_mut(), &self.output_dir, &request)
                     .map(|report| CommandOutput::CompositeReport(Box::new(report)))
             }
+            Command::ProbeAudioMix(request) => mix::probe(self.capture.as_mut(), &request)
+                .map(|report| CommandOutput::MixReport(Box::new(report))),
         }
     }
 }
@@ -141,13 +144,16 @@ mod tests {
 
     use std::sync::Arc;
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use capture_api::{
         AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-        AudioStatsAccumulator, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
-        VideoCaptureReport, VideoSourceInfo, VideoStatsAccumulator, VideoStream,
+        AudioStatsAccumulator, AudioStream, AudioStreamRequest, ScreenCaptureCapability,
+        ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
+        VideoStatsAccumulator, VideoStream,
     };
     use command_api::registry;
-    use media_core::{FrameBuffer, FrameMailbox, PixelFormat, VideoFrame};
+    use media_core::{AudioRing, FrameBuffer, FrameMailbox, PixelFormat, VideoFrame};
     use serde_json::json;
 
     use super::*;
@@ -223,6 +229,34 @@ mod tests {
             }
         }
 
+        fn start_audio_stream(
+            &mut self,
+            request: &AudioStreamRequest,
+        ) -> Result<Box<dyn AudioStream>, CaptureError> {
+            if request.input.as_deref() == Some("missing") {
+                return Err(CaptureError::new(
+                    CaptureErrorKind::NotFound,
+                    "no such input",
+                ));
+            }
+            let ring = Arc::new(AudioRing::new(request.channels, request.rate as usize));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread = std::thread::spawn({
+                let (ring, stop) = (Arc::clone(&ring), Arc::clone(&stop));
+                move || {
+                    while !stop.load(Ordering::Acquire) {
+                        ring.push(std::iter::repeat_n(0.25, 480 * 2));
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            });
+            Ok(Box::new(FakeAudioStream {
+                ring,
+                stop,
+                thread: Some(thread),
+            }))
+        }
+
         fn start_screen_stream(
             &mut self,
             _selection: &ScreenSelection,
@@ -255,6 +289,33 @@ mod tests {
     struct FakeStream {
         mailbox: Arc<FrameMailbox>,
         source: VideoSourceInfo,
+    }
+
+    /// Pushes 10 ms of constant 0.25 every 10 ms until stopped.
+    struct FakeAudioStream {
+        ring: Arc<AudioRing>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl AudioStream for FakeAudioStream {
+        fn samples(&self) -> Arc<AudioRing> {
+            Arc::clone(&self.ring)
+        }
+
+        fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("producer");
+            }
+            Ok(AudioCaptureReport {
+                backend: "fake".into(),
+                input: Some("mic".into()),
+                format: None,
+                stats: AudioStatsAccumulator::new().finish(Duration::from_millis(1)),
+                warnings: Vec::new(),
+            })
+        }
     }
 
     impl VideoStream for FakeStream {
@@ -498,5 +559,46 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    fn mix(engine: &mut Engine, params: serde_json::Value) -> command_api::MixReport {
+        let command = Command::decode("probe_audio_mix", Some(&params)).expect("decode");
+        match engine.handle(command).expect("mix") {
+            CommandOutput::MixReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mix_probe_mixes_a_live_input_and_a_tone() {
+        let report = mix(
+            &mut engine(),
+            json!({
+                "duration_ms": 300,
+                "inputs": [{"input": "mic", "gain_db": -6.0}],
+                "tones": [{"frequency_hz": 1000.0, "level_dbfs": -12.0}],
+            }),
+        );
+        let stats = &report.mix;
+        assert!(stats.blocks_mixed >= 10, "{stats:?}");
+        assert_eq!(stats.inputs.len(), 2);
+        assert_eq!(stats.inputs[0].kind, "live");
+        assert_eq!(stats.inputs[1].kind, "tone");
+        let tone_peak = stats.inputs[1].meter.peak_dbfs.expect("tone peak");
+        assert!((tone_peak + 12.0).abs() < 0.01, "{tone_peak}");
+        assert!(stats.master.rms_dbfs.is_some());
+        assert_eq!(report.captures.len(), 1);
+        assert!(report.captures[0].report.is_some());
+    }
+
+    #[test]
+    fn mix_probe_with_unknown_input_fails_before_mixing() {
+        let command = Command::decode(
+            "probe_audio_mix",
+            Some(&json!({"inputs": [{"input": "missing"}], "duration_ms": 100})),
+        )
+        .expect("decode");
+        let err = engine().handle(command).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 }

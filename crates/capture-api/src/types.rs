@@ -192,6 +192,16 @@ pub struct AudioCaptureRequest {
     pub duration: Duration,
 }
 
+/// Capture an audio input continuously, converted by the platform to
+/// `rate` Hz with `channels` interleaved channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioStreamRequest {
+    /// [`AudioInput::name`]; `None` uses the system default input.
+    pub input: Option<String>,
+    pub rate: u32,
+    pub channels: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoSourceInfo {
     pub kind: Option<VideoSourceKind>,

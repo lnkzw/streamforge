@@ -10,7 +10,7 @@ Probes measure and report what arrives. Since M3, a continuous screen stream (`C
 - each frame is converted to Bgrx8 (or premultiplied Bgra8) in one of 4 pooled buffers
 - frames are published to a latest-frame `FrameMailbox`
 
-Audio does not flow into a graph yet.
+Since M4, a continuous audio stream (`CaptureBackend::start_audio_stream`) feeds the mixer. A dedicated `audio-capture` thread requests 48 kHz stereo F32 from PipeWire, which converts if needed, and pushes into a 1 s `AudioRing`.
 
 ## Requirements
 

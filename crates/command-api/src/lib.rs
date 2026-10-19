@@ -7,10 +7,12 @@
 
 mod composite;
 mod error;
+mod mix;
 mod registry;
 
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
+pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
 
 use capture_api::{
@@ -23,7 +25,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wire names and parameters are defined by the [`registry`]; use
 /// [`Command::decode`] to build a command from untyped input.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     /// Report engine status.
     GetStatus,
@@ -39,6 +41,8 @@ pub enum Command {
     ProbeAudioCapture(AudioCaptureRequest),
     /// Run the compositor on the reference scene and report render timing.
     ProbeComposite(CompositeRequest),
+    /// Mix live inputs and test tones and report meters and buffering.
+    ProbeAudioMix(MixRequest),
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -55,6 +59,7 @@ pub enum CommandOutput {
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
+    MixReport(Box<MixReport>),
 }
 
 /// Result of `list_audio_inputs`.

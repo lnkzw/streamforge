@@ -38,6 +38,21 @@ The eventual audio block type should include:
 
 Audio processing should use predictable block sizes and avoid allocations in the real-time callback path.
 
+Current implementation (M4, `audio-engine`):
+
+- **Mixer format:** 48 kHz, 2 channels, interleaved `f32`, in blocks of 480 frames (10 ms). Every input must deliver this format.
+- **Graph edge:** `media_core::AudioRing`, a bounded ring of interleaved samples with a fixed capacity. When it is full, the oldest frames are overwritten and counted as `overrun_frames`. Pushing never allocates.
+- **Resampling policy:** capture requests 48 kHz / stereo from the platform. On Linux, PipeWire's audioconvert does rate and channel conversion. If PipeWire negotiates any other format, the stream delivers nothing and warns; buffers are counted as dropped. The mixer itself never resamples.
+- **Clock drift policy:** a producer (device/graph clock) and the mixer (monotonic clock) drift apart. Each live input keeps bounded buffering:
+  - Target fill is the larger of two blocks and the largest producer push plus one block.
+  - **Warm-up:** the input stays silent until the target is reached (`warmup_frames`).
+  - **Underrun:** missing frames are padded with silence (`underrun_frames`); a ring that runs dry warms up again.
+  - **Drift:** fill above target + 4 blocks is trimmed back to the target (`trimmed_frames`).
+
+  Latency per input is therefore bounded, and the report shows its trend per 10 s window. Adaptive resampling, which would compensate drift without trimming, is future work.
+- **Clipping policy:** inputs are summed in `f32` without intermediate clipping. The master bus is hard-limited to [-1, 1] after the master gain; every limited sample is counted (`clipped_samples`). Non-finite samples become silence and are counted (`invalid_samples`). There is no limiter yet.
+- **Gain and mute:** gain is set in dB from −96 to +24. Gain and mute changes ramp linearly over one block to avoid clicks. Meters measure each input after gain and the master after limiting (peak and RMS in dBFS; `null` = digital silence).
+
 ## Synchronization
 
 Audio and video use different production rates. Synchronize by timestamps, not by assuming one video frame corresponds to one audio block. Define behavior for late frames, missing audio, capture interruptions, and encoder backpressure.
@@ -53,3 +68,11 @@ Implemented video edges:
 | Capture callback → frame pool | 4 buffers; with no free buffer the frame is discarded | `VideoStats.frames_discarded` |
 | Capture → compositor (`FrameMailbox`) | 1 frame, newest wins | `MailboxStats.replaced` (frames never composited) |
 | Compositor clock | fixed rate; it skips ticks instead of bursting | `RenderStats.skipped_ticks`, `late_frames`; per source `stale_ticks` and `missing_ticks` |
+
+Implemented audio edges:
+
+| Edge | Capacity / policy | Metrics |
+|------|-------------------|---------|
+| Capture callback → `AudioRing` | 1 s; when full, the oldest frames are overwritten | `AudioRingStats.overrun_frames` |
+| `AudioRing` → mixer | bounded target fill (see above): warm-up, pad, trim | `warmup_frames`, `underrun_frames`, `trimmed_frames`, buffer latency min/mean/max and per-10 s trend |
+| Mixer clock | fixed 10 ms blocks; it catches up to 20 blocks back to back, then skips | `late_blocks`, `skipped_blocks` |

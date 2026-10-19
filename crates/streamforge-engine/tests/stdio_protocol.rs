@@ -306,3 +306,24 @@ fn composite_probe_runs_headless() {
     assert!(response["result"]["screen_capture"].is_null());
     assert!(engine.finish().success());
 }
+
+#[test]
+fn audio_mix_probe_runs_headless_with_test_tones() {
+    // Tones only: no audio device needed, so it runs on every CI OS.
+    let mut engine = EngineProcess::spawn();
+    let response = engine.request(
+        r#"{"id":"m","command":"probe_audio_mix","params":{"duration_ms":300,"tones":[{"frequency_hz":440,"level_dbfs":-6},{"frequency_hz":1000,"level_dbfs":-12}]}}"#,
+    );
+    assert_eq!(response["ok"], true, "{response}");
+    let mix = &response["result"]["mix"];
+    assert_eq!(mix["rate"], 48_000);
+    assert_eq!(mix["channels"], 2);
+    assert!(mix["blocks_mixed"].as_u64().is_some_and(|n| n > 0), "{mix}");
+    assert_eq!(mix["inputs"].as_array().map(Vec::len), Some(2));
+    let peak = mix["inputs"][0]["meter"]["peak_dbfs"]
+        .as_f64()
+        .expect("peak");
+    assert!((peak + 6.0).abs() < 0.05, "{peak}");
+    assert_eq!(mix["clipped_samples"], 0);
+    assert!(engine.finish().success());
+}

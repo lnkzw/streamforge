@@ -82,6 +82,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
+| `probe_audio_mix`          | see below | `sensitive` | Mix report |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -161,6 +162,31 @@ Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_captur
   - `late_frames`: frames that finished after the next tick was due.
 - **Timing:** `render_time` (`{"min_ms", "mean_ms", "p95_ms", "p99_ms", "max_ms"}`).
 - **Sources:** a `sources` array. Each entry has `name`, `kind` (`static`/`live`), `frames_consumed`, `stale_ticks` and `missing_ticks`. Live sources also carry `mailbox` (`{"published", "replaced", "taken"}`), where `replaced` counts frames that were never composited.
+
+### Audio mix probe
+
+`probe_audio_mix` mixes live inputs and test tones at 48 kHz stereo for `duration_ms` and reports meters, buffering and timing. No audio is stored or returned. It is `sensitive` because it opens microphones.
+
+| Param            | Type | Default | Meaning |
+|------------------|------|---------|---------|
+| `duration_ms`    | integer 100..=900000 | 5000 | Run time; up to 15 min for latency tests. |
+| `inputs`         | array of `{"input": string|null, "gain_db": number, "mute": bool}` | `[]` | Live inputs; `input: null` is the system default. |
+| `tones`          | array of `{"frequency_hz": number, "level_dbfs": number, "gain_db": number, "mute": bool}` | one 1 kHz tone at −12 dBFS if no source is given | Test tones; `level_dbfs` defaults to −12. |
+| `master_gain_db` | number −96..=24 | 0 | Master gain. |
+
+At most 8 sources in total. Gains must lie in −96..=24 dB, tone frequencies strictly between 0 and 24 000 Hz, and tone levels in −96..=0 dBFS.
+
+Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`. The `mix` object contains:
+
+- **Setup:** `rate`, `channels`, `block_frames`.
+- **Timing:** `elapsed_ms`, `blocks_mixed`, `late_blocks`, `skipped_blocks`, `mix_time`.
+- **Master:** `master` meter (`{"peak_dbfs", "rms_dbfs"}`), `clipped_samples`, `invalid_samples`.
+- **Inputs:** an `inputs` array. Each entry has:
+  - `name`, `kind` (`live`/`tone`), `gain_db`, `muted`
+  - `meter`
+  - `warmup_frames`, `underrun_frames`, `trimmed_frames`
+  - `ring` (`{"capacity_frames", "pushed_frames", "pulled_frames", "overrun_frames", "discarded_frames", "max_push_frames"}`)
+  - `buffer` (`{"target_ms", "min_ms", "mean_ms", "max_ms", "windows_ms"}`), where `windows_ms` is the mean fill per 10 s window, oldest first
 
 `warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
 

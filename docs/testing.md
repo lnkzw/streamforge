@@ -24,7 +24,7 @@ cargo test --workspace
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request:
 
 - `rustfmt` check on Linux.
-- On `ubuntu-latest`, `windows-latest` and `macos-latest` (no fail-fast):
+- On `ubuntu-latest`, `windows-latest` and `macos-15-intel` (no fail-fast). The arm64 `macos-latest` runner was swapped out after jobs repeatedly went unscheduled for lack of capacity:
   - `clippy -D warnings`
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)

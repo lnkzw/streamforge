@@ -40,7 +40,8 @@ Known limitations, deferred to later milestones:
 Acceptance:
 - Manual test captures a selected screen/window:
   - [x] Monitor capture verified 2026-10-19 on Hyprland 0.56.2 / xdph 1.4.1: 2560×1440 BGRx, PTS present, 0 drops.
-  - [ ] Window capture and picker cancellation: pending a run of the procedure in `docs/capture-linux.md`.
+  - [x] Picker cancellation verified 2026-10-19: `cancelled`, exit code 1.
+  - [ ] Window capture: pending. A run with `--source window` delivered a monitor (2560×1440, 252 frames in 3 s, 84 FPS, 0 drops) because xdph's picker offers every type. The report now warns about such mismatches. Repeat the run and pick an entry in the picker's window tab.
 - [x] Capture diagnostics report dimensions, timestamps (explicit time base), FPS, frame intervals and drops: sequence gaps, buffer starvation, empty and corrupted buffers, and the audio frame deficit.
 - [x] Unsupported capabilities fail with a useful message:
   - `unsupported` with `details.available` for source types and cursor modes the portal does not offer.

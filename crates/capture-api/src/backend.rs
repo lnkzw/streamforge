@@ -1,12 +1,25 @@
 use std::sync::Arc;
 
-use media_core::FrameMailbox;
+use media_core::{AudioRing, FrameMailbox};
 
 use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-    CaptureCapabilities, CaptureError, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, VideoCaptureReport, VideoSourceInfo,
+    AudioStreamRequest, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
+    ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
 };
+
+/// A running audio capture delivering interleaved `f32` samples until stopped.
+///
+/// Dropping a stream without calling [`AudioStream::stop`] still stops it,
+/// but discards the report.
+pub trait AudioStream: Send {
+    /// Samples in the requested rate and channel count; the ring is bounded
+    /// and counts overruns when the consumer falls behind.
+    fn samples(&self) -> Arc<AudioRing>;
+
+    /// Stop capturing and return diagnostics for the whole session.
+    fn stop(self: Box<Self>) -> Result<AudioCaptureReport, CaptureError>;
+}
 
 /// A running screen capture delivering frames until stopped.
 ///
@@ -50,6 +63,12 @@ pub trait CaptureBackend {
         &mut self,
         selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError>;
+
+    /// Capture an audio input continuously in the requested format.
+    fn start_audio_stream(
+        &mut self,
+        request: &AudioStreamRequest,
+    ) -> Result<Box<dyn AudioStream>, CaptureError>;
 }
 
 /// Backend for builds without a capture implementation; every operation fails
@@ -112,6 +131,13 @@ impl CaptureBackend for UnsupportedCapture {
         &mut self,
         _selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        Err(self.error())
+    }
+
+    fn start_audio_stream(
+        &mut self,
+        _request: &AudioStreamRequest,
+    ) -> Result<Box<dyn AudioStream>, CaptureError> {
         Err(self.error())
     }
 }

@@ -128,11 +128,26 @@ pub(crate) fn header_meta_param() -> Result<Vec<u8>, String> {
     })
 }
 
-/// `EnumFormat` for interleaved 32-bit float audio at the source's native rate
-/// and channel count.
-pub(crate) fn audio_enum_format() -> Result<Vec<u8>, String> {
+/// `EnumFormat` for interleaved 32-bit float audio: at the source's native
+/// rate and channel count, or at a fixed `(rate, channels)` (1 or 2) that
+/// PipeWire converts to.
+pub(crate) fn audio_enum_format(fixed: Option<(u32, u32)>) -> Result<Vec<u8>, String> {
     let mut info = AudioInfoRaw::new();
     info.set_format(AudioFormat::F32LE);
+    if let Some((rate, channels)) = fixed {
+        info.set_rate(rate);
+        info.set_channels(channels);
+        let mut position = [0; spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
+        match channels {
+            1 => position[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO,
+            2 => {
+                position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
+                position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+            }
+            _ => return Err(format!("unsupported channel count {channels}")),
+        }
+        info.set_position(position);
+    }
     serialize(Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id: ParamType::EnumFormat.as_raw(),
@@ -309,7 +324,9 @@ mod tests {
             video_enum_format(Some((2560, 1440))),
             video_enum_format(None),
             header_meta_param(),
-            audio_enum_format(),
+            audio_enum_format(None),
+            audio_enum_format(Some((48_000, 2))),
+            audio_enum_format(Some((44_100, 1))),
         ] {
             let bytes = bytes.expect("serialize");
             assert!(Pod::from_bytes(&bytes).is_some(), "not a valid pod");
@@ -365,10 +382,12 @@ mod tests {
 
     #[test]
     fn audio_enum_format_round_trips_as_f32() {
-        let bytes = audio_enum_format().expect("serialize");
+        let bytes = audio_enum_format(Some((48_000, 2))).expect("serialize");
         let pod = Pod::from_bytes(&bytes).expect("pod");
         let mut info = AudioInfoRaw::new();
         info.parse(pod).expect("parse");
         assert_eq!(info.format(), AudioFormat::F32LE);
+        assert_eq!((info.rate(), info.channels()), (48_000, 2));
+        assert!(audio_enum_format(Some((48_000, 6))).is_err());
     }
 }

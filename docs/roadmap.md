@@ -79,13 +79,26 @@ Known limitations, deferred to later milestones:
 
 ## M4 — Audio mixer
 
-- Mix at least two inputs.
-- Add gain, mute and peak/RMS meters.
-- Define clipping and resampling policy.
+- [x] Mix at least two inputs: up to 8 live inputs and test tones, on the `audio-mixer` thread (`audio-engine`, `probe_audio_mix`).
+- [x] Add gain, mute and peak/RMS meters, with gain ramps and per-input and master meters.
+- [x] Define clipping and resampling policy (`docs/media-model.md`): the master bus is hard-limited with counting; PipeWire does rate and channel conversion; clock drift is absorbed by bounded buffering, with trims and pads counted.
 
 Acceptance:
-- Offline deterministic test tone mixing.
-- Live test shows no unbounded latency growth during a 10-minute run.
+- [x] Offline deterministic test tone mixing (`crates/audio-engine/tests/offline_mix.rs`):
+  - the sum is bit-exact and the RMS matches theory
+  - output is bit-identical across runs
+  - gain, mute and clipping counts are exact
+- [x] Live test shows no unbounded latency growth during a 10-minute run (2026-10-19, built-in input + 1 kHz tone, release):
+  - 60 000/60 000 blocks, 0 late
+  - buffer latency per 10 s window from 31.3 ms falling to a stable 20.3 ms, never growing
+  - 0 overruns and 0 trims; 768 frames (16 ms) of underrun padding caused by a device clock ≈ 46 ppm slow (ADR 0004)
+
+Known limitations, deferred:
+- Clock drift is corrected by padding and trimming, which is audible. Adaptive resampling or sample slipping is next (ADR 0004).
+- The master bus uses a hard limit with counting, no limiter.
+- The mixer output has no consumer yet; recording comes in M5.
+- Desktop audio (sink monitor) capture is not implemented.
+- The mix probe blocks the engine thread for its duration (up to 15 min).
 
 ## M5 — First recording
 

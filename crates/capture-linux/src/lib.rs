@@ -21,11 +21,10 @@ mod video;
 use std::time::Duration;
 
 use capture_api::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureBackend,
-    CaptureCapabilities, CaptureError, CaptureErrorKind, ScreenCaptureCapability,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream,
+    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
     ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoStream,
 };
-use serde_json::json;
 
 /// Upper bound for each capability query. Screen and audio are queried in
 /// parallel, so `capabilities()` (and the first `get_status`) waits at most
@@ -110,28 +109,13 @@ impl CaptureBackend for LinuxCapture {
         &mut self,
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError> {
-        if let Some(name) = request.input.as_deref() {
-            // Check first: PipeWire would silently fall back to the default
-            // input for an unknown target.
-            let inputs = pw::audio_inputs(QUERY_TIMEOUT)?;
-            if !inputs.iter().any(|input| input.name == name) {
-                return Err(CaptureError::new(
-                    CaptureErrorKind::NotFound,
-                    format!("audio input `{name}` not found; see list_audio_inputs"),
-                )
-                .with_details(json!({
-                    "input": name,
-                    "available": inputs.iter().map(|input| &input.name).collect::<Vec<_>>(),
-                })));
-            }
-        }
-        let run = audio::capture(request.input.as_deref(), request.duration)?;
-        Ok(AudioCaptureReport {
-            backend: pw::BACKEND.to_owned(),
-            input: request.input.clone(),
-            format: run.format,
-            stats: run.stats,
-            warnings: run.warnings,
-        })
+        audio::probe(request)
+    }
+
+    fn start_audio_stream(
+        &mut self,
+        request: &AudioStreamRequest,
+    ) -> Result<Box<dyn AudioStream>, CaptureError> {
+        audio::start_stream(request)
     }
 }

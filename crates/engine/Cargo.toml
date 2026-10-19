@@ -8,6 +8,7 @@ license.workspace = true
 capture-api = { path = "../capture-api" }
 command-api = { path = "../command-api" }
 video-compositor = { path = "../video-compositor" }
+audio-engine = { path = "../audio-engine" }
 media-core = { path = "../media-core" }
 serde.workspace = true
 serde_json.workspace = true

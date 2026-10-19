@@ -32,6 +32,22 @@ enum Commands {
     /// Inspect and test screen/audio capture. Output is JSON.
     #[command(subcommand)]
     Capture(CaptureCommand),
+    /// Mix audio inputs and test tones at 48 kHz stereo; reports meters and buffering. Output is JSON.
+    Mix {
+        /// Live input as NAME or NAME=GAIN_DB (name from `capture inputs`). Repeatable.
+        #[arg(long = "input")]
+        inputs: Vec<String>,
+        /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS. Repeatable; default one 1 kHz tone
+        /// when no input or tone is given.
+        #[arg(long = "tone")]
+        tones: Vec<String>,
+        /// Master gain in dB (default 0).
+        #[arg(long)]
+        master_gain_db: Option<f32>,
+        /// Run time in milliseconds (100..=900000, default 5000).
+        #[arg(long)]
+        duration_ms: Option<u64>,
+    },
     /// Composite the 1920x1080@60 reference scene and report render timing. Output is JSON.
     Compose {
         /// Run time in milliseconds (100..=60000, default 5000).
@@ -114,6 +130,18 @@ fn main() -> Result<ExitCode> {
             let (name, params) = capture_request(capture);
             run_command(&mut engine, name, params)
         }
+        Commands::Mix {
+            inputs,
+            tones,
+            master_gain_db,
+            duration_ms,
+        } => match mix_params(&inputs, &tones, master_gain_db, duration_ms) {
+            Ok(params) => run_command(&mut engine, "probe_audio_mix", params),
+            Err(message) => {
+                eprintln!("error: {message}");
+                Ok(ExitCode::FAILURE)
+            }
+        },
         Commands::Compose {
             duration_ms,
             screen,
@@ -140,6 +168,63 @@ fn main() -> Result<ExitCode> {
             run_command(&mut engine, "probe_composite", params)
         }
     }
+}
+
+/// Build `probe_audio_mix` params from `NAME[=GAIN_DB]` and `FREQ[@LEVEL]`
+/// arguments; value validation is left to `Command::decode`.
+fn mix_params(
+    inputs: &[String],
+    tones: &[String],
+    master_gain_db: Option<f32>,
+    duration_ms: Option<u64>,
+) -> Result<Map<String, Value>, String> {
+    let number = |text: &str, what: &str| -> Result<f64, String> {
+        text.parse::<f64>()
+            .map_err(|_| format!("invalid {what} `{text}`"))
+    };
+    let mut params = Map::new();
+    let mut input_list = Vec::new();
+    for spec in inputs {
+        let (name, gain) = match spec.rsplit_once('=') {
+            Some((name, gain)) => (name, Some(number(gain, "gain")?)),
+            None => (spec.as_str(), None),
+        };
+        let mut input = Map::new();
+        input.insert("input".into(), name.into());
+        if let Some(gain) = gain {
+            input.insert("gain_db".into(), gain.into());
+        }
+        input_list.push(Value::Object(input));
+    }
+    let mut tone_list = Vec::new();
+    for spec in tones {
+        let (frequency, level) = match spec.split_once('@') {
+            Some((frequency, level)) => (frequency, Some(number(level, "level")?)),
+            None => (spec.as_str(), None),
+        };
+        let mut tone = Map::new();
+        tone.insert(
+            "frequency_hz".into(),
+            number(frequency, "frequency")?.into(),
+        );
+        if let Some(level) = level {
+            tone.insert("level_dbfs".into(), level.into());
+        }
+        tone_list.push(Value::Object(tone));
+    }
+    if !input_list.is_empty() {
+        params.insert("inputs".into(), input_list.into());
+    }
+    if !tone_list.is_empty() {
+        params.insert("tones".into(), tone_list.into());
+    }
+    if let Some(gain) = master_gain_db {
+        params.insert("master_gain_db".into(), gain.into());
+    }
+    if let Some(duration_ms) = duration_ms {
+        params.insert("duration_ms".into(), duration_ms.into());
+    }
+    Ok(params)
 }
 
 /// Translate CLI arguments into the protocol's command name and parameters, so
@@ -212,6 +297,28 @@ mod tests {
             Value::Object(params),
             serde_json::json!({"duration_ms": 1500, "source_types": ["window"], "cursor": "hidden"})
         );
+    }
+
+    #[test]
+    fn mix_arguments_become_protocol_params() {
+        let params = mix_params(
+            &["mic=-6".into(), "alsa.input".into()],
+            &["440@-18".into(), "1000".into()],
+            Some(-1.0),
+            Some(600_000),
+        )
+        .expect("params");
+        assert_eq!(
+            Value::Object(params.clone()),
+            serde_json::json!({
+                "inputs": [{"input": "mic", "gain_db": -6.0}, {"input": "alsa.input"}],
+                "tones": [{"frequency_hz": 440.0, "level_dbfs": -18.0}, {"frequency_hz": 1000.0}],
+                "master_gain_db": -1.0,
+                "duration_ms": 600_000,
+            })
+        );
+        assert!(Command::decode("probe_audio_mix", Some(&Value::Object(params))).is_ok());
+        assert!(mix_params(&[], &["loud".into()], None, None).is_err());
     }
 
     #[test]

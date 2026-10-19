@@ -1,0 +1,11 @@
+[package]
+name = "capture-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+capture-api = { path = "../capture-api" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+capture-linux = { path = "../capture-linux" }

@@ -5,6 +5,7 @@ members = [
     "crates/command-api",
     "crates/capture-api",
     "crates/capture-linux",
+    "crates/capture-platform",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",

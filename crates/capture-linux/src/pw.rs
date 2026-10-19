@@ -7,13 +7,14 @@
 use std::cell::{Cell, RefCell};
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capture_api::{AudioInput, CaptureError};
 use pipewire as pw;
 use pw::context::ContextRc;
 use pw::core::CoreRc;
 use pw::main_loop::MainLoopRc;
+use pw::stream::{Stream, StreamListener, StreamState};
 use pw::types::ObjectType;
 
 pub(crate) const BACKEND: &str = "pipewire";
@@ -128,6 +129,143 @@ impl Connection {
     }
 }
 
+#[derive(Default)]
+struct Lifecycle {
+    reached_streaming: bool,
+    error: Option<String>,
+}
+
+/// Lifecycle supervision shared by all capture streams: records whether the
+/// stream reached `Streaming`, stops the loop on stream or core errors and
+/// when a streaming source disappears.
+///
+/// Attach before `Stream::connect` so no state change is missed.
+pub(crate) struct StreamWatch {
+    lifecycle: Rc<RefCell<Lifecycle>>,
+    _core_listener: pw::core::Listener,
+    _stream_listener: StreamListener<()>,
+}
+
+impl StreamWatch {
+    pub fn attach(connection: &Connection, stream: &Stream) -> Result<Self, CaptureError> {
+        let lifecycle = Rc::new(RefCell::new(Lifecycle::default()));
+        let core_listener = connection
+            .core
+            .add_listener_local()
+            .error({
+                let lifecycle = Rc::clone(&lifecycle);
+                let main_loop = connection.main_loop.clone();
+                move |id, _seq, res, message| {
+                    lifecycle.borrow_mut().error =
+                        Some(format!("PipeWire error on object {id}: {message} ({res})"));
+                    main_loop.quit();
+                }
+            })
+            .register();
+        let stream_listener = stream
+            .add_local_listener_with_user_data(())
+            .state_changed({
+                let lifecycle = Rc::clone(&lifecycle);
+                let main_loop = connection.main_loop.clone();
+                move |_, _, _old, new| {
+                    let mut lifecycle = lifecycle.borrow_mut();
+                    match new {
+                        StreamState::Streaming => lifecycle.reached_streaming = true,
+                        StreamState::Error(message) => {
+                            lifecycle.error = Some(format!("PipeWire stream error: {message}"));
+                            main_loop.quit();
+                        }
+                        // The source disappeared or the user stopped sharing.
+                        StreamState::Unconnected if lifecycle.reached_streaming => main_loop.quit(),
+                        _ => {}
+                    }
+                }
+            })
+            .register()
+            .map_err(|err| {
+                CaptureError::backend(format!("cannot register stream state listener: {err}"))
+            })?;
+        Ok(Self {
+            lifecycle,
+            _core_listener: core_listener,
+            _stream_listener: stream_listener,
+        })
+    }
+
+    /// Run the loop for `duration` (or until the stream ends), then disconnect.
+    pub fn run(
+        self,
+        connection: &Connection,
+        stream: &Stream,
+        duration: Duration,
+        start: Instant,
+    ) -> Result<StreamOutcome, CaptureError> {
+        let ran_full_duration = connection.run_for(duration)?;
+        let elapsed = start.elapsed();
+        // Disconnecting emits a final state change; the loop is no longer running.
+        let disconnect_error = stream
+            .disconnect()
+            .err()
+            .map(|err| format!("disconnecting the stream failed: {err}"));
+        let lifecycle = self.lifecycle.take();
+        Ok(StreamOutcome {
+            duration,
+            elapsed,
+            reached_streaming: lifecycle.reached_streaming,
+            ran_full_duration,
+            error: lifecycle.error,
+            disconnect_error,
+        })
+    }
+}
+
+pub(crate) struct StreamOutcome {
+    duration: Duration,
+    elapsed: Duration,
+    reached_streaming: bool,
+    ran_full_duration: bool,
+    error: Option<String>,
+    disconnect_error: Option<String>,
+}
+
+impl StreamOutcome {
+    /// Turn lifecycle problems into an error or warnings and return the
+    /// capture window length. Warnings gathered so far (e.g. format
+    /// negotiation failures) travel in the error's details so no cause is
+    /// lost. `map_error` converts a backend error message into a `CaptureError`.
+    pub fn finish(
+        self,
+        what: &str,
+        warnings: &mut Vec<String>,
+        map_error: impl FnOnce(String) -> CaptureError,
+    ) -> Result<Duration, CaptureError> {
+        warnings.extend(self.disconnect_error);
+        let with_warnings = |error: CaptureError, warnings: &[String]| {
+            if warnings.is_empty() {
+                error
+            } else {
+                error.with_detail("warnings", warnings.to_vec())
+            }
+        };
+        if let Some(message) = self.error {
+            return Err(with_warnings(map_error(message), warnings));
+        }
+        if !self.reached_streaming {
+            return Err(with_warnings(
+                CaptureError::timeout(format!(
+                    "the {what} stream did not start within {} ms",
+                    self.duration.as_millis()
+                )),
+                warnings,
+            ));
+        }
+        if !self.ran_full_duration {
+            warnings.push("the stream ended before the probe duration elapsed".to_owned());
+        }
+        Ok(self.elapsed)
+    }
+}
+
 /// Version string reported by the PipeWire server.
 pub(crate) fn server_version(timeout: Duration) -> Result<String, CaptureError> {
     let connection = Connection::connect()?;
@@ -195,6 +333,64 @@ fn is_audio_input_class(class: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome(
+        reached_streaming: bool,
+        ran_full_duration: bool,
+        error: Option<&str>,
+    ) -> StreamOutcome {
+        StreamOutcome {
+            duration: Duration::from_millis(500),
+            elapsed: Duration::from_millis(420),
+            reached_streaming,
+            ran_full_duration,
+            error: error.map(str::to_owned),
+            disconnect_error: Some("disconnect failed".to_owned()),
+        }
+    }
+
+    #[test]
+    fn errors_carry_earlier_warnings() {
+        let mut warnings = vec!["format rejected".to_owned()];
+        let err = outcome(true, false, Some("boom"))
+            .finish("audio", &mut warnings, CaptureError::backend)
+            .unwrap_err();
+        assert_eq!(err.message, "boom");
+        assert_eq!(
+            err.details,
+            Some(serde_json::json!({"warnings": ["format rejected", "disconnect failed"]}))
+        );
+    }
+
+    #[test]
+    fn stream_that_never_started_times_out_with_warnings() {
+        let mut warnings = vec!["format rejected".to_owned()];
+        let err = outcome(false, true, None)
+            .finish("screen", &mut warnings, CaptureError::backend)
+            .unwrap_err();
+        assert_eq!(err.kind, capture_api::CaptureErrorKind::Timeout);
+        assert!(
+            err.message
+                .contains("screen stream did not start within 500 ms")
+        );
+        assert!(err.details.is_some());
+    }
+
+    #[test]
+    fn early_end_is_a_warning() {
+        let mut warnings = Vec::new();
+        let elapsed = outcome(true, false, None)
+            .finish("audio", &mut warnings, CaptureError::backend)
+            .expect("ok");
+        assert_eq!(elapsed, Duration::from_millis(420));
+        assert_eq!(
+            warnings,
+            vec![
+                "disconnect failed".to_owned(),
+                "the stream ended before the probe duration elapsed".to_owned()
+            ]
+        );
+    }
 
     #[test]
     fn audio_input_classes() {

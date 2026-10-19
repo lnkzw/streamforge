@@ -1,5 +1,5 @@
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 /// Category of a [`CaptureError`]; adapters map it to their own error codes.
@@ -48,6 +48,19 @@ impl CaptureError {
         self
     }
 
+    /// Add one entry to the details object, keeping existing details.
+    /// Non-object details are preserved under `"details"`.
+    pub fn with_detail(mut self, key: &str, value: impl Into<Value>) -> Self {
+        let mut map = match self.details.take() {
+            Some(Value::Object(map)) => map,
+            Some(other) => Map::from_iter([("details".to_owned(), other)]),
+            None => Map::new(),
+        };
+        map.insert(key.to_owned(), value.into());
+        self.details = Some(Value::Object(map));
+        self
+    }
+
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new(CaptureErrorKind::Unsupported, message)
     }
@@ -62,5 +75,33 @@ impl CaptureError {
 
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::new(CaptureErrorKind::Timeout, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn with_detail_merges_into_existing_details() {
+        let err = CaptureError::backend("x")
+            .with_details(json!({"a": 1}))
+            .with_detail("b", 2);
+        assert_eq!(err.details, Some(json!({"a": 1, "b": 2})));
+    }
+
+    #[test]
+    fn with_detail_keeps_non_object_details() {
+        let err = CaptureError::backend("x")
+            .with_details(json!([1]))
+            .with_detail("warnings", vec!["w".to_owned()]);
+        assert_eq!(
+            err.details,
+            Some(json!({"details": [1], "warnings": ["w"]}))
+        );
+        let fresh = CaptureError::backend("y").with_detail("k", "v");
+        assert_eq!(fresh.details, Some(json!({"k": "v"})));
     }
 }

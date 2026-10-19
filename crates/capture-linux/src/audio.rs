@@ -11,12 +11,12 @@ use capture_api::{
 use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
-use pw::stream::{StreamBox, StreamFlags, StreamState};
+use pw::stream::{StreamBox, StreamFlags};
 use spa::param::ParamType;
 use spa::pod::Pod;
 
 use crate::formats;
-use crate::pw::Connection;
+use crate::pw::{Connection, StreamWatch};
 
 const BYTES_PER_SAMPLE: usize = std::mem::size_of::<f32>();
 
@@ -30,9 +30,8 @@ pub(crate) struct AudioRun {
 struct State {
     stats: AudioStatsAccumulator,
     format: Option<AudioFormatInfo>,
+    /// Channel count of the negotiated format; 0 until a usable format exists.
     channels: usize,
-    reached_streaming: bool,
-    error: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -52,45 +51,32 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
     }
     let stream = StreamBox::new(&connection.core, "streamforge-audio-probe", props)
         .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
+    let watch = StreamWatch::attach(&connection, &stream)?;
 
     let _listener = stream
         .add_local_listener_with_user_data(())
-        .state_changed({
-            let state = Rc::clone(&state);
-            let main_loop = connection.main_loop.clone();
-            move |_, _, _old, new| {
-                let mut state = state.borrow_mut();
-                match new {
-                    StreamState::Streaming => state.reached_streaming = true,
-                    StreamState::Error(message) => {
-                        state.error = Some(format!("PipeWire stream error: {message}"));
-                        main_loop.quit();
-                    }
-                    StreamState::Unconnected if state.reached_streaming => {
-                        // The device disappeared while capturing.
-                        main_loop.quit();
-                    }
-                    _ => {}
-                }
-            }
-        })
         .param_changed({
             let state = Rc::clone(&state);
             move |_, _, id, param| {
                 if id != ParamType::Format.as_raw() {
                     return;
                 }
+                let mut state = state.borrow_mut();
                 let Some(param) = param else {
+                    // Format cleared: stop decoding until a new one arrives.
+                    state.channels = 0;
                     return;
                 };
-                let mut state = state.borrow_mut();
                 match formats::parse_audio_format(param) {
                     Ok(format) => {
                         state.stats.set_rate(format.rate);
                         state.channels = usize::try_from(format.channels).unwrap_or(0);
                         state.format = Some(format);
                     }
-                    Err(message) => state.warnings.push(message),
+                    Err(message) => {
+                        state.channels = 0;
+                        state.warnings.push(message);
+                    }
                 }
             }
         })
@@ -104,6 +90,20 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
                     state.stats.buffer_unavailable();
                     return;
                 };
+                let frame_bytes = BYTES_PER_SAMPLE * state.channels;
+                let datas = buffer.datas_mut();
+                if frame_bytes == 0 {
+                    // No usable format: data cannot be interpreted. Count it
+                    // instead of letting it vanish as an "empty" buffer.
+                    if datas.first().is_some_and(|data| data.chunk().size() > 0) {
+                        state.stats.buffer_dropped();
+                    } else {
+                        state
+                            .stats
+                            .observe_buffer(arrival_ns, 0, std::iter::empty(), None);
+                    }
+                    return;
+                }
                 let position = stream.time().ok().and_then(|time| {
                     let rate = time.rate();
                     Some(StreamPosition {
@@ -112,10 +112,9 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
                         time_base_den: rate.denom,
                     })
                 });
-                let frame_bytes = BYTES_PER_SAMPLE * state.channels;
-                let datas = buffer.datas_mut();
-                let samples = match datas.first_mut() {
-                    Some(data) if frame_bytes > 0 => {
+                let bytes = datas
+                    .first_mut()
+                    .and_then(|data| {
                         let chunk = data.chunk();
                         let (offset, size) = (chunk.offset() as usize, chunk.size() as usize);
                         data.data().map(|memory| {
@@ -123,14 +122,11 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
                             let bytes = &memory[offset.min(end)..end];
                             &bytes[..bytes.len() - bytes.len() % frame_bytes]
                         })
-                    }
-                    _ => None,
-                };
-                let bytes = samples.unwrap_or(&[]);
-                let frames = (bytes.len() / frame_bytes.max(1)) as u64;
+                    })
+                    .unwrap_or(&[]);
                 state.stats.observe_buffer(
                     arrival_ns,
-                    frames,
+                    (bytes.len() / frame_bytes) as u64,
                     bytes
                         .as_chunks::<BYTES_PER_SAMPLE>()
                         .0
@@ -155,42 +151,30 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
         )
         .map_err(|err| CaptureError::backend(format!("cannot connect audio stream: {err}")))?;
 
-    let ran_full_duration = connection.run_for(duration)?;
-    let elapsed = start.elapsed();
-    // Disconnecting emits a final state change; the loop is no longer running.
-    let disconnect = stream.disconnect();
-
+    let outcome = watch.run(&connection, &stream, duration, start)?;
     let mut state = state.take();
-    if let Err(err) = disconnect {
-        state
-            .warnings
-            .push(format!("disconnecting the stream failed: {err}"));
-    }
-    if let Some(message) = state.error {
+    let elapsed = outcome.finish("audio", &mut state.warnings, |message| {
         // WirePlumber reports this when no default source exists (e.g. the
         // configured default device is gone); point the caller at `input`.
         if target.is_none() && message.contains("no target node") {
-            return Err(CaptureError::new(
+            CaptureError::new(
                 CaptureErrorKind::NotFound,
                 "no default audio input is available; choose one with `input` \
                  (see list_audio_inputs)",
             )
-            .with_details(serde_json::json!({ "backend_message": message })));
+            .with_detail("backend_message", message)
+        } else {
+            CaptureError::backend(message)
         }
-        return Err(CaptureError::backend(message));
-    }
-    if !state.reached_streaming {
-        return Err(CaptureError::timeout(format!(
-            "the audio stream did not start within {} ms",
-            duration.as_millis()
-        )));
-    }
-    if !ran_full_duration {
-        state
-            .warnings
-            .push("the stream ended before the probe duration elapsed".to_owned());
-    }
+    })?;
+
     let stats = state.stats.finish(elapsed);
+    if stats.dropped_buffers > 0 {
+        state.warnings.push(format!(
+            "{} buffer(s) were dropped because no usable audio format was negotiated",
+            stats.dropped_buffers
+        ));
+    }
     if stats.frames == 0 {
         state
             .warnings

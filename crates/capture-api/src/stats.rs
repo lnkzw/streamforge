@@ -187,6 +187,9 @@ pub struct AudioStats {
     /// `expected_frames - frames` when positive: audio the consumer did not receive.
     pub frame_deficit: Option<u64>,
     pub empty_buffers: u64,
+    /// Buffers with data that could not be decoded, e.g. because no usable
+    /// format was negotiated. Their audio is lost.
+    pub dropped_buffers: u64,
     /// Process callbacks that found no buffer to dequeue.
     pub buffer_starvation: u64,
     /// Samples that were NaN or infinite; excluded from levels.
@@ -219,6 +222,7 @@ pub struct AudioStatsAccumulator {
     first_arrival_ns: Option<u64>,
     last_arrival_ns: Option<u64>,
     empty_buffers: u64,
+    dropped_buffers: u64,
     buffer_starvation: u64,
     invalid_samples: u64,
     clipped_samples: u64,
@@ -287,6 +291,11 @@ impl AudioStatsAccumulator {
         self.buffer_starvation += 1;
     }
 
+    /// A buffer carried data that could not be decoded and was discarded.
+    pub fn buffer_dropped(&mut self) {
+        self.dropped_buffers += 1;
+    }
+
     pub fn finish(&self, elapsed: Duration) -> AudioStats {
         let expected_frames = match (self.first_arrival_ns, self.last_arrival_ns) {
             (Some(first), Some(last)) if self.rate > 0 => {
@@ -304,6 +313,7 @@ impl AudioStatsAccumulator {
             expected_frames,
             frame_deficit: expected_frames.map(|expected| expected.saturating_sub(self.frames)),
             empty_buffers: self.empty_buffers,
+            dropped_buffers: self.dropped_buffers,
             buffer_starvation: self.buffer_starvation,
             invalid_samples: self.invalid_samples,
             clipped_samples: self.clipped_samples,
@@ -479,9 +489,12 @@ mod tests {
         acc.set_rate(48_000);
         acc.observe_buffer(0, 0, std::iter::empty(), None);
         acc.buffer_unavailable();
+        acc.buffer_dropped();
         let stats = acc.finish(Duration::ZERO);
         assert_eq!(stats.empty_buffers, 1);
         assert_eq!(stats.buffer_starvation, 1);
+        assert_eq!(stats.dropped_buffers, 1);
+        assert_eq!(stats.buffers, 0);
         assert_eq!(stats.expected_frames, None);
     }
 

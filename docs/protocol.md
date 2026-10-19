@@ -79,10 +79,10 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
-| `probe_screen_capture`     | see below | `control`   | Video capture report |
+| `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 
-`access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. `probe_audio_capture` is `sensitive` because it opens a microphone without a system consent dialog.
+`access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
 `capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`.
 
@@ -126,7 +126,7 @@ A frame rate of `0/1` means variable (damage-driven) delivery.
 
 Audio report: `{"backend", "input", "format": {"sample_format", "rate", "channels"}, "stats", "warnings"}`. The `stats` fields:
 
-- **Counters:** `elapsed_ms`, `buffers`, `frames`, `empty_buffers`.
+- **Counters:** `elapsed_ms`, `buffers`, `frames`, `empty_buffers`, `dropped_buffers` (data that could not be decoded, e.g. before a usable format was negotiated).
 - **Drop metrics:**
   - `expected_frames` and `frame_deficit`: estimated from arrival times, accurate to about one buffer.
   - `buffer_starvation`.
@@ -134,7 +134,7 @@ Audio report: `{"backend", "input", "format": {"sample_format", "rate", "channel
 - **Levels:** `peak_dbfs` and `rms_dbfs`; `null` means digital silence.
 - **Stream positions:** `first_position` and `last_position`, in the backend's time base.
 
-`warnings` lists non-fatal observations, e.g. "no frames received" on a static screen.
+`warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
 
 ## Example session
 

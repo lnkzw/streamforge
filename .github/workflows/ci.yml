@@ -51,6 +51,13 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
+      - name: Install Linux capture build dependencies
+        if: runner.os == 'Linux'
+        # capture-linux links libpipewire-0.3 (>= 0.3.44); bindgen needs libclang.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev pkg-config
+          pkg-config --modversion libpipewire-0.3
       - name: Record toolchain
         run: |
           rustc --version --verbose

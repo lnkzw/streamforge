@@ -11,6 +11,10 @@ mod registry;
 pub use error::{CommandError, ErrorCode};
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
 
+use capture_api::{
+    AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
+    VideoCaptureReport,
+};
 use serde::{Deserialize, Serialize};
 
 /// A typed engine command.
@@ -23,17 +27,35 @@ pub enum Command {
     GetStatus,
     /// List all commands supported by this engine.
     ListCommands,
+    /// Query screen and audio capture capabilities of the running system.
+    GetCaptureCapabilities,
+    /// List audio input devices.
+    ListAudioInputs,
+    /// Capture a user-selected screen source briefly and report diagnostics.
+    ProbeScreenCapture(ScreenCaptureRequest),
+    /// Capture an audio input briefly and report diagnostics; no audio is stored.
+    ProbeAudioCapture(AudioCaptureRequest),
 }
 
 /// Structured result of a successfully handled [`Command`].
 ///
 /// Serializes as the inner value, so JSON adapters emit the result object
 /// directly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum CommandOutput {
     Status(EngineStatus),
     Commands(CommandList),
+    CaptureCapabilities(CaptureCapabilities),
+    AudioInputs(AudioInputList),
+    VideoCaptureReport(VideoCaptureReport),
+    AudioCaptureReport(AudioCaptureReport),
+}
+
+/// Result of `list_audio_inputs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioInputList {
+    pub inputs: Vec<AudioInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

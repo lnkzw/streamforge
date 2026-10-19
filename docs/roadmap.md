@@ -32,15 +32,27 @@ Known limitations, deferred to later milestones:
 
 ## M2 — Capture spike
 
-- Implement Linux screen capture through XDG ScreenCast portal + PipeWire.
-- Enumerate and capture audio input through PipeWire.
-- Record runtime capability information.
-- Document Hyprland-specific backend requirements.
+- [x] Implement Linux screen capture through XDG ScreenCast portal + PipeWire (`capture-linux`, `probe_screen_capture`).
+- [x] Enumerate and capture audio input through PipeWire (`list_audio_inputs`, `probe_audio_capture`).
+- [x] Record runtime capability information (`get_capture_capabilities`).
+- [x] Document Hyprland-specific backend requirements (`docs/capture-linux.md`).
 
 Acceptance:
-- Manual test captures a selected screen/window.
-- Capture diagnostics report dimensions, timestamps, FPS and drops.
-- Unsupported capabilities fail with a useful message.
+- Manual test captures a selected screen/window:
+  - [x] Monitor capture verified 2026-10-19 on Hyprland 0.56.2 / xdph 1.4.1: 2560×1440 BGRx, PTS present, 0 drops.
+  - [ ] Window capture and picker cancellation: pending a run of the procedure in `docs/capture-linux.md`.
+- [x] Capture diagnostics report dimensions, timestamps (explicit time base), FPS, frame intervals and drops: sequence gaps, buffer starvation, empty and corrupted buffers, and the audio frame deficit.
+- [x] Unsupported capabilities fail with a useful message:
+  - `unsupported` with `details.available` for source types and cursor modes the portal does not offer.
+  - `not_found` with alternatives for unknown inputs.
+  - `unavailable` with a remedy when portal or PipeWire are missing.
+  - Non-Linux builds report `unsupported` with the milestone that adds support.
+
+Known limitations, deferred to later milestones:
+- Probes block the engine thread; there is no continuous capture into a media graph yet (M3).
+- No DMA-BUF import, restore tokens, multi-stream capture or cursor metadata.
+- No desktop-audio (sink monitor) capture; only sources are listed.
+- Windows/macOS capture backends: M9.
 
 ## M3 — First video compositor
 

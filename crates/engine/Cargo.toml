@@ -5,4 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+capture-api = { path = "../capture-api" }
 command-api = { path = "../command-api" }
+
+[dev-dependencies]
+serde_json.workspace = true

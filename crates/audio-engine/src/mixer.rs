@@ -67,8 +67,13 @@ pub struct Meter {
 }
 
 impl Meter {
+    /// Non-finite samples are skipped so one bad value cannot poison the
+    /// RMS; the mixer counts them as `invalid_samples` on the master bus.
     #[inline]
     pub fn observe(&mut self, sample: f32) {
+        if !sample.is_finite() {
+            return;
+        }
         self.peak = self.peak.max(sample.abs());
         self.sum_squares += f64::from(sample) * f64::from(sample);
         self.samples += 1;
@@ -188,6 +193,11 @@ impl Mixer {
         self.master.gain.finish_block();
     }
 
+    /// Current gain and mute of input `index`.
+    pub fn input_config(&self, index: usize) -> Option<StripConfig> {
+        self.strips.get(index).map(|strip| strip.config)
+    }
+
     pub fn input_meter(&self, index: usize) -> Option<MeterReading> {
         self.strips.get(index).map(|strip| strip.meter.reading())
     }
@@ -292,6 +302,16 @@ mod tests {
         let mut out = [0.0; 2];
         mixer.mix(&[&[0.5, 0.5]], &mut out);
         assert_eq!(out, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn non_finite_samples_do_not_poison_meters() {
+        let mut meter = Meter::default();
+        for s in [0.5, f32::NAN, -0.5, f32::INFINITY] {
+            meter.observe(s);
+        }
+        let half_db = 20.0 * 0.5f64.log10();
+        assert!((meter.reading().rms_dbfs.expect("rms") - half_db).abs() < 1e-9);
     }
 
     #[test]

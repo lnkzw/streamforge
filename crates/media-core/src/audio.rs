@@ -42,6 +42,8 @@ pub struct AudioRing {
     overrun: AtomicU64,
     discarded: AtomicU64,
     max_push: AtomicU64,
+    /// Largest push since the consumer last called `take_push_peak`.
+    recent_push_peak: AtomicU64,
 }
 
 impl AudioRing {
@@ -60,6 +62,7 @@ impl AudioRing {
             overrun: AtomicU64::new(0),
             discarded: AtomicU64::new(0),
             max_push: AtomicU64::new(0),
+            recent_push_peak: AtomicU64::new(0),
         }
     }
 
@@ -115,6 +118,8 @@ impl AudioRing {
         self.overrun
             .fetch_add((overrun / self.channels) as u64, Ordering::Relaxed);
         self.max_push.fetch_max(frames as u64, Ordering::Relaxed);
+        self.recent_push_peak
+            .fetch_max(frames as u64, Ordering::Relaxed);
         incoming / self.channels
     }
 
@@ -146,6 +151,12 @@ impl AudioRing {
         let frames = count / self.channels;
         self.discarded.fetch_add(frames as u64, Ordering::Relaxed);
         frames
+    }
+
+    /// Largest single push since the previous call, then reset. Lets the
+    /// consumer size its buffering from recent behavior, not one old burst.
+    pub fn take_push_peak(&self) -> usize {
+        usize::try_from(self.recent_push_peak.swap(0, Ordering::Relaxed)).unwrap_or(usize::MAX)
     }
 
     pub fn fill_frames(&self) -> usize {
@@ -226,6 +237,18 @@ mod tests {
         let mut out = [9.0; 6];
         assert_eq!(ring.pull(&mut out), 1);
         assert_eq!(out, [1.0, 2.0, 9.0, 9.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn push_peak_is_reset_on_take() {
+        let ring = AudioRing::new(1, 64);
+        ring.push([0.0; 10]);
+        ring.push([0.0; 4]);
+        assert_eq!(ring.take_push_peak(), 10);
+        assert_eq!(ring.take_push_peak(), 0);
+        ring.push([0.0; 3]);
+        assert_eq!(ring.take_push_peak(), 3);
+        assert_eq!(ring.stats().max_push_frames, 10);
     }
 
     #[test]

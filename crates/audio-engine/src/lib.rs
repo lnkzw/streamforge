@@ -8,17 +8,20 @@
 //! - **Resampling:** inputs must already run at [`RATE`] with [`CHANNELS`]
 //!   channels. Capture backends request that format and leave sample-rate and
 //!   channel conversion to the platform (PipeWire's audioconvert on Linux).
-//! - **Clock drift:** bounded per-input buffering absorbs it. Excess is
-//!   trimmed, shortfalls are padded with silence, and both are counted
-//!   ([`runner`]).
+//! - **Clock drift:** each live input is resampled by a tiny adaptive ratio
+//!   (at most ±2000 ppm) that holds its buffer at a target fill, so drift
+//!   causes neither gaps nor trims. Producer stalls are still padded with
+//!   silence, and bursts far above target are trimmed; both are counted.
 //! - **Clipping:** inputs are summed without intermediate clipping. The
 //!   master bus is hard-limited to `[-1, 1]` after the master gain, and every
 //!   limited sample is counted.
 
+mod live;
 pub mod mixer;
 pub mod runner;
 pub mod tone;
 
+pub use live::MAX_CORRECTION;
 pub use mixer::{
     GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, Mixer, StripConfig, db_to_linear,
 };

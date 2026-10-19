@@ -178,16 +178,23 @@ fn mix_params(
     master_gain_db: Option<f32>,
     duration_ms: Option<u64>,
 ) -> Result<Map<String, Value>, String> {
+    // Non-finite values would serialize as JSON null and silently become
+    // defaults, so they are rejected here.
     let number = |text: &str, what: &str| -> Result<f64, String> {
         text.parse::<f64>()
-            .map_err(|_| format!("invalid {what} `{text}`"))
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("invalid {what} `{text}`: expected a finite number"))
     };
     let mut params = Map::new();
     let mut input_list = Vec::new();
     for spec in inputs {
+        // Only a numeric suffix is a gain; node names may contain '='.
         let (name, gain) = match spec.rsplit_once('=') {
-            Some((name, gain)) => (name, Some(number(gain, "gain")?)),
-            None => (spec.as_str(), None),
+            Some((name, gain)) if !name.is_empty() && gain.parse::<f64>().is_ok() => {
+                (name, Some(number(gain, "gain")?))
+            }
+            _ => (spec.as_str(), None),
         };
         let mut input = Map::new();
         input.insert("input".into(), name.into());
@@ -219,6 +226,11 @@ fn mix_params(
         params.insert("tones".into(), tone_list.into());
     }
     if let Some(gain) = master_gain_db {
+        if !gain.is_finite() {
+            return Err(format!(
+                "invalid master gain `{gain}`: expected a finite number"
+            ));
+        }
         params.insert("master_gain_db".into(), gain.into());
     }
     if let Some(duration_ms) = duration_ms {
@@ -319,6 +331,18 @@ mod tests {
         );
         assert!(Command::decode("probe_audio_mix", Some(&Value::Object(params))).is_ok());
         assert!(mix_params(&[], &["loud".into()], None, None).is_err());
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected_and_names_may_contain_equals() {
+        assert!(mix_params(&["mic=nan".into()], &[], None, None).is_err());
+        assert!(mix_params(&[], &["440@inf".into()], None, None).is_err());
+        assert!(mix_params(&[], &[], Some(f32::NAN), None).is_err());
+        let params = mix_params(&["node=with=equals".into()], &[], None, None).expect("params");
+        assert_eq!(params["inputs"][0]["input"], "node=with=equals");
+        let params = mix_params(&["a=b=-3".into()], &[], None, None).expect("params");
+        assert_eq!(params["inputs"][0]["input"], "a=b");
+        assert_eq!(params["inputs"][0]["gain_db"], -3.0);
     }
 
     #[test]

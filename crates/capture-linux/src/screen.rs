@@ -12,12 +12,11 @@ use capture_api::{
 use media_core::{FrameMailbox, FramePool};
 use pipewire as pw;
 
+use crate::QUERY_TIMEOUT;
 use crate::portal::{self, Cast};
 use crate::pw::RunUntil;
 use crate::video::{self, Delivery, VideoRun};
 
-/// Upper bound for capability queries.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// Upper bound for the user to pick a source in the portal dialog.
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);

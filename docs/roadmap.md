@@ -57,13 +57,21 @@ Known limitations, deferred to later milestones:
 
 ## M3 — First video compositor
 
-- Composite two sources with position, scale and alpha.
-- Keep render loop independent from UI.
-- Add deterministic tests for transform and scene graph logic.
+- [x] Composite two sources with position, scale and alpha (`video-compositor`: scene graph, CPU bilinear renderer, premultiplied "over"; ADR 0003).
+- [x] Keep render loop independent from UI (dedicated compositor thread with a fixed frame clock; continuous screen capture on its own thread feeding a `FrameMailbox`).
+- [x] Add deterministic tests for transform and scene graph logic. Tests are pixel-exact and cover geometry, alpha, bilinear sampling, z-order, thread-count invariance, the latency histogram, the mailbox and the pool.
 
 Acceptance:
-- Test pattern + captured source render correctly.
-- Target: 1080p/60 FPS on the development machine, measured and reported rather than assumed.
+- Test pattern + captured source render correctly:
+  - [x] Test pattern and moving overlay: PPM snapshot inspected, pixel values match the blend math.
+  - [ ] Live screen layer: pending a run of `streamforge compose --screen` with a human at the picker.
+- [x] Target 1080p/60 measured on the development machine (i5-13600KF, release build). Without screen: 300/300 frames at 59.9994 FPS, 0 late, render time 0.84 ms mean, 1.2 ms p99. Synthetic 3-layer benchmark incl. a scaled 1440p source: 1.71 ms mean with 8 threads, 6.50 ms with 1 thread. Details in ADR 0003.
+
+Known limitations, deferred to later milestones:
+- No GPU path or DMA-BUF import; screen frames are copied into pooled CPU buffers.
+- No color management; blending happens on sRGB-encoded values.
+- The scene is fixed inside `probe_composite`; editing scenes through commands is M7.
+- The composite probe blocks the engine thread for its duration, like the capture probes.
 
 ## M4 — Audio mixer
 

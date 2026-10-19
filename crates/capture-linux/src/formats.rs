@@ -3,6 +3,7 @@
 use std::io::Cursor;
 
 use capture_api::{AudioFormatInfo, Rational, VideoFormatInfo};
+use media_core::PixelFormat;
 use pipewire::spa;
 use spa::param::ParamType;
 use spa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -139,7 +140,107 @@ pub(crate) fn audio_enum_format() -> Result<Vec<u8>, String> {
     })
 }
 
-pub(crate) fn parse_video_format(param: &Pod) -> Result<VideoFormatInfo, String> {
+/// Byte positions of B, G, R (and A) inside one 4-byte pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PixelLayout {
+    b: usize,
+    g: usize,
+    r: usize,
+    a: Option<usize>,
+}
+
+const BGRX: PixelLayout = PixelLayout {
+    b: 0,
+    g: 1,
+    r: 2,
+    a: None,
+};
+
+impl PixelLayout {
+    /// Format of frames produced by [`convert_frame`].
+    pub fn target_format(self) -> PixelFormat {
+        if self.a.is_some() {
+            PixelFormat::Bgra8
+        } else {
+            PixelFormat::Bgrx8
+        }
+    }
+}
+
+/// Layout of the packed formats offered in [`video_enum_format`].
+pub(crate) fn pixel_layout(format: VideoFormat) -> Option<PixelLayout> {
+    let layout = |b, g, r, a| Some(PixelLayout { b, g, r, a });
+    match format.as_raw() {
+        raw if raw == VideoFormat::BGRx.as_raw() => Some(BGRX),
+        raw if raw == VideoFormat::BGRA.as_raw() => layout(0, 1, 2, Some(3)),
+        raw if raw == VideoFormat::RGBx.as_raw() => layout(2, 1, 0, None),
+        raw if raw == VideoFormat::RGBA.as_raw() => layout(2, 1, 0, Some(3)),
+        raw if raw == VideoFormat::xRGB.as_raw() => layout(3, 2, 1, None),
+        raw if raw == VideoFormat::ARGB.as_raw() => layout(3, 2, 1, Some(0)),
+        raw if raw == VideoFormat::xBGR.as_raw() => layout(1, 2, 3, None),
+        raw if raw == VideoFormat::ABGR.as_raw() => layout(1, 2, 3, Some(0)),
+        _ => None,
+    }
+}
+
+/// Copy a `width` x `height` image whose rows are `src_stride` bytes apart
+/// into the tightly packed `dst` as Bgrx8, or as premultiplied Bgra8 when the
+/// source has alpha (SPA alpha is straight). Returns `false` if a buffer is
+/// too small. Does not allocate.
+pub(crate) fn convert_frame(
+    src: &[u8],
+    src_stride: usize,
+    width: usize,
+    height: usize,
+    layout: PixelLayout,
+    dst: &mut [u8],
+) -> bool {
+    let row = width * PixelFormat::BYTES_PER_PIXEL;
+    if height == 0 || src_stride < row || dst.len() < row * height {
+        return false;
+    }
+    if src.len() < src_stride * (height - 1) + row {
+        return false;
+    }
+    for (y, out) in dst.chunks_exact_mut(row).take(height).enumerate() {
+        let input = &src[y * src_stride..][..row];
+        match layout.a {
+            None if layout == BGRX => out.copy_from_slice(input),
+            None => {
+                for (o, i) in pixels_mut(out).iter_mut().zip(pixels(input)) {
+                    *o = [i[layout.b], i[layout.g], i[layout.r], 255];
+                }
+            }
+            Some(a) => {
+                for (o, i) in pixels_mut(out).iter_mut().zip(pixels(input)) {
+                    let alpha = u32::from(i[a]);
+                    let premultiply = |c: u8| {
+                        let x = u32::from(c) * alpha + 128;
+                        ((x + (x >> 8)) >> 8) as u8
+                    };
+                    *o = [
+                        premultiply(i[layout.b]),
+                        premultiply(i[layout.g]),
+                        premultiply(i[layout.r]),
+                        i[a],
+                    ];
+                }
+            }
+        }
+    }
+    true
+}
+
+fn pixels(bytes: &[u8]) -> &[[u8; 4]] {
+    bytes.as_chunks::<{ PixelFormat::BYTES_PER_PIXEL }>().0
+}
+
+fn pixels_mut(bytes: &mut [u8]) -> &mut [[u8; 4]] {
+    bytes.as_chunks_mut::<{ PixelFormat::BYTES_PER_PIXEL }>().0
+}
+
+/// Negotiated raw video format plus its SPA format id.
+pub(crate) fn parse_video_format(param: &Pod) -> Result<(VideoFormatInfo, VideoFormat), String> {
     let (media_type, media_subtype) = format_utils::parse_format(param)
         .map_err(|err| format!("cannot parse negotiated format: {err}"))?;
     if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
@@ -148,7 +249,7 @@ pub(crate) fn parse_video_format(param: &Pod) -> Result<VideoFormatInfo, String>
     let mut info = VideoInfoRaw::new();
     info.parse(param)
         .map_err(|err| format!("cannot parse raw video format: {err}"))?;
-    Ok(VideoFormatInfo {
+    let format = VideoFormatInfo {
         pixel_format: video_format_name(info.format()),
         width: info.size().width,
         height: info.size().height,
@@ -156,7 +257,8 @@ pub(crate) fn parse_video_format(param: &Pod) -> Result<VideoFormatInfo, String>
             num: info.framerate().num,
             den: info.framerate().denom,
         },
-    })
+    };
+    Ok((format, info.format()))
 }
 
 pub(crate) fn parse_audio_format(param: &Pod) -> Result<AudioFormatInfo, String> {
@@ -212,6 +314,53 @@ mod tests {
             let bytes = bytes.expect("serialize");
             assert!(Pod::from_bytes(&bytes).is_some(), "not a valid pod");
         }
+    }
+
+    #[test]
+    fn every_offered_format_has_a_layout() {
+        for (format, name) in VIDEO_FORMATS {
+            assert!(pixel_layout(format).is_some(), "{name}");
+        }
+        assert_eq!(pixel_layout(VideoFormat::NV12), None);
+    }
+
+    #[test]
+    fn bgrx_rows_are_copied_and_padding_dropped() {
+        // 1x2 image, source stride 8 (4 bytes padding per row).
+        let src = [1, 2, 3, 4, 9, 9, 9, 9, 5, 6, 7, 8];
+        let mut dst = [0u8; 8];
+        assert!(convert_frame(&src, 8, 1, 2, BGRX, &mut dst));
+        assert_eq!(dst, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(BGRX.target_format(), PixelFormat::Bgrx8);
+    }
+
+    #[test]
+    fn rgb_orders_are_swizzled_to_bgr() {
+        let mut dst = [0u8; 4];
+        let rgbx = pixel_layout(VideoFormat::RGBx).expect("layout");
+        assert!(convert_frame(&[10, 20, 30, 0], 4, 1, 1, rgbx, &mut dst));
+        assert_eq!(dst, [30, 20, 10, 255]);
+        let xbgr = pixel_layout(VideoFormat::xBGR).expect("layout");
+        assert!(convert_frame(&[0, 30, 20, 10], 4, 1, 1, xbgr, &mut dst));
+        assert_eq!(dst, [30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn straight_alpha_is_premultiplied() {
+        let argb = pixel_layout(VideoFormat::ARGB).expect("layout");
+        assert_eq!(argb.target_format(), PixelFormat::Bgra8);
+        let mut dst = [0u8; 4];
+        // A=128, R=255, G=100, B=0
+        assert!(convert_frame(&[128, 255, 100, 0], 4, 1, 1, argb, &mut dst));
+        assert_eq!(dst, [0, 50, 128, 128]);
+    }
+
+    #[test]
+    fn short_buffers_are_rejected() {
+        let mut dst = [0u8; 8];
+        assert!(!convert_frame(&[0; 7], 4, 1, 2, BGRX, &mut dst));
+        assert!(!convert_frame(&[0; 8], 4, 1, 2, BGRX, &mut dst[..4]));
+        assert!(!convert_frame(&[0; 8], 2, 1, 2, BGRX, &mut dst));
     }
 
     #[test]

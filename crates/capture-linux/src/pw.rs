@@ -83,6 +83,22 @@ impl Connection {
         Ok(timed_out.get())
     }
 
+    /// Run the main loop until a message arrives on `stop` or a callback
+    /// quits it. Returns `true` if `stop` ended the run.
+    pub fn run_until_stopped(&self, stop: pw::channel::Receiver<()>) -> bool {
+        let stopped = Rc::new(Cell::new(false));
+        let _attached = stop.attach(self.main_loop.loop_(), {
+            let main_loop = self.main_loop.clone();
+            let stopped = Rc::clone(&stopped);
+            move |()| {
+                stopped.set(true);
+                main_loop.quit();
+            }
+        });
+        self.main_loop.run();
+        stopped.get()
+    }
+
     /// Wait until the server has processed everything sent so far, so that
     /// e.g. all registry globals have been announced.
     pub fn roundtrip(&self, timeout: Duration) -> Result<(), CaptureError> {
@@ -127,6 +143,14 @@ impl Connection {
         }
         Ok(())
     }
+}
+
+/// When a capture stream ends normally.
+pub(crate) enum RunUntil {
+    /// After a fixed probe duration.
+    Elapsed(Duration),
+    /// When the owner sends a stop message.
+    Stopped(pw::channel::Receiver<()>),
 }
 
 #[derive(Default)]
@@ -192,15 +216,18 @@ impl StreamWatch {
         })
     }
 
-    /// Run the loop for `duration` (or until the stream ends), then disconnect.
+    /// Run the loop until `until` (or until the stream ends), then disconnect.
     pub fn run(
         self,
         connection: &Connection,
         stream: &Stream,
-        duration: Duration,
+        until: RunUntil,
         start: Instant,
     ) -> Result<StreamOutcome, CaptureError> {
-        let ran_full_duration = connection.run_for(duration)?;
+        let (ran_full_duration, duration) = match until {
+            RunUntil::Elapsed(duration) => (connection.run_for(duration)?, duration),
+            RunUntil::Stopped(stop) => (connection.run_until_stopped(stop), start.elapsed()),
+        };
         let elapsed = start.elapsed();
         // Disconnecting emits a final state change; the loop is no longer running.
         let disconnect_error = stream

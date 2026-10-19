@@ -8,8 +8,9 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 
 - M0 (workspace) and M1 (command boundary): typed commands, a headless engine process, and a local JSON-lines control protocol.
 - M2 (Linux capture spike): screen capture through the XDG portal and PipeWire, plus audio input capture. Both run as short diagnostic probes.
+- M3 (first compositor): CPU compositor with scene graph, a 1080p/60 render loop on its own thread, and continuous screen capture as a live source.
 
-Compositing, mixing, encoding, recording, and streaming are not implemented.
+Audio mixing, encoding, recording, and streaming are not implemented.
 
 ## Prerequisites
 
@@ -40,6 +41,9 @@ cargo run -p streamforge-cli -- capture caps
 cargo run -p streamforge-cli -- capture inputs
 cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker
 cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
+
+# Compositor (1920x1080@60 test scene; --screen adds a live capture layer)
+cargo run --release -p streamforge-cli -- compose --duration-ms 5000 --snapshot frame.ppm
 ```
 
 The first version deliberately has no capture or streaming functionality. Do not expect it to replace OBS yet.
@@ -50,6 +54,7 @@ The first version deliberately has no capture or streaming functionality. Do not
 - `crates/capture-api`: platform-neutral capture interface and diagnostics
 - `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
 - `crates/capture-platform`: selects the capture backend for the target OS
+- `crates/video-compositor`: scene graph, CPU renderer and render loop
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

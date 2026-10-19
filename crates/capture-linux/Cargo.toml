@@ -14,3 +14,4 @@ futures-lite = "2"
 pipewire = { version = "0.10", features = ["v0_3_44"] }
 serde_json.workspace = true
 capture-api = { path = "../capture-api" }
+media-core = { path = "../media-core" }

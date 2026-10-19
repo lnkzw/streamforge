@@ -1,8 +1,27 @@
+use std::sync::Arc;
+
+use media_core::FrameMailbox;
+
 use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
     CaptureCapabilities, CaptureError, ScreenCaptureCapability, ScreenCaptureRequest,
-    VideoCaptureReport,
+    ScreenSelection, VideoCaptureReport, VideoSourceInfo,
 };
+
+/// A running screen capture delivering frames until stopped.
+///
+/// Dropping a stream without calling [`VideoStream::stop`] still stops it
+/// and releases system resources, but discards the report.
+pub trait VideoStream: Send {
+    /// Newest captured frame (Bgrx8 or premultiplied Bgra8); frames the
+    /// consumer does not take in time are replaced and counted.
+    fn frames(&self) -> Arc<FrameMailbox>;
+
+    fn source(&self) -> &VideoSourceInfo;
+
+    /// Stop capturing and return diagnostics for the whole session.
+    fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError>;
+}
 
 /// A platform capture implementation.
 ///
@@ -25,6 +44,12 @@ pub trait CaptureBackend {
         &mut self,
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError>;
+
+    /// Let the user pick a screen source and capture it continuously.
+    fn start_screen_stream(
+        &mut self,
+        selection: &ScreenSelection,
+    ) -> Result<Box<dyn VideoStream>, CaptureError>;
 }
 
 /// Backend for builds without a capture implementation; every operation fails
@@ -82,6 +107,13 @@ impl CaptureBackend for UnsupportedCapture {
     ) -> Result<AudioCaptureReport, CaptureError> {
         Err(self.error())
     }
+
+    fn start_screen_stream(
+        &mut self,
+        _selection: &ScreenSelection,
+    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        Err(self.error())
+    }
 }
 
 #[cfg(test)]
@@ -100,8 +132,10 @@ mod tests {
 
         let err = backend
             .probe_screen(&ScreenCaptureRequest {
-                source_kinds: vec![VideoSourceKind::Monitor],
-                cursor: CursorMode::Embedded,
+                selection: ScreenSelection {
+                    source_kinds: vec![VideoSourceKind::Monitor],
+                    cursor: CursorMode::Embedded,
+                },
                 duration: DEFAULT_PROBE_DURATION,
             })
             .unwrap_err();

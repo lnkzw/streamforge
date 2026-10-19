@@ -6,6 +6,7 @@ members = [
     "crates/capture-api",
     "crates/capture-linux",
     "crates/capture-platform",
+    "crates/video-compositor",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",
@@ -24,3 +25,14 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+# Per-pixel code is 10-50x slower unoptimized; keep the rest of the
+# workspace in normal debug mode.
+[profile.dev.package.video-compositor]
+opt-level = 3
+
+[profile.dev.package.media-core]
+opt-level = 3
+
+[profile.dev.package.capture-linux]
+opt-level = 3

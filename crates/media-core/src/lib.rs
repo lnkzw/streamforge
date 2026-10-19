@@ -2,6 +2,12 @@
 //!
 //! Keep this crate free of UI, capture, device, encoder, and OS-specific APIs.
 
+pub mod video;
+
+pub use video::{
+    FrameBuffer, FrameMailbox, FramePool, MailboxStats, PixelFormat, VideoFrame, VideoFrameError,
+};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

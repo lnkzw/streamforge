@@ -33,12 +33,13 @@
 
 | Crate | Kind | Responsibility | Depends on |
 |-------|------|----------------|------------|
-| `media-core` | lib | Platform-neutral media types and time model | — |
+| `media-core` | lib | Platform-neutral media types: time model, `VideoFrame`, `FramePool`, `FrameMailbox` | — |
 | `capture-api` | lib | Platform-neutral capture interface: capabilities, requests, reports, `CaptureError`, `CaptureBackend` trait, allocation-free diagnostics accumulators | `media-core` |
 | `capture-linux` | lib | Linux `CaptureBackend`: XDG ScreenCast portal + PipeWire (`docs/capture-linux.md`); empty on other OSes | `capture-api` (Linux only: `ashpd`, `pipewire`) |
 | `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends | `capture-api`, `capture-linux` (Linux) |
-| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api` (types only) |
-| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` | `command-api`, `capture-api` |
+| `video-compositor` | lib | Scene graph, CPU reference renderer, render loop on its own thread, test patterns, PPM snapshots (ADR 0003) | `media-core` |
+| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor` (report types) |
+| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` and the compositor | `command-api`, `capture-api`, `video-compositor` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
@@ -59,7 +60,13 @@ adapter input ──decode──▶ Command ──CommandHandler::handle──�
 - Adapters must not compute results themselves; they translate input into a `Command` and output back to their medium.
 - Wire formats map `command_api::ErrorCode` to their own codes explicitly, so internal renames do not silently change a protocol.
 
-The headless process currently runs the engine and the protocol loop on the main thread and handles requests sequentially. Capture probes (M2) run their PipeWire loop on that same thread and block it for the probe duration. That is acceptable for diagnostics, but not for continuous capture. Before continuous capture (M3), the engine controller and capture loops move to their own threads behind bounded command and frame queues. See ADR 0002.
+The headless process currently runs the engine and the protocol loop on the main thread and handles requests sequentially. Capture probes (M2) run their PipeWire loop on that same thread and block it for the probe duration; that is acceptable for diagnostics.
+
+Since M3, real-time work has its own threads:
+- **`screen-capture`:** PipeWire loop of a continuous screen stream. It converts frames into pooled buffers and publishes them to a `FrameMailbox`.
+- **`compositor`:** fixed-rate render loop. It takes the newest frame of each live source and renders with scoped worker threads.
+
+The engine thread only starts, waits for and stops these threads; it never touches frames. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
 
 ## Suggested future crates
 
@@ -67,7 +74,6 @@ Add only when a milestone needs them (the socket transport, if needed, extends `
 
 - `capture-windows`
 - `capture-macos`
-- `video-compositor`
 - `audio-engine`
 - `encoder-ffmpeg`
 - `output-rtmp`

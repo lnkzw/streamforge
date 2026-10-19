@@ -5,9 +5,11 @@
 //! [`CommandError`]. Business logic lives behind the handler, never in an
 //! adapter. This crate knows nothing about transports or engine internals.
 
+mod composite;
 mod error;
 mod registry;
 
+pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
 
@@ -35,6 +37,8 @@ pub enum Command {
     ProbeScreenCapture(ScreenCaptureRequest),
     /// Capture an audio input briefly and report diagnostics; no audio is stored.
     ProbeAudioCapture(AudioCaptureRequest),
+    /// Run the compositor on the reference scene and report render timing.
+    ProbeComposite(CompositeRequest),
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -50,6 +54,7 @@ pub enum CommandOutput {
     AudioInputs(AudioInputList),
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
+    CompositeReport(Box<CompositeReport>),
 }
 
 /// Result of `list_audio_inputs`.

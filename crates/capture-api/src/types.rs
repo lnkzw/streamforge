@@ -126,18 +126,26 @@ pub struct AudioInput {
     pub media_class: String,
 }
 
-/// Capture one user-selected screen source for `duration` and report diagnostics.
+/// Which screen sources the user may pick and how the cursor is captured.
 ///
-/// `source_kinds` is non-empty and duplicate-free; `duration` lies within
-/// [`MIN_PROBE_DURATION`]..=[`MAX_PROBE_DURATION`]. `command_api` enforces this.
+/// `source_kinds` is non-empty and duplicate-free; `command_api` enforces this.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScreenCaptureRequest {
+pub struct ScreenSelection {
     pub source_kinds: Vec<VideoSourceKind>,
     pub cursor: CursorMode,
+}
+
+/// Capture one user-selected screen source for `duration` and report diagnostics.
+///
+/// `duration` lies within [`MIN_PROBE_DURATION`]..=[`MAX_PROBE_DURATION`];
+/// `command_api` enforces this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenCaptureRequest {
+    pub selection: ScreenSelection,
     pub duration: Duration,
 }
 
-impl ScreenCaptureRequest {
+impl ScreenSelection {
     /// Reject source kinds or cursor modes the backend did not advertise.
     /// An empty `cursor_modes` list means the backend cannot select a cursor
     /// mode at all (e.g. ScreenCast portal v1); the cursor request is then
@@ -247,11 +255,10 @@ mod tests {
         }
     }
 
-    fn request(kinds: &[VideoSourceKind], cursor: CursorMode) -> ScreenCaptureRequest {
-        ScreenCaptureRequest {
+    fn request(kinds: &[VideoSourceKind], cursor: CursorMode) -> ScreenSelection {
+        ScreenSelection {
             source_kinds: kinds.to_vec(),
             cursor,
-            duration: DEFAULT_PROBE_DURATION,
         }
     }
 

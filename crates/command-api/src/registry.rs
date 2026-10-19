@@ -1,16 +1,17 @@
 //! Command registry: wire names, metadata, and parameter decoding.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use capture_api::{
     AudioCaptureRequest, CursorMode, DEFAULT_PROBE_DURATION, MAX_PROBE_DURATION,
-    MIN_PROBE_DURATION, ScreenCaptureRequest, VideoSourceKind,
+    MIN_PROBE_DURATION, ScreenCaptureRequest, ScreenSelection, VideoSourceKind,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{Command, CommandError, ErrorCode};
+use crate::{Command, CommandError, CompositeRequest, ErrorCode};
 
 /// Permission class of a command.
 ///
@@ -75,6 +76,15 @@ const PROBE_AUDIO_CAPTURE: CommandDescriptor = CommandDescriptor {
     access: CommandAccess::Sensitive,
 };
 
+const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
+    name: "probe_composite",
+    summary: "Composite a 1920x1080@60 test scene (color bars, moving overlay, optional live screen) \
+              and report render time, late frames and source drops. Params: duration_ms (100..=60000, \
+              default 5000), screen (bool, default false; opens the system picker), source_types and \
+              cursor (only with screen), snapshot_path (new .ppm file for the last frame).",
+    access: CommandAccess::Sensitive,
+};
+
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
     LIST_COMMANDS,
@@ -82,6 +92,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     LIST_AUDIO_INPUTS,
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
+    PROBE_COMPOSITE,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -124,6 +135,7 @@ impl Command {
                 decode_screen_probe(name, params).map(Self::ProbeScreenCapture)
             }
             "probe_audio_capture" => decode_audio_probe(name, params).map(Self::ProbeAudioCapture),
+            "probe_composite" => decode_composite_probe(name, params).map(Self::ProbeComposite),
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -143,6 +155,7 @@ impl Command {
             Self::ListAudioInputs => &LIST_AUDIO_INPUTS,
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
+            Self::ProbeComposite(_) => &PROBE_COMPOSITE,
         }
     }
 
@@ -166,16 +179,79 @@ struct AudioProbeParams {
     duration_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompositeProbeParams {
+    duration_ms: Option<u64>,
+    screen: Option<bool>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+    snapshot_path: Option<String>,
+}
+
+fn decode_composite_probe(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<CompositeRequest, CommandError> {
+    let params: CompositeProbeParams = decode_params(command, params)?;
+    let screen = if params.screen.unwrap_or(false) {
+        Some(screen_selection(
+            command,
+            params.source_types,
+            params.cursor,
+        )?)
+    } else if params.source_types.is_some() || params.cursor.is_some() {
+        return Err(invalid_params(
+            command,
+            "`source_types` and `cursor` require `screen: true`",
+        ));
+    } else {
+        None
+    };
+    Ok(CompositeRequest {
+        duration: probe_duration(command, params.duration_ms)?,
+        screen,
+        snapshot_path: params
+            .snapshot_path
+            .map(|path| snapshot_path(command, path))
+            .transpose()?,
+    })
+}
+
+/// Snapshots are restricted to new `.ppm` files; the engine never overwrites.
+fn snapshot_path(command: &str, path: String) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(path);
+    let is_ppm = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ppm"));
+    if !is_ppm || path.file_stem().is_none() {
+        return Err(invalid_params(
+            command,
+            "`snapshot_path` must name a file ending in .ppm",
+        ));
+    }
+    Ok(path)
+}
+
 fn decode_screen_probe(
     command: &str,
     params: Option<&Value>,
 ) -> Result<ScreenCaptureRequest, CommandError> {
     let params: ScreenProbeParams = decode_params(command, params)?;
+    Ok(ScreenCaptureRequest {
+        selection: screen_selection(command, params.source_types, params.cursor)?,
+        duration: probe_duration(command, params.duration_ms)?,
+    })
+}
+
+/// Defaults, deduplication and validation shared by all screen commands.
+fn screen_selection(
+    command: &str,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+) -> Result<ScreenSelection, CommandError> {
     let mut source_kinds = Vec::new();
-    for kind in params
-        .source_types
-        .unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec())
-    {
+    for kind in source_types.unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec()) {
         if !source_kinds.contains(&kind) {
             source_kinds.push(kind);
         }
@@ -183,10 +259,9 @@ fn decode_screen_probe(
     if source_kinds.is_empty() {
         return Err(invalid_params(command, "`source_types` must not be empty"));
     }
-    Ok(ScreenCaptureRequest {
+    Ok(ScreenSelection {
         source_kinds,
-        cursor: params.cursor.unwrap_or(DEFAULT_CURSOR),
-        duration: probe_duration(command, params.duration_ms)?,
+        cursor: cursor.unwrap_or(DEFAULT_CURSOR),
     })
 }
 
@@ -357,8 +432,10 @@ mod tests {
         assert_eq!(
             Command::decode("probe_screen_capture", None),
             Ok(Command::ProbeScreenCapture(ScreenCaptureRequest {
-                source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
-                cursor: CursorMode::Embedded,
+                selection: ScreenSelection {
+                    source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+                    cursor: CursorMode::Embedded,
+                },
                 duration: Duration::from_secs(5),
             }))
         );
@@ -374,8 +451,10 @@ mod tests {
         assert_eq!(
             Command::decode("probe_screen_capture", Some(&params)),
             Ok(Command::ProbeScreenCapture(ScreenCaptureRequest {
-                source_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
-                cursor: CursorMode::Hidden,
+                selection: ScreenSelection {
+                    source_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
+                    cursor: CursorMode::Hidden,
+                },
                 duration: Duration::from_millis(1500),
             }))
         );
@@ -434,6 +513,55 @@ mod tests {
     }
 
     #[test]
+    fn composite_probe_defaults_to_test_pattern_only() {
+        assert_eq!(
+            Command::decode("probe_composite", None),
+            Ok(Command::ProbeComposite(CompositeRequest {
+                duration: Duration::from_secs(5),
+                screen: None,
+                snapshot_path: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn composite_probe_with_screen_and_snapshot() {
+        let params = json!({
+            "duration_ms": 2000,
+            "screen": true,
+            "source_types": ["window"],
+            "snapshot_path": "out/frame.PPM",
+        });
+        assert_eq!(
+            Command::decode("probe_composite", Some(&params)),
+            Ok(Command::ProbeComposite(CompositeRequest {
+                duration: Duration::from_secs(2),
+                screen: Some(ScreenSelection {
+                    source_kinds: vec![VideoSourceKind::Window],
+                    cursor: CursorMode::Embedded,
+                }),
+                snapshot_path: Some(PathBuf::from("out/frame.PPM")),
+            }))
+        );
+    }
+
+    #[test]
+    fn invalid_composite_params_are_rejected() {
+        for params in [
+            json!({"source_types": ["monitor"]}),
+            json!({"cursor": "hidden"}),
+            json!({"snapshot_path": "frame.png"}),
+            json!({"snapshot_path": ".ppm"}),
+            json!({"snapshot_path": ""}),
+            json!({"screen": "yes"}),
+            json!({"duration_ms": 10}),
+        ] {
+            let err = Command::decode("probe_composite", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+        }
+    }
+
+    #[test]
     fn access_classes_match_risk() {
         let access = |name| registry().iter().find(|d| d.name == name).map(|d| d.access);
         assert_eq!(
@@ -449,6 +577,7 @@ mod tests {
             access("probe_audio_capture"),
             Some(CommandAccess::Sensitive)
         );
+        assert_eq!(access("probe_composite"), Some(CommandAccess::Sensitive));
     }
 
     #[test]

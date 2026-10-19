@@ -9,3 +9,4 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 capture-api = { path = "../capture-api" }
+video-compositor = { path = "../video-compositor" }

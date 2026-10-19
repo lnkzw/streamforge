@@ -285,3 +285,24 @@ fn invalid_capture_params_are_rejected_before_any_device_access() {
     assert_error(&response, &json!(2), "invalid_params");
     assert!(engine.finish().success());
 }
+
+#[test]
+fn composite_probe_runs_headless() {
+    // Test pattern only: needs no desktop session, so it runs on every CI OS.
+    let mut engine = EngineProcess::spawn();
+    let response =
+        engine.request(r#"{"id":"c","command":"probe_composite","params":{"duration_ms":300}}"#);
+    assert_eq!(response["id"], "c", "{response}");
+    assert_eq!(response["ok"], true, "{response}");
+    let render = &response["result"]["render"];
+    assert_eq!(render["width"], 1920);
+    assert_eq!(render["height"], 1080);
+    assert_eq!(render["target_fps"], 60);
+    assert!(
+        render["frames_rendered"].as_u64().is_some_and(|n| n > 0),
+        "{render}"
+    );
+    assert!(render["render_time"]["p99_ms"].is_number(), "{render}");
+    assert!(response["result"]["screen_capture"].is_null());
+    assert!(engine.finish().success());
+}

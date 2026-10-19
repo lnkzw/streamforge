@@ -28,6 +28,24 @@ enum Commands {
     /// Inspect and test screen/audio capture. Output is JSON.
     #[command(subcommand)]
     Capture(CaptureCommand),
+    /// Composite the 1920x1080@60 reference scene and report render timing. Output is JSON.
+    Compose {
+        /// Run time in milliseconds (100..=60000, default 5000).
+        #[arg(long)]
+        duration_ms: Option<u64>,
+        /// Add a live screen layer (opens the system picker).
+        #[arg(long)]
+        screen: bool,
+        /// With --screen: offered source type (monitor, window, virtual). Repeatable.
+        #[arg(long = "source", requires = "screen")]
+        sources: Vec<String>,
+        /// With --screen: cursor mode (hidden, embedded, metadata).
+        #[arg(long, requires = "screen")]
+        cursor: Option<String>,
+        /// Write the last composited frame to this new .ppm file.
+        #[arg(long)]
+        snapshot: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,6 +107,31 @@ fn main() -> Result<ExitCode> {
         Commands::Capture(capture) => {
             let (name, params) = capture_request(capture);
             run_command(&mut engine, name, params)
+        }
+        Commands::Compose {
+            duration_ms,
+            screen,
+            sources,
+            cursor,
+            snapshot,
+        } => {
+            let mut params = Map::new();
+            if let Some(duration_ms) = duration_ms {
+                params.insert("duration_ms".into(), duration_ms.into());
+            }
+            if screen {
+                params.insert("screen".into(), true.into());
+            }
+            if !sources.is_empty() {
+                params.insert("source_types".into(), sources.into());
+            }
+            if let Some(cursor) = cursor {
+                params.insert("cursor".into(), cursor.into());
+            }
+            if let Some(snapshot) = snapshot {
+                params.insert("snapshot_path".into(), snapshot.into());
+            }
+            run_command(&mut engine, "probe_composite", params)
         }
     }
 }

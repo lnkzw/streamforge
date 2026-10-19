@@ -5,7 +5,12 @@
 - **Screen:** the XDG desktop portal (`org.freedesktop.portal.ScreenCast`) shows the compositor's source picker. The selected monitor or window arrives as a PipeWire node, consumed through a portal-provided PipeWire file descriptor.
 - **Audio:** PipeWire source nodes are found through the registry and captured as interleaved F32 at the device's native rate and channel count.
 
-This is a spike. Probes measure and report what arrives, but no frames or samples flow into a media graph yet.
+Probes measure and report what arrives. Since M3, a continuous screen stream (`CaptureBackend::start_screen_stream`) also delivers frames to the compositor:
+- a dedicated `screen-capture` thread runs the PipeWire loop
+- each frame is converted to Bgrx8 (or premultiplied Bgra8) in one of 4 pooled buffers
+- frames are published to a latest-frame `FrameMailbox`
+
+Audio does not flow into a graph yet.
 
 ## Requirements
 

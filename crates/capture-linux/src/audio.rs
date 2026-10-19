@@ -16,7 +16,7 @@ use spa::param::ParamType;
 use spa::pod::Pod;
 
 use crate::formats;
-use crate::pw::{Connection, StreamWatch};
+use crate::pw::{Connection, RunUntil, StreamWatch};
 
 const BYTES_PER_SAMPLE: usize = std::mem::size_of::<f32>();
 
@@ -151,7 +151,7 @@ pub(crate) fn capture(target: Option<&str>, duration: Duration) -> Result<AudioR
         )
         .map_err(|err| CaptureError::backend(format!("cannot connect audio stream: {err}")))?;
 
-    let outcome = watch.run(&connection, &stream, duration, start)?;
+    let outcome = watch.run(&connection, &stream, RunUntil::Elapsed(duration), start)?;
     let mut state = state.take();
     let elapsed = outcome.finish("audio", &mut state.warnings, |message| {
         // WirePlumber reports this when no default source exists (e.g. the

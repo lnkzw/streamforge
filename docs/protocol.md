@@ -81,6 +81,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
+| `probe_composite`          | see below | `sensitive` | Composite report |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -118,6 +119,7 @@ Video report: `{"backend", "source": {"kind", "width", "height"}, "format": {"pi
 - **Drop metrics:**
   - `dropped_frames`: gaps in the source sequence number.
   - `buffer_starvation`: process callbacks that found no buffer.
+  - `frames_discarded`: frames received but not delivered to a consumer, e.g. because the buffer pool was exhausted. Only non-zero for continuous streams.
 - **Rate:** `measured_fps`, `frame_interval` (`{"min_ms", "mean_ms", "max_ms"}`).
 - **Timestamps:** `first_pts` and `last_pts`, as `{"ticks", "time_base_num", "time_base_den"}`.
 - **Timestamp quality:** `non_monotonic_pts`, `frames_without_pts`.
@@ -133,6 +135,32 @@ Audio report: `{"backend", "input", "format": {"sample_format", "rate", "channel
 - **Sample quality:** `invalid_samples`, `clipped_samples`.
 - **Levels:** `peak_dbfs` and `rms_dbfs`; `null` means digital silence.
 - **Stream positions:** `first_position` and `last_position`, in the backend's time base.
+
+### Composite probe
+
+`probe_composite` runs the compositor on a fixed 1920×1080 @ 60 FPS reference scene for `duration_ms` and reports render timing:
+- color bars
+- optionally a live screen layer, fitted into 1152×648 at 90 % opacity
+- a half-transparent moving overlay
+
+It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_path` writes a file.
+
+| Param           | Type | Default | Meaning |
+|-----------------|------|---------|---------|
+| `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
+| `screen`        | boolean | `false` | Add the live screen layer; opens the system picker. |
+| `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
+| `snapshot_path` | string ending in `.ppm` | none | Write the last frame as binary PPM. Relative to the engine's working directory. An existing file is never overwritten; the report records the error instead. |
+
+Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
+
+- **Setup:** `renderer`, `threads`, `width`, `height`, `target_fps`.
+- **Totals:** `elapsed_ms`, `frames_rendered`, `achieved_fps`.
+- **Deadline misses:**
+  - `skipped_ticks`: ticks not rendered because rendering fell at least one frame behind.
+  - `late_frames`: frames that finished after the next tick was due.
+- **Timing:** `render_time` (`{"min_ms", "mean_ms", "p95_ms", "p99_ms", "max_ms"}`).
+- **Sources:** a `sources` array. Each entry has `name`, `kind` (`static`/`live`), `frames_consumed`, `stale_ticks` and `missing_ticks`. Live sources also carry `mailbox` (`{"published", "replaced", "taken"}`), where `replaced` counts frames that were never composited.
 
 `warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
 

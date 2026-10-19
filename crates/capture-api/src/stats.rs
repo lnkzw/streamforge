@@ -53,6 +53,9 @@ pub struct VideoStats {
     pub dropped_frames: u64,
     /// Process callbacks that found no buffer to dequeue.
     pub buffer_starvation: u64,
+    /// Frames received but not delivered to the consumer, e.g. because no
+    /// free buffer was available or the pixel format cannot be converted.
+    pub frames_discarded: u64,
     /// Frame rate between first and last frame arrival.
     pub measured_fps: Option<f64>,
     /// Spacing between consecutive frame arrivals.
@@ -73,6 +76,7 @@ pub struct VideoStatsAccumulator {
     corrupted_buffers: u64,
     dropped_frames: u64,
     buffer_starvation: u64,
+    frames_discarded: u64,
     first_arrival_ns: Option<u64>,
     last_arrival_ns: Option<u64>,
     interval_min_ns: u64,
@@ -144,6 +148,11 @@ impl VideoStatsAccumulator {
         self.buffer_starvation += 1;
     }
 
+    /// A received frame could not be handed to the consumer.
+    pub fn frame_discarded(&mut self) {
+        self.frames_discarded += 1;
+    }
+
     pub fn finish(&self, elapsed: Duration) -> VideoStats {
         let measured_fps = match (self.first_arrival_ns, self.last_arrival_ns) {
             (Some(first), Some(last)) if self.frames >= 2 && last > first => {
@@ -163,6 +172,7 @@ impl VideoStatsAccumulator {
             corrupted_buffers: self.corrupted_buffers,
             dropped_frames: self.dropped_frames,
             buffer_starvation: self.buffer_starvation,
+            frames_discarded: self.frames_discarded,
             measured_fps,
             frame_interval,
             first_pts: self.first_pts_ns.and_then(nanos_timestamp),
@@ -421,7 +431,9 @@ mod tests {
             ..frame(1, None, None)
         });
         acc.buffer_unavailable();
+        acc.frame_discarded();
         let stats = acc.finish(Duration::from_millis(1500));
+        assert_eq!(stats.frames_discarded, 1);
         assert_eq!(stats.frames, 0);
         assert_eq!(stats.empty_buffers, 1);
         assert_eq!(stats.corrupted_buffers, 1);

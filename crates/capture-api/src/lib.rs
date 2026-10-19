@@ -9,7 +9,7 @@ mod error;
 mod stats;
 mod types;
 
-pub use backend::{CaptureBackend, UnsupportedCapture};
+pub use backend::{CaptureBackend, UnsupportedCapture, VideoStream};
 pub use error::{CaptureError, CaptureErrorKind};
 pub use stats::{
     AudioStats, AudioStatsAccumulator, BufferKind, FrameObservation, IntervalStats, StreamPosition,
@@ -18,6 +18,6 @@ pub use stats::{
 pub use types::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
     CaptureCapabilities, CursorMode, DEFAULT_PROBE_DURATION, MAX_PROBE_DURATION,
-    MIN_PROBE_DURATION, Rational, ScreenCaptureCapability, ScreenCaptureRequest,
+    MIN_PROBE_DURATION, Rational, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
     VideoCaptureReport, VideoFormatInfo, VideoSourceInfo, VideoSourceKind,
 };

@@ -2,7 +2,8 @@
 //!
 //! All FFmpeg objects are created and used on the `recorder` thread. The
 //! output is finalized (encoders flushed, trailer written) on every path that
-//! got past the header, including encoder errors.
+//! got past the header, including encoder errors. After a failure the thread
+//! keeps receiving until the stop marker and counts everything as dropped.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -11,14 +12,15 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use ff::format::Pixel;
 use ff::format::Sample;
 use ff::format::sample::Type as SampleType;
+use ff::util::color;
 use ff::{ChannelLayout, Dictionary, Packet, Rational, codec, encoder, format, frame, software};
 use ffmpeg_next as ff;
-use media_core::VideoFrame;
+use media_core::{MediaTimestamp, VideoFrame};
 
 use crate::audio_fifo::AudioFifo;
 use crate::{
-    AudioSettings, AudioTrackStats, Counters, Item, RecorderConfig, RecorderError,
-    RecorderErrorKind, RecordingStats, VideoSettings, VideoTrackStats,
+    AudioSettings, AudioTrackStats, Item, RecorderConfig, RecorderError, RecorderErrorKind,
+    RecordingStats, Shared, VideoSettings, VideoTrackStats,
 };
 
 const CONTAINER: &str = "matroska";
@@ -27,7 +29,7 @@ pub(crate) fn run(
     config: RecorderConfig,
     rx: Receiver<Item>,
     ready: SyncSender<Result<(), RecorderError>>,
-    counters: Arc<Counters>,
+    shared: Arc<Shared>,
 ) -> Result<RecordingStats, RecorderError> {
     let (mut output, mut video, mut audio) = match open(&config) {
         Ok(opened) => {
@@ -42,36 +44,55 @@ pub(crate) fn run(
 
     let mut failure = None;
     while let Ok(item) = rx.recv() {
+        let end_ns = shared.end_ns.load(Ordering::Acquire);
         let result = match item {
-            Item::Video { frame, pts_us } => video.encode(&mut output, &frame, pts_us),
-            Item::Audio { samples, len, pts } => audio.push(&mut output, &samples[..len], pts),
+            Item::Video { frame, pts } => video.encode(&mut output, &frame, pts, end_ns),
+            Item::Audio { samples, len, pts } => {
+                audio.push(&mut output, &samples[..len], pts, end_ns)
+            }
             Item::Stop => break,
         };
         if let Err(error) = result {
+            shared.failed.store(true, Ordering::Release);
             failure = Some(error);
             break;
         }
     }
-    // Stop accepting input before the (possibly slow) finalization.
-    drop(rx);
 
-    let flushed = video
-        .flush(&mut output)
-        .and_then(|()| audio.flush(&mut output));
+    // Flush both tracks even if one fails, then write the trailer; the first
+    // error wins.
+    let video_flushed = video.flush(&mut output);
+    let audio_flushed = audio.flush(&mut output);
     let trailer = output
         .write_trailer()
         .map_err(|err| error(RecorderErrorKind::Output, "cannot finalize the file", err));
     drop(output);
+    if failure.is_some() {
+        // Producers run until the owner stops them: count what they still
+        // queue instead of letting it vanish with the channel.
+        for item in &rx {
+            match item {
+                Item::Video { .. } => video.frames_dropped += 1,
+                Item::Audio { .. } => audio.blocks_dropped += 1,
+                Item::Stop => break,
+            }
+        }
+    }
+    drop(rx);
 
     let stats = RecordingStats {
         path: config.path.display().to_string(),
         container: CONTAINER.to_owned(),
         duration_ms: video.end_ms().max(audio.end_ms()),
         file_bytes: std::fs::metadata(&config.path).ok().map(|m| m.len()),
-        video: video.stats(counters.video_dropped.load(Ordering::Relaxed)),
-        audio: audio.stats(counters.audio_dropped.load(Ordering::Relaxed)),
+        video: video.stats(shared.video_dropped.load(Ordering::Relaxed)),
+        audio: audio.stats(shared.audio_dropped.load(Ordering::Relaxed)),
     };
-    match failure.or(flushed.err()).or(trailer.err()) {
+    let first_error = failure
+        .or(video_flushed.err())
+        .or(audio_flushed.err())
+        .or(trailer.err());
+    match first_error {
         None => Ok(stats),
         Some(mut error) => {
             error.partial = Some(Box::new(stats));
@@ -87,7 +108,19 @@ fn open(
         .map_err(|err| error(RecorderErrorKind::Internal, "cannot initialize FFmpeg", err))?;
     // FFmpeg logs to stderr; keep it to real errors.
     ff::log::set_level(ff::log::Level::Error);
-    let mut output = format::output(&config.path).map_err(|err| {
+    let path = config.path.to_str().ok_or_else(|| {
+        RecorderError::new(
+            RecorderErrorKind::Output,
+            format!(
+                "the output path {} is not valid UTF-8",
+                config.path.display()
+            ),
+        )
+    })?;
+    // The `file:` prefix keeps FFmpeg from reading the name as another
+    // protocol (e.g. `pipe:1.mkv`); the container is fixed, not guessed.
+    let url = format!("file:{path}");
+    let mut output = format::output_as(&url, CONTAINER).map_err(|err| {
         error(
             RecorderErrorKind::Output,
             &format!("cannot create {}", config.path.display()),
@@ -124,6 +157,8 @@ fn error(kind: RecorderErrorKind, context: &str, err: ff::Error) -> RecorderErro
 }
 
 /// Receive all pending packets from `encoder` and write them interleaved.
+/// "Needs more input" and "fully flushed" end the loop; anything else is an
+/// encoder error.
 fn drain(
     encoder: &mut encoder::Encoder,
     output: &mut format::context::Output,
@@ -132,14 +167,48 @@ fn drain(
     stream_time_base: Rational,
 ) -> Result<(), RecorderError> {
     let mut packet = Packet::empty();
-    while encoder.receive_packet(&mut packet).is_ok() {
+    loop {
+        match encoder.receive_packet(&mut packet) {
+            Ok(()) => {}
+            Err(ff::Error::Eof) => return Ok(()),
+            Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => return Ok(()),
+            Err(err) => {
+                return Err(error(
+                    RecorderErrorKind::Encoder,
+                    "the encoder failed to produce a packet",
+                    err,
+                ));
+            }
+        }
         packet.set_stream(stream);
         packet.rescale_ts(encoder_time_base, stream_time_base);
         packet
             .write_interleaved(output)
             .map_err(|err| error(RecorderErrorKind::Output, "cannot write a packet", err))?;
     }
-    Ok(())
+}
+
+/// Whether `pts` is at or after the requested end (`end_ns`).
+fn after_end(pts: MediaTimestamp, end_ns: i64) -> bool {
+    pts.to_nanoseconds()
+        .is_ok_and(|ns| ns >= i128::from(end_ns))
+}
+
+/// A positive `u32` setting as FFmpeg's `int`.
+fn positive_i32(value: u32, what: &str) -> Result<i32, RecorderError> {
+    i32::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            RecorderError::new(
+                RecorderErrorKind::Unsupported,
+                format!("{what} {value} is out of range"),
+            )
+        })
+}
+
+fn frames_i64(count: usize) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 struct VideoTrack {
@@ -154,6 +223,7 @@ struct VideoTrack {
     staging: frame::Video,
     frames_encoded: u64,
     frames_dropped: u64,
+    frames_after_end: u64,
     first_pts: Option<i64>,
     last_pts: Option<i64>,
 }
@@ -178,16 +248,27 @@ impl VideoTrack {
             .encoder()
             .video()
             .map_err(|err| encoder_error("cannot create the video encoder", err))?;
-        let time_base = Rational::new(1, settings.fps as i32);
+        let fps = positive_i32(settings.fps, "frame rate")?;
+        let time_base = Rational::new(1, fps);
         context.set_width(settings.width);
         context.set_height(settings.height);
         context.set_format(Pixel::YUV420P);
         context.set_time_base(time_base);
-        context.set_frame_rate(Some(Rational::new(settings.fps as i32, 1)));
+        context.set_frame_rate(Some(Rational::new(fps, 1)));
+        // Tag what the conversion below produces: swscale's default BGRA to
+        // YUV matrix is BT.601 with limited range. The canvas is sRGB
+        // (BT.709 primaries, sRGB transfer; ADR 0003). Untagged HD video
+        // would be shown with the BT.709 matrix, shifting hues.
+        context.set_colorspace(color::Space::SMPTE170M);
+        context.set_color_range(color::Range::MPEG);
+        context.set_color_primaries(color::Primaries::BT709);
         if global_header {
             context.set_flags(codec::Flags::GLOBAL_HEADER);
         }
         let mut options = Dictionary::new();
+        // No typed setter for the transfer in ffmpeg-next; it is a codec
+        // context option.
+        options.set("color_trc", "iec61966-2-1");
         for (key, value) in &settings.options {
             options.set(key, value);
         }
@@ -227,6 +308,7 @@ impl VideoTrack {
             staging: frame::Video::new(Pixel::BGRA, settings.width, settings.height),
             frames_encoded: 0,
             frames_dropped: 0,
+            frames_after_end: 0,
             first_pts: None,
             last_pts: None,
         })
@@ -236,10 +318,17 @@ impl VideoTrack {
         &mut self,
         output: &mut format::context::Output,
         source: &VideoFrame,
-        pts_us: i64,
+        pts: MediaTimestamp,
+        end_ns: i64,
     ) -> Result<(), RecorderError> {
-        let fps = i128::from(self.settings.fps);
-        let pts = ((i128::from(pts_us) * fps + 500_000).div_euclid(1_000_000)) as i64;
+        if after_end(pts, end_ns) {
+            self.frames_after_end += 1;
+            return Ok(());
+        }
+        let Ok(pts) = pts.rescale(1, self.settings.fps) else {
+            self.frames_dropped += 1;
+            return Ok(());
+        };
         let wrong_size =
             source.width() != self.settings.width || source.height() != self.settings.height;
         if wrong_size || self.last_pts.is_some_and(|last| pts <= last) {
@@ -308,8 +397,9 @@ impl VideoTrack {
             fps: self.settings.fps,
             frames_encoded: self.frames_encoded,
             frames_dropped: self.frames_dropped + queue_dropped,
+            frames_after_end: self.frames_after_end,
             first_pts_ms: self.first_pts.map(|pts| self.pts_ms(pts)),
-            last_pts_ms: self.last_pts.map(|pts| self.pts_ms(pts)),
+            end_ms: self.last_pts.map(|pts| self.pts_ms(pts + 1)),
         }
     }
 }
@@ -327,6 +417,8 @@ struct AudioTrack {
     /// De-interleaving scratch, one buffer per channel.
     planes: Vec<Vec<f32>>,
     samples_encoded: u64,
+    blocks_dropped: u64,
+    blocks_after_end: u64,
     padding_samples: u64,
     first_pts: Option<i64>,
     end_pts: Option<i64>,
@@ -360,11 +452,18 @@ impl AudioTrack {
             .encoder()
             .audio()
             .map_err(|err| encoder_error("cannot create the audio encoder", err))?;
-        let time_base = Rational::new(1, settings.rate as i32);
-        context.set_rate(settings.rate as i32);
+        let rate = positive_i32(settings.rate, "sample rate")?;
+        let bitrate = usize::try_from(settings.bitrate).map_err(|_| {
+            RecorderError::new(
+                RecorderErrorKind::Unsupported,
+                format!("bit rate {} is out of range", settings.bitrate),
+            )
+        })?;
+        let time_base = Rational::new(1, rate);
+        context.set_rate(rate);
         context.set_channel_layout(layout);
         context.set_format(Sample::F32(SampleType::Planar));
-        context.set_bit_rate(settings.bitrate as usize);
+        context.set_bit_rate(bitrate);
         context.set_time_base(time_base);
         if global_header {
             context.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -401,6 +500,8 @@ impl AudioTrack {
             fifo: AudioFifo::new(channels, settings.rate as usize),
             planes: vec![vec![0.0; frame_size]; channels],
             samples_encoded: 0,
+            blocks_dropped: 0,
+            blocks_after_end: 0,
             padding_samples: 0,
             first_pts: None,
             end_pts: None,
@@ -411,8 +512,17 @@ impl AudioTrack {
         &mut self,
         output: &mut format::context::Output,
         block: &[f32],
-        pts: i64,
+        pts: MediaTimestamp,
+        end_ns: i64,
     ) -> Result<(), RecorderError> {
+        if after_end(pts, end_ns) {
+            self.blocks_after_end += 1;
+            return Ok(());
+        }
+        let Ok(pts) = pts.rescale(1, self.settings.rate) else {
+            self.blocks_dropped += 1;
+            return Ok(());
+        };
         if self.fifo.push(block, pts) {
             // Timeline restarts: encode what is queued (padded), then begin anew.
             self.encode_queued(output, true)?;
@@ -460,7 +570,7 @@ impl AudioTrack {
                 .map_err(|err| error(RecorderErrorKind::Encoder, "audio encoding failed", err))?;
             self.samples_encoded += count as u64;
             self.first_pts.get_or_insert(pts);
-            self.end_pts = Some(pts + count as i64);
+            self.end_pts = Some(pts.saturating_add(frames_i64(count)));
             drain(
                 &mut self.encoder,
                 output,
@@ -505,12 +615,14 @@ impl AudioTrack {
             channels: self.settings.channels,
             bitrate: self.settings.bitrate,
             samples_encoded: self.samples_encoded,
-            blocks_dropped: queue_dropped,
+            blocks_dropped: self.blocks_dropped + queue_dropped,
+            blocks_after_end: self.blocks_after_end,
             gap_samples: fifo.gap_samples,
             overlap_samples: fifo.overlap_samples,
             discontinuities: fifo.discontinuities,
+            padding_samples: self.padding_samples,
             first_pts_ms: self.first_pts.map(|pts| self.pts_ms(pts)),
-            last_pts_ms: self.end_pts.map(|pts| self.pts_ms(pts)),
+            end_ms: self.end_pts.map(|pts| self.pts_ms(pts)),
         }
     }
 }

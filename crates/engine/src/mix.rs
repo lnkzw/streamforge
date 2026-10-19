@@ -54,11 +54,7 @@ pub(crate) fn probe(
     };
 
     let mut warnings = mix_warnings(&mix);
-    for capture in &captures {
-        if let Some(error) = &capture.error {
-            warnings.push(format!("capture failed: {}", error.message));
-        }
-    }
+    warnings.extend(capture_warnings(&captures));
     Ok(MixReport {
         mix,
         captures,
@@ -129,6 +125,14 @@ pub(crate) fn stop_captures(
                 error: Some(ErrorSummary::from(error)),
             },
         })
+        .collect()
+}
+
+pub(crate) fn capture_warnings(captures: &[CaptureOutcome]) -> Vec<String> {
+    captures
+        .iter()
+        .filter_map(|capture| capture.error.as_ref())
+        .map(|error| format!("capture failed: {}", error.message))
         .collect()
 }
 

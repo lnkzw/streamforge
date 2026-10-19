@@ -69,11 +69,16 @@ pub struct VideoTrackStats {
     pub height: u32,
     pub fps: u32,
     pub frames_encoded: u64,
-    /// Frames not recorded: the input queue was full or the timestamp did
-    /// not advance.
+    /// Frames not recorded: no free copy buffer, the input queue was full,
+    /// the recorder had failed, or the timestamp was invalid or did not
+    /// advance.
     pub frames_dropped: u64,
+    /// Frames stamped at or after the requested end; not part of the file.
+    pub frames_after_end: u64,
+    /// Start of the first frame.
     pub first_pts_ms: Option<f64>,
-    pub last_pts_ms: Option<f64>,
+    /// End of the last frame (its timestamp plus one frame duration).
+    pub end_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -83,16 +88,24 @@ pub struct AudioTrackStats {
     pub channels: u32,
     pub bitrate: u64,
     pub samples_encoded: u64,
-    /// Blocks not recorded because the input queue was full.
+    /// Blocks not recorded: the input queue was full, the recorder had
+    /// failed, or the block was invalid (too large, bad timestamp).
     pub blocks_dropped: u64,
+    /// Blocks stamped at or after the requested end; not part of the file.
+    pub blocks_after_end: u64,
     /// Silence inserted to keep the audio timeline continuous.
     pub gap_samples: u64,
     /// Repeated samples dropped from overlapping blocks.
     pub overlap_samples: u64,
     /// Gaps too long to fill; the timeline restarted.
     pub discontinuities: u64,
+    /// Silence appended to complete the last encoder frame before the end
+    /// and before each discontinuity.
+    pub padding_samples: u64,
+    /// Start of the first sample.
     pub first_pts_ms: Option<f64>,
-    pub last_pts_ms: Option<f64>,
+    /// End of the last recorded sample (padding excluded).
+    pub end_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

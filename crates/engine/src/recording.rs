@@ -5,6 +5,7 @@
 //! the session epoch `t0`, so audio and video share one timeline.
 
 use std::fs::{self, OpenOptions};
+use std::io::ErrorKind as IoErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecorderInput,
     VideoSettings,
 };
-use media_core::{FramePool, VideoFrame};
+use media_core::{FramePool, MediaTimestamp, VideoFrame};
 use serde_json::{Map, Value, json};
 use video_compositor::{Compositor, FrameSink};
 
@@ -41,11 +42,18 @@ pub(crate) struct RecordingSession {
     audio: Vec<Box<dyn AudioStream>>,
     specs: Vec<LiveInputSpec>,
     path: PathBuf,
+    /// Session epoch: media time zero of both tracks.
+    t0: Instant,
 }
 
 impl RecordingSession {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// `false` once the recorder, compositor or mixer has stopped on its own.
+    pub fn is_running(&self) -> bool {
+        self.recorder.is_running() && !self.compositor.is_finished() && !self.mixer.is_finished()
     }
 
     pub fn start(
@@ -60,12 +68,23 @@ impl RecordingSession {
             .create_new(true)
             .open(&path)
             .map_err(|err| {
-                CommandError::new(
-                    ErrorCode::InvalidParams,
-                    format!(
-                        "cannot create {}: {err}; choose another file_name",
-                        path.display()
+                let (code, hint) = match err.kind() {
+                    IoErrorKind::AlreadyExists => {
+                        (ErrorCode::InvalidParams, "; choose another file_name")
+                    }
+                    IoErrorKind::NotFound => (
+                        ErrorCode::NotFound,
+                        "; the engine's output directory does not exist",
                     ),
+                    IoErrorKind::PermissionDenied => (
+                        ErrorCode::PermissionDenied,
+                        "; the engine's output directory is not writable",
+                    ),
+                    _ => (ErrorCode::BackendError, ""),
+                };
+                CommandError::new(
+                    code,
+                    format!("cannot create {}: {err}{hint}", path.display()),
                 )
                 .with_details(json!({ "path": path.display().to_string() }))
             })?;
@@ -133,6 +152,7 @@ impl RecordingSession {
             audio,
             specs: request.inputs.clone(),
             path,
+            t0,
         };
         Ok((session, started))
     }
@@ -147,7 +167,11 @@ impl RecordingSession {
             audio,
             specs,
             path: _,
+            t0,
         } = self;
+        // One end for both tracks: whatever the producers emit while they
+        // are being stopped one after the other is cut (and counted).
+        recorder.end_at(since(t0, Instant::now()));
         let mut warnings = Vec::new();
         let render = compositor
             .stop()
@@ -176,6 +200,10 @@ impl RecordingSession {
         }
         if let Some(mix) = &mix {
             warnings.extend(mix::mix_warnings(mix));
+        }
+        warnings.extend(mix::capture_warnings(&audio_captures));
+        if let Some(error) = &screen_capture_error {
+            warnings.push(format!("screen capture failed: {}", error.message));
         }
         let recording = match recording {
             Ok(stats) => stats,
@@ -243,10 +271,7 @@ impl FrameSink for VideoTap {
         );
         match copy {
             Ok(copy) => {
-                let pts_us =
-                    i64::try_from(presented_at.saturating_duration_since(self.t0).as_micros())
-                        .unwrap_or(i64::MAX);
-                self.input.send_video(copy, pts_us);
+                self.input.send_video(copy, since(self.t0, presented_at));
             }
             Err(_) => self.input.count_dropped_video(),
         }
@@ -261,10 +286,18 @@ struct AudioTap {
 
 impl BlockSink for AudioTap {
     fn block(&mut self, samples: &[f32], at: Instant) {
-        let nanos = at.saturating_duration_since(self.t0).as_nanos();
-        let pts = (nanos * u128::from(RATE) + 500_000_000) / 1_000_000_000;
-        self.input
-            .send_audio(samples, i64::try_from(pts).unwrap_or(i64::MAX));
+        self.input.send_audio(samples, since(self.t0, at));
+    }
+}
+
+/// Media time of `at` on the session timeline, in nanoseconds; instants
+/// before the epoch clamp to zero. Saturates after about 292 years.
+fn since(t0: Instant, at: Instant) -> MediaTimestamp {
+    let nanos = i64::try_from(at.saturating_duration_since(t0).as_nanos()).unwrap_or(i64::MAX);
+    MediaTimestamp {
+        ticks: nanos,
+        time_base_num: 1,
+        time_base_den: 1_000_000_000,
     }
 }
 

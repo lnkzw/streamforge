@@ -104,7 +104,7 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
     summary: "Start recording the 1920x1080@60 reference scene (optionally with a live screen layer) \
-              and the audio mix (live inputs and tones; one -20 dBFS 1 kHz tone by default) to \
+              and the audio mix (live inputs and tones; one -20 dBFS 1 kHz tone if no source is given) to \
               H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
               output directory, never overwritten), screen, source_types, cursor, inputs, tones, \
               master_gain_db. Returns immediately; recording continues until stop_recording.",
@@ -355,7 +355,7 @@ struct StartRecordingParams {
     cursor: Option<CursorMode>,
     #[serde(default)]
     inputs: Vec<LiveInputParams>,
-    /// Absent: one quiet test tone; `[]`: no tones.
+    /// Absent: one quiet test tone if there are no `inputs`; `[]`: no tones.
     tones: Option<Vec<ToneParams>>,
     master_gain_db: Option<f32>,
 }
@@ -367,14 +367,18 @@ fn decode_start_recording(
     params: Option<&Value>,
 ) -> Result<RecordingRequest, CommandError> {
     let params: StartRecordingParams = decode_params(command, params)?;
-    let tones = params.tones.unwrap_or_else(|| {
-        vec![ToneParams {
+    // Without any source, record a quiet tone so the audio track is
+    // audibly alive; with live inputs, record only them.
+    let tones = match params.tones {
+        Some(tones) => tones,
+        None if params.inputs.is_empty() => vec![ToneParams {
             frequency_hz: DEFAULT_TONE_HZ,
             level_dbfs: Some(DEFAULT_RECORDING_TONE_DBFS),
             gain_db: None,
             mute: None,
-        }]
-    });
+        }],
+        None => Vec::new(),
+    };
     let sources = mix_sources(command, params.inputs, tones, params.master_gain_db)?;
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
@@ -879,9 +883,25 @@ mod tests {
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
         assert_eq!(request.screen, None);
         assert_eq!(request.inputs.len(), 1);
-        // Default: one quiet tone.
-        assert_eq!(request.tones.len(), 1);
-        assert_eq!(request.tones[0].level_dbfs, -20.0);
+        // With live inputs there is no default tone.
+        assert!(request.tones.is_empty());
+        let Ok(Command::StartRecording(no_sources)) =
+            Command::decode("start_recording", Some(&json!({"file_name": "a.mkv"})))
+        else {
+            panic!("decode");
+        };
+        // Without sources: one quiet tone.
+        assert_eq!(no_sources.tones.len(), 1);
+        assert_eq!(no_sources.tones[0].level_dbfs, -20.0);
+        // Eight live inputs fit; the default tone does not count against them.
+        let eight: Vec<_> = (0..8).map(|i| json!({"input": format!("in{i}")})).collect();
+        assert!(
+            Command::decode(
+                "start_recording",
+                Some(&json!({"file_name": "a.mkv", "inputs": eight}))
+            )
+            .is_ok()
+        );
         let Ok(Command::StartRecording(silent)) = Command::decode(
             "start_recording",
             Some(&json!({"file_name": "a.mkv", "tones": []})),

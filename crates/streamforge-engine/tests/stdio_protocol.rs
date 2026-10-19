@@ -1,108 +1,15 @@
 //! M1 acceptance: drive the real `streamforge-engine` process over stdio.
 //!
-//! Every wait is bounded by [`TIMEOUT`]; the child is killed if a test fails.
+//! Every wait is bounded by `common::TIMEOUT`; the child is killed if a test
+//! fails.
+
+mod common;
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread;
-use std::time::{Duration, Instant};
 
+use common::EngineProcess;
 use control_protocol::MAX_REQUEST_BYTES;
 use serde_json::{Value, json};
-
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-struct EngineProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    // Test-only channel; a reader thread forwards stdout lines so that every
-    // receive can time out instead of blocking forever.
-    lines: Receiver<String>,
-}
-
-impl EngineProcess {
-    fn spawn() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_streamforge-engine"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn streamforge-engine");
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, lines) = mpsc::channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            child,
-            stdin,
-            lines,
-        }
-    }
-
-    fn send_raw(&mut self, bytes: &[u8]) {
-        let stdin = self.stdin.as_mut().expect("stdin open");
-        stdin.write_all(bytes).expect("write to engine");
-        stdin.flush().expect("flush engine stdin");
-    }
-
-    fn send(&mut self, request: &str) {
-        self.send_raw(format!("{request}\n").as_bytes());
-    }
-
-    fn recv(&self) -> Value {
-        let line = self
-            .lines
-            .recv_timeout(TIMEOUT)
-            .unwrap_or_else(|err| panic!("no response within {TIMEOUT:?}: {err}"));
-        serde_json::from_str(&line)
-            .unwrap_or_else(|err| panic!("response is not JSON ({err}): {line}"))
-    }
-
-    fn request(&mut self, request: &str) -> Value {
-        self.send(request);
-        self.recv()
-    }
-
-    /// Close stdin, wait for exit, and assert no unanswered output remains.
-    fn finish(mut self) -> ExitStatus {
-        drop(self.stdin.take());
-        let deadline = Instant::now() + TIMEOUT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("poll engine") {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "engine did not exit within {TIMEOUT:?} after stdin closed"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
-        match self.lines.recv_timeout(TIMEOUT) {
-            Err(RecvTimeoutError::Disconnected) => {}
-            Ok(line) => panic!("unexpected extra output: {line}"),
-            Err(RecvTimeoutError::Timeout) => panic!("stdout not closed after exit"),
-        }
-        status
-    }
-}
-
-impl Drop for EngineProcess {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
 
 fn assert_error(response: &Value, id: &Value, code: &str) {
     assert_eq!(response["v"], 1, "{response}");

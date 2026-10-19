@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use encoder_ffmpeg::{AudioSettings, Recorder, RecorderConfig, RecorderErrorKind, VideoSettings};
 use ffmpeg_next as ff;
-use media_core::{FrameBuffer, PixelFormat, VideoFrame};
+use media_core::{FrameBuffer, MediaTimestamp, PixelFormat, VideoFrame};
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 360;
@@ -62,6 +62,10 @@ fn config(path: &TempFile) -> RecorderConfig {
     }
 }
 
+fn micros(us: i64) -> MediaTimestamp {
+    MediaTimestamp::new(us, 1, 1_000_000).expect("pts")
+}
+
 /// Record `SECONDS` of the picture and a 1 kHz tone at -12 dBFS.
 fn record(path: &TempFile) -> encoder_ffmpeg::RecordingStats {
     let recorder = Recorder::start(config(path)).expect("start");
@@ -78,7 +82,7 @@ fn record(path: &TempFile) -> encoder_ffmpeg::RecordingStats {
         let block_us = i64::from(next_block) * 10_000;
         let frame_pts = i64::from(next_frame) * frame_us;
         if next_frame < total_frames && (frame_pts <= block_us || next_block == total_blocks) {
-            assert!(input.send_video_blocking(picture(), frame_pts));
+            assert!(input.send_video_blocking(picture(), micros(frame_pts)));
             next_frame += 1;
         } else {
             for frame in block.as_chunks_mut::<2>().0 {
@@ -86,7 +90,8 @@ fn record(path: &TempFile) -> encoder_ffmpeg::RecordingStats {
                 *frame = [sample, sample];
                 phase = (phase + 1000.0 / f64::from(RATE)).fract();
             }
-            assert!(input.send_audio_blocking(&block, i64::from(next_block) * 480));
+            let pts = MediaTimestamp::new(i64::from(next_block) * 480, 1, RATE).expect("pts");
+            assert!(input.send_audio_blocking(&block, pts));
             next_block += 1;
         }
     }
@@ -127,6 +132,14 @@ fn recording_has_expected_streams_duration_and_sync() {
         .video()
         .expect("video decoder");
     assert_eq!((decoder.width(), decoder.height()), (WIDTH, HEIGHT));
+    // Tagged as converted: BT.601 matrix, limited range, sRGB.
+    assert_eq!(decoder.color_space(), ff::util::color::Space::SMPTE170M);
+    assert_eq!(decoder.color_range(), ff::util::color::Range::MPEG);
+    assert_eq!(decoder.color_primaries(), ff::util::color::Primaries::BT709);
+    assert_eq!(
+        decoder.color_transfer_characteristic(),
+        ff::util::color::TransferCharacteristic::IEC61966_2_1
+    );
     let audio_decoder = ff::codec::context::Context::from_parameters(audio.parameters())
         .expect("ctx")
         .decoder()
@@ -254,6 +267,51 @@ fn decoded_content_matches_what_was_recorded() {
     let rms_db = 10.0 * (sum_squares / count as f64).log10();
     // Sine at -12 dBFS peak has an RMS of -15.05 dBFS; AAC is lossy.
     assert!((rms_db + 15.05).abs() < 0.5, "rms {rms_db}");
+}
+
+#[test]
+fn items_after_the_end_are_counted_not_recorded() {
+    let file = TempFile::new("end");
+    let recorder = Recorder::start(config(&file)).expect("start");
+    let input = recorder.input();
+    let silence = [0.0f32; 960];
+    // 0.5 s of media, end set at 0.25 s.
+    recorder.end_at(micros(250_000));
+    for frame in 0..15 {
+        assert!(input.send_video_blocking(picture(), micros(frame * 33_333)));
+    }
+    for block in 0..50 {
+        let pts = MediaTimestamp::new(block * 480, 1, RATE).expect("pts");
+        assert!(input.send_audio_blocking(&silence, pts));
+    }
+    assert!(recorder.is_running());
+    let stats = recorder.stop().expect("stop");
+    // Frames at 0..=233 ms (8) and blocks at 0..=240 ms (25) are recorded.
+    assert_eq!(stats.video.frames_encoded, 8, "{stats:?}");
+    assert_eq!(stats.video.frames_after_end, 7);
+    assert_eq!(stats.audio.blocks_after_end, 25);
+    assert_eq!(stats.audio.samples_encoded, 25 * 480);
+    assert_eq!(stats.audio.end_ms, Some(250.0));
+    assert!(
+        stats
+            .video
+            .end_ms
+            .is_some_and(|end| (end - 266.67).abs() < 0.1)
+    );
+}
+
+#[test]
+fn output_names_are_not_read_as_protocols() {
+    // A relative name starting with `pipe:` would be FFmpeg's pipe protocol
+    // (writing to stdout) without the recorder's `file:` prefix. Tests run
+    // in the crate directory; the guard removes the file again.
+    let file = TempFile(PathBuf::from(format!(
+        "pipe:streamforge-test-{}.mkv",
+        std::process::id()
+    )));
+    let recorder = Recorder::start(config(&file)).expect("start");
+    recorder.stop().expect("stop");
+    assert!(file.0.is_file(), "no file at {}", file.0.display());
 }
 
 #[test]

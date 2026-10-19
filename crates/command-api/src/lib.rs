@@ -83,7 +83,11 @@ pub struct EngineStatus {
     pub media_engine_ready: bool,
     pub capture_available: bool,
     pub streaming_active: bool,
+    /// A recording is open and its workers are running.
     pub recording_active: bool,
+    /// A recording is open but stopped unexpectedly (encoder, compositor or
+    /// mixer failure); `stop_recording` finalizes it and reports the error.
+    pub recording_failed: bool,
 }
 
 /// Executes typed commands.
@@ -107,6 +111,7 @@ mod tests {
             capture_available: false,
             streaming_active: false,
             recording_active: false,
+            recording_failed: false,
         };
         let value = serde_json::to_value(CommandOutput::Status(status)).expect("serialize status");
         assert_eq!(
@@ -118,6 +123,7 @@ mod tests {
                 "capture_available": false,
                 "streaming_active": false,
                 "recording_active": false,
+                "recording_failed": false,
             })
         );
     }

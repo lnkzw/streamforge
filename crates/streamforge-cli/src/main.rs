@@ -153,7 +153,7 @@ fn main() -> Result<ExitCode> {
                 println!("Recording active: {}", status.recording_active);
                 println!();
                 println!(
-                    "Capture probes: `streamforge capture --help`. Recording and streaming are not implemented yet."
+                    "Capture probes: `streamforge capture --help`. Recording: `streamforge record --help` (Linux). Streaming is not implemented yet."
                 );
             }
             Ok(ExitCode::SUCCESS)

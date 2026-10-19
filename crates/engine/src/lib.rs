@@ -8,6 +8,8 @@ mod composite;
 mod mix;
 mod recording;
 
+use recording::RecordingSession;
+
 use std::path::PathBuf;
 
 use capture_api::{
@@ -26,7 +28,7 @@ pub struct Engine {
     /// Last capability query; `get_status` derives `capture_available` from it.
     capture_capabilities: Option<CaptureCapabilities>,
     /// Running recording; dropping the engine finalizes its file.
-    recording: Option<recording::RecordingSession>,
+    recording: Option<RecordingSession>,
 }
 
 impl Engine {
@@ -47,6 +49,7 @@ impl Engine {
                 capture_available: false,
                 streaming_active: false,
                 recording_active: false,
+                recording_failed: false,
             },
             capture,
             output_dir: PathBuf::from("."),
@@ -59,6 +62,25 @@ impl Engine {
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
         self
+    }
+
+    /// Commands that capture, render or record need the devices and CPU a
+    /// running recording uses, and they would block `stop_recording` for
+    /// their duration; they fail with `invalid_state` while one is open.
+    fn ensure_not_recording(&self, command: &str) -> Result<(), CommandError> {
+        let Some(session) = &self.recording else {
+            return Ok(());
+        };
+        let message = if session.is_running() {
+            format!("`{command}` is not available while a recording is running; stop it first")
+        } else {
+            format!(
+                "the open recording stopped unexpectedly; call stop_recording to finalize it \
+                 and read the error before `{command}`"
+            )
+        };
+        Err(CommandError::new(ErrorCode::InvalidState, message)
+            .with_details(serde_json::json!({ "recording": session.path().display().to_string() })))
     }
 
     fn refresh_capabilities(&mut self) -> &CaptureCapabilities {
@@ -91,7 +113,9 @@ impl CommandHandler for Engine {
                 if self.capture_capabilities.is_none() {
                     self.refresh_capabilities();
                 }
-                self.status.recording_active = self.recording.is_some();
+                let running = self.recording.as_ref().map(RecordingSession::is_running);
+                self.status.recording_active = running == Some(true);
+                self.status.recording_failed = running == Some(false);
                 Ok(CommandOutput::Status(self.status.clone()))
             }
             Command::ListCommands => Ok(CommandOutput::Commands(CommandList::all())),
@@ -103,37 +127,34 @@ impl CommandHandler for Engine {
                 .audio_inputs()
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
                 .map_err(command_error),
-            Command::ProbeScreenCapture(request) => self
-                .capture
-                .probe_screen(&request)
-                .map(CommandOutput::VideoCaptureReport)
-                .map_err(command_error),
-            Command::ProbeAudioCapture(request) => self
-                .capture
-                .probe_audio(&request)
-                .map(CommandOutput::AudioCaptureReport)
-                .map_err(command_error),
+            Command::ProbeScreenCapture(request) => {
+                self.ensure_not_recording("probe_screen_capture")?;
+                self.capture
+                    .probe_screen(&request)
+                    .map(CommandOutput::VideoCaptureReport)
+                    .map_err(command_error)
+            }
+            Command::ProbeAudioCapture(request) => {
+                self.ensure_not_recording("probe_audio_capture")?;
+                self.capture
+                    .probe_audio(&request)
+                    .map(CommandOutput::AudioCaptureReport)
+                    .map_err(command_error)
+            }
             Command::ProbeComposite(request) => {
+                self.ensure_not_recording("probe_composite")?;
                 composite::probe(self.capture.as_mut(), &self.output_dir, &request)
                     .map(|report| CommandOutput::CompositeReport(Box::new(report)))
             }
-            Command::ProbeAudioMix(request) => mix::probe(self.capture.as_mut(), &request)
-                .map(|report| CommandOutput::MixReport(Box::new(report))),
+            Command::ProbeAudioMix(request) => {
+                self.ensure_not_recording("probe_audio_mix")?;
+                mix::probe(self.capture.as_mut(), &request)
+                    .map(|report| CommandOutput::MixReport(Box::new(report)))
+            }
             Command::StartRecording(request) => {
-                if let Some(running) = &self.recording {
-                    return Err(CommandError::new(
-                        ErrorCode::InvalidState,
-                        "a recording is already running; stop it first",
-                    )
-                    .with_details(serde_json::json!({
-                        "path": running.path().display().to_string()
-                    })));
-                }
-                let (session, started) = recording::RecordingSession::start(
-                    self.capture.as_mut(),
-                    &self.output_dir,
-                    &request,
-                )?;
+                self.ensure_not_recording("start_recording")?;
+                let (session, started) =
+                    RecordingSession::start(self.capture.as_mut(), &self.output_dir, &request)?;
                 self.recording = Some(session);
                 Ok(CommandOutput::RecordingStarted(started))
             }
@@ -497,6 +518,13 @@ mod tests {
         let again = start(&mut engine, json!({"file_name": "other.mkv"})).unwrap_err();
         assert_eq!(again.code, ErrorCode::InvalidState);
         assert!(!dir.0.join("other.mkv").exists());
+        // Probes would compete for devices and block stop_recording.
+        let probe =
+            Command::decode("probe_composite", Some(&json!({"duration_ms": 100}))).expect("decode");
+        assert_eq!(
+            engine.handle(probe).unwrap_err().code,
+            ErrorCode::InvalidState
+        );
 
         std::thread::sleep(Duration::from_millis(700));
         let report = match engine.handle(Command::StopRecording).expect("stop") {
@@ -509,11 +537,11 @@ mod tests {
         assert!(recording.file_bytes.is_some_and(|bytes| bytes > 1_000));
         assert_eq!(report.audio_captures.len(), 1);
         assert!(report.render.is_some() && report.mix.is_some());
-        // Video and audio cover the same span (within a frame and an AAC frame).
-        let video_end = recording.video.last_pts_ms.expect("video") + 1000.0 / 60.0;
-        let audio_end = recording.audio.last_pts_ms.expect("audio");
+        // Both tracks end at the stop time, within a frame or a block.
+        let video_end = recording.video.end_ms.expect("video");
+        let audio_end = recording.audio.end_ms.expect("audio");
         assert!(
-            (video_end - audio_end).abs() < 60.0,
+            (video_end - audio_end).abs() < 30.0,
             "{video_end} vs {audio_end}"
         );
         assert!(!status(&mut engine).recording_active);
@@ -535,6 +563,15 @@ mod tests {
             b"precious"
         );
         assert!(!status(&mut engine).recording_active);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_output_directory_is_not_found() {
+        let dir = TempDir::new("missing");
+        let mut engine = engine().with_output_dir(dir.0.join("absent"));
+        let err = start(&mut engine, json!({"file_name": "a.mkv"})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound, "{err}");
     }
 
     #[cfg(target_os = "linux")]

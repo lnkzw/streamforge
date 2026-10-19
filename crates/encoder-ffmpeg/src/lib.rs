@@ -3,9 +3,9 @@
 //! A [`Recorder`] owns a `recorder` thread that converts, encodes and muxes.
 //! Producers (compositor, mixer) feed it through a cloneable
 //! [`RecorderInput`] that never blocks. When the bounded queue is full, items
-//! are dropped and counted. Timestamps come from one monotonic clock: video in
-//! microseconds and audio in sample frames, both relative to the recording
-//! start.
+//! are dropped and counted. Timestamps are [`MediaTimestamp`]s with explicit
+//! time bases on one monotonic timeline that starts at the recording start;
+//! the recorder rescales them (checked) into the encoder time bases.
 //!
 //! FFmpeg is linked through `ffmpeg-next` on Linux. On other platforms
 //! [`Recorder::start`] returns [`RecorderErrorKind::Unsupported`] (M9).
@@ -16,11 +16,11 @@ mod audio_fifo;
 mod ffmpeg;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 
-use media_core::VideoFrame;
+use media_core::{MediaTimestamp, VideoFrame};
 
 pub use audio_fifo::{AudioFifo, FifoStats, MAX_GAP_FILL};
 pub use encoder_api::{
@@ -41,37 +41,53 @@ const QUEUE_CAPACITY: usize = 256;
 pub(crate) enum Item {
     Video {
         frame: VideoFrame,
-        pts_us: i64,
+        pts: MediaTimestamp,
     },
     Audio {
         samples: [f32; MAX_AUDIO_BLOCK_SAMPLES],
         len: usize,
-        /// Timestamp of the first frame, in sample frames.
-        pts: i64,
+        /// Timestamp of the first frame.
+        pts: MediaTimestamp,
     },
     Stop,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct Counters {
+/// State shared by the recorder thread, its owner and the producers.
+#[derive(Debug)]
+pub(crate) struct Shared {
     pub video_dropped: AtomicU64,
     pub audio_dropped: AtomicU64,
+    /// Items stamped at or after this time (ns) are not recorded.
+    pub end_ns: AtomicI64,
+    /// Set by the recorder thread when encoding or writing failed.
+    pub failed: AtomicBool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            video_dropped: AtomicU64::new(0),
+            audio_dropped: AtomicU64::new(0),
+            end_ns: AtomicI64::new(i64::MAX),
+            failed: AtomicBool::new(false),
+        }
+    }
 }
 
 /// Non-blocking producer handle; clone it for each producer.
 #[derive(Clone)]
 pub struct RecorderInput {
     tx: SyncSender<Item>,
-    counters: Arc<Counters>,
+    shared: Arc<Shared>,
 }
 
 impl RecorderInput {
-    /// Queue a Bgra8/Bgrx8 frame with its presentation time in microseconds.
-    /// Returns `false` (and counts a drop) if the queue is full or closed.
-    pub fn send_video(&self, frame: VideoFrame, pts_us: i64) -> bool {
-        let sent = self.tx.try_send(Item::Video { frame, pts_us }).is_ok();
+    /// Queue a Bgra8/Bgrx8 frame with its presentation time. Returns `false`
+    /// (and counts a drop) if the queue is full or the recorder has ended.
+    pub fn send_video(&self, frame: VideoFrame, pts: MediaTimestamp) -> bool {
+        let sent = self.tx.try_send(Item::Video { frame, pts }).is_ok();
         if !sent {
-            self.counters.video_dropped.fetch_add(1, Ordering::Relaxed);
+            self.count_dropped_video();
         }
         sent
     }
@@ -79,38 +95,20 @@ impl RecorderInput {
     /// Count a video frame the producer could not even prepare (e.g. no free
     /// copy buffer), so it shows up in `frames_dropped`.
     pub fn count_dropped_video(&self) {
-        self.counters.video_dropped.fetch_add(1, Ordering::Relaxed);
+        self.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Like [`Self::send_video`] but waits for queue space instead of
     /// dropping; for offline sources that may produce faster than real time.
     /// Returns `false` only if the recorder has stopped.
-    pub fn send_video_blocking(&self, frame: VideoFrame, pts_us: i64) -> bool {
-        self.tx.send(Item::Video { frame, pts_us }).is_ok()
+    pub fn send_video_blocking(&self, frame: VideoFrame, pts: MediaTimestamp) -> bool {
+        self.tx.send(Item::Video { frame, pts }).is_ok()
     }
 
-    /// Like [`Self::send_audio`] but waits for queue space; see
-    /// [`Self::send_video_blocking`].
-    pub fn send_audio_blocking(&self, samples: &[f32], pts: i64) -> bool {
-        if samples.len() > MAX_AUDIO_BLOCK_SAMPLES {
-            self.counters.audio_dropped.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
-        block[..samples.len()].copy_from_slice(samples);
-        self.tx
-            .send(Item::Audio {
-                samples: block,
-                len: samples.len(),
-                pts,
-            })
-            .is_ok()
-    }
-
-    /// Queue interleaved samples whose first frame has timestamp `pts`
-    /// (in sample frames). Copies into a fixed-size message; does not
-    /// allocate. Blocks larger than [`MAX_AUDIO_BLOCK_SAMPLES`] are dropped.
-    pub fn send_audio(&self, samples: &[f32], pts: i64) -> bool {
+    /// Queue interleaved samples whose first frame has timestamp `pts`.
+    /// Copies into a fixed-size message; does not allocate. Blocks larger
+    /// than [`MAX_AUDIO_BLOCK_SAMPLES`] are dropped and counted.
+    pub fn send_audio(&self, samples: &[f32], pts: MediaTimestamp) -> bool {
         let sent = samples.len() <= MAX_AUDIO_BLOCK_SAMPLES && {
             let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
             block[..samples.len()].copy_from_slice(samples);
@@ -123,9 +121,27 @@ impl RecorderInput {
                 .is_ok()
         };
         if !sent {
-            self.counters.audio_dropped.fetch_add(1, Ordering::Relaxed);
+            self.shared.audio_dropped.fetch_add(1, Ordering::Relaxed);
         }
         sent
+    }
+
+    /// Like [`Self::send_audio`] but waits for queue space; see
+    /// [`Self::send_video_blocking`].
+    pub fn send_audio_blocking(&self, samples: &[f32], pts: MediaTimestamp) -> bool {
+        if samples.len() > MAX_AUDIO_BLOCK_SAMPLES {
+            self.shared.audio_dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
+        block[..samples.len()].copy_from_slice(samples);
+        self.tx
+            .send(Item::Audio {
+                samples: block,
+                len: samples.len(),
+                pts,
+            })
+            .is_ok()
     }
 }
 
@@ -144,12 +160,12 @@ impl Recorder {
     pub fn start(config: RecorderConfig) -> Result<Self, RecorderError> {
         let (tx, rx) = sync_channel(QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = sync_channel(1);
-        let counters = Arc::new(Counters::default());
+        let shared = Arc::new(Shared::default());
         let thread = thread::Builder::new()
             .name("recorder".to_owned())
             .spawn({
-                let counters = Arc::clone(&counters);
-                move || run(config, rx, ready_tx, counters)
+                let shared = Arc::clone(&shared);
+                move || run(config, rx, ready_tx, shared)
             })
             .map_err(|err| {
                 RecorderError::new(
@@ -159,7 +175,7 @@ impl Recorder {
             })?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {
-                input: RecorderInput { tx, counters },
+                input: RecorderInput { tx, shared },
                 thread: Some(thread),
             }),
             // Setup failed: the thread ends with that error.
@@ -175,6 +191,25 @@ impl Recorder {
 
     pub fn input(&self) -> RecorderInput {
         self.input.clone()
+    }
+
+    /// Set the end of the recording: items stamped at or after `end` are not
+    /// recorded (counted as `*_after_end`). Producers run on until they are
+    /// stopped, so this gives both tracks the same end.
+    pub fn end_at(&self, end: MediaTimestamp) {
+        let end_ns = end
+            .to_nanoseconds()
+            .map_or(i64::MAX, |ns| i64::try_from(ns).unwrap_or(i64::MAX));
+        self.input.shared.end_ns.store(end_ns, Ordering::Release);
+    }
+
+    /// `false` once encoding or writing has failed (the file is finalized as
+    /// far as possible; [`Self::stop`] returns the error) or the thread ended.
+    pub fn is_running(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+            && !self.input.shared.failed.load(Ordering::Acquire)
     }
 
     /// Encode everything queued, flush the encoders and finalize the file.
@@ -216,9 +251,9 @@ fn run(
     config: RecorderConfig,
     rx: Receiver<Item>,
     ready: SyncSender<Result<(), RecorderError>>,
-    counters: Arc<Counters>,
+    shared: Arc<Shared>,
 ) -> RecorderResult {
-    ffmpeg::run(config, rx, ready, counters)
+    ffmpeg::run(config, rx, ready, shared)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -226,7 +261,7 @@ fn run(
     _config: RecorderConfig,
     _rx: Receiver<Item>,
     ready: SyncSender<Result<(), RecorderError>>,
-    _counters: Arc<Counters>,
+    _shared: Arc<Shared>,
 ) -> RecorderResult {
     let error = RecorderError::new(
         RecorderErrorKind::Unsupported,

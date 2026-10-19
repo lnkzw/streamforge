@@ -2,11 +2,12 @@
 //! file's streams, duration, A/V timestamp drift and decoded content.
 #![cfg(target_os = "linux")]
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+mod common;
+
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use common::EngineProcess;
 use ffmpeg_next as ff;
 use serde_json::Value;
 
@@ -32,31 +33,19 @@ impl Drop for TempDir {
     }
 }
 
-/// Send requests one by one (waiting for each response) to a fresh engine.
-fn session(output_dir: &PathBuf, steps: &[(&str, Option<Duration>)]) -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_streamforge-engine"))
-        .arg("--output-dir")
-        .arg(output_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn engine");
-    let mut stdin = child.stdin.take().expect("stdin");
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+/// Send requests one by one (waiting, bounded, for each response) to a fresh
+/// engine, then close stdin and wait for a clean exit.
+fn session(output_dir: &Path, steps: &[(&str, Option<Duration>)]) -> Vec<Value> {
+    let mut engine =
+        EngineProcess::spawn_with(&[std::ffi::OsStr::new("--output-dir"), output_dir.as_os_str()]);
     let mut responses = Vec::new();
     for (request, wait_after) in steps {
-        writeln!(stdin, "{request}").expect("write");
-        stdin.flush().expect("flush");
-        let mut line = String::new();
-        stdout.read_line(&mut line).expect("read response");
-        responses.push(serde_json::from_str(&line).expect("json"));
+        responses.push(engine.request(request));
         if let Some(wait) = wait_after {
             std::thread::sleep(*wait);
         }
     }
-    drop(stdin);
-    assert!(child.wait().expect("wait").success());
+    assert!(engine.finish().success());
     responses
 }
 
@@ -107,6 +96,8 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         .audio()
         .expect("decoder");
     assert_eq!((video.width(), video.height()), (1920, 1080));
+    assert_eq!(video.color_space(), ff::util::color::Space::SMPTE170M);
+    assert_eq!(video.color_range(), ff::util::color::Range::MPEG);
     assert_eq!(audio.rate(), 48_000);
     assert_eq!(audio.channel_layout().channels(), 2);
 

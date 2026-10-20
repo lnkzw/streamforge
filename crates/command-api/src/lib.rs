@@ -31,9 +31,11 @@ pub use scenes::{
     StripState, UpdateSourceRequest,
 };
 
+/// Entries of [`ScreenSourceList`], for adapters that do not use `capture-api`.
+pub use capture_api::ScreenSource;
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
-    ScreenSource, VideoCaptureReport,
+    VideoCaptureReport,
 };
 use encoder_api::StreamState;
 use serde::{Deserialize, Serialize};

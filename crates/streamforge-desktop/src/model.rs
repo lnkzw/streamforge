@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use command_api::{
     CommandError, CommandOutput, EngineStatus, MixerState, RecordingStarted, SceneList,
-    StreamingStarted,
+    ScreenSource, StreamingStarted,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -50,6 +50,9 @@ pub struct SourceForm {
     /// `None`: the whole canvas; otherwise x, y, width, height.
     pub rect: Option<[f32; 4]>,
     pub opacity: f32,
+    /// Screen sources: an id from [`Model::screen_sources`]; `None` opens
+    /// the system picker.
+    pub screen_source: Option<String>,
 }
 
 impl Default for SourceForm {
@@ -60,6 +63,7 @@ impl Default for SourceForm {
             color: [40, 90, 200, 255],
             rect: None,
             opacity: 1.0,
+            screen_source: None,
         }
     }
 }
@@ -76,6 +80,8 @@ enum Refresh {
 enum Pending {
     Refresh(Refresh),
     Action,
+    /// `list_screen_sources`; failing is normal where there is only a picker.
+    ScreenSources,
 }
 
 pub struct Model {
@@ -87,6 +93,9 @@ pub struct Model {
     pub preview_enabled: bool,
     pub recording: Option<RecordingStarted>,
     pub streaming: Option<StreamingStarted>,
+    /// Sources that can be captured by id, or why there are none (e.g. the
+    /// platform only has a picker); `None` until asked for.
+    pub screen_sources: Option<Result<Vec<ScreenSource>, String>>,
     pub log: VecDeque<LogEntry>,
 }
 
@@ -101,6 +110,7 @@ impl Model {
             preview_enabled: false,
             recording: None,
             streaming: None,
+            screen_sources: None,
             log: VecDeque::new(),
         };
         model.refresh_all();
@@ -164,6 +174,17 @@ impl Model {
         self.refresh(Refresh::Mixer);
     }
 
+    /// Ask the engine which screen sources can be captured by id.
+    pub fn find_screen_sources(&mut self) {
+        if !self
+            .pending
+            .values()
+            .any(|pending| matches!(pending, Pending::ScreenSources))
+        {
+            self.submit("list_screen_sources", json!({}), Pending::ScreenSources);
+        }
+    }
+
     pub fn create_scene(&mut self, name: &str) {
         self.act("create_scene", json!({ "name": name }));
     }
@@ -191,7 +212,12 @@ impl Model {
                 );
                 "solid"
             }
-            SourceType::Screen => "screen",
+            SourceType::Screen => {
+                if let Some(id) = &form.screen_source {
+                    params.insert("source_id".into(), id.clone().into());
+                }
+                "screen"
+            }
         };
         params.insert("kind".into(), kind.into());
         if let Some([x, y, width, height]) = form.rect {
@@ -264,6 +290,14 @@ impl Model {
         let changed = !responses.is_empty();
         for response in responses {
             let pending = self.pending.remove(&response.id);
+            if matches!(pending, Some(Pending::ScreenSources)) {
+                self.screen_sources = Some(match response.result {
+                    Ok(CommandOutput::ScreenSources(list)) => Ok(list.sources),
+                    Ok(other) => Err(format!("unexpected response: {other:?}")),
+                    Err(error) => Err(error.message),
+                });
+                continue;
+            }
             match response.result {
                 Ok(output) => self.apply(output),
                 Err(error) => self.failed(&response.name, &error),

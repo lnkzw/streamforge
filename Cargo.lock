@@ -757,6 +757,7 @@ name = "capture-platform"
 version = "0.1.0"
 dependencies = [
  "capture-api",
+ "capture-cpal",
  "capture-linux",
 ]
 

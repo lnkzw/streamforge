@@ -83,7 +83,7 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/ffmpeg.zip" "$base/$FFMPEG_BUILD.zip"
           curl -fsSL -o "$RUNNER_TEMP/checksums.sha256" "$base/checksums.sha256"
           expected=$(grep " $FFMPEG_BUILD.zip\$" "$RUNNER_TEMP/checksums.sha256" | cut -d' ' -f1)
-          actual=$(sha256sum "$RUNNER_TEMP/ffmpeg.zip" | cut -d' ' -f1)
+          actual=$(sha256sum < "$RUNNER_TEMP/ffmpeg.zip" | cut -d' ' -f1)
           echo "sha256 expected $expected, got $actual"
           test -n "$expected" && test "$expected" = "$actual"
           7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ffmpeg.zip" > /dev/null

@@ -537,11 +537,13 @@ mod tests {
         assert!(recording.file_bytes.is_some_and(|bytes| bytes > 1_000));
         assert_eq!(report.audio_captures.len(), 1);
         assert!(report.render.is_some() && report.mix.is_some());
-        // Both tracks end at the stop time, within a frame or a block.
+        // Both tracks end at the stop time, within a frame or a block, plus
+        // any counted trailing drops on a slow machine.
         let video_end = recording.video.end_ms.expect("video");
         let audio_end = recording.audio.end_ms.expect("audio");
+        let allowed = 30.0 + recording.video.frames_dropped as f64 * 1000.0 / 60.0;
         assert!(
-            (video_end - audio_end).abs() < 30.0,
+            (video_end - audio_end).abs() < allowed,
             "{video_end} vs {audio_end}"
         );
         assert!(!status(&mut engine).recording_active);

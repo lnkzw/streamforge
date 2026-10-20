@@ -74,7 +74,9 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     let encoded = count(&report["video"]["frames_encoded"]);
     let dropped = count(&report["video"]["frames_dropped"]);
     let skipped = count(&responses[2]["result"]["render"]["skipped_ticks"]);
-    let end_ms = report["video"]["end_ms"].as_f64().expect("video end");
+    // The audio track has no drops, so its end marks the cut-off; trailing
+    // video frames may be among the dropped ones.
+    let end_ms = report["audio"]["end_ms"].as_f64().expect("audio end");
     let ticks = (end_ms * 60.0 / 1000.0).round() as u64;
     assert!(
         (encoded + dropped + skipped).abs_diff(ticks) <= 1,
@@ -127,6 +129,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
 
     // Timestamps, A/V drift and decoded content.
     let mut ends = [f64::MIN; 2];
+    let mut starts = [f64::MAX; 2];
     let mut first_picture_checked = false;
     let (mut sum_squares, mut samples_seen) = (0f64, 0u64);
     let mut picture = ff::frame::Video::empty();
@@ -134,6 +137,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     for (stream, packet) in input.packets() {
         let Some(pts) = packet.pts() else { continue };
         if stream.index() == video_index {
+            starts[0] = starts[0].min(pts as f64 * f64::from(video_tb));
             ends[0] = ends[0].max((pts + packet.duration()) as f64 * f64::from(video_tb));
             if !first_picture_checked {
                 video.send_packet(&packet).expect("send");
@@ -143,6 +147,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
                 }
             }
         } else if stream.index() == audio_index {
+            starts[1] = starts[1].min(pts as f64 * f64::from(audio_tb));
             ends[1] = ends[1].max((pts + packet.duration()) as f64 * f64::from(audio_tb));
             audio.send_packet(&packet).expect("send");
             while audio.receive_frame(&mut sound).is_ok() {
@@ -156,13 +161,18 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         }
     }
     assert!(first_picture_checked, "no video frame decoded");
+    // Dropped trailing frames shorten the video track; allow exactly them.
     let drift = (ends[0] - ends[1]).abs();
+    let allowed = 0.05 + dropped as f64 / 60.0;
     assert!(
-        drift < 0.05,
-        "A/V end drift {drift:.3} s (video {:.3}, audio {:.3})",
+        drift < allowed,
+        "A/V end drift {drift:.3} s > {allowed:.3} s (video {:.3}, audio {:.3})",
         ends[0],
         ends[1]
     );
+    // Starts are not affected by drops at the end.
+    let start_drift = (starts[0] - starts[1]).abs();
+    assert!(start_drift < 0.05, "A/V start drift {start_drift:.3} s");
     let rms_db = 10.0 * (sum_squares / samples_seen as f64).log10();
     assert!((rms_db + 15.05).abs() < 0.6, "audio rms {rms_db:.2} dBFS");
 }

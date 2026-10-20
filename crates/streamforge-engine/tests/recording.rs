@@ -1,6 +1,5 @@
 //! M5 acceptance: record through the real engine process, then verify the
 //! file's streams, duration, A/V timestamp drift and decoded content.
-#![cfg(target_os = "linux")]
 
 mod common;
 

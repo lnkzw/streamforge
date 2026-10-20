@@ -587,7 +587,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     fn start(
         engine: &mut Engine,
         params: serde_json::Value,
@@ -595,7 +594,6 @@ mod tests {
         engine.handle(Command::decode("start_recording", Some(&params)).expect("decode"))
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn recording_lifecycle_produces_a_finalized_file() {
         let _media = media_test_lock();
@@ -657,7 +655,6 @@ mod tests {
         assert_eq!(stop_again.code, ErrorCode::InvalidState);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn existing_files_are_never_overwritten() {
         let dir = TempDir::new("no-overwrite");
@@ -674,7 +671,6 @@ mod tests {
 
     /// Start streaming to `url`, retrying while the test server is not
     /// listening yet.
-    #[cfg(target_os = "linux")]
     fn start_streaming(engine: &mut Engine, params: serde_json::Value) -> CommandOutput {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -692,7 +688,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn streams_the_pipeline_to_a_local_server() {
         let _media = media_test_lock();
@@ -737,7 +732,6 @@ mod tests {
         assert!(video.end_s - video.first_s > 1.0, "{video:?}");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn recording_continues_when_the_stream_fails() {
         let _media = media_test_lock();
@@ -1054,7 +1048,6 @@ mod tests {
         assert!(preview.frames_published.is_some());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn open_outputs_never_wait_for_a_picker() {
         let _media = media_test_lock();
@@ -1085,7 +1078,6 @@ mod tests {
         engine.handle(Command::StopRecording).expect("stop");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_recording_shows_the_active_scene() {
         let _media = media_test_lock();
@@ -1110,7 +1102,6 @@ mod tests {
         assert_eq!(names, ["fill"]);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn missing_output_directory_is_not_found() {
         let dir = TempDir::new("missing");
@@ -1119,7 +1110,6 @@ mod tests {
         assert_eq!(err.code, ErrorCode::NotFound, "{err}");
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn dropping_the_engine_finalizes_the_recording() {
         let _media = media_test_lock();

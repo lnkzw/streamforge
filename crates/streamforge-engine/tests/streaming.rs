@@ -1,6 +1,5 @@
 //! M6 acceptance through the real engine process: stream to a local RTMP
 //! server, and keep recording when the stream fails.
-#![cfg(target_os = "linux")]
 
 mod common;
 

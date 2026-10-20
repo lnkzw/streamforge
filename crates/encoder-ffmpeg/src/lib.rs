@@ -9,12 +9,11 @@
 //! timeline that starts at the output's start; the output rescales them
 //! (checked) into the encoder time bases.
 //!
-//! FFmpeg is linked through `ffmpeg-next` on Linux. On other platforms the
-//! outputs return [`RecorderErrorKind::Unsupported`] (M9). Binaries inherit
+//! FFmpeg is linked through `ffmpeg-next` on Linux, Windows and macOS (see
+//! `docs/platforms.md` for how each gets its libraries). Binaries inherit
 //! the license of the FFmpeg build they link (often GPL).
 
 mod audio_fifo;
-#[cfg(target_os = "linux")]
 mod ffmpeg;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
@@ -50,8 +49,6 @@ pub(crate) fn monotonic_ns() -> i64 {
 // Audio blocks travel inline so the mixer thread never allocates; the
 // bounded channel preallocates its slots once.
 #[allow(clippy::large_enum_variant)]
-// Only the Linux outputs read the payloads.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum Item {
     Video {
         frame: VideoFrame,
@@ -393,7 +390,6 @@ impl Drop for Streamer {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn run_recorder(
     config: RecorderConfig,
     rx: Receiver<Item>,
@@ -403,7 +399,6 @@ fn run_recorder(
     ffmpeg::record::run(config, rx, ready, shared)
 }
 
-#[cfg(target_os = "linux")]
 fn run_streamer(
     config: StreamConfig,
     rx: Receiver<Item>,
@@ -411,38 +406,4 @@ fn run_streamer(
     shared: Arc<Shared>,
 ) -> Result<StreamStats, RecorderError> {
     ffmpeg::stream::run(config, rx, ready, shared)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_recorder(
-    _config: RecorderConfig,
-    _rx: Receiver<Item>,
-    ready: Ready,
-    _shared: Arc<Shared>,
-) -> Result<RecordingStats, RecorderError> {
-    unsupported(ready)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run_streamer(
-    _config: StreamConfig,
-    _rx: Receiver<Item>,
-    ready: Ready,
-    _shared: Arc<Shared>,
-) -> Result<StreamStats, RecorderError> {
-    unsupported(ready)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn unsupported<T>(ready: Ready) -> Result<T, RecorderError> {
-    let error = RecorderError::new(
-        RecorderErrorKind::Unsupported,
-        format!(
-            "recording and streaming are not implemented on {} yet; Linux is supported, \
-             other platforms follow in M9",
-            std::env::consts::OS
-        ),
-    );
-    let _ = ready.send(Err(error.clone()));
-    Err(error)
 }

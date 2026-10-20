@@ -14,7 +14,6 @@ use tokio::process::Command;
 type Client = RunningService<RoleClient, ()>;
 
 /// Tests that run encoders take turns, so small CI runners keep up.
-#[cfg(target_os = "linux")]
 static MEDIA: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct TempDir(std::path::PathBuf);
@@ -273,7 +272,6 @@ fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
     assert!(!started && !message.contains("SECRET"), "{message}");
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
     let _media = MEDIA.lock().await;
@@ -357,7 +355,8 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
 /// A termination signal (how clients usually stop stdio servers) still
 /// finalizes an open recording. Driven over raw JSON-RPC lines, since the
 /// SDK client kills its child on close.
-#[cfg(target_os = "linux")]
+// Sends SIGTERM with `kill`.
+#[cfg(unix)]
 #[test]
 fn sigterm_finalizes_an_open_recording() {
     let _media = MEDIA.blocking_lock();

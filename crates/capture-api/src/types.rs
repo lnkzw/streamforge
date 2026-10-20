@@ -11,7 +11,7 @@ pub const MIN_PROBE_DURATION: Duration = Duration::from_millis(100);
 pub const MAX_PROBE_DURATION: Duration = Duration::from_secs(60);
 pub const DEFAULT_PROBE_DURATION: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoSourceKind {
     Monitor,
@@ -32,7 +32,7 @@ impl VideoSourceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorMode {
     /// Cursor is not part of the stream.

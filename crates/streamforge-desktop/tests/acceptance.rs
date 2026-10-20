@@ -150,12 +150,22 @@ fn preview_frames_reach_the_ui() {
         thread::sleep(Duration::from_millis(10));
     };
     assert_eq!((frame.width(), frame.height()), (480, 270));
-    // Levels flow while the pipeline runs.
-    wait(&mut model, "live levels", |m| {
-        m.mixer
-            .as_ref()
-            .is_some_and(|mixer| mixer.running && mixer.strips[0].peak_dbfs.is_some())
-    });
+    // Levels flow while the pipeline runs (polled, as the UI does).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !model
+        .mixer
+        .as_ref()
+        .is_some_and(|mixer| mixer.running && mixer.strips[0].peak_dbfs.is_some())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "no live levels; log: {:?}",
+            model.log
+        );
+        model.refresh_live();
+        model.update();
+        thread::sleep(Duration::from_millis(20));
+    }
     model.set_preview(false);
     wait(&mut model, "the preview to stop", |m| !m.preview_enabled);
 }

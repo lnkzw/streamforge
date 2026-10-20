@@ -12,6 +12,7 @@
 //! the monotonic clock; the fan-out converts it to media time relative to
 //! each output's epoch, so audio and video of an output share one timeline.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,11 @@ const PREVIEW_BUFFERS: usize = 3;
 /// Capture outcomes of removed screen sources kept for the report (the most
 /// recent ones; older ones are counted).
 const MAX_RETIRED_CAPTURES: usize = 64;
+/// How long finishing an output waits for producers running late.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// Frames and mixer blocks per second (both exact integers).
+const FRAMES_PER_SECOND: i128 = FPS as i128;
+const BLOCKS_PER_SECOND: i128 = (audio_engine::RATE as usize / audio_engine::BLOCK_FRAMES) as i128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputId {
@@ -230,17 +236,42 @@ impl Pipeline {
     /// Feed `input` from now on; returns the output's epoch (media time 0).
     pub fn attach(&self, id: OutputId, input: OutputInput) -> Instant {
         let t0 = Instant::now();
+        let progress = Arc::new(Progress::default());
         lock(&self.fanout.video).push(VideoOut {
             id,
             input: input.clone(),
             pool: FramePool::new(VIDEO_COPY_BUFFERS),
             t0,
+            progress: Arc::clone(&progress),
         });
-        lock(&self.fanout.audio).push(AudioOut { id, input, t0 });
+        lock(&self.fanout.audio).push(AudioOut {
+            id,
+            input,
+            t0,
+            progress,
+        });
         t0
     }
 
-    pub fn detach(&self, id: OutputId) {
+    /// Detach output `id` once both producers have handed it everything
+    /// stamped before `end` (its recorder or streamer cuts at `end`), so
+    /// both tracks end together even if a producer runs a few frames late.
+    /// Waits at most [`DRAIN_TIMEOUT`]; frames and blocks still missing then
+    /// are counted as dropped, never lost silently.
+    pub fn finish_output(&self, id: OutputId, end: MediaTimestamp) {
+        let end_ns = end.ticks;
+        let found = lock(&self.fanout.video)
+            .iter()
+            .find(|out| out.id == id)
+            .map(|out| (Arc::clone(&out.progress), out.input.clone()));
+        if let Some((progress, input)) = found {
+            let deadline = Instant::now() + DRAIN_TIMEOUT;
+            while !progress.past(end_ns) && Instant::now() < deadline && self.is_running() {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let (video, audio) = progress.missing_before(end_ns);
+            input.count_dropped(video, audio);
+        }
         lock(&self.fanout.video).retain(|out| out.id != id);
         lock(&self.fanout.audio).retain(|out| out.id != id);
     }
@@ -505,12 +536,58 @@ struct VideoOut {
     input: OutputInput,
     pool: FramePool,
     t0: Instant,
+    progress: Arc<Progress>,
 }
 
 struct AudioOut {
     id: OutputId,
     input: OutputInput,
     t0: Instant,
+    progress: Arc<Progress>,
+}
+
+/// Media time (ns) of the latest frame and block handed to an output.
+struct Progress {
+    video: AtomicI64,
+    audio: AtomicI64,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            video: AtomicI64::new(-1),
+            audio: AtomicI64::new(-1),
+        }
+    }
+}
+
+impl Progress {
+    /// Both producers handed over something stamped at or after `end_ns`.
+    fn past(&self, end_ns: i64) -> bool {
+        self.video.load(Ordering::Acquire) >= end_ns && self.audio.load(Ordering::Acquire) >= end_ns
+    }
+
+    /// Frames and blocks stamped before `end_ns` that were never handed over.
+    /// Producers stamp exact multiples of their period, so indices follow
+    /// from the rates without accumulated rounding.
+    fn missing_before(&self, end_ns: i64) -> (u64, u64) {
+        const NS: i128 = 1_000_000_000;
+        let missing = |handled: i64, per_second: i128| {
+            // Items before the end: ceil(end * rate / 1 s).
+            let before_end = (i128::from(end_ns) * per_second + NS - 1).div_euclid(NS);
+            // Index of the next item owed: after the one handed over last.
+            let next = if handled < 0 {
+                0
+            } else {
+                (i128::from(handled) * per_second + NS / 2).div_euclid(NS) + 1
+            };
+            u64::try_from(before_end - next).unwrap_or(0)
+        };
+        (
+            missing(self.video.load(Ordering::Acquire), FRAMES_PER_SECOND),
+            missing(self.audio.load(Ordering::Acquire), BLOCKS_PER_SECOND),
+        )
+    }
 }
 
 struct PreviewOut {
@@ -539,6 +616,7 @@ impl FrameSink for VideoTap {
             let Some(pts) = since(out.t0, presented_at) else {
                 continue;
             };
+            out.progress.video.store(pts.ticks, Ordering::Release);
             let Some(mut buffer) = out.pool.acquire(frame.data().len()) else {
                 out.input.count_dropped_video();
                 continue;
@@ -591,6 +669,7 @@ impl BlockSink for AudioTap {
         for out in lock(&self.0.audio).iter() {
             if let Some(pts) = since(out.t0, at) {
                 out.input.send_audio(samples, pts);
+                out.progress.audio.store(pts.ticks, Ordering::Release);
             }
         }
     }
@@ -616,4 +695,28 @@ fn internal(error: impl std::fmt::Display) -> CommandError {
         ErrorCode::Internal,
         format!("media pipeline failed: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_media_before_the_end_is_counted_exactly() {
+        let progress = Progress::default();
+        let ms = |value: i64| value * 1_000_000;
+        // Nothing handed over yet: every frame (0, 16.7, 33.3 ms) and block
+        // (0..40 ms) before 50 ms is missing.
+        assert_eq!(progress.missing_before(ms(50)), (3, 5));
+        progress.video.store(33_333_333, Ordering::Release);
+        progress.audio.store(ms(20), Ordering::Release);
+        // The frame at 33.3 ms is the last before 50 ms: nothing missing;
+        // blocks at 30 and 40 ms are.
+        assert_eq!(progress.missing_before(ms(50)), (0, 2));
+        assert!(!progress.past(ms(50)));
+        progress.video.store(ms(50), Ordering::Release);
+        progress.audio.store(ms(50), Ordering::Release);
+        assert!(progress.past(ms(50)));
+        assert_eq!(progress.missing_before(ms(50)), (0, 0));
+    }
 }

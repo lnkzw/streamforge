@@ -36,6 +36,8 @@ On Linux, CI installs `libpipewire-0.3-dev` and `libclang-dev` for `capture-linu
 
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
+Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. The drops are counted, but these tests assert that nothing is lost. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+
 ## Where tests live
 
 - `crates/command-api`: unit tests for registry consistency, parameter decoding and result serialization.
@@ -79,6 +81,14 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
   - rollback of a failing live change
   - mixer control with levels
   - a recording of a user scene
+- `crates/command-api` (access): generated parameter schemas (objects, no `$ref`, enums, required fields), per-call access of `add_source`, `AccessPolicy` and `Gated`.
+- `crates/engine` (`thread`): `EngineThread` serves calls from several threads; a stopped engine is an `internal` error.
+- `crates/streamforge-mcp/tests/mcp.rs`: M8 acceptance. The official rmcp client drives the real `streamforge-mcp` binary:
+  - read-only default (listing, denial, unknown tool)
+  - creating a test scene under `--allow control`; screen sources and `delete_scene` denied
+  - streaming only with a configured target, redirects refused, and the key absent from everything the agent sees (Linux, in-process RTMP ingest)
+  - startup checks of the target
+- `crates/streamforge-engine/tests/stdio_protocol.rs`: `--allow read-only` denies a control command.
 - `crates/streamforge-desktop/tests/acceptance.rs`: M7 acceptance through the UI model (the layer the widgets call), against the real engine on its worker thread. It creates a scene, adds a source, activates it and records, and checks that engine errors reach the log and that preview frames and levels arrive. The egui layer itself is checked by starting the app.
 - `crates/engine` (Linux): the recording lifecycle, including:
   - `invalid_state` on a double start, on probes while recording, and on a stop without a recording

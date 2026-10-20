@@ -71,7 +71,10 @@ Recording (M5, ADR 0005) puts both producers on one timeline:
   - larger jumps restart the timeline and are counted as `discontinuities`
 - **Late frames and missing audio:** both keep their nominal timestamps, so a late frame does not shift later ones. A missing live input reads as silence in the mix (`underrun_frames`), so the audio track stays continuous.
 - **Explicit time bases:** the taps hand the recorder `MediaTimestamp`s in nanoseconds. The recorder rescales them into 1/fps and 1/48000 with checked, rounded integer arithmetic (`MediaTimestamp::rescale`). A timestamp that cannot be converted drops its item and counts it.
-- **Common end:** on stop, the engine sets one end time before stopping the producers one after the other. Items stamped at or after it are not recorded and are counted (`frames_after_end`, `blocks_after_end`), so both tracks end within one frame or block of each other.
+- **Common end:** on stop, the engine sets one end time for the output. It then waits (at most 500 ms) until both producers have handed over everything stamped before it, because a compositor running late still owes frames. Only then does it detach the output.
+  - Items stamped at or after the end are not recorded and are counted (`frames_after_end`, `blocks_after_end`).
+  - Items still owed after the wait are counted as dropped.
+  - Both tracks end within one frame or block of each other, and nothing before the end is lost silently.
 - **Per-output epochs:** every output's media time 0 is the moment it was attached; frames and blocks from before that are not part of it. A stream additionally restarts its timeline at 0 with each connection, starting at the connection's first video frame (a keyframe).
 - **Capture latency:** not compensated yet. Live audio is stamped when mixed, about one jitter-buffer target after capture; screen frames are stamped when composited.
 

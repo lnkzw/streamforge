@@ -7,6 +7,8 @@ use capture_api::{
     AudioCaptureRequest, CursorMode, DEFAULT_PROBE_DURATION, MAX_PROBE_DURATION,
     MIN_PROBE_DURATION, ScreenCaptureRequest, ScreenSelection, VideoSourceKind,
 };
+use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -23,8 +25,9 @@ use crate::{
 /// Permission class of a command.
 ///
 /// Adapters must require explicit authorization for anything other than
-/// [`CommandAccess::ReadOnly`]; enforcement arrives with agent integration (M8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// [`CommandAccess::ReadOnly`] (see [`crate::AccessPolicy`]). Levels are
+/// ordered: read-only < control < sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAccess {
     /// Inspects state without changing it.
@@ -35,6 +38,22 @@ pub enum CommandAccess {
     Sensitive,
 }
 
+impl std::str::FromStr for CommandAccess {
+    type Err = String;
+
+    /// `read-only` (or `read_only`), `control` or `sensitive`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "read-only" | "read_only" => Ok(Self::ReadOnly),
+            "control" => Ok(Self::Control),
+            "sensitive" => Ok(Self::Sensitive),
+            _ => Err(format!(
+                "`{text}` is not an access level; use read-only, control or sensitive"
+            )),
+        }
+    }
+}
+
 /// Static metadata for one command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CommandDescriptor {
@@ -42,30 +61,56 @@ pub struct CommandDescriptor {
     pub name: &'static str,
     pub summary: &'static str,
     pub access: CommandAccess,
+    /// May overwrite, remove or end something (a scene, a gain, a running
+    /// output), as opposed to only adding or inspecting.
+    pub destructive: bool,
+    /// Talks to systems outside this machine (e.g. a streaming server).
+    pub open_world: bool,
+}
+
+impl CommandDescriptor {
+    /// The lowest access any call of this command can need (see
+    /// [`Command::required_access`]): `add_source` of color bars or a solid
+    /// color needs only control.
+    pub fn least_access(&self) -> CommandAccess {
+        if self.name == "add_source" {
+            CommandAccess::Control
+        } else {
+            self.access
+        }
+    }
 }
 
 const GET_STATUS: CommandDescriptor = CommandDescriptor {
     name: "get_status",
     summary: "Report engine status.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const LIST_COMMANDS: CommandDescriptor = CommandDescriptor {
     name: "list_commands",
     summary: "List commands supported by this engine.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const GET_CAPTURE_CAPABILITIES: CommandDescriptor = CommandDescriptor {
     name: "get_capture_capabilities",
     summary: "Query screen and audio capture capabilities of the running system.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const LIST_AUDIO_INPUTS: CommandDescriptor = CommandDescriptor {
     name: "list_audio_inputs",
     summary: "List audio input devices.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const PROBE_SCREEN_CAPTURE: CommandDescriptor = CommandDescriptor {
@@ -74,6 +119,8 @@ const PROBE_SCREEN_CAPTURE: CommandDescriptor = CommandDescriptor {
               Params: duration_ms (100..=60000, default 5000), source_types ([\"monitor\",\"window\",\"virtual\"], \
               default [\"monitor\",\"window\"]), cursor (\"hidden\"|\"embedded\"|\"metadata\", default \"embedded\").",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const PROBE_AUDIO_CAPTURE: CommandDescriptor = CommandDescriptor {
@@ -81,6 +128,8 @@ const PROBE_AUDIO_CAPTURE: CommandDescriptor = CommandDescriptor {
     summary: "Capture an audio input and report format, levels, timestamps and drops; no audio is stored. \
               Params: input (name from list_audio_inputs, default: system default), duration_ms (100..=60000, default 5000).",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
@@ -91,6 +140,8 @@ const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
               cursor (only with screen), snapshot_path (plain .ppm file name, written to the engine's output \
               directory, never overwritten).",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
@@ -101,6 +152,8 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
               ([{frequency_hz, level_dbfs, gain_db, mute}]), master_gain_db; up to 8 sources, \
               default one 1 kHz test tone.",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
@@ -113,12 +166,16 @@ const START_RECORDING: CommandDescriptor = CommandDescriptor {
               for this run and add a screen layer. Returns immediately; recording continues \
               until stop_recording.",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const STOP_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "stop_recording",
     summary: "Stop the running recording, finalize the file and report its statistics.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const START_STREAMING: CommandDescriptor = CommandDescriptor {
@@ -130,24 +187,32 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
               start_recording. Returns once connected; reconnects after errors; independent of \
               recording.",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: true,
 };
 
 const STOP_STREAMING: CommandDescriptor = CommandDescriptor {
     name: "stop_streaming",
     summary: "Stop the live stream, disconnect and report its connection history.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const LIST_SCENES: CommandDescriptor = CommandDescriptor {
     name: "list_scenes",
     summary: "List the scenes with their sources, the active scene and the canvas size.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "create_scene",
     summary: "Create an empty scene. Params: name (1-64 characters, unique). Returns the scene list.",
     access: CommandAccess::Control,
+    destructive: false,
+    open_world: false,
 };
 
 const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
@@ -155,6 +220,8 @@ const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
     summary: "Delete a scene that is not active; irreversible. Params: name, confirm (must be \
               true). Returns the scene list.",
     access: CommandAccess::Sensitive,
+    destructive: true,
+    open_world: false,
 };
 
 const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
@@ -163,6 +230,8 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
               screen sources start capturing, which opens the system picker). Params: name. \
               Returns the scene list.",
     access: CommandAccess::Sensitive,
+    destructive: true,
+    open_world: false,
 };
 
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
@@ -173,6 +242,8 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
               sources start capturing (system picker) when the scene is rendered. Returns the \
               scene list.",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
@@ -180,18 +251,24 @@ const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     summary: "Move, resize or fade a source. Params: scene, name, and any of x, y, width, height, \
               opacity. Returns the scene list.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "remove_source",
     summary: "Remove a source from a scene. Params: scene, name. Returns the scene list.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const GET_MIXER: CommandDescriptor = CommandDescriptor {
     name: "get_mixer",
     summary: "Mixer strips with gain, mute and the peak level since the previous call.",
     access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
 };
 
 const SET_MIXER_STRIP: CommandDescriptor = CommandDescriptor {
@@ -199,6 +276,8 @@ const SET_MIXER_STRIP: CommandDescriptor = CommandDescriptor {
     summary: "Change one strip (live if running). Params: index, gain_db (-96..24), mute. Returns \
               the mixer state.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const SET_MASTER_GAIN: CommandDescriptor = CommandDescriptor {
@@ -206,6 +285,8 @@ const SET_MASTER_GAIN: CommandDescriptor = CommandDescriptor {
     summary: "Change the master gain (live if running). Params: gain_db (-96..24). Returns the \
               mixer state.",
     access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
 };
 
 const SET_AUDIO_SOURCES: CommandDescriptor = CommandDescriptor {
@@ -214,6 +295,8 @@ const SET_AUDIO_SOURCES: CommandDescriptor = CommandDescriptor {
               master_gain_db (as for probe_audio_mix; one -20 dBFS tone if neither inputs nor \
               tones are given). Returns the mixer state.",
     access: CommandAccess::Sensitive,
+    destructive: true,
+    open_world: false,
 };
 
 const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
@@ -221,6 +304,8 @@ const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     summary: "Run the pipeline for an in-process preview (quarter resolution, 30 FPS) or stop. \
               Params: enabled.",
     access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
 };
 
 const COMMANDS: &[CommandDescriptor] = &[
@@ -330,6 +415,25 @@ impl Command {
         }
     }
 
+    /// Access this particular command needs: its descriptor's class, except
+    /// `add_source` of a non-capturing source (color bars, solid), which is
+    /// `control` (only screen sources capture private content).
+    pub fn required_access(&self) -> CommandAccess {
+        match self {
+            // Listed explicitly: a new source kind needs the descriptor's
+            // (sensitive) access until it is known to capture nothing.
+            Self::AddSource(request)
+                if matches!(
+                    request.kind,
+                    SourceKind::ColorBars | SourceKind::Solid { .. }
+                ) =>
+            {
+                CommandAccess::Control
+            }
+            _ => self.descriptor().access,
+        }
+    }
+
     pub fn descriptor(&self) -> &'static CommandDescriptor {
         match self {
             Self::GetStatus => &GET_STATUS,
@@ -364,46 +468,62 @@ impl Command {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ScreenProbeParams {
+    /// Run time in milliseconds.
     duration_ms: Option<u64>,
+    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
+    /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AudioProbeParams {
+    /// Audio input name from list_audio_inputs; null for the system default.
     input: Option<String>,
+    /// Run time in milliseconds.
     duration_ms: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MixProbeParams {
+    /// Run time in milliseconds.
     duration_ms: Option<u64>,
+    /// Live audio inputs (names from list_audio_inputs).
     #[serde(default)]
     inputs: Vec<LiveInputParams>,
+    /// Test tones.
     #[serde(default)]
     tones: Vec<ToneParams>,
+    /// Master gain in dB, -96 to 24.
     master_gain_db: Option<f32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct LiveInputParams {
+    /// Audio input name from list_audio_inputs; null for the system default.
     input: Option<String>,
+    /// Gain in dB, -96 to 24.
     gain_db: Option<f32>,
+    /// Mute this strip.
     mute: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ToneParams {
+    /// Tone frequency in Hz (below 24000).
     frequency_hz: f64,
+    /// Tone level in dBFS, -96 to 0 (default -12).
     level_dbfs: Option<f64>,
+    /// Gain in dB, -96 to 24.
     gain_db: Option<f32>,
+    /// Mute this strip.
     mute: Option<bool>,
 }
 
@@ -575,15 +695,22 @@ pub fn default_sources() -> MediaSources {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StartRecordingParams {
+    /// Plain .mkv file name, created in the engine's output directory; never overwrites.
     file_name: String,
+    /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
+    /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
+    /// Live audio inputs (names from list_audio_inputs).
     inputs: Option<Vec<LiveInputParams>>,
+    /// Test tones.
     tones: Option<Vec<ToneParams>>,
+    /// Master gain in dB, -96 to 24.
     master_gain_db: Option<f32>,
 }
 
@@ -613,22 +740,67 @@ const VIDEO_BITRATE_KBPS: std::ops::RangeInclusive<u32> = 300..=50_000;
 const MAX_RECONNECT_ATTEMPTS: u32 = 100;
 const RECONNECT_DELAY_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StartStreamingParams {
+    /// rtmp:// or rtmps:// server URL with host and application, without credentials or key.
     url: String,
-    /// Raw JSON so a wrongly typed key is rejected without serde quoting
-    /// its value in the error message.
+    // Raw JSON so a wrongly typed key is rejected without serde quoting
+    // its value in the error message.
+    /// Secret stream key, appended to the URL when connecting; never echoed.
+    #[schemars(with = "Option<String>")]
     stream_key: Option<Value>,
+    /// Constant video bit rate in kbit/s, 300 to 50000 (default 6000).
     video_bitrate_kbps: Option<u32>,
+    /// Reconnect attempts after a lost connection, 0 to 100 (default 5).
     reconnect_attempts: Option<u32>,
+    /// Wait before the first reconnect in ms, doubling up to 30 s (default 1000).
     reconnect_delay_ms: Option<u64>,
+    /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
+    /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
+    /// Live audio inputs (names from list_audio_inputs).
     inputs: Option<Vec<LiveInputParams>>,
+    /// Test tones.
     tones: Option<Vec<ToneParams>>,
+    /// Master gain in dB, -96 to 24.
     master_gain_db: Option<f32>,
+}
+
+/// Stands in for an adapter's fixed target while its parameters decode.
+const PLACEHOLDER_URL: &str = "rtmp://configured-target/app";
+
+/// `start_streaming` to a target the adapter fixed (its configuration),
+/// not one the client chooses: `url` and `stream_key` in `params` are
+/// refused (`permission_denied`); everything else decodes and validates as
+/// usual. Lets adapters keep credentials away from less trusted clients.
+pub fn decode_streaming_to(
+    target: StreamTarget,
+    params: Option<&Value>,
+) -> Result<Command, CommandError> {
+    const COMMAND: &str = "start_streaming";
+    let mut object = match params {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(object)) => object.clone(),
+        Some(other) => return Err(not_an_object(COMMAND, other)),
+    };
+    if let Some(field) = ["url", "stream_key"]
+        .into_iter()
+        .find(|field| object.contains_key(*field))
+    {
+        return Err(CommandError::new(
+            ErrorCode::PermissionDenied,
+            format!("`{field}` is fixed by the configuration; streaming goes only to its target"),
+        )
+        .with_details(json!({ "command": COMMAND, "field": field })));
+    }
+    object.insert("url".into(), PLACEHOLDER_URL.into());
+    let mut request = decode_start_streaming(COMMAND, Some(&Value::Object(object)))?;
+    request.target = target;
+    Ok(Command::StartStreaming(request))
 }
 
 fn decode_start_streaming(
@@ -722,9 +894,10 @@ fn valid_name(command: &str, field: &str, name: String) -> Result<String, Comman
     Ok(name)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SceneNameParams {
+    /// Scene name.
     name: String,
 }
 
@@ -733,10 +906,12 @@ fn decode_scene_name(command: &str, params: Option<&Value>) -> Result<String, Co
     valid_name(command, "name", params.name)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DeleteSceneParams {
+    /// Scene name.
     name: String,
+    /// Must be true: deleting a scene cannot be undone.
     confirm: Option<bool>,
 }
 
@@ -794,19 +969,31 @@ fn parse_color(command: &str, text: &str) -> Result<Rgba, CommandError> {
     Ok(Rgba([byte(0)?, byte(2)?, byte(4)?, alpha]))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddSourceParams {
+    /// Scene name.
     scene: String,
+    /// Source name, unique within the scene.
     name: String,
+    /// Source kind: color_bars, solid or screen.
+    #[schemars(extend("enum" = ["color_bars", "solid", "screen"]))]
     kind: String,
+    /// Solid sources: #rrggbb or #rrggbbaa.
     color: Option<String>,
+    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
+    /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
+    /// Left edge in canvas pixels.
     x: Option<f32>,
+    /// Top edge in canvas pixels.
     y: Option<f32>,
+    /// Width in canvas pixels.
     width: Option<f32>,
+    /// Height in canvas pixels.
     height: Option<f32>,
+    /// Opacity from 0 to 1.
     opacity: Option<f32>,
 }
 
@@ -885,15 +1072,22 @@ fn decode_add_source(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateSourceParams {
+    /// Scene name.
     scene: String,
+    /// Source name.
     name: String,
+    /// Left edge in canvas pixels.
     x: Option<f32>,
+    /// Top edge in canvas pixels.
     y: Option<f32>,
+    /// Width in canvas pixels.
     width: Option<f32>,
+    /// Height in canvas pixels.
     height: Option<f32>,
+    /// Opacity from 0 to 1.
     opacity: Option<f32>,
 }
 
@@ -933,10 +1127,12 @@ fn decode_update_source(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RemoveSourceParams {
+    /// Scene name.
     scene: String,
+    /// Source name.
     name: String,
 }
 
@@ -962,11 +1158,14 @@ fn gain_db(command: &str, field: &str, value: f32) -> Result<f32, CommandError> 
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MixerStripParams {
+    /// Mixer strip index (from get_mixer).
     index: usize,
+    /// Gain in dB, -96 to 24.
     gain_db: Option<f32>,
+    /// Mute this strip.
     mute: Option<bool>,
 }
 
@@ -985,9 +1184,10 @@ fn decode_mixer_strip(command: &str, params: Option<&Value>) -> Result<StripChan
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct MasterGainParams {
+    /// Gain in dB, -96 to 24.
     gain_db: f32,
 }
 
@@ -996,12 +1196,15 @@ fn decode_master_gain(command: &str, params: Option<&Value>) -> Result<f32, Comm
     gain_db(command, "gain_db", params.gain_db)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AudioSourcesParams {
+    /// Live audio inputs (names from list_audio_inputs).
     #[serde(default)]
     inputs: Vec<LiveInputParams>,
+    /// Test tones.
     tones: Option<Vec<ToneParams>>,
+    /// Master gain in dB, -96 to 24.
     master_gain_db: Option<f32>,
 }
 
@@ -1020,9 +1223,10 @@ fn decode_audio_sources(command: &str, params: Option<&Value>) -> Result<AudioSe
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PreviewParams {
+    /// Whether the preview keeps the pipeline running.
     enabled: bool,
 }
 
@@ -1031,13 +1235,18 @@ fn decode_preview(command: &str, params: Option<&Value>) -> Result<bool, Command
     Ok(params.enabled)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CompositeProbeParams {
+    /// Run time in milliseconds.
     duration_ms: Option<u64>,
+    /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
+    /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
+    /// Plain .ppm file name for a snapshot of the last frame.
     snapshot_path: Option<String>,
 }
 
@@ -1178,6 +1387,56 @@ fn duration_within(
         "min_ms": MIN_PROBE_DURATION.as_millis(),
         "max_ms": MAX_PROBE_DURATION.as_millis(),
     })))
+}
+
+/// JSON Schema (draft 2020-12, subschemas inlined) of a command's
+/// parameters, for adapters that describe commands to clients (MCP tools).
+/// Generated from the same structs `Command::decode` deserializes, so it
+/// cannot drift from validation. `None` for an unknown command.
+pub fn params_schema(name: &str) -> Option<Value> {
+    fn of<T: JsonSchema>() -> Value {
+        let generator = SchemaSettings::draft2020_12()
+            .with(|settings| settings.inline_subschemas = true)
+            .into_generator();
+        let mut schema = Value::from(generator.into_root_schema_for::<T>());
+        if let Some(object) = schema.as_object_mut() {
+            // Metadata of the Rust type, not of the command.
+            object.remove("$schema");
+            object.remove("title");
+        }
+        schema
+    }
+    let schema = match name {
+        "probe_screen_capture" => of::<ScreenProbeParams>(),
+        "probe_audio_capture" => of::<AudioProbeParams>(),
+        "probe_composite" => of::<CompositeProbeParams>(),
+        "probe_audio_mix" => of::<MixProbeParams>(),
+        "start_recording" => of::<StartRecordingParams>(),
+        "start_streaming" => of::<StartStreamingParams>(),
+        "create_scene" | "set_active_scene" => of::<SceneNameParams>(),
+        "delete_scene" => of::<DeleteSceneParams>(),
+        "add_source" => of::<AddSourceParams>(),
+        "update_source" => of::<UpdateSourceParams>(),
+        "remove_source" => of::<RemoveSourceParams>(),
+        "set_mixer_strip" => of::<MixerStripParams>(),
+        "set_master_gain" => of::<MasterGainParams>(),
+        "set_audio_sources" => of::<AudioSourcesParams>(),
+        "set_preview" => of::<PreviewParams>(),
+        // Listed explicitly so a new command without a mapping has no schema
+        // (and fails the registry test) instead of an empty one.
+        "get_status"
+        | "list_commands"
+        | "get_capture_capabilities"
+        | "list_audio_inputs"
+        | "stop_recording"
+        | "stop_streaming"
+        | "list_scenes"
+        | "get_mixer" => {
+            json!({"type": "object", "properties": {}, "additionalProperties": false})
+        }
+        _ => return None,
+    };
+    Some(schema)
 }
 
 fn decode_params<T: DeserializeOwned>(
@@ -1744,6 +2003,112 @@ mod tests {
     }
 
     #[test]
+    fn every_command_has_an_object_params_schema() {
+        for descriptor in registry() {
+            let schema = params_schema(descriptor.name)
+                .unwrap_or_else(|| panic!("{} has no schema", descriptor.name));
+            assert_eq!(schema["type"], "object", "{}: {schema}", descriptor.name);
+            assert_eq!(schema["additionalProperties"], false, "{}", descriptor.name);
+            // Inlined: no references a client would have to resolve.
+            assert!(!schema.to_string().contains("$ref"), "{}", descriptor.name);
+        }
+        assert_eq!(params_schema("nope"), None);
+        let add = params_schema("add_source").expect("schema");
+        assert_eq!(
+            add["properties"]["kind"]["enum"],
+            json!(["color_bars", "solid", "screen"])
+        );
+        assert_eq!(add["required"], json!(["scene", "name", "kind"]));
+        // The advertised kinds are exactly the ones the decoder accepts.
+        for kind in add["properties"]["kind"]["enum"].as_array().expect("kinds") {
+            let mut params = json!({"scene": "Main", "name": "s", "kind": kind});
+            if kind == "solid" {
+                params["color"] = json!("#000000");
+            }
+            assert!(
+                Command::decode("add_source", Some(&params)).is_ok(),
+                "{kind}"
+            );
+        }
+        assert!(
+            add["properties"]["opacity"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("0 to 1"))
+        );
+        // Enums keep their wire names (in whatever form schemars emits).
+        let probe = params_schema("probe_screen_capture").expect("schema");
+        let kinds = probe["properties"]["source_types"]["items"].to_string();
+        for kind in ["monitor", "window", "virtual"] {
+            assert!(kinds.contains(&format!("\"{kind}\"")), "{kinds}");
+        }
+    }
+
+    #[test]
+    fn streaming_to_a_fixed_target_refuses_url_and_key() {
+        let target = StreamTarget::new("rtmp://ingest.example/app", StreamKey::new("k-SECRET"))
+            .expect("target");
+        let Ok(Command::StartStreaming(request)) =
+            decode_streaming_to(target.clone(), Some(&json!({"video_bitrate_kbps": 3000})))
+        else {
+            panic!("decode");
+        };
+        assert_eq!(request.target, target);
+        assert_eq!(request.video_bitrate_kbps, 3000);
+        for params in [
+            json!({"url": "rtmp://evil/app"}),
+            json!({"stream_key": "x"}),
+        ] {
+            let err = decode_streaming_to(target.clone(), Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::PermissionDenied, "{params}");
+        }
+        let invalid = decode_streaming_to(target, Some(&json!({"video_bitrate_kbps": 1})));
+        assert_eq!(invalid.unwrap_err().code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn descriptors_flag_effects_and_least_access() {
+        let get = |name: &str| *registry().iter().find(|d| d.name == name).expect(name);
+        assert!(get("delete_scene").destructive && get("stop_streaming").destructive);
+        assert!(!get("create_scene").destructive && !get("get_status").destructive);
+        assert!(get("start_streaming").open_world);
+        assert_eq!(
+            registry().iter().filter(|d| d.open_world).count(),
+            1,
+            "only streaming leaves the machine"
+        );
+        for descriptor in registry() {
+            assert!(descriptor.least_access() <= descriptor.access);
+            assert!(descriptor.access != CommandAccess::ReadOnly || !descriptor.destructive);
+        }
+        assert_eq!(get("add_source").least_access(), CommandAccess::Control);
+        assert_eq!("read-only".parse(), Ok(CommandAccess::ReadOnly));
+        assert_eq!("sensitive".parse(), Ok(CommandAccess::Sensitive));
+        assert!("everything".parse::<CommandAccess>().is_err());
+    }
+
+    #[test]
+    fn only_screen_sources_need_sensitive_access() {
+        let add = |params: Value| {
+            Command::decode("add_source", Some(&params))
+                .expect("decode")
+                .required_access()
+        };
+        let bars = add(json!({"scene": "Main", "name": "s", "kind": "color_bars"}));
+        let solid = add(json!({"scene": "Main", "name": "s", "kind": "solid", "color": "#ffffff"}));
+        let screen = add(json!({"scene": "Main", "name": "s", "kind": "screen"}));
+        assert_eq!(
+            (bars, solid, screen),
+            (
+                CommandAccess::Control,
+                CommandAccess::Control,
+                CommandAccess::Sensitive
+            )
+        );
+        assert!(CommandAccess::ReadOnly < CommandAccess::Control);
+        assert!(CommandAccess::Control < CommandAccess::Sensitive);
+    }
+
+    #[test]
     fn access_classes_match_risk() {
         let access = |name| registry().iter().find(|d| d.name == name).map(|d| d.access);
         assert_eq!(
@@ -1776,6 +2141,8 @@ mod tests {
                 "name": "get_status",
                 "summary": "Report engine status.",
                 "access": "read_only",
+                "destructive": false,
+                "open_world": false,
             })
         );
     }

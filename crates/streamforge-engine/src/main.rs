@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use command_api::{AccessPolicy, CommandAccess, Gated};
 use engine::Engine;
 
 #[derive(Debug, Parser)]
@@ -23,12 +24,18 @@ struct Args {
     /// Clients only choose file names inside it.
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
+    /// Highest class of commands the client may run: read-only, control or
+    /// sensitive (the client is whoever controls stdin; restrict it when
+    /// that is not you).
+    #[arg(long, default_value = "sensitive")]
+    allow: CommandAccess,
 }
 
 fn main() -> ExitCode {
-    let Args { output_dir } = Args::parse();
-    let mut engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
-    match control_protocol::serve(io::stdin().lock(), io::stdout().lock(), &mut engine) {
+    let Args { output_dir, allow } = Args::parse();
+    let engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+    let mut handler = Gated::new(engine, AccessPolicy::allowing(allow));
+    match control_protocol::serve(io::stdin().lock(), io::stdout().lock(), &mut handler) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("streamforge-engine: control channel I/O error: {err}");

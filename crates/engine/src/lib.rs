@@ -10,10 +10,12 @@ mod outputs;
 mod pipeline;
 mod scenes;
 mod studio;
+mod thread;
 
 use outputs::{RecordingOutput, StreamingOutput};
 use pipeline::Pipeline;
 use scenes::SceneCollection;
+pub use thread::{EngineHandle, EngineThread, PendingReply};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -548,6 +550,17 @@ mod tests {
             .port()
     }
 
+    /// Tests that run the media pipeline (1080p60 compositor, x264
+    /// encoders) take turns: in parallel they overload small CI runners
+    /// until encoders fall seconds behind and drop media (counted, but the
+    /// tests assert none is lost).
+    fn media_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static MEDIA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        MEDIA
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Temporary directory removed when the test ends.
     struct TempDir(std::path::PathBuf);
 
@@ -585,6 +598,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recording_lifecycle_produces_a_finalized_file() {
+        let _media = media_test_lock();
         let dir = TempDir::new("lifecycle");
         let mut engine = engine().with_output_dir(&dir.0);
         assert!(!status(&mut engine).recording_active);
@@ -681,6 +695,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn streams_the_pipeline_to_a_local_server() {
+        let _media = media_test_lock();
         let server = rtmp_test_server::TestServer::start(Default::default());
         let mut engine = engine();
         let started = start_streaming(
@@ -725,6 +740,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn recording_continues_when_the_stream_fails() {
+        let _media = media_test_lock();
         let dir = TempDir::new("survive");
         let server = rtmp_test_server::TestServer::start(rtmp_test_server::ServerOptions {
             close_after: Some(Duration::from_millis(800)),
@@ -785,8 +801,12 @@ mod tests {
         let recording = &report.recording;
         assert_eq!(recording.audio.blocks_dropped, 0, "{recording:?}");
         assert_eq!(recording.audio.gap_samples, 0, "{recording:?}");
-        // Every frame tick before the cut is encoded or counted.
-        let ticks = (recording.audio.end_ms.expect("audio") * 60.0 / 1000.0).round() as u64;
+        // No silent loss: every tick from the first frame to the cut is
+        // encoded, dropped or skipped (skips cover the whole pipeline run,
+        // so they can exceed the output's share), and no frame is invented.
+        let first = recording.video.first_pts_ms.expect("video start");
+        let end = recording.audio.end_ms.expect("audio");
+        let ticks = ((end - first) * 60.0 / 1000.0).round() as u64;
         let skipped = report
             .pipeline
             .render
@@ -794,8 +814,12 @@ mod tests {
             .map_or(0, |r| r.skipped_ticks);
         let accounted = recording.video.frames_encoded + recording.video.frames_dropped + skipped;
         assert!(
-            accounted.abs_diff(ticks) <= 1,
+            accounted + 2 >= ticks,
             "{accounted} vs {ticks}: {recording:?}"
+        );
+        assert!(
+            recording.video.frames_encoded + recording.video.frames_dropped <= ticks + 1,
+            "{recording:?}"
         );
         let _ = server.join();
     }
@@ -827,6 +851,7 @@ mod tests {
 
     #[test]
     fn scene_edits_apply_live_to_the_preview() {
+        let _media = media_test_lock();
         let mut engine = Engine::new();
         run(&mut engine, "create_scene", json!({"name": "Show"}));
         run(
@@ -873,6 +898,7 @@ mod tests {
 
     #[test]
     fn a_live_scene_change_that_fails_is_undone() {
+        let _media = media_test_lock();
         // No capture backend: a screen source cannot start.
         let mut engine = Engine::new();
         run(&mut engine, "set_preview", json!({"enabled": true}));
@@ -928,6 +954,7 @@ mod tests {
 
     #[test]
     fn mixer_gains_apply_live_and_levels_are_reported() {
+        let _media = media_test_lock();
         let mut engine = Engine::new();
         let idle = mixer(run(&mut engine, "get_mixer", json!({})));
         assert!(!idle.running);
@@ -992,6 +1019,7 @@ mod tests {
 
     #[test]
     fn screen_captures_survive_scene_switches() {
+        let _media = media_test_lock();
         let (mut engine, starts) = engine_with_screen_counter();
         for scene in ["Main", "BRB"] {
             run(&mut engine, "create_scene", json!({"name": scene}));
@@ -1029,6 +1057,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn open_outputs_never_wait_for_a_picker() {
+        let _media = media_test_lock();
         let dir = TempDir::new("no-picker");
         let (engine, starts) = engine_with_screen_counter();
         let mut engine = engine.with_output_dir(&dir.0);
@@ -1059,6 +1088,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_recording_shows_the_active_scene() {
+        let _media = media_test_lock();
         let dir = TempDir::new("scene");
         let mut engine = Engine::new().with_output_dir(&dir.0);
         run(&mut engine, "create_scene", json!({"name": "Green"}));
@@ -1092,6 +1122,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn dropping_the_engine_finalizes_the_recording() {
+        let _media = media_test_lock();
         let dir = TempDir::new("drop");
         let mut engine = engine().with_output_dir(&dir.0);
         start(&mut engine, json!({"file_name": "dropped.mkv"})).expect("start");

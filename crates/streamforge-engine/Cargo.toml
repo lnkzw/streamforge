@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 capture-platform = { path = "../capture-platform" }
+command-api = { path = "../command-api" }
 control-protocol = { path = "../control-protocol" }
 engine = { path = "../engine" }
 

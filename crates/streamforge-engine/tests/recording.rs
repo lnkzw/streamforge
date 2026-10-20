@@ -74,13 +74,24 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     let encoded = count(&report["video"]["frames_encoded"]);
     let dropped = count(&report["video"]["frames_dropped"]);
     let skipped = count(&responses[2]["result"]["render"]["skipped_ticks"]);
-    // The audio track has no drops, so its end marks the cut-off; trailing
-    // video frames may be among the dropped ones.
+    // Ticks from the output's first frame (its epoch starts at attach, so
+    // the first frame may be a tick later) to the cut-off, which the audio
+    // end marks (audio has no drops; trailing video frames may be dropped).
+    // Skipped ticks cover the whole pipeline run (they can exceed the
+    // output's share), so the check is one-sided: nothing silently lost,
+    // nothing invented.
+    let first_ms = report["video"]["first_pts_ms"]
+        .as_f64()
+        .expect("video start");
     let end_ms = report["audio"]["end_ms"].as_f64().expect("audio end");
-    let ticks = (end_ms * 60.0 / 1000.0).round() as u64;
+    let ticks = ((end_ms - first_ms) * 60.0 / 1000.0).round() as u64;
     assert!(
-        (encoded + dropped + skipped).abs_diff(ticks) <= 1,
-        "{encoded} encoded + {dropped} dropped + {skipped} skipped != {ticks} ticks: {report}"
+        encoded + dropped + skipped + 2 >= ticks,
+        "{encoded} encoded + {dropped} dropped + {skipped} skipped < {ticks} ticks: {report}"
+    );
+    assert!(
+        encoded + dropped <= ticks + 1,
+        "more frames than ticks: {report}"
     );
     assert!(
         encoded * 4 >= ticks * 3,

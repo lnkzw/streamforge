@@ -524,6 +524,25 @@ mod tests {
         }
     }
 
+    /// Poll `done` until it holds (bounded), so slow runners pass.
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Records how many frames were rendered and the last top-left pixel.
+    struct PixelSink(Arc<std::sync::Mutex<(u64, [u8; 4])>>);
+
+    impl FrameSink for PixelSink {
+        fn frame(&mut self, frame: &VideoFrame, _presented_at: Instant) {
+            let mut seen = self.0.lock().expect("lock");
+            *seen = (seen.0 + 1, frame.pixel(10, 10));
+        }
+    }
+
     #[test]
     fn updates_replace_the_scene_while_running_and_keep_unchanged_sources() {
         let red = Arc::new(pattern::solid(64, 48, [0, 0, 255, 255]).expect("red"));
@@ -534,10 +553,13 @@ mod tests {
             input: SourceInput::Static(Arc::clone(frame)),
         };
         let layer = |name: &str, id| Layer::new(name, SourceId(id), Transform::IDENTITY);
-        let compositor =
-            Compositor::spawn(config(vec![source(1, "red", &red)], vec![layer("red", 1)]))
-                .expect("spawn");
-        thread::sleep(Duration::from_millis(50));
+        let seen = Arc::new(std::sync::Mutex::new((0, [0; 4])));
+        let mut red_scene = config(vec![source(1, "red", &red)], vec![layer("red", 1)]);
+        red_scene.sink = Some(Box::new(PixelSink(Arc::clone(&seen))));
+        let compositor = Compositor::spawn(red_scene).expect("spawn");
+        wait_until("a red frame", || {
+            seen.lock().expect("lock").1 == [0, 0, 255, 255]
+        });
         let scene = |layers| Scene {
             width: 64,
             height: 48,
@@ -563,7 +585,9 @@ mod tests {
             }),
             Err(CompositorError::CanvasMismatch { .. })
         ));
-        thread::sleep(Duration::from_millis(50));
+        wait_until("a blue frame", || {
+            seen.lock().expect("lock").1 == [255, 0, 0, 255]
+        });
         let run = compositor.stop().expect("stop");
         assert_eq!(run.stats.scene_updates, 1);
         // Blue covers red in the last frame.
@@ -598,16 +622,18 @@ mod tests {
     #[test]
     fn removed_sources_are_reported_as_retired() {
         let mailbox = Arc::new(FrameMailbox::new());
-        let compositor = Compositor::spawn(config(
+        let seen = Arc::new(std::sync::Mutex::new((0, [0; 4])));
+        let mut live = config(
             vec![SourceConfig {
                 id: SourceId(7),
                 name: "live".into(),
                 input: SourceInput::Live(Arc::clone(&mailbox)),
             }],
             vec![Layer::new("live", SourceId(7), Transform::IDENTITY)],
-        ))
-        .expect("spawn");
-        thread::sleep(Duration::from_millis(30));
+        );
+        live.sink = Some(Box::new(PixelSink(Arc::clone(&seen))));
+        let compositor = Compositor::spawn(live).expect("spawn");
+        wait_until("a rendered frame", || seen.lock().expect("lock").0 > 0);
         compositor
             .update(SceneUpdate {
                 scene: Scene::new(64, 48),
@@ -615,7 +641,8 @@ mod tests {
                 animation: None,
             })
             .expect("update");
-        thread::sleep(Duration::from_millis(30));
+        // Applying the update releases the render thread's mailbox handle.
+        wait_until("the update", || Arc::strong_count(&mailbox) == 1);
         let run = compositor.stop().expect("stop");
         // The retired live source still shows its counters.
         assert_eq!(run.stats.retired_sources, 1);

@@ -35,8 +35,10 @@ impl fmt::Debug for StreamKey {
     }
 }
 
-/// A validated RTMP(S) server URL plus its separate stream key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A validated RTMP(S) server URL plus its separate stream key. `Debug`
+/// shows only the redacted form: URLs can embed secrets in deeper path
+/// segments or the query.
+#[derive(Clone, PartialEq, Eq)]
 pub struct StreamTarget {
     url: String,
     key: StreamKey,
@@ -85,14 +87,23 @@ impl StreamTarget {
         })
     }
 
-    /// The URL to connect to, including the secret key. Hand it only to the
-    /// network layer; never log or return it.
+    /// The URL to connect to, including the secret key as the last path
+    /// segment (before any query). Hand it only to the network layer; never
+    /// log or return it.
     pub fn connect_url(&self) -> String {
         if self.key.is_empty() {
-            self.url.clone()
-        } else {
-            format!("{}/{}", self.url.trim_end_matches('/'), self.key.0)
+            return self.url.clone();
         }
+        let (path, query) = match self.url.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (self.url.as_str(), None),
+        };
+        let mut url = format!("{}/{}", path.trim_end_matches('/'), self.key.0);
+        if let Some(query) = query {
+            url.push('?');
+            url.push_str(query);
+        }
+        url
     }
 
     /// Safe to show: scheme, host and the first path segment (the RTMP
@@ -123,10 +134,21 @@ impl StreamTarget {
     }
 }
 
+impl fmt::Debug for StreamTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StreamTarget")
+            .field(&self.redacted())
+            .finish()
+    }
+}
+
 /// When and how often a dropped connection is retried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconnectPolicy {
-    /// Attempts after a connection was lost; 0 disables reconnecting.
+    /// Attempts after a connection was lost; 0 disables reconnecting. The
+    /// count restarts only after a connection stayed up for a while (see the
+    /// streamer), so a server that accepts and drops at once still ends in
+    /// [`StreamState::Failed`].
     pub max_attempts: u32,
     /// Wait before the first attempt; doubles per attempt.
     pub initial_delay: Duration,
@@ -218,16 +240,25 @@ pub struct StreamStats {
     /// Totals over all connections.
     pub video: VideoTrackStats,
     pub audio: AudioTrackStats,
-    /// Media that arrived while not connected (included in the track
-    /// `frames_dropped` / `blocks_dropped`).
+    /// Media the streamer discarded because it was not connected (backoff,
+    /// failed), including audio before a connection's first video frame.
+    /// Included in the track `frames_dropped` / `blocks_dropped`, which also
+    /// count producer-side drops (copy pool or queue full).
     pub frames_dropped_offline: u64,
     pub blocks_dropped_offline: u64,
+    /// Media that was encoded but never delivered because the connection
+    /// broke: frames still inside the encoder or in the failed write.
+    /// Audio is counted in whole encoder frames. Included in
+    /// `frames_encoded` / `samples_encoded`.
+    pub frames_undelivered: u64,
+    pub samples_undelivered: u64,
 }
 
 impl VideoSettings {
     /// libx264 for live streaming: `preset=veryfast`, constant bit rate
-    /// (`nal-hrd=cbr`, buffer of two seconds' worth) and a keyframe every
-    /// two seconds, as common RTMP ingests expect.
+    /// (`nal-hrd=cbr`, buffer of two seconds' worth) and a keyframe exactly
+    /// every two seconds (scene-cut keyframes off), as common RTMP ingests
+    /// expect.
     pub fn h264_live(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Self {
         let rate = format!("{bitrate_kbps}k");
         Self {
@@ -245,6 +276,8 @@ impl VideoSettings {
                 ),
                 ("nal-hrd".to_owned(), "cbr".to_owned()),
                 ("g".to_owned(), (u64::from(fps) * 2).to_string()),
+                ("keyint_min".to_owned(), (u64::from(fps) * 2).to_string()),
+                ("sc_threshold".to_owned(), "0".to_owned()),
             ],
         }
     }
@@ -282,12 +315,17 @@ mod tests {
 
     #[test]
     fn redaction_hides_deeper_paths_and_queries() {
-        let t = target("rtmp://host:1935/live2/embedded-key?token=x", "").expect("valid");
+        let t = target("rtmp://host:1935/live2/embedded-SECRET?token=x", "").expect("valid");
         assert_eq!(t.redacted(), "rtmp://host:1935/live2/***?***");
         assert_eq!(
             t.connect_url(),
-            "rtmp://host:1935/live2/embedded-key?token=x"
+            "rtmp://host:1935/live2/embedded-SECRET?token=x"
         );
+        // Debug shows only the redacted form.
+        assert!(!format!("{t:?}").contains("SECRET"), "{t:?}");
+        // The key goes before the query.
+        let with_query = target("rtmp://host/app?auth=abc", "k").expect("valid");
+        assert_eq!(with_query.connect_url(), "rtmp://host/app/k?auth=abc");
         let bare = target("rtmps://host", "").expect("valid");
         assert_eq!(bare.redacted(), "rtmps://host");
     }

@@ -243,14 +243,18 @@ If finalizing fails, the error's `details` carry the partial `recording` stats, 
 
 #### Streaming
 
-`start_streaming` publishes over RTMP: H.264 with constant bit rate and a keyframe every 2 s, plus AAC, in FLV. It returns once the first connection is established. If that fails, the error is `unavailable` and nothing is retried. Later network or encoder errors trigger reconnects with exponential backoff. Each new connection uses fresh encoders and starts with a keyframe at timestamp 0. Every blocking network operation is bounded by a 5 s timeout. The command is `sensitive` because it publishes private content and handles a credential.
+`start_streaming` publishes over RTMP: H.264 with constant bit rate and a keyframe exactly every 2 s, plus AAC, in FLV. It is `sensitive` because it publishes private content and handles a credential.
+
+- **First connection:** the command returns once it is established. If that fails, the error is `unavailable` and nothing is retried.
+- **Reconnects:** later network or encoder errors trigger reconnects with exponential backoff. Each new connection uses fresh encoders and starts with a keyframe at timestamp 0. The attempt count restarts only after a connection stayed up for 10 s, so a server that keeps accepting and dropping ends in `failed`.
+- **Timeouts:** connect, handshake and writes are bounded by a 5 s timeout. `stop_streaming` gives a healthy connection 2 s to flush, then interrupts blocked I/O. Name resolution is not bounded.
 
 | Param                | Type | Default | Meaning |
 |----------------------|------|---------|---------|
 | `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. |
 | `stream_key`         | string | none | Appended as the last path segment when connecting. No `/` or whitespace. **Secret:** never echoed in results, errors, logs or `Debug` output; reports show `<stream key>`. |
 | `video_bitrate_kbps` | integer 300..=50000 | 6000 | Video bit rate (CBR, buffer of 2 s). |
-| `reconnect_attempts` | integer 0..=100 | 5 | Attempts after a lost connection; `0` gives up right away. |
+| `reconnect_attempts` | integer 0..=100 | 5 | Attempts after a lost connection; `0` gives up right away. The count restarts after a connection stayed up for 10 s. |
 | `reconnect_delay_ms` | integer 100..=60000 | 1000 | Wait before the first attempt; doubles per attempt, up to 30 s. |
 
 Targets are shown redacted: scheme, host and application. Deeper path segments become `***`, a query becomes `?***` and the key becomes `<stream key>`. Once streaming has been used, FFmpeg's own log output is turned off, because RTMP error messages can contain the stream path.
@@ -267,7 +271,8 @@ Errors:
 - **Target and state:** `target` (redacted), `container` (`flv`), and `state` at the moment the stop was requested: `connected`, `reconnecting` or `failed`.
 - **Connection history:** `connects`, `disconnects`, `reconnect_attempts`, `connected_ms`, and `last_error`, which never contains the key.
 - **Tracks:** `video` and `audio` with totals over all connections; their `first_pts_ms` and `end_ms` refer to the last connection.
-- **Offline drops:** `frames_dropped_offline` and `blocks_dropped_offline` count media that arrived while not connected. Audio received before a connection's first video frame counts here too. Both numbers are included in the tracks' `frames_dropped` and `blocks_dropped`.
+- **Offline drops:** `frames_dropped_offline` and `blocks_dropped_offline` count media the streamer discarded while not connected. Audio received before a connection's first video frame counts here too. Both numbers are included in the tracks' `frames_dropped` and `blocks_dropped`, which also count producer-side drops (copy pool or queue full).
+- **Undelivered media:** `frames_undelivered` and `samples_undelivered` count media that was encoded but never reached the server because the connection broke (in the encoder or in the failed write; audio in whole encoder frames). Both are included in `frames_encoded` and `samples_encoded`.
 
 ## Example session
 

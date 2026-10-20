@@ -25,7 +25,7 @@ pub(crate) fn run(
     ready: Ready,
     shared: Arc<Shared>,
 ) -> Result<RecordingStats, RecorderError> {
-    let mut session = match open(&config) {
+    let mut session = match open(&config, &shared) {
         Ok(session) => {
             let _ = ready.send(Ok(()));
             session
@@ -79,7 +79,7 @@ pub(crate) fn run(
     }
 }
 
-fn open(config: &RecorderConfig) -> Result<Session, RecorderError> {
+fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, RecorderError> {
     init(false)?;
     let path = config.path.to_str().ok_or_else(|| {
         RecorderError::new(
@@ -100,5 +100,7 @@ fn open(config: &RecorderConfig) -> Result<Session, RecorderError> {
         RecorderErrorKind::Output,
         &config.video,
         &config.audio,
+        // File I/O is never interrupted: the recorder has no stop deadline.
+        Arc::clone(shared),
     )
 }

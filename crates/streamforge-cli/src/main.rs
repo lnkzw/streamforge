@@ -54,9 +54,10 @@ enum Commands {
         /// Server URL without the key, e.g. rtmp://live.example.com/app.
         #[arg(long)]
         url: String,
-        /// Environment variable holding the stream key.
-        #[arg(long, default_value = "STREAMFORGE_STREAM_KEY")]
-        key_env: String,
+        /// Environment variable holding the stream key (must be set if given; without this
+        /// flag, STREAMFORGE_STREAM_KEY is used if set).
+        #[arg(long)]
+        key_env: Option<String>,
         /// Streaming length in milliseconds.
         #[arg(long, default_value_t = 10_000)]
         duration_ms: u64,
@@ -213,8 +214,15 @@ fn main() -> Result<ExitCode> {
                     return Ok(ExitCode::FAILURE);
                 }
             };
+            let explicit = key_env.is_some();
+            let key_env = key_env.unwrap_or_else(|| DEFAULT_KEY_ENV.to_owned());
             let key = match std::env::var(&key_env) {
                 Ok(key) => key,
+                // A named but missing variable is a mistake, not "no key".
+                Err(std::env::VarError::NotPresent) if explicit => {
+                    eprintln!("error: --key-env names ${key_env}, which is not set");
+                    return Ok(ExitCode::FAILURE);
+                }
                 Err(std::env::VarError::NotPresent) => String::new(),
                 Err(std::env::VarError::NotUnicode(_)) => {
                     eprintln!("error: ${key_env} is not valid UTF-8");
@@ -381,6 +389,9 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
     };
     (name, params)
 }
+
+/// Read for the stream key when `--key-env` is not given.
+const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
 
 /// Pipeline source flags shared by `record` and `stream`.
 #[derive(clap::Args, Debug)]

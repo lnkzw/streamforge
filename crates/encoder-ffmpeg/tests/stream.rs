@@ -2,13 +2,15 @@
 //! reconnects and giving up.
 #![cfg(target_os = "linux")]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use encoder_ffmpeg::{
-    AudioSettings, OutputInput, ReconnectPolicy, RecorderErrorKind, StreamConfig, StreamKey,
-    StreamState, StreamTarget, Streamer, VideoSettings,
+    AudioSettings, OutputInput, ReconnectPolicy, RecorderErrorKind, STOP_GRACE, StreamConfig,
+    StreamKey, StreamState, StreamTarget, Streamer, VideoSettings,
 };
 use media_core::{FrameBuffer, MediaTimestamp, PixelFormat, VideoFrame};
 use rtmp_test_server::{ServerOptions, TestServer, free_port};
@@ -179,6 +181,8 @@ fn reconnects_after_the_server_drops_the_connection() {
     assert_eq!(stats.state, StreamState::Connected, "{stats:?}");
     assert_eq!((stats.connects, stats.disconnects), (2, 1), "{stats:?}");
     assert!(stats.reconnect_attempts >= 1);
+    // Frames inside the encoder when the connection broke are counted.
+    assert!(stats.frames_undelivered > 0, "{stats:?}");
     assert!(
         stats
             .last_error
@@ -261,4 +265,107 @@ fn silent_peer_times_out_instead_of_hanging() {
         "gave up after {waited:?}"
     );
     let _ = holder.join();
+}
+
+#[test]
+fn a_server_that_keeps_dropping_the_connection_ends_in_failed() {
+    // Accepts every connection and drops it at once: each reconnect
+    // succeeds, so only counting across short-lived connections ends it.
+    let port = free_port();
+    let first = TestServer::start_on(
+        port,
+        ServerOptions {
+            close_after: Some(Duration::from_millis(200)),
+            ..ServerOptions::default()
+        },
+    );
+    let url = first.url();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flapping = thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            let _ = first.join();
+            while !stop.load(Ordering::Relaxed) {
+                let next = TestServer::start_on(
+                    port,
+                    ServerOptions {
+                        accept_timeout: Duration::from_secs(2),
+                        close_after: Some(Duration::from_millis(200)),
+                        ..ServerOptions::default()
+                    },
+                );
+                let _ = next.join();
+            }
+        }
+    });
+    let streamer = start(&config(&url, quick_retries(3)));
+    let mut feeder = Feeder::new(streamer.input());
+    let failed = feeder.run_until(
+        || streamer.state() == StreamState::Failed,
+        Duration::from_secs(20),
+    );
+    stop.store(true, Ordering::Relaxed);
+    assert!(failed, "state {:?}", streamer.state());
+    let stats = streamer.stop().expect("stop");
+    assert_eq!(stats.state, StreamState::Failed);
+    assert!(stats.connects >= 2, "{stats:?}");
+    assert_eq!(stats.connects, stats.disconnects, "{stats:?}");
+    let _ = flapping.join();
+}
+
+#[test]
+fn stop_is_bounded_while_a_reconnect_hangs() {
+    // The ingest goes away; on its port a silent peer accepts TCP but never
+    // answers, so the reconnect handshake would block for the full I/O
+    // timeout (10 s here). Stopping must not wait for it.
+    let port = free_port();
+    let first = TestServer::start_on(
+        port,
+        ServerOptions {
+            close_after: Some(Duration::from_millis(500)),
+            ..ServerOptions::default()
+        },
+    );
+    let mut config = config(&first.url(), quick_retries(5));
+    config.io_timeout = Duration::from_secs(10);
+    let (bound_tx, bound_rx) = mpsc::channel();
+    let done = Arc::new(AtomicBool::new(false));
+    let silent = thread::spawn({
+        let done = Arc::clone(&done);
+        move || {
+            let _ = first.join();
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind");
+            let _ = bound_tx.send(());
+            listener.set_nonblocking(true).expect("nonblocking");
+            let mut held = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                if let Ok((connection, _)) = listener.accept() {
+                    held.push(connection);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    });
+    let streamer = start(&config);
+    let mut feeder = Feeder::new(streamer.input());
+    let lost = feeder.run_until(
+        || streamer.state() == StreamState::Reconnecting,
+        Duration::from_secs(10),
+    );
+    assert!(lost, "state {:?}", streamer.state());
+    bound_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("silent peer listening");
+    // Let the reconnect attempt start and block in the handshake.
+    feeder.run_until(|| false, Duration::from_millis(700));
+    let stopping = Instant::now();
+    let stats = streamer.stop().expect("stop");
+    let took = stopping.elapsed();
+    assert!(
+        took < STOP_GRACE + Duration::from_secs(1),
+        "stop took {took:?}"
+    );
+    done.store(true, Ordering::Relaxed);
+    assert_eq!(stats.disconnects, 1, "{stats:?}");
+    let _ = silent.join();
 }

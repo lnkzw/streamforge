@@ -17,10 +17,11 @@ mod audio_fifo;
 #[cfg(target_os = "linux")]
 mod ffmpeg;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use media_core::{MediaTimestamp, VideoFrame};
 
@@ -35,6 +36,16 @@ pub use encoder_api::{
 pub const MAX_AUDIO_BLOCK_SAMPLES: usize = 2048;
 /// About 1 s of 60 FPS video plus audio blocks; preallocated.
 const QUEUE_CAPACITY: usize = 256;
+/// How long a stopping stream may spend flushing and closing a healthy
+/// connection before blocked network I/O is interrupted.
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// Nanoseconds on a process-wide monotonic clock (for deadlines in atomics).
+pub(crate) fn monotonic_ns() -> i64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    i64::try_from(epoch.elapsed().as_nanos()).unwrap_or(i64::MAX)
+}
 
 // Audio blocks travel inline so the mixer thread never allocates; the
 // bounded channel preallocates its slots once.
@@ -66,6 +77,9 @@ pub(crate) struct Shared {
     pub failed: AtomicBool,
     /// [`StreamState`] of a streaming output.
     pub state: AtomicU8,
+    /// Deadline ([`monotonic_ns`]) after which blocked FFmpeg I/O is
+    /// interrupted; `i64::MAX` while not stopping.
+    pub abort_after_ns: AtomicI64,
 }
 
 impl Default for Shared {
@@ -76,6 +90,7 @@ impl Default for Shared {
             end_ns: AtomicI64::new(i64::MAX),
             failed: AtomicBool::new(false),
             state: AtomicU8::new(StreamState::Connecting.as_u8()),
+            abort_after_ns: AtomicI64::new(i64::MAX),
         }
     }
 }
@@ -209,11 +224,14 @@ impl<T> Worker<T> {
         self.input.shared.end_ns.store(end_ns, Ordering::Release);
     }
 
-    fn is_running(&self) -> bool {
+    fn thread_alive(&self) -> bool {
         self.thread
             .as_ref()
             .is_some_and(|thread| !thread.is_finished())
-            && !self.input.shared.failed.load(Ordering::Acquire)
+    }
+
+    fn is_running(&self) -> bool {
+        self.thread_alive() && !self.input.shared.failed.load(Ordering::Acquire)
     }
 
     fn finish(&mut self) -> Option<Result<T, RecorderError>> {
@@ -320,14 +338,47 @@ impl Streamer {
         self.worker.end_at(end);
     }
 
+    /// Current state; a streamer thread that ended on its own (e.g. a
+    /// panic) reads as [`StreamState::Failed`].
     pub fn state(&self) -> StreamState {
-        StreamState::from_u8(self.worker.input.shared.state.load(Ordering::Acquire))
+        let state = StreamState::from_u8(self.worker.input.shared.state.load(Ordering::Acquire));
+        if self.worker.thread_alive() || state == StreamState::Stopped {
+            state
+        } else {
+            StreamState::Failed
+        }
     }
 
-    /// Flush, disconnect and report. A stream that ended in
-    /// [`StreamState::Failed`] still returns its statistics.
-    pub fn stop(self) -> Result<StreamStats, RecorderError> {
-        self.worker.stop()
+    /// Flush, disconnect and report. A healthy connection gets
+    /// [`STOP_GRACE`] to flush and close; after that, blocked network I/O is
+    /// interrupted, so stopping is bounded even for a stalled peer. A stream
+    /// that ended in [`StreamState::Failed`] still returns its statistics.
+    pub fn stop(mut self) -> Result<StreamStats, RecorderError> {
+        self.start_stop_grace();
+        self.worker.finish().unwrap_or_else(|| {
+            Err(RecorderError::new(
+                RecorderErrorKind::Internal,
+                "the output was already stopped",
+            ))
+        })
+    }
+
+    fn start_stop_grace(&self) {
+        let deadline =
+            monotonic_ns().saturating_add(i64::try_from(STOP_GRACE.as_nanos()).unwrap_or(i64::MAX));
+        self.worker
+            .input
+            .shared
+            .abort_after_ns
+            .store(deadline, Ordering::Release);
+    }
+}
+
+impl Drop for Streamer {
+    /// Dropping (e.g. at engine shutdown) is bounded like [`Streamer::stop`];
+    /// the worker's own drop then disconnects.
+    fn drop(&mut self) {
+        self.start_stop_grace();
     }
 }
 

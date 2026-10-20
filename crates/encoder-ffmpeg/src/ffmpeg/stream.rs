@@ -23,6 +23,9 @@ use crate::{
 };
 
 const CONTAINER: &str = "flv";
+/// A connection that stayed up this long restarts the reconnect count; a
+/// server that accepts and drops at once still exhausts the attempts.
+const STABLE_CONNECTION: Duration = Duration::from_secs(10);
 
 pub(crate) fn run(
     config: StreamConfig,
@@ -30,7 +33,7 @@ pub(crate) fn run(
     ready: Ready,
     shared: Arc<Shared>,
 ) -> Result<StreamStats, RecorderError> {
-    let mut stream = Stream::new(&config, &shared);
+    let mut stream = Stream::new(&config, Arc::clone(&shared));
     // The first connection decides whether `Streamer::start` succeeds.
     let first = init(true).and_then(|()| stream.connect());
     let mut session = match first {
@@ -53,8 +56,9 @@ pub(crate) fn run(
                     return Ok(stream.finish(StreamState::Connected));
                 }
                 Served::Broken(error) => {
-                    stream.lose(live, error);
-                    attempt = 0;
+                    if stream.lose(live, error) >= STABLE_CONNECTION {
+                        attempt = 0;
+                    }
                 }
             }
         }
@@ -83,7 +87,7 @@ enum Served {
 
 struct Stream<'a> {
     config: &'a StreamConfig,
-    shared: &'a Shared,
+    shared: Arc<Shared>,
     display: String,
     connects: u32,
     disconnects: u32,
@@ -95,12 +99,14 @@ struct Stream<'a> {
     audio: Option<AudioTrackStats>,
     frames_offline: u64,
     blocks_offline: u64,
+    frames_undelivered: u64,
+    samples_undelivered: u64,
     /// Media time (ns) of the current connection's first video frame.
     origin_ns: Option<i64>,
 }
 
 impl<'a> Stream<'a> {
-    fn new(config: &'a StreamConfig, shared: &'a Shared) -> Self {
+    fn new(config: &'a StreamConfig, shared: Arc<Shared>) -> Self {
         Self {
             config,
             shared,
@@ -115,6 +121,8 @@ impl<'a> Stream<'a> {
             audio: None,
             frames_offline: 0,
             blocks_offline: 0,
+            frames_undelivered: 0,
+            samples_undelivered: 0,
             origin_ns: None,
         }
     }
@@ -138,6 +146,7 @@ impl<'a> Stream<'a> {
             RecorderErrorKind::Network,
             &self.config.video,
             &self.config.audio,
+            Arc::clone(&self.shared),
         );
         match opened {
             Ok(session) => {
@@ -202,13 +211,15 @@ impl<'a> Stream<'a> {
         }
     }
 
-    /// The connection broke: close it as far as possible and keep its stats.
-    fn lose(&mut self, live: Session, error: RecorderError) {
+    /// The connection broke: close it without waiting on the dead peer, keep
+    /// its stats, and return how long it was up.
+    fn lose(&mut self, live: Session, error: RecorderError) -> Duration {
         self.disconnects += 1;
         self.last_error = Some(error.message);
         self.set_state(StreamState::Reconnecting);
+        live.abort();
         let (video, audio, _) = live.finish();
-        self.absorb(&video, &audio);
+        self.absorb(&video, &audio)
     }
 
     /// Normal stop: flush, write the trailer, disconnect.
@@ -220,12 +231,20 @@ impl<'a> Stream<'a> {
         self.absorb(&video, &audio);
     }
 
-    fn absorb(&mut self, video: &VideoTrack, audio: &AudioTrack) {
-        if let Some(since) = self.connected_since.take() {
-            self.connected += since.elapsed();
-        }
+    /// Add a finished session's counters; returns how long it was connected.
+    fn absorb(&mut self, video: &VideoTrack, audio: &AudioTrack) -> Duration {
+        let lasted = self
+            .connected_since
+            .take()
+            .map_or(Duration::ZERO, |since| since.elapsed());
+        self.connected += lasted;
+        // Encoded but not delivered: still inside the encoder or in the
+        // failed write when the connection broke (zero after a clean close).
+        self.frames_undelivered += video.undelivered();
+        self.samples_undelivered += audio.undelivered();
         merge_video(&mut self.video, video.stats(0));
         merge_audio(&mut self.audio, audio.stats(0));
+        lasted
     }
 
     /// Wait `delay` before the next attempt, counting what arrives. Returns
@@ -303,6 +322,8 @@ impl<'a> Stream<'a> {
             audio,
             frames_dropped_offline: self.frames_offline,
             blocks_dropped_offline: self.blocks_offline,
+            frames_undelivered: self.frames_undelivered,
+            samples_undelivered: self.samples_undelivered,
         }
     }
 }

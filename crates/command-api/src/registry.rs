@@ -483,7 +483,9 @@ const RECONNECT_DELAY_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
 #[serde(deny_unknown_fields)]
 struct StartStreamingParams {
     url: String,
-    stream_key: Option<String>,
+    /// Raw JSON so a wrongly typed key is rejected without serde quoting
+    /// its value in the error message.
+    stream_key: Option<Value>,
     video_bitrate_kbps: Option<u32>,
     reconnect_attempts: Option<u32>,
     reconnect_delay_ms: Option<u64>,
@@ -502,7 +504,11 @@ fn decode_start_streaming(
     let params: StartStreamingParams = decode_params(command, params)?;
     // The key moves into a redacting type right away; validation messages
     // never include it.
-    let key = StreamKey::new(params.stream_key.unwrap_or_default());
+    let key = match params.stream_key {
+        None | Some(Value::Null) => StreamKey::default(),
+        Some(Value::String(key)) => StreamKey::new(key),
+        Some(_) => return Err(invalid_params(command, "`stream_key` must be a string")),
+    };
     let target =
         StreamTarget::new(&params.url, key).map_err(|message| invalid_params(command, message))?;
     let video_bitrate_kbps = params
@@ -1147,11 +1153,16 @@ mod tests {
             json!({"url": "rtmp://host/app", "reconnect_delay_ms": 5}),
             json!({"url": "rtmp://host/app", "cursor": "hidden"}),
             json!({"url": "rtmp://host/app", "key": "SECRET"}),
+            json!({"url": "rtmp://host/app", "stream_key": 12345678}),
+            json!({"url": "rtmp://host/app", "stream_key": ["SECRET"]}),
         ] {
             let err = Command::decode("start_streaming", Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
             let shown = format!("{err} {:?}", err.details);
-            assert!(!shown.contains("SECRET"), "{shown}");
+            assert!(
+                !shown.contains("SECRET") && !shown.contains("12345678"),
+                "{shown}"
+            );
         }
         assert!(Command::decode("stop_streaming", Some(&json!({"now": true}))).is_err());
     }

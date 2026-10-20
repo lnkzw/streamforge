@@ -132,7 +132,8 @@ Known limitations, deferred:
 - [x] Add RTMP output: H.264 (CBR, 2 s GOP) + AAC in FLV via FFmpeg's RTMP protocol on the `streamer` thread (`start_streaming`, `stop_streaming`, ADR 0006).
 - [x] Handle reconnect, network errors, encoder failure and shutdown:
   - exponential-backoff reconnects with fresh encoders, keyframe first
-  - every blocking network operation bounded (5 s), so a dead or silent peer cannot stall the output or its shutdown
+  - connect, handshake and writes bounded (5 s); stop interrupts blocked I/O after a 2 s grace, so a dead or silent peer cannot stall the output or its shutdown
+  - the reconnect count restarts only after a stable connection, so accept-and-drop servers still end in `failed`
   - a `failed` state after the attempts, with counted drops
   - the stream key handled as a secret
 - [x] Keep recording and streaming as separate output consumers: one shared media pipeline fans out to outputs with their own copy pools, queues, encoders and threads.
@@ -149,7 +150,9 @@ Known limitations, deferred:
 - Linux only (M9). `rtmps://` depends on the TLS support of the linked FFmpeg.
 - The stream uses the canvas resolution (1080p60); no scaling, no hardware encoder, one stream at a time.
 - Outputs share the sources of the first output; changing sources needs all outputs stopped (scene commands come with M7).
-- FFmpeg's own log output is disabled once streaming is used (it can contain the stream path).
+- FFmpeg's own log output is disabled once streaming is used (it can contain the stream path); a redacting log callback would keep diagnostics.
+- Name resolution inside FFmpeg is neither bounded by the I/O timeout nor interruptible.
+- Each output copies every frame and converts it separately (isolation over memory bandwidth).
 - No push events for state changes; clients poll `get_status`.
 
 ## M7 — Desktop UI

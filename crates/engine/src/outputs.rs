@@ -284,13 +284,26 @@ impl Engine {
         }
         let result = streamer.stop();
         let (pipeline, mut warnings) = self.release_pipeline();
-        let streaming = result.map_err(|error| output_error("streaming", error))?;
-        warnings.extend(streaming_warnings(&streaming));
-        Ok(StreamingReport {
-            streaming,
-            pipeline,
-            warnings,
-        })
+        match result {
+            Ok(streaming) => {
+                warnings.extend(streaming_warnings(&streaming));
+                Ok(StreamingReport {
+                    streaming,
+                    pipeline,
+                    warnings,
+                })
+            }
+            Err(error) => {
+                // Keep what the pipeline reported even though the stream's
+                // own statistics are lost.
+                let mut details = Map::new();
+                if let Value::Object(pipeline) = to_value(&pipeline) {
+                    details.extend(pipeline);
+                }
+                details.insert("warnings".into(), to_value(&warnings));
+                Err(output_error("streaming", error).with_details(Value::Object(details)))
+            }
+        }
     }
 }
 
@@ -369,12 +382,29 @@ fn streaming_warnings(stream: &StreamStats) -> Vec<String> {
             stream.disconnects, stream.frames_dropped_offline, stream.blocks_dropped_offline
         ));
     }
-    let queue_frames = stream.video.frames_dropped - stream.frames_dropped_offline;
-    let queue_blocks = stream.audio.blocks_dropped - stream.blocks_dropped_offline;
+    if stream.frames_undelivered > 0 || stream.samples_undelivered > 0 {
+        warnings.push(format!(
+            "{} encoded video frame(s) and {} audio sample(s) never reached the server \
+             (in flight when a connection broke)",
+            stream.frames_undelivered, stream.samples_undelivered
+        ));
+    }
+    // Producer-side drops (copy pool or queue full) cannot be told apart by
+    // cause: the encoder, the network or a blocking reconnect may have
+    // stalled the streamer.
+    let queue_frames = stream
+        .video
+        .frames_dropped
+        .saturating_sub(stream.frames_dropped_offline);
+    let queue_blocks = stream
+        .audio
+        .blocks_dropped
+        .saturating_sub(stream.blocks_dropped_offline);
     if queue_frames > 0 || queue_blocks > 0 {
         warnings.push(format!(
-            "the stream dropped {queue_frames} video frame(s) and {queue_blocks} audio block(s) \
-             while connected; the encoder or the network fell behind"
+            "the stream's queue overflowed: {queue_frames} video frame(s) and {queue_blocks} \
+             audio block(s) dropped while the streamer was busy (encoding, a slow network or \
+             a reconnect)"
         ));
     }
     warnings

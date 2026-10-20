@@ -4,9 +4,14 @@
 //! from its [`FrameMailbox`], renders, and records timing. When rendering
 //! falls behind by whole frames, those ticks are skipped (not rendered in a
 //! burst) and counted.
+//!
+//! The scene can be replaced while running ([`Compositor::update`]): the
+//! update waits in a single "newest wins" slot that the render thread only
+//! try-locks before a frame, so editing never blocks rendering and pending
+//! edits never queue up.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -53,6 +58,14 @@ pub struct CompositorConfig {
     pub sink: Option<Box<dyn FrameSink>>,
 }
 
+/// A replacement scene for a running compositor. Sources whose id and input
+/// (the same static frame or mailbox) are unchanged keep their state.
+pub struct SceneUpdate {
+    pub scene: Scene,
+    pub sources: Vec<SourceConfig>,
+    pub animation: Option<Animation>,
+}
+
 #[derive(Debug, Error)]
 pub enum CompositorError {
     #[error(transparent)]
@@ -67,6 +80,11 @@ pub enum CompositorError {
     Spawn(std::io::Error),
     #[error("the compositor thread panicked")]
     Panicked,
+    #[error("an update must keep the canvas size {expected:?}, got {got:?}")]
+    CanvasMismatch {
+        expected: (u32, u32),
+        got: (u32, u32),
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -100,6 +118,9 @@ pub struct RenderStats {
     pub late_frames: u64,
     pub achieved_fps: Option<f64>,
     pub render_time: Option<LatencySummary>,
+    /// Scene updates applied while running.
+    pub scene_updates: u64,
+    /// Current sources, then those removed by updates.
     pub sources: Vec<SourceStats>,
 }
 
@@ -114,6 +135,8 @@ pub struct CompositorRun {
 /// Dropping it without `stop` still stops and joins the render thread.
 pub struct Compositor {
     stop: Arc<AtomicBool>,
+    pending: Arc<Mutex<Option<SceneUpdate>>>,
+    canvas: (u32, u32),
     thread: Option<JoinHandle<Result<CompositorRun, CompositorError>>>,
 }
 
@@ -125,18 +148,39 @@ impl Compositor {
         }
         let target =
             VideoFrame::zeroed(config.scene.width, config.scene.height, PixelFormat::Bgra8)?;
+        let canvas = (config.scene.width, config.scene.height);
         let stop = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(Mutex::new(None));
         let thread = thread::Builder::new()
             .name("compositor".to_owned())
             .spawn({
                 let stop = Arc::clone(&stop);
-                move || run(config, target, &stop)
+                let pending = Arc::clone(&pending);
+                move || run(config, target, &stop, &pending)
             })
             .map_err(CompositorError::Spawn)?;
         Ok(Self {
             stop,
+            pending,
+            canvas,
             thread: Some(thread),
         })
+    }
+
+    /// Replace scene, sources and animation from the next frame on. The
+    /// update is validated here; an update not yet picked up is replaced
+    /// (newest wins). The render thread never waits for this.
+    pub fn update(&self, update: SceneUpdate) -> Result<(), CompositorError> {
+        update.scene.validate()?;
+        let got = (update.scene.width, update.scene.height);
+        if got != self.canvas {
+            return Err(CompositorError::CanvasMismatch {
+                expected: self.canvas,
+                got,
+            });
+        }
+        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
+        Ok(())
     }
 
     /// The render thread ended on its own (it failed or panicked).
@@ -180,6 +224,35 @@ struct SourceState {
 }
 
 impl SourceState {
+    fn new(source: SourceConfig) -> Self {
+        Self {
+            id: source.id,
+            name: source.name,
+            current: match source.input {
+                SourceInput::Static(frame) => Current::Static(frame),
+                SourceInput::Live(mailbox) => Current::Live {
+                    mailbox,
+                    frame: None,
+                },
+            },
+            consumed: 0,
+            stale: 0,
+            missing: 0,
+        }
+    }
+
+    /// Same id and the same underlying frame or mailbox.
+    fn matches(&self, source: &SourceConfig) -> bool {
+        self.id == source.id
+            && match (&self.current, &source.input) {
+                (Current::Static(a), SourceInput::Static(b)) => Arc::ptr_eq(a, b),
+                (Current::Live { mailbox, .. }, SourceInput::Live(other)) => {
+                    Arc::ptr_eq(mailbox, other)
+                }
+                _ => false,
+            }
+    }
+
     fn poll(&mut self) {
         let Current::Live { mailbox, frame } = &mut self.current else {
             return;
@@ -219,36 +292,55 @@ impl SourceState {
     }
 }
 
+/// Take a pending update without waiting for the slot.
+fn take_update(pending: &Mutex<Option<SceneUpdate>>) -> Option<SceneUpdate> {
+    match pending.try_lock() {
+        Ok(mut slot) => slot.take(),
+        Err(TryLockError::Poisoned(slot)) => slot.into_inner().take(),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+/// Keep the state of unchanged sources; retire the rest (for the stats).
+/// Runs on the render thread only when an update arrives; the rebuild
+/// allocates, which is acceptable outside the per-frame path.
+fn rebuild(
+    mut current: Vec<SourceState>,
+    sources: Vec<SourceConfig>,
+    retired: &mut Vec<SourceStats>,
+) -> Vec<SourceState> {
+    let mut next = Vec::with_capacity(sources.len());
+    for source in sources {
+        match current.iter().position(|state| state.matches(&source)) {
+            Some(index) => {
+                let mut state = current.swap_remove(index);
+                state.name = source.name;
+                next.push(state);
+            }
+            None => next.push(SourceState::new(source)),
+        }
+    }
+    retired.extend(current.iter().map(SourceState::stats));
+    next
+}
+
 fn run(
     config: CompositorConfig,
     mut target: VideoFrame,
     stop: &AtomicBool,
+    pending: &Mutex<Option<SceneUpdate>>,
 ) -> Result<CompositorRun, CompositorError> {
     let CompositorConfig {
         mut scene,
         fps,
         sources,
-        animation,
+        mut animation,
         mut renderer,
         mut sink,
     } = config;
-    let mut sources: Vec<SourceState> = sources
-        .into_iter()
-        .map(|source| SourceState {
-            id: source.id,
-            name: source.name,
-            current: match source.input {
-                SourceInput::Static(frame) => Current::Static(frame),
-                SourceInput::Live(mailbox) => Current::Live {
-                    mailbox,
-                    frame: None,
-                },
-            },
-            consumed: 0,
-            stale: 0,
-            missing: 0,
-        })
-        .collect();
+    let mut sources: Vec<SourceState> = sources.into_iter().map(SourceState::new).collect();
+    let mut retired = Vec::new();
+    let mut updates = 0u64;
 
     let period_ns = 1_000_000_000 / u64::from(fps);
     let due =
@@ -273,6 +365,12 @@ fn run(
             tick += behind;
         }
 
+        if let Some(update) = take_update(pending) {
+            scene = update.scene;
+            animation = update.animation;
+            sources = rebuild(sources, update.sources, &mut retired);
+            updates += 1;
+        }
         for source in &mut sources {
             source.poll();
         }
@@ -316,7 +414,12 @@ fn run(
         achieved_fps: (elapsed > Duration::ZERO && rendered > 0)
             .then(|| rendered as f64 / elapsed.as_secs_f64()),
         render_time: render_times.summary(),
-        sources: sources.iter().map(SourceState::stats).collect(),
+        scene_updates: updates,
+        sources: sources
+            .iter()
+            .map(SourceState::stats)
+            .chain(retired)
+            .collect(),
     };
     Ok(CompositorRun {
         stats,
@@ -392,6 +495,87 @@ mod tests {
             assert_eq!(step.as_nanos() % 10_000_000, 0, "{step:?}");
             assert!(step >= Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn updates_replace_the_scene_while_running_and_keep_unchanged_sources() {
+        let red = Arc::new(pattern::solid(64, 48, [0, 0, 255, 255]).expect("red"));
+        let blue = Arc::new(pattern::solid(64, 48, [255, 0, 0, 255]).expect("blue"));
+        let source = |id, name: &str, frame: &Arc<VideoFrame>| SourceConfig {
+            id: SourceId(id),
+            name: name.into(),
+            input: SourceInput::Static(Arc::clone(frame)),
+        };
+        let layer = |name: &str, id| Layer::new(name, SourceId(id), Transform::IDENTITY);
+        let compositor =
+            Compositor::spawn(config(vec![source(1, "red", &red)], vec![layer("red", 1)]))
+                .expect("spawn");
+        thread::sleep(Duration::from_millis(50));
+        let scene = |layers| Scene {
+            width: 64,
+            height: 48,
+            background: [0, 0, 0, 255],
+            layers,
+        };
+        // Keep red (same id and frame), add blue on top.
+        compositor
+            .update(SceneUpdate {
+                scene: scene(vec![layer("red", 1), layer("blue", 2)]),
+                sources: vec![source(1, "red", &red), source(2, "blue", &blue)],
+                animation: None,
+            })
+            .expect("update");
+        // A different canvas size is rejected before it reaches the thread.
+        let mut wrong = scene(vec![]);
+        wrong.width = 32;
+        assert!(matches!(
+            compositor.update(SceneUpdate {
+                scene: wrong,
+                sources: vec![],
+                animation: None,
+            }),
+            Err(CompositorError::CanvasMismatch { .. })
+        ));
+        thread::sleep(Duration::from_millis(50));
+        let run = compositor.stop().expect("stop");
+        assert_eq!(run.stats.scene_updates, 1);
+        // Blue covers red in the last frame.
+        assert_eq!(run.last_frame.pixel(10, 10), [255, 0, 0, 255]);
+        let red_stats = &run.stats.sources[0];
+        assert_eq!(red_stats.name, "red");
+        assert_eq!(red_stats.kind, "static");
+        // Red was kept, not retired and re-created (which would list it twice).
+        assert_eq!(run.stats.sources.len(), 2);
+    }
+
+    #[test]
+    fn removed_sources_are_reported_as_retired() {
+        let mailbox = Arc::new(FrameMailbox::new());
+        let compositor = Compositor::spawn(config(
+            vec![SourceConfig {
+                id: SourceId(7),
+                name: "live".into(),
+                input: SourceInput::Live(Arc::clone(&mailbox)),
+            }],
+            vec![Layer::new("live", SourceId(7), Transform::IDENTITY)],
+        ))
+        .expect("spawn");
+        thread::sleep(Duration::from_millis(30));
+        compositor
+            .update(SceneUpdate {
+                scene: Scene::new(64, 48),
+                sources: vec![],
+                animation: None,
+            })
+            .expect("update");
+        thread::sleep(Duration::from_millis(30));
+        let run = compositor.stop().expect("stop");
+        // The retired live source still shows its counters.
+        assert_eq!(run.stats.sources.len(), 1);
+        assert_eq!(run.stats.sources[0].name, "live");
+        assert!(run.stats.sources[0].missing_ticks > 0);
+        // The render thread released the mailbox.
+        assert_eq!(Arc::strong_count(&mailbox), 1);
     }
 
     #[test]

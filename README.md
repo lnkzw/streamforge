@@ -12,12 +12,11 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 - M4 (audio mixer): a 48 kHz stereo mixer with gain, mute, meters and an explicit clipping and drift policy. It takes continuous audio capture and test tones.
 - M5 (first recording, Linux): the composited scene and the audio mix are recorded to H.264 + AAC in Matroska through the FFmpeg libraries.
 - M6 (live output, Linux): RTMP streaming with reconnects, running alongside a recording; the two fail independently.
-
-A desktop UI is not implemented.
+- M7 (desktop UI): scenes and sources edited live, preview, mixer with meters, and recording/stream controls in an egui app on top of the command API.
 
 ## Prerequisites
 
-- Rust stable toolchain (`rustup`, `cargo`, `rustfmt`, `clippy`)
+- Rust stable toolchain, 1.95 or newer (`rustup`, `cargo`, `rustfmt`, `clippy`; eframe needs 1.95)
 - Git
 - Linux: PipeWire headers (≥ 0.3.44), `clang`/libclang and `pkg-config`, for `capture-linux`. Runtime needs PipeWire and xdg-desktop-portal with a ScreenCast backend. See `docs/capture-linux.md`.
 - Linux: FFmpeg development libraries (libavcodec, libavformat, libavutil, libswscale; FFmpeg 6.1 (CI, Ubuntu 24.04) and 9.0 are tested; libx264 is needed for H.264), for `encoder-ffmpeg`. On Debian/Ubuntu: `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`.
@@ -55,6 +54,9 @@ cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-m
 # Recording (H.264 + AAC in Matroska; never overwrites an existing file)
 cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 10000 [--screen] [--input <name>]
 
+# Desktop UI (scenes, preview, mixer, record and stream controls)
+cargo run --release -p streamforge-desktop -- --output-dir /tmp
+
 # Streaming over RTMP; the key comes from an environment variable, never from the command line
 export STREAMFORGE_STREAM_KEY=…   # e.g. read it with `read -rs STREAMFORGE_STREAM_KEY`
 cargo run --release -p streamforge-cli -- --output-dir /tmp stream --url rtmp://live.example.com/app --duration-ms 60000 [--record take.mkv]
@@ -77,6 +79,7 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/encoder-api`: recording and streaming settings, secret stream key, statistics and errors
 - `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska) and streamer (→ FLV over RTMP) via FFmpeg
 - `crates/rtmp-test-server`: in-process RTMP ingest for tests
+- `crates/streamforge-desktop`: desktop UI (egui/eframe) over the command API
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

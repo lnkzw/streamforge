@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod pattern;
 pub mod render;
 pub mod runner;
+pub mod scale;
 pub mod scene;
 pub mod snapshot;
 pub mod stats;
@@ -16,7 +17,8 @@ pub use geometry::{Rect, Transform};
 pub use render::{CpuRenderer, RenderError, RenderOutcome};
 pub use runner::{
     Animation, Compositor, CompositorConfig, CompositorError, CompositorRun, FrameSink,
-    RenderStats, SourceConfig, SourceInput, SourceStats,
+    RenderStats, SceneUpdate, SourceConfig, SourceInput, SourceStats,
 };
+pub use scale::downscale;
 pub use scene::{Layer, Scene, SceneError, SourceId};
 pub use stats::LatencySummary;

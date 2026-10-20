@@ -104,3 +104,12 @@ Implemented output edges (one set per attached output, so outputs never starve e
 | Audio timeline → AAC frames | gaps ≤ 1 s padded with silence, overlaps trimmed, larger jumps restart (the last frame before a restart and at the end is padded) | `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples` |
 | Recorder after a failure | finalizes the file, then counts everything still queued or sent as dropped until stopped | `frames_dropped`, `blocks_dropped`; `get_status.recording_failed` |
 | Streamer while disconnected (backoff, connect) or failed | everything received is dropped; audio before a connection's first video frame too | `frames_dropped_offline`, `blocks_dropped_offline` (included in the track totals); `get_status.streaming_state` |
+
+Implemented control and preview edges (M7):
+
+| Edge | Capacity / policy | Metrics |
+|------|-------------------|---------|
+| Engine → compositor scene update | 1 slot, newest wins; the render thread try-locks it before a frame | `RenderStats.scene_updates`; removed sources listed in `sources` |
+| Engine → mixer gain/mute changes | 1 slot per strip plus master, newest wins; the mixer try-locks it once per block | — (changes are state, not media) |
+| Mixer → levels | peak since the last read per strip and master (atomics) | `get_mixer` |
+| Compositor → preview | every second frame, downscaled 4×, 3 pooled buffers, newest-wins mailbox; best effort (a viewer that falls behind sees fewer frames) | `MailboxStats` of the preview mailbox |

@@ -77,6 +77,16 @@ pub struct PipelineReport {
     pub screen_capture: Option<VideoCaptureReport>,
     pub screen_capture_error: Option<ErrorSummary>,
     pub audio_captures: Vec<CaptureOutcome>,
+    /// Screen captures of scene sources during this run.
+    pub scene_captures: Vec<SceneCaptureOutcome>,
+}
+
+/// How the screen capture of one scene source ended.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SceneCaptureOutcome {
+    pub source: String,
+    pub report: Option<VideoCaptureReport>,
+    pub error: Option<ErrorSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

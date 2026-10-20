@@ -15,6 +15,7 @@ members = [
     "crates/control-protocol",
     "crates/streamforge-engine",
     "crates/streamforge-cli",
+    "crates/streamforge-desktop",
 ]
 
 [workspace.package]

@@ -157,11 +157,22 @@ Known limitations, deferred:
 
 ## M7 — Desktop UI
 
-- Add scenes/sources, preview, audio mixer, recording/stream controls.
-- UI calls the same command handlers as CLI/protocol adapters.
+- [x] Add scenes/sources, preview, audio mixer, recording/stream controls (`streamforge-desktop`, egui/eframe, ADR 0007):
+  - engine-owned scenes with color bars, solid and screen sources, edited live
+  - a 480×270 @ 30 FPS preview
+  - mixer gain, mute and peak meters
+  - record and RTMP controls with a password field for the key
+- [x] UI calls the same command handlers as CLI/protocol adapters: an engine worker thread executes `Command::decode` + `CommandHandler::handle`; the UI model only builds commands.
 
 Acceptance:
-- UI can create a scene, add a source, and start/stop a recording without direct business logic in UI widgets.
+- [x] UI can create a scene, add a source, and start/stop a recording without direct business logic in UI widgets (`crates/streamforge-desktop/tests/acceptance.rs` drives the model the widgets call, against the real engine).
+
+Known limitations, deferred:
+- Scenes and settings are not persisted.
+- Sources are placed numerically; no dragging on the preview, no undo.
+- The UI has no audio-input picker yet (`set_audio_sources` exists in the API).
+- The egui layer has no automated UI test; the model below it is tested.
+- Requires Rust 1.95 or newer (eframe 0.36).
 
 ## M8 — Agent integration
 

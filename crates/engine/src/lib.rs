@@ -8,20 +8,25 @@ mod composite;
 mod mix;
 mod outputs;
 mod pipeline;
+mod scenes;
+mod studio;
 
 use outputs::{RecordingOutput, StreamingOutput};
 use pipeline::Pipeline;
+use scenes::SceneCollection;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use capture_api::{
     CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
 };
 use command_api::{
-    AudioInputList, Command, CommandError, CommandHandler, CommandList, CommandOutput,
+    AudioInputList, AudioSetup, Command, CommandError, CommandHandler, CommandList, CommandOutput,
     EngineStatus, ErrorCode,
 };
 use encoder_ffmpeg::StreamState;
+use media_core::FrameMailbox;
 
 pub struct Engine {
     /// Shared by the outputs; declared first so it is dropped (producers
@@ -30,6 +35,14 @@ pub struct Engine {
     /// Open outputs; dropping the engine finalizes them.
     recording: Option<RecordingOutput>,
     streaming: Option<StreamingOutput>,
+    /// Scenes; the pipeline renders the active one.
+    scenes: SceneCollection,
+    /// Audio the pipeline mixes unless an output brings its own sources.
+    audio: AudioSetup,
+    /// The preview keeps the pipeline running.
+    preview_enabled: bool,
+    /// Where preview frames go (see `Engine::preview_frames`).
+    preview_frames: Arc<FrameMailbox>,
     status: EngineStatus,
     capture: Box<dyn CaptureBackend>,
     /// Where commands may create files (snapshots); clients only name files.
@@ -58,10 +71,15 @@ impl Engine {
                 streaming_state: None,
                 recording_active: false,
                 recording_failed: false,
+                preview_active: false,
             },
             capture,
             output_dir: PathBuf::from("."),
             capture_capabilities: None,
+            scenes: SceneCollection::new(),
+            audio: default_audio(),
+            preview_enabled: false,
+            preview_frames: Arc::new(FrameMailbox::new()),
             pipeline: None,
             recording: None,
             streaming: None,
@@ -109,6 +127,7 @@ impl CommandHandler for Engine {
                 self.status.recording_failed = self.recording.is_some() && !recording;
                 let streaming = self.streaming_state();
                 self.status.streaming_state = streaming;
+                self.status.preview_active = self.preview_enabled;
                 self.status.streaming_active = matches!(
                     streaming,
                     Some(
@@ -164,7 +183,44 @@ impl CommandHandler for Engine {
             Command::StopStreaming => self
                 .stop_streaming()
                 .map(|report| CommandOutput::StreamingReport(Box::new(report))),
+            Command::ListScenes => Ok(CommandOutput::SceneList(self.list_scenes())),
+            Command::CreateScene { name } => self.create_scene(&name).map(CommandOutput::SceneList),
+            Command::DeleteScene { name } => self.delete_scene(&name).map(CommandOutput::SceneList),
+            Command::SetActiveScene { name } => {
+                self.set_active_scene(&name).map(CommandOutput::SceneList)
+            }
+            Command::AddSource(request) => self.add_source(&request).map(CommandOutput::SceneList),
+            Command::UpdateSource(request) => {
+                self.update_source(&request).map(CommandOutput::SceneList)
+            }
+            Command::RemoveSource { scene, name } => self
+                .remove_source(&scene, &name)
+                .map(CommandOutput::SceneList),
+            Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
+            Command::SetMixerStrip(change) => {
+                self.set_mixer_strip(change).map(CommandOutput::MixerState)
+            }
+            Command::SetMasterGain { gain_db } => {
+                Ok(CommandOutput::MixerState(self.set_master_gain(gain_db)))
+            }
+            Command::SetAudioSources(setup) => {
+                self.set_audio_sources(setup).map(CommandOutput::MixerState)
+            }
+            Command::SetPreview { enabled } => {
+                self.set_preview(enabled).map(CommandOutput::PreviewState)
+            }
         }
+    }
+}
+
+/// Audio before `set_audio_sources`: one quiet test tone (as outputs use
+/// when started without sources).
+fn default_audio() -> AudioSetup {
+    let defaults = command_api::default_sources();
+    AudioSetup {
+        inputs: defaults.inputs,
+        tones: defaults.tones,
+        master_gain_db: defaults.master_gain_db,
     }
 }
 
@@ -447,6 +503,18 @@ mod tests {
                     // Keep probes short; their defaults run for seconds.
                     name if name.starts_with("probe_") => Some(json!({"duration_ms": 100})),
                     "start_recording" => Some(json!({"file_name": format!("all-{index}.mkv")})),
+                    "create_scene" | "set_active_scene" => Some(json!({"name": "Scene"})),
+                    "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
+                    "add_source" => {
+                        Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"}))
+                    }
+                    "update_source" => {
+                        Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5}))
+                    }
+                    "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+                    "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
+                    "set_master_gain" => Some(json!({"gain_db": -3.0})),
+                    "set_preview" => Some(json!({"enabled": false})),
                     // Nothing listens there: a structured `unavailable` error.
                     "start_streaming" => {
                         Some(json!({"url": format!("rtmp://127.0.0.1:{}/live", free_port())}))
@@ -486,7 +554,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
     fn status(engine: &mut Engine) -> EngineStatus {
         match engine.handle(Command::GetStatus).expect("status") {
             CommandOutput::Status(status) => status,
@@ -718,6 +785,200 @@ mod tests {
             "{accounted} vs {ticks}: {recording:?}"
         );
         let _ = server.join();
+    }
+
+    fn run(engine: &mut Engine, name: &str, params: serde_json::Value) -> CommandOutput {
+        let command = Command::decode(name, Some(&params)).expect("decode");
+        engine
+            .handle(command)
+            .unwrap_or_else(|err| panic!("{name}: {err}"))
+    }
+
+    /// Wait for a preview frame whose pixel at (x, y) is `bgra`.
+    fn wait_for_preview_pixel(engine: &Engine, x: u32, y: u32, bgra: [u8; 4]) {
+        let frames = engine.preview_frames();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(frame) = frames.take() {
+                assert_eq!((frame.width(), frame.height()), (480, 270));
+                last = Some(frame.pixel(x, y));
+                if last == Some(bgra) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("preview pixel ({x}, {y}) is {last:?}, expected {bgra:?}");
+    }
+
+    #[test]
+    fn scene_edits_apply_live_to_the_preview() {
+        let mut engine = Engine::new();
+        run(&mut engine, "create_scene", json!({"name": "Show"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Show", "name": "red", "kind": "solid", "color": "#ff0000"}),
+        );
+        let CommandOutput::PreviewState(preview) =
+            run(&mut engine, "set_preview", json!({"enabled": true}))
+        else {
+            panic!("unexpected output");
+        };
+        assert!(preview.enabled && preview.fps == 30);
+        assert!(status(&mut engine).preview_active);
+        // The default scene starts with color bars: white at the top left.
+        wait_for_preview_pixel(&engine, 10, 10, [255, 255, 255, 255]);
+        run(&mut engine, "set_active_scene", json!({"name": "Show"}));
+        wait_for_preview_pixel(&engine, 10, 10, [0, 0, 255, 255]);
+        // A blue box over the top left quarter (canvas pixels).
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Show", "name": "blue", "kind": "solid", "color": "#0000ff",
+                   "x": 0, "y": 0, "width": 960, "height": 540}),
+        );
+        wait_for_preview_pixel(&engine, 10, 10, [255, 0, 0, 255]);
+        wait_for_preview_pixel(&engine, 400, 200, [0, 0, 255, 255]);
+        run(
+            &mut engine,
+            "update_source",
+            json!({"scene": "Show", "name": "blue", "opacity": 0.0}),
+        );
+        wait_for_preview_pixel(&engine, 10, 10, [0, 0, 255, 255]);
+        // Probes would compete with the running pipeline.
+        let probe =
+            Command::decode("probe_composite", Some(&json!({"duration_ms": 100}))).expect("decode");
+        let err = engine.handle(probe).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidState);
+        assert!(err.message.contains("preview"), "{err}");
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+        assert!(!status(&mut engine).preview_active);
+        assert!(engine.preview_frames().take().is_none());
+    }
+
+    #[test]
+    fn a_live_scene_change_that_fails_is_undone() {
+        // No capture backend: a screen source cannot start.
+        let mut engine = Engine::new();
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        let before = match run(&mut engine, "list_scenes", json!({})) {
+            CommandOutput::SceneList(list) => list,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        let add = Command::decode(
+            "add_source",
+            Some(&json!({"scene": "Test pattern", "name": "desk", "kind": "screen"})),
+        )
+        .expect("decode");
+        assert_eq!(engine.handle(add).unwrap_err().code, ErrorCode::Unsupported);
+        let after = match run(&mut engine, "list_scenes", json!({})) {
+            CommandOutput::SceneList(list) => list,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        assert_eq!(before, after);
+        // Deleting needs confirmation, and the active scene cannot go.
+        let delete = Command::decode(
+            "delete_scene",
+            Some(&json!({"name": "Test pattern", "confirm": true})),
+        )
+        .expect("decode");
+        assert_eq!(
+            engine.handle(delete).unwrap_err().code,
+            ErrorCode::InvalidState
+        );
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+    }
+
+    fn mixer(output: CommandOutput) -> command_api::MixerState {
+        match output {
+            CommandOutput::MixerState(state) => state,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixer_gains_apply_live_and_levels_are_reported() {
+        let mut engine = Engine::new();
+        let idle = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert!(!idle.running);
+        assert_eq!(idle.strips.len(), 1);
+        assert_eq!(idle.strips[0].kind, "tone");
+        let muted = mixer(run(
+            &mut engine,
+            "set_mixer_strip",
+            json!({"index": 0, "mute": true}),
+        ));
+        assert!(muted.strips[0].muted);
+        let missing = Command::decode("set_mixer_strip", Some(&json!({"index": 3, "mute": true})))
+            .expect("decode");
+        assert_eq!(
+            engine.handle(missing).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        std::thread::sleep(Duration::from_millis(100));
+        let running = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert!(running.running && running.strips[0].muted);
+        assert_eq!(running.strips[0].peak_dbfs, None, "{running:?}");
+        run(
+            &mut engine,
+            "set_mixer_strip",
+            json!({"index": 0, "mute": false}),
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        let _ramp = mixer(run(&mut engine, "get_mixer", json!({})));
+        std::thread::sleep(Duration::from_millis(100));
+        let live = mixer(run(&mut engine, "get_mixer", json!({})));
+        // The default tone peaks at -20 dBFS.
+        let peak = live.strips[0].peak_dbfs.expect("tone level");
+        assert!((peak + 20.0).abs() < 0.2, "{live:?}");
+        let gain = mixer(run(
+            &mut engine,
+            "set_master_gain",
+            json!({"gain_db": -6.0}),
+        ));
+        assert_eq!(gain.master_gain_db, -6.0);
+        // Sources are fixed while running; gains are not.
+        let setup =
+            Command::decode("set_audio_sources", Some(&json!({"tones": []}))).expect("decode");
+        assert_eq!(
+            engine.handle(setup).unwrap_err().code,
+            ErrorCode::InvalidState
+        );
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+        // The live changes were kept in the configuration.
+        let after = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert!(!after.running && !after.strips[0].muted);
+        assert_eq!(after.master_gain_db, -6.0);
+        let silent = mixer(run(&mut engine, "set_audio_sources", json!({"tones": []})));
+        assert!(silent.strips.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_recording_shows_the_active_scene() {
+        let dir = TempDir::new("scene");
+        let mut engine = Engine::new().with_output_dir(&dir.0);
+        run(&mut engine, "create_scene", json!({"name": "Green"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Green", "name": "fill", "kind": "solid", "color": "#00ff00"}),
+        );
+        run(&mut engine, "set_active_scene", json!({"name": "Green"}));
+        start(&mut engine, json!({"file_name": "green.mkv"})).expect("start");
+        std::thread::sleep(Duration::from_millis(400));
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        assert!(report.recording.video.frames_encoded > 5);
+        let render = report.pipeline.render.expect("render stats");
+        let names: Vec<_> = render.sources.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["fill"]);
     }
 
     #[cfg(target_os = "linux")]

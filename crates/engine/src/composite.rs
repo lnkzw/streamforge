@@ -32,7 +32,7 @@ const BARS: SourceId = SourceId(0);
 const SCREEN: SourceId = SourceId(1);
 const OVERLAY: SourceId = SourceId(2);
 const OVERLAY_SIZE: u32 = 160;
-const SCREEN_BOX: Rect = Rect {
+pub(crate) const SCREEN_BOX: Rect = Rect {
     x: 704.0,
     y: 368.0,
     width: 1152.0,
@@ -166,7 +166,7 @@ pub(crate) fn reference_scene(
 
 /// Sweep the overlay across the canvas; sub-pixel positions exercise the
 /// bilinear path.
-fn move_overlay(scene: &mut Scene, tick: u64) {
+pub(crate) fn move_overlay(scene: &mut Scene, tick: u64) {
     let travel = (CANVAS_WIDTH - OVERLAY_SIZE - 128) as f32;
     let phase = (tick % OVERLAY_PERIOD) as f32 / OVERLAY_PERIOD as f32;
     if let Some(layer) = scene.layer_mut("overlay") {

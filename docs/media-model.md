@@ -61,6 +61,19 @@ Current implementation (M4, `audio-engine`):
 
 Audio and video use different production rates. Synchronize by timestamps, not by assuming one video frame corresponds to one audio block. Define behavior for late frames, missing audio, capture interruptions, and encoder backpressure.
 
+Recording (M5, ADR 0005) puts both producers on one timeline:
+
+- **Shared epoch:** the compositor reports each frame's nominal tick time and the mixer each block's nominal time on the monotonic clock. The recorder taps subtract one session epoch.
+- **Video:** microseconds, rounded to the frame tick in the encoder time base 1/fps. Skipped ticks leave gaps; frames whose timestamp does not increase are dropped and counted.
+- **Audio:** sample frames at 48 kHz (`round(t · 48000)`). The recorder regroups them into 1024-sample AAC frames:
+  - gaps up to 1 s are filled with silence (`gap_samples`)
+  - overlapping samples are dropped (`overlap_samples`)
+  - larger jumps restart the timeline and are counted as `discontinuities`
+- **Late frames and missing audio:** both keep their nominal timestamps, so a late frame does not shift later ones. A missing live input reads as silence in the mix (`underrun_frames`), so the audio track stays continuous.
+- **Explicit time bases:** the taps hand the recorder `MediaTimestamp`s in nanoseconds. The recorder rescales them into 1/fps and 1/48000 with checked, rounded integer arithmetic (`MediaTimestamp::rescale`). A timestamp that cannot be converted drops its item and counts it.
+- **Common end:** on stop, the engine sets one end time before stopping the producers one after the other. Items stamped at or after it are not recorded and are counted (`frames_after_end`, `blocks_after_end`), so both tracks end within one frame or block of each other.
+- **Capture latency:** not compensated yet. Live audio is stamped when mixed, about one jitter-buffer target after capture; screen frames are stamped when composited.
+
 ## Queue policy
 
 Each edge in the media graph must have a bounded capacity and an explicit overload policy. Live video may drop stale frames to protect latency. Audio overrun handling must be deliberate and measurable. Every drop/overrun increments a metric.
@@ -80,3 +93,12 @@ Implemented audio edges:
 | Capture callback → `AudioRing` | 1 s; when full, the oldest frames are overwritten | `AudioRingStats.overrun_frames` |
 | `AudioRing` → mixer | adaptive resampling to a bounded target fill (see above); warm-up, pad and trim only on stalls and bursts | `drift_ppm`, `warmup_frames`, `underrun_frames`, `trimmed_frames`, buffer latency min/mean/max and per-10 s trend |
 | Mixer clock | fixed 10 ms blocks; it catches up to 20 blocks back to back, then skips | `late_blocks`, `skipped_blocks` |
+
+Implemented recording edges:
+
+| Edge | Capacity / policy | Metrics |
+|------|-------------------|---------|
+| Compositor → video copy pool | 8 frame buffers; with no free buffer the frame is dropped | `RecordingStats.video.frames_dropped` |
+| Taps → `recorder` queue | 256 items shared by video and audio (about 1 s), preallocated; when full the item is dropped | `video.frames_dropped`, `audio.blocks_dropped` |
+| Audio timeline → AAC frames | gaps ≤ 1 s padded with silence, overlaps trimmed, larger jumps restart (the last frame before a restart and at the end is padded) | `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples` |
+| Recorder after a failure | finalizes the file, then counts everything still queued or sent as dropped until stopped | `frames_dropped`, `blocks_dropped`; `get_status.recording_failed` |

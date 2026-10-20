@@ -103,13 +103,29 @@ Known limitations, deferred:
 
 ## M5 — First recording
 
-- Encode video and audio using FFmpeg libraries.
-- Mux into a local container.
-- Finalize files correctly on stop and on recoverable errors.
+- [x] Encode video and audio using FFmpeg libraries: H.264 (libx264) and AAC through `ffmpeg-next` on the `recorder` thread (`encoder-ffmpeg`, ADR 0005).
+- [x] Mux into a local container: Matroska, created only as a new file in the engine's output directory.
+- [x] Finalize files correctly on stop and on recoverable errors: encoders are flushed and the trailer is written on `stop_recording`, on encoder errors and when the engine is dropped (stdin closed).
 
 Acceptance:
-- Produce a playable recording with synchronized audio/video.
-- Automated test checks duration, stream metadata, and A/V timestamp drift.
+- [x] Produce a playable recording with synchronized audio/video (2026-10-20, release, `streamforge record --duration-ms 3000`):
+  - libx264 1920×1080 at 60 FPS: 181 frames, 0 dropped
+  - AAC 48 kHz stereo: 0 gaps
+  - ffprobe confirms both streams; the container lasts 3.054 s
+  - the stream ends differ by 3 ms
+- [x] Automated test checks duration, stream metadata, and A/V timestamp drift (`crates/streamforge-engine/tests/recording.rs`): it records through the real engine process, then demuxes and decodes the file and checks:
+  - codecs, size, frame rate, sample rate and channels
+  - duration
+  - end drift below 50 ms
+  - the color bars and the tone RMS
+
+Known limitations, deferred:
+- Linux only; Windows and macOS return `unsupported` (M9).
+- Fixed settings: 1920×1080@60 reference scene, x264 `veryfast`/CRF 20, AAC 160 kbit/s. No hardware encoders, no settings in the command yet.
+- Live-input drift resampling is still linear (ADR 0004).
+- A failure during recording is visible through polling (`get_status.recording_failed`); there are no push events yet. This failure path has no automated test, because an encoder failure cannot be triggered deterministically.
+- Live sources are stamped when mixed or composited, not when captured. Live audio is late by its jitter-buffer target (about 30 ms), and screen frames by up to one capture interval. Per-source latency compensation is deferred.
+- `streamforge record` does not handle Ctrl-C; Matroska stays playable up to the last cluster but loses its index.
 
 ## M6 — Live output
 

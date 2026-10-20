@@ -8,6 +8,8 @@ members = [
     "crates/capture-platform",
     "crates/video-compositor",
     "crates/audio-engine",
+    "crates/encoder-api",
+    "crates/encoder-ffmpeg",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",
@@ -39,4 +41,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.audio-engine]
+opt-level = 3
+
+[profile.dev.package.encoder-ffmpeg]
 opt-level = 3

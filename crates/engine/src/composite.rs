@@ -117,7 +117,7 @@ pub(crate) fn probe(
     })
 }
 
-fn reference_scene(
+pub(crate) fn reference_scene(
     stream: Option<&dyn VideoStream>,
 ) -> Result<CompositorConfig, video_compositor::CompositorError> {
     let bars = pattern::color_bars(CANVAS_WIDTH, CANVAS_HEIGHT)?;
@@ -160,6 +160,7 @@ fn reference_scene(
         sources,
         animation: Some(move_overlay),
         renderer: CpuRenderer::with_available_parallelism(),
+        sink: None,
     })
 }
 

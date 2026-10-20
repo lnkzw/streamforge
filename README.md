@@ -10,14 +10,16 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 - M2 (Linux capture spike): screen capture through the XDG portal and PipeWire, plus audio input capture. Both run as short diagnostic probes.
 - M3 (first compositor): CPU compositor with scene graph, a 1080p/60 render loop on its own thread, and continuous screen capture as a live source.
 - M4 (audio mixer): a 48 kHz stereo mixer with gain, mute, meters and an explicit clipping and drift policy. It takes continuous audio capture and test tones.
+- M5 (first recording, Linux): the composited scene and the audio mix are recorded to H.264 + AAC in Matroska through the FFmpeg libraries.
 
-Encoding, recording, and streaming are not implemented.
+Streaming and a desktop UI are not implemented.
 
 ## Prerequisites
 
 - Rust stable toolchain (`rustup`, `cargo`, `rustfmt`, `clippy`)
 - Git
 - Linux: PipeWire headers (≥ 0.3.44), `clang`/libclang and `pkg-config`, for `capture-linux`. Runtime needs PipeWire and xdg-desktop-portal with a ScreenCast backend. See `docs/capture-linux.md`.
+- Linux: FFmpeg development libraries (libavcodec, libavformat, libavutil, libswscale; FFmpeg 6.1 (CI, Ubuntu 24.04) and 9.0 are tested; libx264 is needed for H.264), for `encoder-ffmpeg`. On Debian/Ubuntu: `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`.
 
 Install Rust using the official instructions: <https://www.rust-lang.org/tools/install>
 
@@ -48,9 +50,16 @@ cargo run --release -p streamforge-cli -- mix --input <name>=-6 --tone 1000@-12 
 
 # Compositor (1920x1080@60 test scene; --screen adds a live capture layer)
 cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 --snapshot frame.ppm
+
+# Recording (H.264 + AAC in Matroska; never overwrites an existing file)
+cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 10000 [--screen] [--input <name>]
 ```
 
-The first version deliberately has no capture or streaming functionality. Do not expect it to replace OBS yet.
+StreamForge is not a replacement for OBS yet.
+
+## Licensing
+
+The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`. Builds link the system FFmpeg libraries dynamically, so a binary is also subject to the license of the FFmpeg build it links. With libx264 (`--enable-gpl`), as in most distribution packages, that is the GPL. Anyone distributing binaries must comply with it (ADR 0005).
 
 ## Repository layout
 
@@ -60,6 +69,8 @@ The first version deliberately has no capture or streaming functionality. Do not
 - `crates/capture-platform`: selects the capture backend for the target OS
 - `crates/video-compositor`: scene graph, CPU renderer and render loop
 - `crates/audio-engine`: mixer, meters, test tones and mixer thread
+- `crates/encoder-api`: recording settings, statistics and errors
+- `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska via FFmpeg)
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

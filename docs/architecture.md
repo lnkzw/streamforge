@@ -39,8 +39,10 @@
 | `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends | `capture-api`, `capture-linux` (Linux) |
 | `audio-engine` | lib | Mixer core (gain ramps, mute, meters, clipping policy), test tones, mixer thread with bounded drift-absorbing input buffering | `media-core` |
 | `video-compositor` | lib | Scene graph, CPU reference renderer, render loop on its own thread, test patterns, PPM snapshots (ADR 0003) | `media-core` |
-| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor`, `audio-engine` (report types) |
-| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend`, the compositor and the mixer | `command-api`, `capture-api`, `video-compositor`, `audio-engine` |
+| `encoder-api` | lib | Platform-neutral recording settings, statistics and errors (no FFmpeg) | — |
+| `encoder-ffmpeg` | lib | `Recorder`: H.264 + AAC into Matroska on its own thread, fed through a non-blocking bounded `RecorderInput` (ADR 0005); `unsupported` on non-Linux | `encoder-api`, `media-core` (Linux only: `ffmpeg-next`) |
+| `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor`, `audio-engine`, `encoder-api` (report types) |
+| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend`, the compositor, the mixer and the recorder | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
@@ -68,8 +70,9 @@ Since M3, real-time work has its own threads:
 - **`compositor`:** fixed-rate render loop. It takes the newest frame of each live source and renders with scoped worker threads.
 - **`audio-capture`:** PipeWire loop of a continuous audio stream. It pushes 48 kHz stereo `f32` into a bounded `AudioRing` (M4).
 - **`audio-mixer`:** fixed 10 ms block clock. It pulls each ring with bounded buffering, mixes and meters, and does not allocate (M4).
+- **`recorder`:** converts BGRA to YUV 4:2:0, encodes H.264 and AAC, and muxes Matroska (M5). Compositor and mixer feed it through output sinks (`FrameSink`, `BlockSink`). The sinks never block: the video tap copies into one of 8 pooled buffers, audio blocks travel inline in a bounded queue, and whatever does not fit is dropped and counted.
 
-The engine thread only starts, waits for and stops these threads; it never touches frames. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
+The engine thread only starts, waits for and stops these threads; it never touches frames. A recording (`start_recording`) keeps them running after the command returns. The engine holds the session until `stop_recording` or until it is dropped. It sets one end time for both tracks first, then stops the producers, then the recorder, then the captures. While a recording is open, commands that would compete for its devices or CPU, or block the engine thread (the probes), fail with `invalid_state`. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
 
 ## Suggested future crates
 
@@ -77,9 +80,7 @@ Add only when a milestone needs them (the socket transport, if needed, extends `
 
 - `capture-windows`
 - `capture-macos`
-- `encoder-ffmpeg`
 - `output-rtmp`
-- `output-recording`
 - `desktop-app`
 - `mcp-server`
 

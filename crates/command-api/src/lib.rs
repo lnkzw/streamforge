@@ -8,11 +8,13 @@
 mod composite;
 mod error;
 mod mix;
+mod recording;
 mod registry;
 
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
+pub use recording::{RecordingReport, RecordingRequest, RecordingStarted};
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
 
 use capture_api::{
@@ -43,6 +45,10 @@ pub enum Command {
     ProbeComposite(CompositeRequest),
     /// Mix live inputs and test tones and report meters and buffering.
     ProbeAudioMix(MixRequest),
+    /// Start recording to a new file; returns immediately.
+    StartRecording(RecordingRequest),
+    /// Stop the running recording and finalize its file.
+    StopRecording,
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -60,6 +66,8 @@ pub enum CommandOutput {
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
     MixReport(Box<MixReport>),
+    RecordingStarted(RecordingStarted),
+    RecordingReport(Box<RecordingReport>),
 }
 
 /// Result of `list_audio_inputs`.
@@ -75,7 +83,11 @@ pub struct EngineStatus {
     pub media_engine_ready: bool,
     pub capture_available: bool,
     pub streaming_active: bool,
+    /// A recording is open and its workers are running.
     pub recording_active: bool,
+    /// A recording is open but stopped unexpectedly (encoder, compositor or
+    /// mixer failure); `stop_recording` finalizes it and reports the error.
+    pub recording_failed: bool,
 }
 
 /// Executes typed commands.
@@ -99,6 +111,7 @@ mod tests {
             capture_available: false,
             streaming_active: false,
             recording_active: false,
+            recording_failed: false,
         };
         let value = serde_json::to_value(CommandOutput::Status(status)).expect("serialize status");
         assert_eq!(
@@ -110,6 +123,7 @@ mod tests {
                 "capture_available": false,
                 "streaming_active": false,
                 "recording_active": false,
+                "recording_failed": false,
             })
         );
     }

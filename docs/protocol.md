@@ -75,7 +75,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
-| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "recording_active"}` |
+| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "recording_active", "recording_failed"}` |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
@@ -83,6 +83,8 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
 | `probe_audio_mix`          | see below | `sensitive` | Mix report |
+| `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels"}` |
+| `stop_recording`           | none   | `control`   | Recording report |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -190,6 +192,37 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
   - `buffer` (`{"target_ms", "min_ms", "mean_ms", "max_ms", "windows_ms"}`), where `windows_ms` is the mean fill per 10 s window, oldest first
 
 `warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
+
+### Recording
+
+`start_recording` records the 1920×1080@60 reference scene (the `probe_composite` scene, with an optional live screen layer) and the audio mix to H.264 + AAC in Matroska. It returns as soon as the file header is written; recording continues on its own threads until `stop_recording`. Closing the engine's stdin also stops and finalizes the recording. It is `sensitive` because it captures and stores private content.
+
+| Param            | Type | Default | Meaning |
+|------------------|------|---------|---------|
+| `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
+| `screen`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (opens the portal picker). |
+| `inputs`         | as in `probe_audio_mix` | `[]` | Live audio inputs. |
+| `tones`          | as in `probe_audio_mix` | one 1 kHz tone at −20 dBFS if there are no `inputs` | Test tones; `[]` records without a tone. |
+| `master_gain_db` | number −96..=24 | 0 | Master gain. |
+
+Errors:
+- `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. While a recording is open, the probe commands fail with `invalid_state` too. If its recorder, compositor or mixer stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
+- `unsupported`: no recorder on this platform (only Linux has one so far).
+- `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
+- Capture errors are the same as for the probes.
+
+If `start_recording` fails, the file it created is removed.
+
+`stop_recording` stops the compositor and mixer, drains the queue, flushes the encoders, writes the trailer and ends the captures. Report: `{"recording", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
+
+- **`recording`:** `path`, `container`, `duration_ms`, `file_bytes`, plus:
+  - `video` (`encoder`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
+  - `audio` (`encoder`, `rate`, `channels`, `bitrate`, `samples_encoded`, `blocks_dropped`, `gap_samples`, `overlap_samples`, `discontinuities`, `blocks_after_end`, `padding_samples`, `first_pts_ms`, `end_ms`). Both tracks are cut at the stop time; `*_after_end` counts what producers emitted while stopping
+- **`render`:** the composite stats.
+- **`mix`:** the mix stats (as in `probe_audio_mix`).
+- **`audio_captures`:** as `captures` in `probe_audio_mix`.
+
+If finalizing fails, the error's `details` carry the partial `recording` stats, the capture reports and `warnings`. The file is kept.
 
 ## Example session
 

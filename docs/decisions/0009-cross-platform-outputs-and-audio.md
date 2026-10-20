@@ -31,11 +31,12 @@ Windows paths work with the recorder's `file:` URL prefix. The test that a `pipe
 ### Audio input on Windows and macOS through `cpal`
 
 - **Backend:** `capture-cpal` uses `cpal` 0.18 (WASAPI, CoreAudio). `cpal` is a mature, widely used crate and gives one implementation for both platforms instead of two FFI layers. The dependency exists only on Windows and macOS; on Linux, PipeWire stays.
-- **Threading:** each stream owns a thread that builds, plays and finally drops the `cpal` stream (not `Send` on every host). The data callback:
-  - converts the device format with `Converter`, into a preallocated scratch buffer that is flushed into the bounded `AudioRing`, so it never allocates
-  - records statistics with `try_lock` only, so it never waits; buffers left out are counted
+- **Threading:** each stream owns a thread that builds, plays and finally drops the `cpal` stream (not `Send` on every host). The data callback runs on the OS real-time audio thread (CoreAudio IOProc, WASAPI's audio thread), so it never allocates and never waits for a lock:
+  - it converts the device format with `Converter` into a preallocated scratch buffer
+  - it hands the result to the bounded `AudioRing` with `try_push`. While the mixer holds the ring's lock, frames wait, in order, in a preallocated pending buffer (one second) for the next callback; only if that fills are frames dropped, counted as ring overrun. Linux producers are not real-time threads and keep the blocking `push`.
+  - it records statistics of the converted stereo stream with `try_lock` only; frames delivered while the statistics were busy (possible only at teardown) are counted and do not show up as a deficit
 - **Conversion:** WASAPI shared mode and CoreAudio deliver the device's own format, which on Linux PipeWire would have converted.
-  - The backend prefers a 48 kHz configuration (`f32`, stereo) when the device offers one; otherwise it resamples linearly.
+  - The backend captures at the rate the device runs at now (its default configuration), preferring `f32` and stereo at that rate, and resamples linearly to 48 kHz if needed. Requesting 48 kHz instead would make CoreAudio switch the device's rate for every app, or fail while another app uses the device.
   - Mono is duplicated to both channels, and from multichannel input the first two channels are used.
   - Every conversion is reported as a warning, and digital silence gets a hint about macOS microphone permission.
 - **Inputs and errors:** inputs are selected by the host's device id (or display name). `cpal` error kinds map to capture error codes: permission, not found, unavailable, unsupported, invalid request, backend.
@@ -45,6 +46,7 @@ Windows paths work with the recorder's `file:` URL prefix. The test that a `pipe
 
 - **Documentation:** `docs/platforms.md` documents capabilities, build requirements and verification per OS, and `get_capture_capabilities` reports them at runtime.
 - **CI:**
+  - Every push to `main` and every pull request runs on all three runners. (While the repository was private, pull requests ran on Linux only unless labeled `cross-platform`, to save minutes. It is public since 2026-10-21, standard runners are free, and Windows- or macOS-only code no longer merges untested.)
   - FFmpeg is installed on all three runners.
   - Recording (decode-checked files), streaming (in-process RTMP: connect, reconnect, give-up), the engine, desktop-model and MCP acceptance tests (including SIGTERM finalization) run natively on each.
   - The cpal tests run on Windows and macOS, and a step prints each runner's capture capabilities.
@@ -53,13 +55,13 @@ Windows paths work with the recorder's `file:` URL prefix. The test that a `pipe
 
 At the last complete CI run before Actions minutes ran out:
 - **Windows:** passed everything, including the FFmpeg tests, the cpal tests and all media acceptance tests.
-- **macOS:** passed everything except the recording acceptance test's throughput floor. The 3-core Intel VM skips about a third of the 1080p60 compositor ticks; they are counted, and the accounting and content checks passed. The floor was lowered to "at least a third" (a guard against total failure); throughput is a performance question, not a correctness one.
+- **macOS:** passed everything except the recording acceptance test's throughput floor. The 3-core Intel VM skips about a third of the 1080p60 compositor ticks; they are counted, and the accounting and content checks passed. On macOS the floor is now "at least a third" (a guard against total failure); throughput is a performance question, not a correctness one. Linux and Windows keep three quarters.
 
 Runners have no microphone, so on Windows the `not_found` path was exercised. Live audio capture on Windows and macOS still needs a manual check on a real machine.
 
 ## Consequences
 
 - Recording and streaming work on all three OSes; CI exercises them for real, not just by compiling.
-- Audio quality on Windows and macOS depends on the device offering 48 kHz; otherwise the linear resampler softens high frequencies.
+- Audio quality on Windows and macOS depends on the device running at 48 kHz; otherwise (e.g. a 44.1 kHz microphone) the linear resampler softens high frequencies.
 - Windows users need an FFmpeg shared build, and distributing binaries means shipping its DLLs under its license (GPL for builds with libx264).
-- macOS CI minutes cost ten times Linux minutes and Windows twice as much; a private repository can exhaust the free allowance.
+- The Windows FFmpeg build follows BtbN's rolling 8.1 release, so CI may link a newer 8.1 build from one run to the next. Pinning a dated build with a hard-coded hash would also prove provenance, but breaks whenever BtbN prunes that release.

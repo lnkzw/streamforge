@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `labeled`: adding the `cross-platform` label starts the full matrix.
-    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -20,26 +18,6 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  # Windows minutes cost twice and macOS minutes ten times as much as Linux
-  # minutes, so pull requests run on Linux only unless they carry the
-  # `cross-platform` label. Pushes to main and manual runs test all three.
-  plan:
-    name: pick platforms
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      os: ${{ steps.pick.outputs.os }}
-    steps:
-      - id: pick
-        env:
-          ALL: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'cross-platform') }}
-        run: |
-          if [ "$ALL" = "true" ]; then
-            echo 'os=["ubuntu-latest","windows-latest","macos-15-intel"]' >> "$GITHUB_OUTPUT"
-          else
-            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
-          fi
-
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -56,14 +34,12 @@ jobs:
 
   check:
     name: clippy + test (${{ matrix.os }})
-    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        # From `plan`: Linux, or all of ubuntu-latest, windows-latest and
-        # macos-15-intel. (macos-latest, arm64, was repeatedly not picked up
-        # for lack of capacity on 2026-10-19; the Intel image is standard.)
-        os: ${{ fromJSON(needs.plan.outputs.os) }}
+        # macos-latest (arm64) was repeatedly not picked up for lack of
+        # capacity on 2026-10-19; the Intel image is a standard runner.
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

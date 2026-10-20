@@ -17,8 +17,8 @@ What each operating system supports, how it is built, and how it is verified. Ca
 
 Notes:
 - **Audio conversion (Windows, macOS):** WASAPI shared mode and CoreAudio deliver the device's own format.
-  - The backend picks 48 kHz if the device offers it, preferring `f32` and stereo.
-  - Otherwise it resamples linearly, with the same quality note as the mixer's drift correction (ADR 0004).
+  - The backend captures at the device's current rate (never switching it, which would affect other apps), preferring `f32` and stereo.
+  - Unless that rate is 48 kHz, it resamples linearly, with the same quality note as the mixer's drift correction (ADR 0004).
   - Mono is duplicated to both channels; with more than two channels, the first two are used.
   - Each report warns about these conversions.
 - **macOS microphone access:** it needs permission for the app that runs StreamForge (System Settings → Privacy & Security → Microphone). Without it, CoreAudio delivers silence, which the capture report flags.
@@ -37,7 +37,7 @@ CI uses the [BtbN FFmpeg builds](https://github.com/BtbN/FFmpeg-Builds) on Windo
 
 ## Verification
 
-CI (`.github/workflows/ci.yml`) builds and tests on `ubuntu-latest`, `windows-latest` and `macos-15-intel`:
+CI (`.github/workflows/ci.yml`) builds and tests every push and pull request on `ubuntu-latest`, `windows-latest` and `macos-15-intel`:
 
 | Test area | Linux | Windows | macOS |
 |-----------|-------|---------|-------|
@@ -48,4 +48,4 @@ CI (`.github/workflows/ci.yml`) builds and tests on `ubuntu-latest`, `windows-la
 | Audio input | manual (dev machine); CI runners have no session | CI: the runner has no input, so the structured `not_found` path; live capture still needs a manual check | CI: the runner's devices if any, else the structured error; microphone permission cannot be granted on runners |
 | Screen capture | manual (needs a human in the picker) | — | — |
 
-At the last complete CI run (ADR 0009), every test passed on Windows. On macOS, every test passed except a throughput floor, which has since been made a guard against total failure: the macOS VM skips some compositor ticks at 1080p60, and those skips are counted.
+At the first complete CI run (ADR 0009), every test passed on Windows. On macOS, every test passed except a throughput floor, which on macOS is now only a guard against total failure: the macOS VM skips some compositor ticks at 1080p60, and those skips are counted.

@@ -56,7 +56,14 @@ fn the_default_input_captures_or_reports_that_there_is_none() {
                 ),
                 "{error:?}"
             );
-            assert!(inputs.is_empty() || error.kind != CaptureErrorKind::NotFound);
+            // Inputs without a default one are possible; then the error
+            // says so instead of claiming there is no input at all.
+            assert!(
+                inputs.is_empty()
+                    || error.kind != CaptureErrorKind::NotFound
+                    || error.message.contains("no default audio input"),
+                "{error:?}"
+            );
         }
     }
 }
@@ -82,4 +89,13 @@ fn unknown_inputs_and_unsupported_layouts_are_errors() {
         .err()
         .expect("must fail");
     assert_eq!(mono.kind, CaptureErrorKind::InvalidRequest);
+    let no_rate = capture
+        .start_audio_stream(&AudioStreamRequest {
+            input: None,
+            rate: 0,
+            channels: 2,
+        })
+        .err()
+        .expect("must fail");
+    assert_eq!(no_rate.kind, CaptureErrorKind::InvalidRequest);
 }

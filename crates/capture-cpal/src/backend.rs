@@ -2,13 +2,17 @@
 //!
 //! Each audio stream owns a thread that builds the cpal stream (not `Send`
 //! on every host), plays it and waits for the stop signal. The cpal
-//! callback converts into a preallocated scratch buffer and pushes into a
-//! bounded `AudioRing`; it does not allocate or block (statistics are
-//! try-locked and skipped, counted, when busy).
+//! callback runs on the OS real-time audio thread. It converts into
+//! preallocated buffers and hands the result to the bounded `AudioRing`
+//! with `try_push`, so it never allocates and never waits for a lock:
+//! - frames the ring cannot take yet (the mixer holds its lock) wait in a
+//!   pending buffer for the next callback; only if that fills are frames
+//!   dropped, counted as ring overrun;
+//! - statistics are try-locked too; frames left out of them are counted.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -139,6 +143,12 @@ impl CaptureBackend for CpalCapture {
                 ),
             ));
         }
+        if request.rate == 0 {
+            return Err(CaptureError::new(
+                CaptureErrorKind::InvalidRequest,
+                "the sample rate must be positive",
+            ));
+        }
         let ring = Arc::new(AudioRing::new(
             request.channels,
             request.rate as usize * RING_SECONDS,
@@ -247,12 +257,14 @@ fn find_device(host: &cpal::Host, input: Option<&str>) -> Result<cpal::Device, C
     }
 }
 
-/// The device config to capture with: at `rate` if the device offers it
-/// (preferring f32 and stereo), else its default config (resampled).
-fn choose_config(
-    device: &cpal::Device,
-    rate: u32,
-) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+/// The device config to capture with: at the rate the device runs at now
+/// (its default config), preferring f32 and stereo at that rate. Asking
+/// for another rate would make CoreAudio switch the device's rate for every
+/// app, or fail while another app uses it; the converter resamples instead.
+fn choose_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+    let default = device
+        .default_input_config()
+        .map_err(|err| capture_error(&err, "the input has no usable format"))?;
     let usable = |format: SampleFormat| {
         matches!(
             format,
@@ -273,28 +285,33 @@ fn choose_config(
             let score = u8::from(range.sample_format() == SampleFormat::F32) * 2
                 + u8::from(range.channels() == 2);
             range
-                .try_with_sample_rate(rate)
+                .try_with_sample_rate(default.sample_rate())
                 .map(|config| (score, config))
         })
         .max_by_key(|(score, _)| *score)
         .map(|(_, config)| config);
-    match best {
-        Some(config) => Ok(config),
-        None => device
-            .default_input_config()
-            .map_err(|err| capture_error(&err, "the input has no usable format")),
-    }
+    Ok(best.unwrap_or(default))
 }
 
-/// State moved into the cpal data callback.
+/// State moved into the cpal data callback (see the module docs).
 struct Callback {
     converter: Converter,
+    /// Converted stereo output of one device buffer; flushed when it fills.
     scratch: Vec<f32>,
-    ring: Arc<AudioRing>,
-    stats: Arc<Mutex<AudioStatsAccumulator>>,
-    stats_skipped: Arc<AtomicU64>,
-    in_channels: usize,
+    sink: Sink,
     start: Instant,
+}
+
+/// Where converted frames go: the ring and the statistics.
+struct Sink {
+    ring: Arc<AudioRing>,
+    /// Frames waiting for the ring, in order: `pending[..pending_len]`.
+    pending: Vec<f32>,
+    pending_len: usize,
+    /// Levels and timing of the converted stereo stream.
+    stats: Arc<Mutex<AudioStatsAccumulator>>,
+    /// Frames delivered while `stats` was busy (only possible at teardown).
+    unobserved_frames: Arc<AtomicU64>,
 }
 
 impl Callback {
@@ -304,27 +321,66 @@ impl Callback {
         f32: FromSample<T>,
     {
         let arrival = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        let frames = (data.len() / self.in_channels) as u64;
-        let ring = &self.ring;
+        if data.is_empty() {
+            self.sink.observe(arrival, &[]);
+            return;
+        }
+        let sink = &mut self.sink;
         self.converter.convert(
             data.iter().map(|sample| sample.to_sample::<f32>()),
             &mut self.scratch,
             |part| {
-                ring.push(part.iter().copied());
+                sink.observe(arrival, part);
+                sink.deliver(part);
             },
         );
-        // Never wait in the audio callback: if the reader holds the
-        // statistics right now, this buffer is left out (and counted).
-        match self.stats.try_lock() {
-            Ok(mut stats) => stats.observe_buffer(
-                arrival,
-                frames,
-                data.iter().map(|sample| sample.to_sample::<f32>()),
-                None,
-            ),
-            Err(_) => {
-                self.stats_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Sink {
+    /// Statistics of converted stereo frames; never waits.
+    fn observe(&self, arrival: u64, part: &[f32]) {
+        let frames = (part.len() / 2) as u64;
+        let mut stats = match self.stats.try_lock() {
+            Ok(stats) => stats,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.unobserved_frames.fetch_add(frames, Ordering::Relaxed);
+                return;
             }
+        };
+        stats.observe_buffer(arrival, frames, part.iter().copied(), None);
+    }
+
+    /// Hand frames to the ring without waiting, keeping their order.
+    fn deliver(&mut self, part: &[f32]) {
+        if self.pending_len == 0 && self.ring.try_push(part).is_some() {
+            return;
+        }
+        let room = self.pending.len() - self.pending_len;
+        let kept = part.len().min(room) / 2 * 2;
+        self.pending[self.pending_len..self.pending_len + kept].copy_from_slice(&part[..kept]);
+        self.pending_len += kept;
+        let lost = (part.len() - kept) / 2;
+        if lost > 0 {
+            self.ring.count_overrun(lost);
+        }
+        if self
+            .ring
+            .try_push(&self.pending[..self.pending_len])
+            .is_some()
+        {
+            self.pending_len = 0;
+        }
+    }
+}
+
+impl Drop for Sink {
+    /// Teardown, not the real-time path: deliver what is still pending.
+    fn drop(&mut self) {
+        if self.pending_len > 0 {
+            self.ring
+                .push(self.pending[..self.pending_len].iter().copied());
         }
     }
 }
@@ -361,25 +417,31 @@ fn run(
 ) -> Result<AudioCaptureReport, CaptureError> {
     let host = host();
     let stats = Arc::new(Mutex::new(AudioStatsAccumulator::new()));
-    let stats_skipped = Arc::new(AtomicU64::new(0));
+    let unobserved_frames = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(Mutex::new(Vec::new()));
     let setup = (|| {
         let device = find_device(&host, request.input.as_deref())?;
-        let supported = choose_config(&device, request.rate)?;
+        let supported = choose_config(&device)?;
         let format = supported.sample_format();
         let config = supported.config();
+        // The statistics describe the converted stream.
         stats
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .set_rate(config.sample_rate);
+            .set_rate(request.rate);
+        // One second of stereo output each: far more than one device
+        // buffer, so neither fills in normal operation.
+        let second = request.rate as usize * 2;
         let callback = Callback {
             converter: Converter::new(config.channels, config.sample_rate, request.rate),
-            // One second of output; flushed into the ring when it fills.
-            scratch: vec![0.0; request.rate as usize * 2],
-            ring,
-            stats: Arc::clone(&stats),
-            stats_skipped: Arc::clone(&stats_skipped),
-            in_channels: usize::from(config.channels.max(1)),
+            scratch: vec![0.0; second],
+            sink: Sink {
+                ring,
+                pending: vec![0.0; second],
+                pending_len: 0,
+                stats: Arc::clone(&stats),
+                unobserved_frames: Arc::clone(&unobserved_frames),
+            },
             start: Instant::now(),
         };
         let errors = Arc::clone(&errors);
@@ -417,10 +479,18 @@ fn run(
     // Until `stop` (or the stream handle is dropped).
     let _ = stop.recv();
     drop(stream);
-    let stats = stats
+    let mut stats = stats
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .finish(started.elapsed());
+    let unobserved = unobserved_frames.load(Ordering::Relaxed);
+    if unobserved > 0 {
+        // Delivered, so not a deficit; only their levels are missing.
+        stats.frames += unobserved;
+        stats.frame_deficit = stats
+            .expected_frames
+            .map(|expected| expected.saturating_sub(stats.frames));
+    }
 
     let mut warnings: Vec<String> = errors
         .lock()
@@ -440,10 +510,9 @@ fn run(
             config.channels
         ));
     }
-    let skipped = stats_skipped.load(Ordering::Relaxed);
-    if skipped > 0 {
+    if unobserved > 0 {
         warnings.push(format!(
-            "{skipped} buffer(s) left out of the statistics (not of the audio)"
+            "{unobserved} frame(s) delivered without level statistics (stopped mid-buffer)"
         ));
     }
     if stats.frames > 0 && stats.peak_dbfs.is_none() {

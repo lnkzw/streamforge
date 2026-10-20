@@ -3,11 +3,13 @@
 //!
 //! Capacity is fixed at construction; pushing never allocates. When full,
 //! the oldest frames are overwritten and counted as overrun. The lock is
-//! held only while copying samples; producers are PipeWire main-loop
-//! callbacks (not RT threads), so this is acceptable for now.
+//! held only while copying samples. Producers on a non-real-time thread
+//! (PipeWire main-loop callbacks) use [`AudioRing::push`]; producers on an
+//! OS real-time audio thread (cpal callbacks) use [`AudioRing::try_push`],
+//! which never waits for the consumer.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use serde::Serialize;
 
@@ -81,12 +83,41 @@ impl AudioRing {
         I: IntoIterator<Item = f32>,
         I::IntoIter: ExactSizeIterator,
     {
-        let mut samples = samples.into_iter();
-        let frames = samples.len() / self.channels;
-        if frames == 0 {
+        let samples = samples.into_iter();
+        if samples.len() < self.channels {
             return 0;
         }
-        let mut inner = self.lock();
+        self.store(self.lock(), samples)
+    }
+
+    /// [`push`](Self::push) for real-time producers: never waits. `None`
+    /// means the consumer holds the lock right now and nothing was stored;
+    /// the caller keeps the frames and tries again later.
+    pub fn try_push(&self, samples: &[f32]) -> Option<usize> {
+        if samples.len() < self.channels {
+            return Some(0);
+        }
+        let inner = match self.inner.try_lock() {
+            Ok(inner) => inner,
+            // See `lock`: the indices stay consistent.
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        Some(self.store(inner, samples.iter().copied()))
+    }
+
+    /// Count frames a producer had to drop before they reached the ring,
+    /// so they show up as overrun like frames the ring dropped itself.
+    pub fn count_overrun(&self, frames: usize) {
+        self.overrun.fetch_add(frames as u64, Ordering::Relaxed);
+    }
+
+    fn store(
+        &self,
+        mut inner: MutexGuard<'_, Inner>,
+        mut samples: impl ExactSizeIterator<Item = f32>,
+    ) -> usize {
+        let frames = samples.len() / self.channels;
         let capacity = inner.samples.len();
         let mut incoming = frames * self.channels;
         let mut overrun = 0;
@@ -174,7 +205,7 @@ impl AudioRing {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
         // A poisoned lock only means another holder panicked mid-copy; the
         // indices are still consistent because they are updated after copying.
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
@@ -215,6 +246,20 @@ mod tests {
         assert_eq!(ring.pull(&mut out), 3);
         assert_eq!(out, [2.0, -2.0, 3.0, -3.0, 4.0, -4.0]);
         assert_eq!(ring.stats().overrun_frames, 1);
+    }
+
+    #[test]
+    fn try_push_never_waits_for_the_consumer() {
+        let ring = AudioRing::new(2, 4);
+        let held = ring.lock();
+        assert_eq!(ring.try_push(&frames(&[1.0])), None);
+        drop(held);
+        assert_eq!(ring.try_push(&frames(&[1.0, 2.0])), Some(2));
+        assert_eq!(ring.try_push(&[0.5]), Some(0), "partial frame");
+        ring.count_overrun(3);
+        let stats = ring.stats();
+        assert_eq!(stats.pushed_frames, 2);
+        assert_eq!(stats.overrun_frames, 3);
     }
 
     #[test]

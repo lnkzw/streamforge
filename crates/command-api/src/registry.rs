@@ -105,12 +105,13 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
 
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
-    summary: "Record the media pipeline (1920x1080@60 reference scene, optional live screen layer, \
-              audio mix) to H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in \
-              the engine's output directory, never overwritten); sources (screen, source_types, \
-              cursor, inputs, tones, master_gain_db) only if no other output is running, since \
-              outputs share one pipeline; without sources and without a running pipeline, one \
-              -20 dBFS 1 kHz tone. Returns immediately; recording continues until stop_recording.",
+    summary: "Record the media pipeline (the active scene at 1920x1080@60 and the audio mix) to \
+              H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
+              output directory, never overwritten); optional sources (screen, source_types, \
+              cursor, inputs, tones, master_gain_db) only while no preview or output runs: they \
+              replace the configured audio (set_audio_sources, which may include microphones) \
+              for this run and add a screen layer. Returns immediately; recording continues \
+              until stop_recording.",
     access: CommandAccess::Sensitive,
 };
 
@@ -151,16 +152,17 @@ const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
 
 const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "delete_scene",
-    summary: "Delete a scene that is not active. Params: name, confirm (must be true). Returns the \
-              scene list.",
-    access: CommandAccess::Control,
+    summary: "Delete a scene that is not active; irreversible. Params: name, confirm (must be \
+              true). Returns the scene list.",
+    access: CommandAccess::Sensitive,
 };
 
 const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "set_active_scene",
-    summary: "Render this scene from now on (applies live while preview or outputs run). Params: \
-              name. Returns the scene list.",
-    access: CommandAccess::Control,
+    summary: "Render this scene from now on (applies live while preview or outputs run; its \
+              screen sources start capturing, which opens the system picker). Params: name. \
+              Returns the scene list.",
+    access: CommandAccess::Sensitive,
 };
 
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
@@ -168,8 +170,9 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     summary: "Add a source on top of a scene. Params: scene, name, kind (color_bars, solid, \
               screen), color (#rrggbb[aa], solid), source_types and cursor (screen), x, y, width, \
               height (canvas pixels; all or none, default the whole canvas), opacity (0-1). Screen \
-              sources open the system picker when they start. Returns the scene list.",
-    access: CommandAccess::Control,
+              sources start capturing (system picker) when the scene is rendered. Returns the \
+              scene list.",
+    access: CommandAccess::Sensitive,
 };
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {

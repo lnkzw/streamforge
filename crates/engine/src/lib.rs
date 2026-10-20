@@ -206,9 +206,9 @@ impl CommandHandler for Engine {
             Command::SetAudioSources(setup) => {
                 self.set_audio_sources(setup).map(CommandOutput::MixerState)
             }
-            Command::SetPreview { enabled } => {
-                self.set_preview(enabled).map(CommandOutput::PreviewState)
-            }
+            Command::SetPreview { enabled } => self
+                .set_preview(enabled)
+                .map(|state| CommandOutput::PreviewState(Box::new(state))),
         }
     }
 }
@@ -267,6 +267,7 @@ mod tests {
     /// Backend with a working screen capability and a failing audio side.
     struct FakeCapture {
         capability_queries: Rc<Cell<usize>>,
+        screen_starts: Rc<Cell<usize>>,
     }
 
     impl CaptureBackend for FakeCapture {
@@ -367,6 +368,7 @@ mod tests {
             &mut self,
             _selection: &ScreenSelection,
         ) -> Result<Box<dyn VideoStream>, CaptureError> {
+            self.screen_starts.set(self.screen_starts.get() + 1);
             let mailbox = Arc::new(FrameMailbox::new());
             // One solid red 32x18 frame.
             let pixels = [0u8, 0, 255, 0].repeat(32 * 18);
@@ -449,8 +451,19 @@ mod tests {
         let queries = Rc::new(Cell::new(0));
         let engine = Engine::with_capture(Box::new(FakeCapture {
             capability_queries: Rc::clone(&queries),
+            screen_starts: Rc::new(Cell::new(0)),
         }));
         (engine, queries)
+    }
+
+    /// Engine with the fake backend, counting screen captures started.
+    fn engine_with_screen_counter() -> (Engine, Rc<Cell<usize>>) {
+        let starts = Rc::new(Cell::new(0));
+        let engine = Engine::with_capture(Box::new(FakeCapture {
+            capability_queries: Rc::new(Cell::new(0)),
+            screen_starts: Rc::clone(&starts),
+        }));
+        (engine, starts)
     }
 
     fn engine() -> Engine {
@@ -891,6 +904,21 @@ mod tests {
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
+    /// Poll `get_mixer` until `done` holds (bounded).
+    fn wait_mixer(
+        engine: &mut Engine,
+        done: impl Fn(&command_api::MixerState) -> bool,
+    ) -> command_api::MixerState {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = mixer(run(engine, "get_mixer", json!({})));
+            if done(&state) || std::time::Instant::now() >= deadline {
+                return state;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn mixer(output: CommandOutput) -> command_api::MixerState {
         match output {
             CommandOutput::MixerState(state) => state,
@@ -919,22 +947,27 @@ mod tests {
         );
 
         run(&mut engine, "set_preview", json!({"enabled": true}));
-        std::thread::sleep(Duration::from_millis(100));
-        let running = mixer(run(&mut engine, "get_mixer", json!({})));
-        assert!(running.running && running.strips[0].muted);
+        let running = wait_mixer(&mut engine, |state| state.running);
+        assert!(running.strips[0].muted);
         assert_eq!(running.strips[0].peak_dbfs, None, "{running:?}");
         run(
             &mut engine,
             "set_mixer_strip",
             json!({"index": 0, "mute": false}),
         );
-        std::thread::sleep(Duration::from_millis(100));
-        let _ramp = mixer(run(&mut engine, "get_mixer", json!({})));
-        std::thread::sleep(Duration::from_millis(100));
-        let live = mixer(run(&mut engine, "get_mixer", json!({})));
         // The default tone peaks at -20 dBFS.
+        // Past the unmute ramp, the window holds full-level blocks.
+        let live = wait_mixer(&mut engine, |state| {
+            state.strips[0].peak_dbfs.is_some_and(|peak| peak > -20.1)
+        });
         let peak = live.strips[0].peak_dbfs.expect("tone level");
         assert!((peak + 20.0).abs() < 0.2, "{live:?}");
+        // Reading levels is read-only: a second reader sees them too.
+        assert!(
+            mixer(run(&mut engine, "get_mixer", json!({}))).strips[0]
+                .peak_dbfs
+                .is_some()
+        );
         let gain = mixer(run(
             &mut engine,
             "set_master_gain",
@@ -955,6 +988,72 @@ mod tests {
         assert_eq!(after.master_gain_db, -6.0);
         let silent = mixer(run(&mut engine, "set_audio_sources", json!({"tones": []})));
         assert!(silent.strips.is_empty());
+    }
+
+    #[test]
+    fn screen_captures_survive_scene_switches() {
+        let (mut engine, starts) = engine_with_screen_counter();
+        for scene in ["Main", "BRB"] {
+            run(&mut engine, "create_scene", json!({"name": scene}));
+            run(
+                &mut engine,
+                "add_source",
+                json!({"scene": scene, "name": "desk", "kind": "screen"}),
+            );
+        }
+        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        assert_eq!(starts.get(), 1);
+        // Each scene's source starts once; switching back reuses it.
+        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
+        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        assert_eq!(starts.get(), 2);
+        // Removing a source from every scene ends its capture.
+        run(
+            &mut engine,
+            "remove_source",
+            json!({"scene": "Main", "name": "desk"}),
+        );
+        let CommandOutput::PreviewState(preview) =
+            run(&mut engine, "set_preview", json!({"enabled": false}))
+        else {
+            panic!("unexpected output");
+        };
+        let pipeline = preview.pipeline.expect("pipeline report");
+        // One capture retired when `Main`'s source went, one at the stop.
+        assert_eq!(pipeline.scene_captures.len(), 2, "{pipeline:?}");
+        assert!(preview.frames_published.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_outputs_never_wait_for_a_picker() {
+        let dir = TempDir::new("no-picker");
+        let (engine, starts) = engine_with_screen_counter();
+        let mut engine = engine.with_output_dir(&dir.0);
+        start(&mut engine, json!({"file_name": "live.mkv"})).expect("start");
+        let add = Command::decode(
+            "add_source",
+            Some(&json!({"scene": "Test pattern", "name": "desk", "kind": "screen"})),
+        )
+        .expect("decode");
+        let err = engine.handle(add).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidState);
+        assert!(err.message.contains("picker"), "{err}");
+        assert_eq!(starts.get(), 0);
+        // The refused edit was undone.
+        let CommandOutput::SceneList(list) = run(&mut engine, "list_scenes", json!({})) else {
+            panic!("unexpected output");
+        };
+        assert_eq!(list.scenes[0].sources.len(), 2);
+        // Edits that need no capture still apply live.
+        run(
+            &mut engine,
+            "update_source",
+            json!({"scene": "Test pattern", "name": "overlay", "opacity": 0.5}),
+        );
+        engine.handle(Command::StopRecording).expect("stop");
     }
 
     #[cfg(target_os = "linux")]

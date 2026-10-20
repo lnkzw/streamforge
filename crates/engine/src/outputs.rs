@@ -97,14 +97,14 @@ impl Engine {
         match &self.pipeline {
             Some(_) if sources.is_some() => Err(CommandError::new(
                 ErrorCode::InvalidState,
-                "the media pipeline already runs for another output; omit the source \
-                 parameters (screen, source_types, cursor, inputs, tones, master_gain_db) \
-                 to join it",
+                "the media pipeline already runs (for the preview or another output); omit the \
+                 source parameters (screen, source_types, cursor, inputs, tones, \
+                 master_gain_db) to join it, or turn the preview off first",
             )),
             Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
                 ErrorCode::InvalidState,
-                "the media pipeline stopped unexpectedly; stop the open outputs to collect \
-                 their reports",
+                "the media pipeline stopped unexpectedly; turn the preview off and stop the \
+                 open outputs to collect their reports",
             )),
             Some(_) => Ok(false),
             None => {

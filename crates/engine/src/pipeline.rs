@@ -42,6 +42,9 @@ pub(crate) const PREVIEW_FACTOR: u32 = 4;
 pub(crate) const PREVIEW_EVERY: u64 = 2;
 /// The newest preview frame, one in the mailbox and one being drawn.
 const PREVIEW_BUFFERS: usize = 3;
+/// Capture outcomes of removed screen sources kept for the report (the most
+/// recent ones; older ones are counted).
+const MAX_RETIRED_CAPTURES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputId {
@@ -62,6 +65,7 @@ pub(crate) struct Pipeline {
     control: MixerControl,
     scene_screens: Vec<SceneCapture>,
     retired_screens: Vec<SceneCaptureOutcome>,
+    retired_omitted: u64,
     extra_screen: Option<Box<dyn VideoStream>>,
     audio_streams: Vec<Box<dyn AudioStream>>,
     /// What this run mixes; gains follow live changes.
@@ -127,6 +131,7 @@ impl Pipeline {
             control,
             scene_screens,
             retired_screens: Vec::new(),
+            retired_omitted: 0,
             extra_screen,
             audio_streams,
             audio,
@@ -145,14 +150,39 @@ impl Pipeline {
         self.audio_from_setup
     }
 
-    /// Render `scene` from the next frame on: start captures for new screen
-    /// sources (opens the picker), then swap the compositor's scene, then
-    /// end captures no longer shown. On error nothing changes.
+    /// Render `scene` from the next frame on: start captures for its new
+    /// screen sources (opens the picker), then swap the compositor's scene,
+    /// then end captures of screen sources no longer in any scene (`keep`
+    /// lists those that still exist, so switching back and forth between
+    /// scenes does not ask again). Starting a capture waits for the picker,
+    /// which `allow_new_captures: false` refuses (open outputs must not
+    /// stall behind a human). On error nothing changes.
     pub fn apply_scene(
         &mut self,
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
+        keep: &[u32],
+        allow_new_captures: bool,
     ) -> Result<(), CommandError> {
+        if !allow_new_captures
+            && let Some(source) = scene.sources.iter().find(|source| {
+                matches!(source.kind, SourceKind::Screen { .. })
+                    && !self
+                        .scene_screens
+                        .iter()
+                        .any(|screen| screen.id == source.id)
+            })
+        {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "screen source `{}` would start a capture, which waits for the system \
+                     picker and would block the engine while recording or streaming; add \
+                     screen sources while only the preview runs",
+                    source.name
+                ),
+            ));
+        }
         let started = start_screens(capture, scene, &self.scene_screens)?;
         let mut live = mailboxes(&self.scene_screens);
         live.extend(mailboxes(&started));
@@ -170,21 +200,31 @@ impl Pipeline {
             Ok(()) => {
                 let mut screens = std::mem::take(&mut self.scene_screens);
                 screens.extend(started);
-                let (keep, retire): (Vec<_>, Vec<_>) = screens
+                let (running, retire): (Vec<_>, Vec<_>) = screens
                     .into_iter()
-                    .partition(|screen| screen_ids(scene).any(|id| id == screen.id));
-                self.scene_screens = keep;
-                self.retired_screens
-                    .extend(retire.into_iter().map(stop_scene_capture));
+                    .partition(|screen| keep.contains(&screen.id));
+                self.scene_screens = running;
+                for screen in retire {
+                    self.retire(stop_scene_capture(screen));
+                }
                 Ok(())
             }
             Err(error) => {
                 // The scene stays as it was; captures started for it end.
-                self.retired_screens
-                    .extend(started.into_iter().map(stop_scene_capture));
+                for screen in started {
+                    self.retire(stop_scene_capture(screen));
+                }
                 Err(error)
             }
         }
+    }
+
+    fn retire(&mut self, outcome: SceneCaptureOutcome) {
+        if self.retired_screens.len() == MAX_RETIRED_CAPTURES {
+            self.retired_screens.remove(0);
+            self.retired_omitted += 1;
+        }
+        self.retired_screens.push(outcome);
     }
 
     /// Feed `input` from now on; returns the output's epoch (media time 0).
@@ -205,17 +245,25 @@ impl Pipeline {
         lock(&self.fanout.audio).retain(|out| out.id != id);
     }
 
-    /// Start (`Some`) or stop (`None`) publishing preview frames.
-    pub fn set_preview(&self, mailbox: Option<Arc<FrameMailbox>>) {
-        *lock(&self.fanout.preview) = mailbox.map(|mailbox| PreviewOut {
-            mailbox,
-            pool: FramePool::new(PREVIEW_BUFFERS),
-        });
+    /// Start (`Some`) or stop (`None`) publishing preview frames. Stopping
+    /// returns how many frames were published and dropped (no free buffer,
+    /// e.g. a viewer holding frames).
+    pub fn set_preview(&self, mailbox: Option<Arc<FrameMailbox>>) -> Option<(u64, u64)> {
+        let previous = std::mem::replace(
+            &mut *lock(&self.fanout.preview),
+            mailbox.map(|mailbox| PreviewOut {
+                mailbox,
+                pool: FramePool::new(PREVIEW_BUFFERS),
+                published: 0,
+                dropped: 0,
+            }),
+        );
+        previous.map(|out| (out.published, out.dropped))
     }
 
     /// Strips with live gains and the peaks since the previous call.
     pub fn mixer_state(&self) -> MixerState {
-        let levels = self.control.take_levels();
+        let levels = self.control.levels();
         let mut state = idle_mixer_state(&self.audio);
         state.running = true;
         for (strip, peak) in state.strips.iter_mut().zip(levels.inputs) {
@@ -245,6 +293,7 @@ impl Pipeline {
             control: _,
             scene_screens,
             mut retired_screens,
+            retired_omitted,
             extra_screen,
             audio_streams,
             audio,
@@ -302,17 +351,10 @@ impl Pipeline {
             screen_capture_error,
             audio_captures,
             scene_captures: retired_screens,
+            scene_captures_omitted: retired_omitted,
         };
         (report, warnings)
     }
-}
-
-fn screen_ids(scene: &SceneSpec) -> impl Iterator<Item = u32> + '_ {
-    scene
-        .sources
-        .iter()
-        .filter(|source| matches!(source.kind, SourceKind::Screen { .. }))
-        .map(|source| source.id)
 }
 
 /// Start captures for the screen sources of `scene` not in `running`. On
@@ -474,6 +516,8 @@ struct AudioOut {
 struct PreviewOut {
     mailbox: Arc<FrameMailbox>,
     pool: FramePool,
+    published: u64,
+    dropped: u64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -518,16 +562,22 @@ impl FrameSink for VideoTap {
         if !self.frame.is_multiple_of(PREVIEW_EVERY) {
             return;
         }
-        if let Some(preview) = lock(&self.fanout.preview).as_ref() {
+        if let Some(preview) = lock(&self.fanout.preview).as_mut() {
             let len = (frame.width() / PREVIEW_FACTOR) as usize
                 * (frame.height() / PREVIEW_FACTOR) as usize
                 * 4;
-            // A missing buffer only means the viewer is behind; the
-            // preview is best effort and not counted.
-            if let Some(buffer) = preview.pool.acquire(len)
-                && let Ok(small) = downscale(frame, PREVIEW_FACTOR, buffer)
+            // No free buffer means the viewer holds frames; the preview is
+            // best effort, but drops are counted.
+            match preview
+                .pool
+                .acquire(len)
+                .map(|buffer| downscale(frame, PREVIEW_FACTOR, buffer))
             {
-                preview.mailbox.publish(small);
+                Some(Ok(small)) => {
+                    preview.mailbox.publish(small);
+                    preview.published += 1;
+                }
+                _ => preview.dropped += 1,
             }
         }
     }

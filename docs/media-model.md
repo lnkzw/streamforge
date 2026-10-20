@@ -111,5 +111,6 @@ Implemented control and preview edges (M7):
 |------|-------------------|---------|
 | Engine → compositor scene update | 1 slot, newest wins; the render thread try-locks it before a frame | `RenderStats.scene_updates`; removed sources listed in `sources` |
 | Engine → mixer gain/mute changes | 1 slot per strip plus master, newest wins; the mixer try-locks it once per block | — (changes are state, not media) |
-| Mixer → levels | peak since the last read per strip and master (atomics) | `get_mixer` |
-| Compositor → preview | every second frame, downscaled 4×, 3 pooled buffers, newest-wins mailbox; best effort (a viewer that falls behind sees fewer frames) | `MailboxStats` of the preview mailbox |
+| Mixer → levels | peak of the last 30 blocks (300 ms) per strip and master, written by the mixer thread into atomics; reads do not reset | `get_mixer` |
+| Compositor → preview | every second frame, downscaled 4×, 3 pooled buffers, newest-wins mailbox; best effort (a viewer that falls behind sees fewer frames) | `frames_published`, `frames_dropped` (no free buffer) when the preview is turned off; replaced frames in the mailbox stats |
+| Scene updates → retired stats | removed sources and ended captures are reported, bounded to the latest 64 each | `RenderStats.retired_sources`, `scene_captures_omitted` |

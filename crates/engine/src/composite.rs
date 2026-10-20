@@ -166,12 +166,17 @@ pub(crate) fn reference_scene(
 
 /// Sweep the overlay across the canvas; sub-pixel positions exercise the
 /// bilinear path.
-pub(crate) fn move_overlay(scene: &mut Scene, tick: u64) {
+fn move_overlay(scene: &mut Scene, tick: u64) {
+    if let Some(layer) = scene.layer_mut("overlay") {
+        layer.transform.x = overlay_x(tick);
+    }
+}
+
+/// Horizontal position of the moving overlay at frame `tick`.
+pub(crate) fn overlay_x(tick: u64) -> f32 {
     let travel = (CANVAS_WIDTH - OVERLAY_SIZE - 128) as f32;
     let phase = (tick % OVERLAY_PERIOD) as f32 / OVERLAY_PERIOD as f32;
-    if let Some(layer) = scene.layer_mut("overlay") {
-        layer.transform.x = 64.0 + phase * travel;
-    }
+    64.0 + phase * travel
 }
 
 /// Create `path` (never overwriting) and write the frame. A partially

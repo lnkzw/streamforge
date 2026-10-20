@@ -24,6 +24,9 @@ use crate::scene::{Scene, SceneError, SourceId};
 use crate::stats::{LatencyHistogram, LatencySummary};
 
 pub const MAX_FPS: u32 = 240;
+/// Sources removed by updates whose stats are kept for the report (the
+/// most recent ones; `RenderStats::retired_sources` counts all).
+pub const MAX_RETIRED_SOURCES: usize = 64;
 
 pub enum SourceInput {
     /// A frame that never changes, e.g. a test pattern.
@@ -120,7 +123,10 @@ pub struct RenderStats {
     pub render_time: Option<LatencySummary>,
     /// Scene updates applied while running.
     pub scene_updates: u64,
-    /// Current sources, then those removed by updates.
+    /// Sources removed by updates (only the last
+    /// [`MAX_RETIRED_SOURCES`] are listed in `sources`).
+    pub retired_sources: u64,
+    /// Current sources, then the most recently removed ones.
     pub sources: Vec<SourceStats>,
 }
 
@@ -307,7 +313,7 @@ fn take_update(pending: &Mutex<Option<SceneUpdate>>) -> Option<SceneUpdate> {
 fn rebuild(
     mut current: Vec<SourceState>,
     sources: Vec<SourceConfig>,
-    retired: &mut Vec<SourceStats>,
+    retired: &mut Retired,
 ) -> Vec<SourceState> {
     let mut next = Vec::with_capacity(sources.len());
     for source in sources {
@@ -320,8 +326,28 @@ fn rebuild(
             None => next.push(SourceState::new(source)),
         }
     }
-    retired.extend(current.iter().map(SourceState::stats));
+    for state in &current {
+        retired.push(state.stats());
+    }
     next
+}
+
+/// Stats of removed sources, bounded so a long session of scene switches
+/// cannot grow the report without limit.
+#[derive(Default)]
+struct Retired {
+    recent: Vec<SourceStats>,
+    total: u64,
+}
+
+impl Retired {
+    fn push(&mut self, stats: SourceStats) {
+        if self.recent.len() == MAX_RETIRED_SOURCES {
+            self.recent.remove(0);
+        }
+        self.recent.push(stats);
+        self.total += 1;
+    }
 }
 
 fn run(
@@ -339,7 +365,7 @@ fn run(
         mut sink,
     } = config;
     let mut sources: Vec<SourceState> = sources.into_iter().map(SourceState::new).collect();
-    let mut retired = Vec::new();
+    let mut retired = Retired::default();
     let mut updates = 0u64;
 
     let period_ns = 1_000_000_000 / u64::from(fps);
@@ -415,10 +441,11 @@ fn run(
             .then(|| rendered as f64 / elapsed.as_secs_f64()),
         render_time: render_times.summary(),
         scene_updates: updates,
+        retired_sources: retired.total,
         sources: sources
             .iter()
             .map(SourceState::stats)
-            .chain(retired)
+            .chain(retired.recent)
             .collect(),
     };
     Ok(CompositorRun {
@@ -549,6 +576,26 @@ mod tests {
     }
 
     #[test]
+    fn retired_stats_stay_bounded() {
+        let mut retired = Retired::default();
+        for index in 0..(MAX_RETIRED_SOURCES as u32 + 10) {
+            retired.push(SourceStats {
+                id: SourceId(index),
+                name: index.to_string(),
+                kind: "static",
+                frames_consumed: 0,
+                stale_ticks: 0,
+                missing_ticks: 0,
+                mailbox: None,
+            });
+        }
+        assert_eq!(retired.total, MAX_RETIRED_SOURCES as u64 + 10);
+        assert_eq!(retired.recent.len(), MAX_RETIRED_SOURCES);
+        // The oldest were dropped.
+        assert_eq!(retired.recent[0].id, SourceId(10));
+    }
+
+    #[test]
     fn removed_sources_are_reported_as_retired() {
         let mailbox = Arc::new(FrameMailbox::new());
         let compositor = Compositor::spawn(config(
@@ -571,6 +618,7 @@ mod tests {
         thread::sleep(Duration::from_millis(30));
         let run = compositor.stop().expect("stop");
         // The retired live source still shows its counters.
+        assert_eq!(run.stats.retired_sources, 1);
         assert_eq!(run.stats.sources.len(), 1);
         assert_eq!(run.stats.sources[0].name, "live");
         assert!(run.stats.sources[0].missing_ticks > 0);

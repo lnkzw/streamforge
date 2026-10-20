@@ -77,8 +77,10 @@ pub struct PipelineReport {
     pub screen_capture: Option<VideoCaptureReport>,
     pub screen_capture_error: Option<ErrorSummary>,
     pub audio_captures: Vec<CaptureOutcome>,
-    /// Screen captures of scene sources during this run.
+    /// Screen captures of scene sources during this run (the most recent
+    /// 64; `scene_captures_omitted` counts older ones).
     pub scene_captures: Vec<SceneCaptureOutcome>,
+    pub scene_captures_omitted: u64,
 }
 
 /// How the screen capture of one scene source ended.

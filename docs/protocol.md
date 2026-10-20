@@ -89,16 +89,16 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `stop_streaming`           | none   | `control`   | Streaming report |
 | `list_scenes`              | none   | `read_only` | Scene list |
 | `create_scene`             | see below | `control` | Scene list |
-| `delete_scene`             | see below | `control` | Scene list |
-| `set_active_scene`         | see below | `control` | Scene list |
-| `add_source`               | see below | `control` | Scene list |
+| `delete_scene`             | see below | `sensitive` | Scene list |
+| `set_active_scene`         | see below | `sensitive` | Scene list |
+| `add_source`               | see below | `sensitive` | Scene list |
 | `update_source`            | see below | `control` | Scene list |
 | `remove_source`            | see below | `control` | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `set_mixer_strip`          | see below | `control` | Mixer state |
 | `set_master_gain`          | see below | `control` | Mixer state |
 | `set_audio_sources`        | see below | `sensitive` | Mixer state |
-| `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "warnings"}` |
+| `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -295,7 +295,8 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
 - **Scene commands:**
   - `create_scene {name}` creates an empty scene (black).
   - `set_active_scene {name}` switches the rendered scene.
-  - `delete_scene {name, confirm}`: deletion is irreversible, so `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
+  - `delete_scene {name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
+- **Access:** `add_source` and `set_active_scene` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
 - **`add_source`:** params `scene`, `name`, `kind`, optional rectangle and `opacity`.
@@ -306,20 +307,24 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
   - `opacity` 0..=1.
   - Sources are drawn in order, so later ones are on top.
-  - A screen source starts its capture, which opens the system picker, when it becomes part of the rendered scene; its capture report is in the output reports' `scene_captures`.
+  - A screen source starts its capture, which opens the system picker, when it becomes part of the rendered scene.
+  - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
+  - While a recording or stream is open, a change that would start a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add screen sources while only the preview runs.
+  - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
 - **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
 - **`remove_source`:** params `scene`, `name`.
 
 Mixer:
 - **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
-- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level since the previous `get_mixer` (`null` for silence, or when not running).
+- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level of the last 300 ms (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
 - **`set_mixer_strip {index, gain_db?, mute?}` and `set_master_gain {gain_db}`:** change gains live (ramped over one block) and keep the change in the configuration.
 - **`set_audio_sources {inputs, tones, master_gain_db}`:** parameters as for `probe_audio_mix`. Without inputs and without `tones`, one −20 dBFS tone is used. It configures what the pipeline mixes, but only while the pipeline is idle (`invalid_state` otherwise). It is `sensitive` because the inputs are microphones. An output that brings its own source parameters overrides this configuration for its run.
 
 Preview:
 - **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
 - **Access:** `sensitive`, because it renders (and can capture) private content.
-- **Lifecycle:** the pipeline stops when the preview and all outputs are off. If turning the preview off stops it, `warnings` carries the pipeline's observations.
+- **Lifecycle:** the pipeline stops when the preview and all outputs are off.
+- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames). If that stopped the pipeline, `pipeline` (as in output reports) and `warnings` carry its report.
 
 ## Example session
 

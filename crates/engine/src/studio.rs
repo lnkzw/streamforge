@@ -37,9 +37,18 @@ impl Engine {
         let before = self.scenes.snapshot();
         let rendered = self.scenes.active().clone();
         change(&mut self.scenes)?;
+        // Open outputs must not wait for a picker; the preview alone means
+        // someone is at the UI.
+        let allow_new_captures = self.recording.is_none() && self.streaming.is_none();
+        let keep = self.scenes.screen_source_ids();
         if let Some(pipeline) = &mut self.pipeline
             && *self.scenes.active() != rendered
-            && let Err(error) = pipeline.apply_scene(self.capture.as_mut(), self.scenes.active())
+            && let Err(error) = pipeline.apply_scene(
+                self.capture.as_mut(),
+                self.scenes.active(),
+                &keep,
+                allow_new_captures,
+            )
         {
             self.scenes.restore(before);
             return Err(error);
@@ -133,7 +142,16 @@ impl Engine {
     }
 
     pub(crate) fn set_preview(&mut self, enabled: bool) -> Result<PreviewState, CommandError> {
-        let mut warnings = Vec::new();
+        let mut state = PreviewState {
+            enabled: self.preview_enabled,
+            width: PREVIEW_WIDTH,
+            height: PREVIEW_HEIGHT,
+            fps: (u64::from(FPS) / PREVIEW_EVERY) as u32,
+            frames_published: None,
+            frames_dropped: None,
+            pipeline: None,
+            warnings: Vec::new(),
+        };
         if enabled && !self.preview_enabled {
             self.ensure_pipeline(None)?;
             self.preview_enabled = true;
@@ -141,21 +159,24 @@ impl Engine {
                 pipeline.set_preview(Some(Arc::clone(&self.preview_frames)));
             }
         } else if !enabled && self.preview_enabled {
-            if let Some(pipeline) = &self.pipeline {
-                pipeline.set_preview(None);
+            if let Some((published, dropped)) = self
+                .pipeline
+                .as_ref()
+                .and_then(|pipeline| pipeline.set_preview(None))
+            {
+                state.frames_published = Some(published);
+                state.frames_dropped = Some(dropped);
             }
             self.preview_enabled = false;
             // A drained mailbox does not show a stale last frame later.
             let _ = self.preview_frames.take();
-            let (_, pipeline_warnings) = self.release_pipeline();
-            warnings = pipeline_warnings;
+            let (pipeline, warnings) = self.release_pipeline();
+            if pipeline.pipeline_stopped {
+                state.pipeline = Some(pipeline);
+            }
+            state.warnings = warnings;
         }
-        Ok(PreviewState {
-            enabled: self.preview_enabled,
-            width: PREVIEW_WIDTH,
-            height: PREVIEW_HEIGHT,
-            fps: (u64::from(FPS) / PREVIEW_EVERY) as u32,
-            warnings,
-        })
+        state.enabled = self.preview_enabled;
+        Ok(state)
     }
 }

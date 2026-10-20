@@ -43,12 +43,15 @@ M7 asks for scenes and sources, a preview, an audio mixer and recording and stre
   - A change to what the running pipeline renders is applied to the compositor. If that fails (e.g. the picker of a new screen source is cancelled), the change is undone and the error returned.
   - `Compositor::update` places a validated `SceneUpdate` in a single newest-wins slot. The render thread only try-locks it before a frame, so editing never blocks rendering and edits never queue up.
   - Sources whose id and input (the same static frame or mailbox) are unchanged keep their state.
-  - The engine caches static frames by content so rebuilds reuse them. Screen captures start and stop with the screen sources of the rendered scene.
+  - The engine caches static frames by content so rebuilds reuse them.
+  - **Screen captures:** a capture starts when its source is first rendered and keeps running while the source exists in any scene, so scene switches do not ask the picker again.
+  - **Open outputs:** while a recording or stream is open, an edit that would start a new capture is refused. The picker waits for a human and would block the engine, so `stop_*` and `get_status` would queue behind it. With only the preview running, someone is at the UI, so it is allowed.
+  - **Bounded reports:** stats of removed sources and capture reports are bounded (the latest 64 each, plus counts).
 
 ### Mixer control
 
 - **Live changes:** `MixerControl` carries gain, mute and master changes in a preallocated slot that the mixer thread try-locks once per block (no allocation, no waiting).
-- **Levels:** `AtomicU32` peaks (f32 bits; `fetch_max` is exact for non-negative values), reset when read.
+- **Levels:** the mixer thread keeps the last 30 block peaks per strip in preallocated memory and publishes the window maximum (300 ms) as `AtomicU32` f32 bits. Reads change nothing, so `get_mixer` is read-only and concurrent readers see the same levels.
 - **Commands:**
   - `get_mixer` and `set_mixer_strip`/`set_master_gain` work live and when idle.
   - `set_audio_sources` (sensitive) configures inputs and tones while the pipeline is idle.
@@ -56,7 +59,7 @@ M7 asks for scenes and sources, a preview, an audio mixer and recording and stre
 ### Preview
 
 - **Commands versus media:** control goes through commands (`set_preview`, sensitive); frames take the media path. The pipeline's fan-out has a preview consumer that downscales every second frame by 4 (480×270 at 30 FPS) into a pooled buffer and publishes it to a newest-wins `FrameMailbox`. Embedding UIs read it through `Engine::preview_frames()`; over the JSON-lines protocol no frames are sent.
-- **Downscaling:** four samples per output pixel, about 1 ms per frame on the compositor thread.
+- **Downscaling:** four samples per output pixel, about 1 ms per frame on the compositor thread. Frames dropped for lack of a free buffer are counted and reported when the preview is turned off.
 - **Lifecycle:** the pipeline runs while the preview or any output is on.
 
 ## Measurements and checks (development machine, 2026-10-20)
@@ -70,6 +73,7 @@ M7 asks for scenes and sources, a preview, an audio mixer and recording and stre
 
 - Business logic stays in the engine. The UI is a thin adapter, so a future MCP adapter (M8) gets the same scene commands.
 - Scenes are not persisted; a restart starts from `Test pattern`.
-- Screen sources open the system picker when they start. Adding one to the rendered scene is a `control` command; the picker is the consent step.
+- Commands that can start a screen capture (`add_source`, `set_active_scene`) and the irreversible `delete_scene` are `sensitive`; `update_source` and `remove_source` stay `control`.
+- New screen sources cannot go live during a recording or stream; starting captures without blocking (asynchronously) is future work.
 - The UI cannot drag sources on the preview yet (rectangles are entered numerically). There is no undo, no audio-input picker list in the UI (`set_audio_sources` exists), and no settings persistence.
 - The preview is best effort: frames the UI does not pick up in time are replaced, not counted.

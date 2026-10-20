@@ -283,6 +283,12 @@ impl Model {
             CommandOutput::MixerState(mixer) => self.mixer = Some(mixer),
             CommandOutput::PreviewState(preview) => {
                 self.preview_enabled = preview.enabled;
+                if let Some(dropped) = preview.frames_dropped.filter(|dropped| *dropped > 0) {
+                    self.push(
+                        Level::Warning,
+                        format!("{dropped} preview frame(s) dropped (the UI fell behind)"),
+                    );
+                }
                 for warning in preview.warnings {
                     self.push(Level::Warning, warning);
                 }

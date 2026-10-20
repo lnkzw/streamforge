@@ -118,7 +118,7 @@ pub enum CommandOutput {
     StreamingReport(Box<StreamingReport>),
     SceneList(SceneList),
     MixerState(MixerState),
-    PreviewState(PreviewState),
+    PreviewState(Box<PreviewState>),
 }
 
 /// Result of `list_audio_inputs`.

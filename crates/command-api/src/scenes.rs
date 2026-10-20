@@ -139,12 +139,17 @@ pub struct MixerState {
 }
 
 /// Result of `set_preview`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreviewState {
     pub enabled: bool,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Observations from the pipeline if turning the preview off stopped it.
+    /// When turning the preview off: frames published, and frames dropped
+    /// because no buffer was free (the viewer held them).
+    pub frames_published: Option<u64>,
+    pub frames_dropped: Option<u64>,
+    /// When turning the preview off stopped the pipeline: its report.
+    pub pipeline: Option<crate::PipelineReport>,
     pub warnings: Vec<String>,
 }

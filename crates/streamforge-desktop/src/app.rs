@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::{Color32, RichText};
 
+use command_api::{SceneList, SourceKind};
+
 use crate::model::{Level, Model, SourceForm, SourceType};
 
 /// Status and meters are polled this often.
@@ -150,23 +152,19 @@ impl DesktopApp {
             ui.spinner();
             return;
         };
-        let selected = self
-            .selected_scene
-            .clone()
-            .filter(|name| scenes.scenes.iter().any(|scene| &scene.name == name))
-            .unwrap_or_else(|| scenes.active.clone());
+        let shown = selection(self.selected_scene.as_deref(), None, &scenes);
+        let mut clicked = None;
         for scene in &scenes.scenes {
-            ui.horizontal(|ui| {
-                let label = if scene.name == scenes.active {
-                    format!("▶ {}", scene.name)
-                } else {
-                    scene.name.clone()
-                };
-                if ui.selectable_label(scene.name == selected, label).clicked() {
-                    self.selected_scene = Some(scene.name.clone());
-                }
-            });
+            let label = if scene.name == scenes.active {
+                format!("▶ {}", scene.name)
+            } else {
+                scene.name.clone()
+            };
+            if ui.selectable_label(scene.name == shown, label).clicked() {
+                clicked = Some(scene.name.clone());
+            }
         }
+        let selected = selection(self.selected_scene.as_deref(), clicked.as_deref(), &scenes);
         self.selected_scene = Some(selected.clone());
         ui.horizontal(|ui| {
             if ui
@@ -221,9 +219,8 @@ impl DesktopApp {
                 meter_bar(ui, *meter);
                 let mut gain = strip.gain_db;
                 let mut muted = strip.muted;
-                let gain_changed = ui
-                    .add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB"))
-                    .drag_stopped();
+                let gain_changed =
+                    committed(&ui.add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB")));
                 let mute_changed = ui.checkbox(&mut muted, "Mute").changed();
                 if gain_changed || mute_changed {
                     self.model.set_strip(strip.index, gain, muted);
@@ -234,10 +231,7 @@ impl DesktopApp {
         ui.label("Master");
         meter_bar(ui, self.master_meter);
         let mut master = mixer.master_gain_db;
-        if ui
-            .add(egui::Slider::new(&mut master, -60.0..=12.0).suffix(" dB"))
-            .drag_stopped()
-        {
+        if committed(&ui.add(egui::Slider::new(&mut master, -60.0..=12.0).suffix(" dB"))) {
             self.model.set_master_gain(master);
         }
     }
@@ -278,16 +272,14 @@ impl DesktopApp {
         ui.heading(format!("Sources of `{}`", scene.name));
         for source in scene.sources.iter().rev() {
             ui.horizontal(|ui| {
-                let kind = serde_json::to_value(&source.kind)
-                    .ok()
-                    .and_then(|value| value["kind"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
+                let kind = match source.kind {
+                    SourceKind::ColorBars => "color bars",
+                    SourceKind::Solid { .. } => "solid",
+                    SourceKind::Screen { .. } => "screen",
+                };
                 ui.label(format!("{} ({kind})", source.name));
                 let mut opacity = source.opacity;
-                if ui
-                    .add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"))
-                    .drag_stopped()
-                {
+                if committed(&ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"))) {
                     self.model
                         .set_source_opacity(&scene.name, &source.name, opacity);
                 }
@@ -404,6 +396,24 @@ impl DesktopApp {
     }
 }
 
+/// The scene to show: a click wins, then the previous selection if it still
+/// exists, then the active scene.
+fn selection(previous: Option<&str>, clicked: Option<&str>, scenes: &SceneList) -> String {
+    let exists = |name: &&str| scenes.scenes.iter().any(|scene| scene.name == *name);
+    clicked
+        .filter(exists)
+        .or(previous.filter(exists))
+        .unwrap_or(&scenes.active)
+        .to_owned()
+}
+
+/// A slider edit is sent when a drag ends, or right away for keyboard and
+/// typed input (which change the value without dragging). Mid-drag values
+/// are not sent, so a drag is one command, not one per frame.
+fn committed(response: &egui::Response) -> bool {
+    response.drag_stopped() || (response.changed() && !response.dragged())
+}
+
 fn meter_bar(ui: &mut egui::Ui, db: f32) {
     let fraction = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
     let color = if db > -3.0 {
@@ -436,7 +446,51 @@ impl eframe::App for DesktopApp {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.center_panel(ui));
         });
-        // Keep meters and the preview moving.
-        ctx.request_repaint_after(Duration::from_millis(33));
+        // Smooth preview and meters while something is live; otherwise just
+        // often enough to pick up status changes (responses also repaint).
+        let live = self.model.preview_enabled
+            || self.model.recording.is_some()
+            || self.model.streaming.is_some();
+        ctx.request_repaint_after(if live {
+            Duration::from_millis(33)
+        } else {
+            Duration::from_millis(250)
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use command_api::SceneSpec;
+
+    use super::*;
+
+    fn scenes(names: &[&str], active: &str) -> SceneList {
+        SceneList {
+            canvas_width: 1920,
+            canvas_height: 1080,
+            active: active.to_owned(),
+            scenes: names
+                .iter()
+                .map(|name| SceneSpec {
+                    name: (*name).to_owned(),
+                    sources: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_click_selects_and_the_selection_sticks() {
+        let list = scenes(&["Test pattern", "Show"], "Test pattern");
+        // Nothing chosen yet: the active scene.
+        assert_eq!(selection(None, None, &list), "Test pattern");
+        // A click selects, and the next frame keeps it.
+        let clicked = selection(Some("Test pattern"), Some("Show"), &list);
+        assert_eq!(clicked, "Show");
+        assert_eq!(selection(Some(&clicked), None, &list), "Show");
+        // A deleted selection falls back to the active scene.
+        let fewer = scenes(&["Test pattern"], "Test pattern");
+        assert_eq!(selection(Some("Show"), None, &fewer), "Test pattern");
     }
 }

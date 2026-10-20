@@ -19,10 +19,21 @@ use video_compositor::{
     pattern,
 };
 
-use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, move_overlay};
+use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, overlay_x};
 
-/// The built-in scene (the M3 reference scene); its `overlay` layer moves.
+/// The built-in scene (the M3 reference scene).
 pub(crate) const DEFAULT_SCENE: &str = "Test pattern";
+/// Ids of the built-in sources. The overlay moves (as in the reference
+/// scene) while it keeps its built-in rectangle; ids are never reused, so
+/// user sources are never animated.
+const BUILTIN_BARS: u32 = 1;
+const BUILTIN_OVERLAY: u32 = 2;
+const BUILTIN_OVERLAY_RECT: SourceRect = SourceRect {
+    x: 64.0,
+    y: 120.0,
+    width: 160.0,
+    height: 160.0,
+};
 /// Compositor id of the legacy `screen: true` output layer.
 const EXTRA_SCREEN: SourceId = SourceId(u32::MAX);
 /// Solid colors are tiny frames stretched over their rectangle.
@@ -36,41 +47,37 @@ pub(crate) struct SceneCollection {
 
 impl SceneCollection {
     pub fn new() -> Self {
-        let mut collection = Self {
-            scenes: Vec::new(),
-            active: DEFAULT_SCENE.to_owned(),
-            next_id: 1,
+        let builtin = |id, name: &str, kind, rect| SourceSpec {
+            id,
+            name: name.to_owned(),
+            kind,
+            rect,
+            opacity: 1.0,
         };
-        collection.scenes.push(SceneSpec {
-            name: DEFAULT_SCENE.to_owned(),
-            sources: Vec::new(),
-        });
-        for (name, kind, rect) in [
-            ("color_bars", SourceKind::ColorBars, full_canvas()),
-            (
-                "overlay",
-                // 60 % gray at 60 % alpha, as in the reference scene.
-                SourceKind::Solid {
-                    color: Rgba([153, 153, 153, 153]),
-                },
-                SourceRect {
-                    x: 64.0,
-                    y: 120.0,
-                    width: 160.0,
-                    height: 160.0,
-                },
-            ),
-        ] {
-            let id = collection.allocate_id();
-            collection.scenes[0].sources.push(SourceSpec {
-                id,
-                name: name.to_owned(),
-                kind,
-                rect,
-                opacity: 1.0,
-            });
+        Self {
+            scenes: vec![SceneSpec {
+                name: DEFAULT_SCENE.to_owned(),
+                sources: vec![
+                    builtin(
+                        BUILTIN_BARS,
+                        "color_bars",
+                        SourceKind::ColorBars,
+                        full_canvas(),
+                    ),
+                    builtin(
+                        BUILTIN_OVERLAY,
+                        "overlay",
+                        // 60 % gray at 60 % alpha, as in the reference scene.
+                        SourceKind::Solid {
+                            color: Rgba([153, 153, 153, 153]),
+                        },
+                        BUILTIN_OVERLAY_RECT,
+                    ),
+                ],
+            }],
+            active: DEFAULT_SCENE.to_owned(),
+            next_id: BUILTIN_OVERLAY + 1,
         }
-        collection
     }
 
     fn allocate_id(&mut self) -> u32 {
@@ -86,6 +93,17 @@ impl SceneCollection {
             active: self.active.clone(),
             scenes: self.scenes.clone(),
         }
+    }
+
+    /// Ids of the screen sources in any scene (their captures may keep
+    /// running while another scene is shown).
+    pub fn screen_source_ids(&self) -> Vec<u32> {
+        self.scenes
+            .iter()
+            .flat_map(|scene| &scene.sources)
+            .filter(|source| matches!(source.kind, SourceKind::Screen { .. }))
+            .map(|source| source.id)
+            .collect()
     }
 
     pub fn active(&self) -> &SceneSpec {
@@ -321,21 +339,40 @@ pub(crate) fn build(
         });
     }
     if let Some(mailbox) = live.extra_screen {
-        canvas
-            .layers
-            .push(Layer::fitted("screen", EXTRA_SCREEN, SCREEN_BOX).with_opacity(0.9));
+        // Above the bottom source, as in the reference scene (bars, screen,
+        // overlay).
+        let at = canvas.layers.len().min(1);
+        canvas.layers.insert(
+            at,
+            Layer::fitted("screen", EXTRA_SCREEN, SCREEN_BOX).with_opacity(0.9),
+        );
         sources.push(SourceConfig {
             id: EXTRA_SCREEN,
             name: "screen".to_owned(),
             input: SourceInput::Live(Arc::clone(mailbox)),
         });
     }
-    let animation: Option<Animation> = (scene.name == DEFAULT_SCENE).then_some(move_overlay);
+    let animated = scene
+        .sources
+        .iter()
+        .any(|source| source.id == BUILTIN_OVERLAY && source.rect == BUILTIN_OVERLAY_RECT);
+    let animation: Option<Animation> = animated.then_some(move_builtin_overlay);
     Ok(SceneUpdate {
         scene: canvas,
         sources,
         animation,
     })
+}
+
+/// Sweep the built-in overlay across the canvas (as the reference scene).
+fn move_builtin_overlay(scene: &mut Scene, tick: u64) {
+    if let Some(layer) = scene
+        .layers
+        .iter_mut()
+        .find(|layer| layer.source == SourceId(BUILTIN_OVERLAY))
+    {
+        layer.transform.x = overlay_x(tick);
+    }
 }
 
 fn stretched(spec: &SourceSpec, width: u32, height: u32) -> Layer {
@@ -388,6 +425,66 @@ mod tests {
         assert!(update.animation.is_some());
         assert_eq!(update.scene.layers.len(), 2);
         update.scene.validate().expect("valid");
+    }
+
+    #[test]
+    fn only_the_builtin_overlay_in_place_is_animated() {
+        let mut collection = SceneCollection::new();
+        let none = LiveFrames {
+            screens: &[],
+            extra_screen: None,
+        };
+        let mut cache = FrameCache::default();
+        collection
+            .update_source(&UpdateSourceRequest {
+                scene: DEFAULT_SCENE.to_owned(),
+                name: "overlay".to_owned(),
+                x: Some(500.0),
+                y: None,
+                width: None,
+                height: None,
+                opacity: None,
+            })
+            .expect("move");
+        // Moved by the user: it stays where it was put.
+        let moved = build(collection.active(), &none, &mut cache).expect("build");
+        assert!(moved.animation.is_none());
+        // A user source named `overlay` in a new scene is not animated.
+        collection.create("Other").expect("create");
+        collection
+            .add_source(&AddSourceRequest {
+                scene: "Other".to_owned(),
+                name: "overlay".to_owned(),
+                kind: SourceKind::ColorBars,
+                rect: Some(BUILTIN_OVERLAY_RECT),
+                opacity: 1.0,
+            })
+            .expect("add");
+        let other =
+            build(collection.get("Other").expect("scene"), &none, &mut cache).expect("build");
+        assert!(other.animation.is_none());
+    }
+
+    #[test]
+    fn the_legacy_screen_layer_sits_above_the_bottom_source() {
+        let collection = SceneCollection::new();
+        let mailbox = Arc::new(FrameMailbox::new());
+        let update = build(
+            collection.active(),
+            &LiveFrames {
+                screens: &[],
+                extra_screen: Some(&mailbox),
+            },
+            &mut FrameCache::default(),
+        )
+        .expect("build");
+        let names: Vec<_> = update
+            .scene
+            .layers
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(names, ["color_bars", "screen", "overlay"]);
     }
 
     #[test]

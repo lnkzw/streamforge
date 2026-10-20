@@ -94,6 +94,8 @@ fn serve(port: u16, options: &ServerOptions) -> ServerReport {
     if let Err(err) = ff::init() {
         return failed(format!("init: {err}"));
     }
+    // FFmpeg's listener warns with the published stream name (the key).
+    ff::log::set_level(ff::log::Level::Error);
     let mut dictionary = ff::Dictionary::new();
     dictionary.set("listen", "1");
     dictionary.set(

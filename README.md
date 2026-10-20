@@ -13,6 +13,7 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 - M5 (first recording, Linux): the composited scene and the audio mix are recorded to H.264 + AAC in Matroska through the FFmpeg libraries.
 - M6 (live output, Linux): RTMP streaming with reconnects, running alongside a recording; the two fail independently.
 - M7 (desktop UI): scenes and sources edited live, preview, mixer with meters, and recording/stream controls in an egui app on top of the command API.
+- M8 (agent integration): an MCP server exposing the commands as tools, read-only by default. More access must be granted explicitly, and agents never see stream keys.
 
 ## Prerequisites
 
@@ -54,6 +55,12 @@ cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-m
 # Recording (H.264 + AAC in Matroska; never overwrites an existing file)
 cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 10000 [--screen] [--input <name>]
 
+# MCP server for agents (stdio). Read-only unless you allow more; streaming
+# only to the target you configure, with the key from an environment variable.
+cargo build --release -p streamforge-mcp
+claude mcp add streamforge -- "$PWD/target/release/streamforge-mcp" --allow control --output-dir /tmp
+#   --allow sensitive --stream-url rtmp://live.example.com/app --stream-key-env STREAMFORGE_STREAM_KEY
+
 # Desktop UI (scenes, preview, mixer, record and stream controls)
 cargo run --release -p streamforge-desktop -- --output-dir /tmp
 
@@ -80,6 +87,7 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska) and streamer (→ FLV over RTMP) via FFmpeg
 - `crates/rtmp-test-server`: in-process RTMP ingest for tests
 - `crates/streamforge-desktop`: desktop UI (egui/eframe) over the command API
+- `crates/streamforge-mcp`: MCP server for agents, with access levels
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

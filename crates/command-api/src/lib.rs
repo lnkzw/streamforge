@@ -5,6 +5,7 @@
 //! [`CommandError`]. Business logic lives behind the handler, never in an
 //! adapter. This crate knows nothing about transports or engine internals.
 
+mod access;
 mod composite;
 mod error;
 mod mix;
@@ -12,6 +13,7 @@ mod outputs;
 mod registry;
 mod scenes;
 
+pub use access::{AccessPolicy, Gated, label as access_label};
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
@@ -19,7 +21,9 @@ pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
     SceneCaptureOutcome, StreamingReport, StreamingRequest, StreamingStarted,
 };
-pub use registry::{CommandAccess, CommandDescriptor, CommandList, default_sources, registry};
+pub use registry::{
+    CommandAccess, CommandDescriptor, CommandList, default_sources, params_schema, registry,
+};
 pub use scenes::{
     AddSourceRequest, AudioSetup, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, MixerState,
     PreviewState, Rgba, SceneList, SceneSpec, SourceKind, SourceRect, SourceSpec, StripChange,

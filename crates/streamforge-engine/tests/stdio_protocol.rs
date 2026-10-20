@@ -234,3 +234,17 @@ fn audio_mix_probe_runs_headless_with_test_tones() {
     assert_eq!(mix["clipped_samples"], 0);
     assert!(engine.finish().success());
 }
+
+#[test]
+fn allow_restricts_what_the_client_may_run() {
+    let mut engine = EngineProcess::spawn_with(&["--allow", "read-only"]);
+    let status = engine.request(r#"{"id":1,"command":"get_status"}"#);
+    assert_eq!(status["ok"], true, "{status}");
+    let create = engine.request(r#"{"id":2,"command":"create_scene","params":{"name":"x"}}"#);
+    assert_error(&create, &json!(2), "permission_denied");
+    assert_eq!(
+        create["error"]["details"]["required"], "control",
+        "{create}"
+    );
+    assert!(engine.finish().success());
+}

@@ -16,6 +16,7 @@ members = [
     "crates/streamforge-engine",
     "crates/streamforge-cli",
     "crates/streamforge-desktop",
+    "crates/streamforge-mcp",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lnkzw/streamforge"
 
 [workspace.dependencies]
+schemars = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

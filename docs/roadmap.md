@@ -176,14 +176,25 @@ Known limitations, deferred:
 
 ## M8 — Agent integration
 
-- Expose safe read-only status and diagnostics first.
-- Add MCP tools over the same command API.
-- Require explicit authorization for sensitive actions and credentials.
-- Never expose stream keys in logs or default tool responses.
+- [x] Expose safe read-only status and diagnostics first: `streamforge-mcp` offers only read-only tools unless started with `--allow control` or `--allow sensitive` (ADR 0008).
+- [x] Add MCP tools over the same command API (`rmcp`, stdio): every tool is a registry command with a schema generated from its decoder, called via `Command::decode` + policy + `CommandHandler`.
+- [x] Require explicit authorization for sensitive actions and credentials:
+  - Access levels are chosen by the person starting the adapter; denied commands are not listed and return `permission_denied`.
+  - The JSON-lines server got `--allow` as well.
+  - Streaming goes only to a target configured at startup, with the key from an environment variable.
+- [x] Never expose stream keys in logs or default tool responses: the MCP tool takes no URL or key, redirects are refused, and results show `<stream key>`.
 
 Acceptance:
-- Agent can inspect status and create a test scene.
-- Destructive and credential-related operations are permission-gated.
+- [x] Agent can inspect status and create a test scene (`crates/streamforge-mcp/tests/mcp.rs`, official MCP client against the real binary: `get_status`, then `create_scene` and `add_source` with color bars under `--allow control`).
+- [x] Destructive and credential-related operations are permission-gated:
+  - `delete_scene` and screen sources are denied below `sensitive`.
+  - `start_streaming` exists only with a configured target and refuses a URL.
+  - The key never reaches tool lists, results or server info (tested).
+
+Known limitations, deferred:
+- A long command (probes, a stream connecting, a screen picker) blocks other tool calls; MCP cancellation does not abort it.
+- One streaming target per server; no per-call user confirmation through MCP elicitation yet.
+- No frames over MCP (the preview is in-process only).
 
 ## M9 — Cross-platform backends
 

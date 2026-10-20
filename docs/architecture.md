@@ -48,6 +48,7 @@
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
 | `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, egui panels | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
+| `streamforge-mcp` | bin + lib | MCP server on stdio (ADR 0008): tools from the registry with generated schemas, an access policy chosen at startup, streaming only to a configured target | `command-api`, `encoder-api`, `engine`, `capture-platform` (`rmcp`, `tokio`) |
 
 `engine` and `control-protocol` do not depend on each other. Only the binaries combine them. A future socket transport, JSON-RPC or MCP adapter would be another crate that calls `CommandHandler`, next to `control-protocol`.
 
@@ -93,6 +94,12 @@ Scenes, mixer and preview (ADR 0007):
 - **Mixer control:** gain changes reach the running mixer the same way (`MixerControl`), and levels come back as atomics.
 - **Preview:** the preview is a fan-out consumer that publishes downscaled frames to a mailbox (`Engine::preview_frames`). It runs on the media plane; control goes through commands.
 
+Access control (ADR 0008):
+- **Policy:** `command_api::AccessPolicy` allows commands up to a level chosen by whoever starts an adapter. `Command::required_access` refines the level per call; `add_source` needs only `control` for non-capturing sources.
+- **JSON-lines server:** wraps the engine in `Gated` (default `sensitive`).
+- **MCP server:** lists and accepts only allowed tools (default `read-only`). It gives agents no way to set a stream URL or key: streaming goes to a target configured at its start.
+- **Threading:** `engine::EngineThread` runs the engine on its own thread for async adapters; calls go through `EngineHandle::call`.
+
 The desktop UI is an adapter like the CLI:
 - **Worker thread:** it builds the engine on its own thread and executes commands there via `Command::decode` and `CommandHandler::handle`. Channels are bounded, and the UI thread never blocks.
 - **Model:** its model turns user actions into commands with the protocol's names and parameters. The widgets only call the model.
@@ -104,7 +111,6 @@ Add only when a milestone needs them (the socket transport, if needed, extends `
 - `capture-windows`
 - `capture-macos`
 - `output-rtmp`
-- `mcp-server`
 
 ## Cross-platform policy
 

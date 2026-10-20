@@ -10,10 +10,12 @@ mod outputs;
 mod pipeline;
 mod scenes;
 mod studio;
+mod thread;
 
 use outputs::{RecordingOutput, StreamingOutput};
 use pipeline::Pipeline;
 use scenes::SceneCollection;
+pub use thread::{EngineHandle, EngineThread};
 
 use std::path::PathBuf;
 use std::sync::Arc;

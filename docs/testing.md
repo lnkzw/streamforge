@@ -79,6 +79,14 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
   - rollback of a failing live change
   - mixer control with levels
   - a recording of a user scene
+- `crates/command-api` (access): generated parameter schemas (objects, no `$ref`, enums, required fields), per-call access of `add_source`, `AccessPolicy` and `Gated`.
+- `crates/engine` (`thread`): `EngineThread` serves calls from several threads; a stopped engine is an `internal` error.
+- `crates/streamforge-mcp/tests/mcp.rs`: M8 acceptance. The official rmcp client drives the real `streamforge-mcp` binary:
+  - read-only default (listing, denial, unknown tool)
+  - creating a test scene under `--allow control`; screen sources and `delete_scene` denied
+  - streaming only with a configured target, redirects refused, and the key absent from everything the agent sees (Linux, in-process RTMP ingest)
+  - startup checks of the target
+- `crates/streamforge-engine/tests/stdio_protocol.rs`: `--allow read-only` denies a control command.
 - `crates/streamforge-desktop/tests/acceptance.rs`: M7 acceptance through the UI model (the layer the widgets call), against the real engine on its worker thread. It creates a scene, adds a source, activates it and records, and checks that engine errors reach the log and that preview frames and levels arrive. The egui layer itself is checked by starting the app.
 - `crates/engine` (Linux): the recording lifecycle, including:
   - `invalid_state` on a double start, on probes while recording, and on a stop without a recording

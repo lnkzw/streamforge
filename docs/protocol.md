@@ -100,7 +100,12 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `set_audio_sources`        | see below | `sensitive` | Mixer state |
 | `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 
-`access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
+`access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
+- **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
+- **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`.
+- **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
+
+Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
 `capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`.
 

@@ -54,11 +54,20 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
   - gain and mute are exact
   - clipping is counted
 - `crates/encoder-ffmpeg/src/audio_fifo.rs`: audio timeline regrouping (gap fill, overlap trim, discontinuity restart).
-- `crates/encoder-ffmpeg/tests/record.rs`: records a synthetic 2 s clip, then demuxes and decodes it. It checks stream metadata, duration, start timestamps, A/V end drift, decoded pixel colors and tone RMS, and that an unwritable path is an output error.
+- `crates/encoder-ffmpeg/tests/record.rs`: records a synthetic 2 s clip, then demuxes and decodes it. It checks:
+  - stream metadata and color tags, duration and start timestamps
+  - A/V end drift
+  - decoded pixel colors and tone RMS
+  - the end cut-off (`end_at`)
+  - that a `pipe:` name becomes a file
+  - that an unwritable path is an output error
+- `crates/media-core`: `MediaTimestamp::rescale` rounding and overflow.
 - `crates/engine` (Linux): the recording lifecycle, including:
-  - `invalid_state` on a double start or a stop without a recording
+  - `invalid_state` on a double start, on probes while recording, and on a stop without a recording
+  - `not_found` for a missing output directory
   - no overwrite of existing files
   - finalization when the engine is dropped
+- `crates/streamforge-engine/tests/common/mod.rs`: the shared process harness. Every wait is bounded and the child is killed on drop.
 - `crates/streamforge-engine/tests/recording.rs`: M5 acceptance. It records 2 s through the real engine process over JSON lines, then decodes the file and checks:
   - codecs, size, frame rate, audio format and duration
   - A/V end drift below 50 ms

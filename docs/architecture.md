@@ -72,7 +72,7 @@ Since M3, real-time work has its own threads:
 - **`audio-mixer`:** fixed 10 ms block clock. It pulls each ring with bounded buffering, mixes and meters, and does not allocate (M4).
 - **`recorder`:** converts BGRA to YUV 4:2:0, encodes H.264 and AAC, and muxes Matroska (M5). Compositor and mixer feed it through output sinks (`FrameSink`, `BlockSink`). The sinks never block: the video tap copies into one of 8 pooled buffers, audio blocks travel inline in a bounded queue, and whatever does not fit is dropped and counted.
 
-The engine thread only starts, waits for and stops these threads; it never touches frames. A recording (`start_recording`) keeps them running after the command returns. The engine holds the session until `stop_recording` or until it is dropped, and stops producers before the recorder and the recorder before the captures. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
+The engine thread only starts, waits for and stops these threads; it never touches frames. A recording (`start_recording`) keeps them running after the command returns. The engine holds the session until `stop_recording` or until it is dropped. It sets one end time for both tracks first, then stops the producers, then the recorder, then the captures. While a recording is open, commands that would compete for its devices or CPU, or block the engine thread (the probes), fail with `invalid_state`. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
 
 ## Suggested future crates
 
@@ -81,7 +81,6 @@ Add only when a milestone needs them (the socket transport, if needed, extends `
 - `capture-windows`
 - `capture-macos`
 - `output-rtmp`
-- `output-recording`
 - `desktop-app`
 - `mcp-server`
 

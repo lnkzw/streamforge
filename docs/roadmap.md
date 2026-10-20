@@ -123,7 +123,8 @@ Known limitations, deferred:
 - Linux only; Windows and macOS return `unsupported` (M9).
 - Fixed settings: 1920×1080@60 reference scene, x264 `veryfast`/CRF 20, AAC 160 kbit/s. No hardware encoders, no settings in the command yet.
 - Live-input drift resampling is still linear (ADR 0004).
-- A failure during recording surfaces only at `stop_recording`; there are no events yet.
+- A failure during recording is visible through polling (`get_status.recording_failed`); there are no push events yet. This failure path has no automated test, because an encoder failure cannot be triggered deterministically.
+- Live sources are stamped when mixed or composited, not when captured. Live audio is late by its jitter-buffer target (about 30 ms), and screen frames by up to one capture interval. Per-source latency compensation is deferred.
 - `streamforge record` does not handle Ctrl-C; Matroska stays playable up to the last cluster but loses its index.
 
 ## M6 — Live output

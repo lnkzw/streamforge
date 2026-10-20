@@ -536,6 +536,7 @@ mod tests {
                 SourceKind::Screen {
                     source_types: vec![capture_api::VideoSourceKind::Monitor],
                     cursor: capture_api::CursorMode::Embedded,
+                    source_id: None,
                 },
             ),
         ] {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{AudioStats, CaptureError, VideoStats};
+use crate::{AudioStats, CaptureError, CaptureErrorKind, VideoStats};
 
 /// Shortest accepted probe duration.
 pub const MIN_PROBE_DURATION: Duration = Duration::from_millis(100);
@@ -82,6 +82,10 @@ pub struct ScreenCaptureCapability {
     pub portal_version: Option<u32>,
     pub source_kinds: Vec<VideoSourceKind>,
     pub cursor_modes: Vec<CursorMode>,
+    /// The user picks the source in a system dialog (no `source`).
+    pub picker: bool,
+    /// Sources can be listed ([`ScreenSource`]) and captured by id.
+    pub source_list: bool,
 }
 
 impl ScreenCaptureCapability {
@@ -93,8 +97,24 @@ impl ScreenCaptureCapability {
             portal_version: None,
             source_kinds: Vec::new(),
             cursor_modes: Vec::new(),
+            picker: false,
+            source_list: false,
         }
     }
+}
+
+/// A screen source that can be captured by its [`ScreenSource::id`]
+/// without a picker. Names (e.g. window titles) can reveal private
+/// content, so listing them needs the same access as capturing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScreenSource {
+    /// Backend-specific id, valid while the source exists (e.g. `monitor:1`).
+    pub id: String,
+    pub kind: VideoSourceKind,
+    /// Display name or window title.
+    pub name: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -126,13 +146,17 @@ pub struct AudioInput {
     pub media_class: String,
 }
 
-/// Which screen sources the user may pick and how the cursor is captured.
+/// Which screen source to capture and how the cursor is captured: a
+/// [`ScreenSource::id`], or (without one) whatever the user picks in the
+/// system dialog among `source_kinds`.
 ///
-/// `source_kinds` is non-empty and duplicate-free; `command_api` enforces this.
+/// `source_kinds` is non-empty and duplicate-free, and `source` is not
+/// empty; `command_api` enforces this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSelection {
     pub source_kinds: Vec<VideoSourceKind>,
     pub cursor: CursorMode,
+    pub source: Option<String>,
 }
 
 /// Capture one user-selected screen source for `duration` and report diagnostics.
@@ -150,14 +174,34 @@ impl ScreenSelection {
     /// An empty `cursor_modes` list means the backend cannot select a cursor
     /// mode at all (e.g. ScreenCast portal v1); the cursor request is then
     /// not checked and the backend reports that it was ignored.
+    ///
+    /// A named `source` needs a backend with a source list and defines its
+    /// own kind, so `source_kinds` is not checked; without one the backend
+    /// needs a picker.
     pub fn check_supported(
         &self,
         capability: &ScreenCaptureCapability,
     ) -> Result<(), CaptureError> {
+        match (&self.source, capability.source_list, capability.picker) {
+            (Some(_), false, _) => {
+                return Err(CaptureError::unsupported(
+                    "this screen capture backend cannot capture a named source; \
+                     omit `source_id` to pick one in the system dialog",
+                ));
+            }
+            (None, _, false) => {
+                return Err(CaptureError::new(
+                    CaptureErrorKind::InvalidRequest,
+                    "this screen capture backend has no system picker; \
+                     name a source (`source_id`) from list_screen_sources",
+                ));
+            }
+            _ => {}
+        }
         let missing: Vec<_> = self
             .source_kinds
             .iter()
-            .filter(|kind| !capability.source_kinds.contains(kind))
+            .filter(|kind| self.source.is_none() && !capability.source_kinds.contains(kind))
             .map(|kind| kind.as_str())
             .collect();
         if !missing.is_empty() {
@@ -252,7 +296,6 @@ pub struct AudioCaptureReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CaptureErrorKind;
 
     fn capability(kinds: &[VideoSourceKind], cursors: &[CursorMode]) -> ScreenCaptureCapability {
         ScreenCaptureCapability {
@@ -262,6 +305,8 @@ mod tests {
             portal_version: Some(5),
             source_kinds: kinds.to_vec(),
             cursor_modes: cursors.to_vec(),
+            picker: true,
+            source_list: false,
         }
     }
 
@@ -269,7 +314,35 @@ mod tests {
         ScreenSelection {
             source_kinds: kinds.to_vec(),
             cursor,
+            source: None,
         }
+    }
+
+    #[test]
+    fn named_sources_need_a_source_list_and_pickers_a_picker() {
+        let picker_only = capability(&[VideoSourceKind::Monitor], &[]);
+        let mut named = request(&[VideoSourceKind::Window], CursorMode::Embedded);
+        named.source = Some("monitor:1".into());
+        let err = named.check_supported(&picker_only).unwrap_err();
+        assert_eq!(err.kind, CaptureErrorKind::Unsupported);
+        assert!(err.message.contains("source_id"), "{}", err.message);
+
+        let list_only = ScreenCaptureCapability {
+            picker: false,
+            source_list: true,
+            ..picker_only
+        };
+        // The named source defines its kind; `source_kinds` is not checked.
+        assert_eq!(named.check_supported(&list_only), Ok(()));
+        let err = request(&[VideoSourceKind::Monitor], CursorMode::Embedded)
+            .check_supported(&list_only)
+            .unwrap_err();
+        assert_eq!(err.kind, CaptureErrorKind::InvalidRequest);
+        assert!(
+            err.message.contains("list_screen_sources"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

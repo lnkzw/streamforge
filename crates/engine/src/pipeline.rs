@@ -400,6 +400,7 @@ fn start_screens(
         let SourceKind::Screen {
             source_types,
             cursor,
+            source_id,
         } = &source.kind
         else {
             continue;
@@ -410,6 +411,7 @@ fn start_screens(
         let selection = ScreenSelection {
             source_kinds: source_types.clone(),
             cursor: *cursor,
+            source: source_id.clone(),
         };
         let stream = capture.start_screen_stream(&selection).map_err(|error| {
             command_error(error).with_details(serde_json::json!({ "source": source.name }))

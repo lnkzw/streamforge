@@ -25,7 +25,7 @@ use capture_api::{
 };
 use command_api::{
     AudioInputList, AudioSetup, Command, CommandError, CommandHandler, CommandList, CommandOutput,
-    EngineStatus, ErrorCode,
+    EngineStatus, ErrorCode, ScreenSourceList,
 };
 use encoder_ffmpeg::StreamState;
 use media_core::FrameMailbox;
@@ -148,6 +148,11 @@ impl CommandHandler for Engine {
                 .capture
                 .audio_inputs()
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
+                .map_err(command_error),
+            Command::ListScreenSources => self
+                .capture
+                .screen_sources()
+                .map(|sources| CommandOutput::ScreenSources(ScreenSourceList { sources }))
                 .map_err(command_error),
             Command::ProbeScreenCapture(request) => {
                 self.ensure_idle("probe_screen_capture")?;
@@ -287,6 +292,8 @@ mod tests {
                     portal_version: Some(5),
                     source_kinds: vec![capture_api::VideoSourceKind::Monitor],
                     cursor_modes: vec![capture_api::CursorMode::Embedded],
+                    picker: true,
+                    source_list: false,
                 },
                 audio: AudioCaptureCapability::unavailable(Some("fake"), "no server"),
             }

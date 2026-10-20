@@ -69,6 +69,9 @@ impl CaptureBackend for LinuxCapture {
                 portal_version: Some(info.version),
                 source_kinds: info.source_kinds,
                 cursor_modes: info.cursor_modes,
+                // The portal always asks the user; it cannot capture a named source.
+                picker: true,
+                source_list: false,
             },
             Err(err) => ScreenCaptureCapability::unavailable(Some(screen::BACKEND), err.message),
         };

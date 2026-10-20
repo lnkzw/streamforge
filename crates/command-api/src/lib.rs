@@ -33,7 +33,7 @@ pub use scenes::{
 
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
-    VideoCaptureReport,
+    ScreenSource, VideoCaptureReport,
 };
 use encoder_api::StreamState;
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,9 @@ pub enum Command {
     GetCaptureCapabilities,
     /// List audio input devices.
     ListAudioInputs,
-    /// Capture a user-selected screen source briefly and report diagnostics.
+    /// List screen sources that can be captured by id (no picker).
+    ListScreenSources,
+    /// Capture a screen source (named or user-picked) briefly and report diagnostics.
     ProbeScreenCapture(ScreenCaptureRequest),
     /// Capture an audio input briefly and report diagnostics; no audio is stored.
     ProbeAudioCapture(AudioCaptureRequest),
@@ -113,6 +115,7 @@ pub enum CommandOutput {
     Commands(CommandList),
     CaptureCapabilities(CaptureCapabilities),
     AudioInputs(AudioInputList),
+    ScreenSources(ScreenSourceList),
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
@@ -130,6 +133,12 @@ pub enum CommandOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioInputList {
     pub inputs: Vec<AudioInput>,
+}
+
+/// Result of `list_screen_sources`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScreenSourceList {
+    pub sources: Vec<ScreenSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

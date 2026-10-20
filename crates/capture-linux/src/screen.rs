@@ -42,6 +42,9 @@ fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
         portal_version: Some(info.version),
         source_kinds: info.source_kinds,
         cursor_modes: info.cursor_modes,
+        // The portal always asks the user; it cannot capture a named source.
+        picker: true,
+        source_list: false,
     })?;
     let mut warnings = Vec::new();
     // ScreenCast v1 has no cursor modes; the requested cursor is ignored there.

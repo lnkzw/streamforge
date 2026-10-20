@@ -23,11 +23,14 @@ pub enum SourceKind {
     ColorBars,
     /// A flat color (`#rrggbbaa`, straight alpha).
     Solid { color: Rgba },
-    /// Live screen capture through the system picker, fitted into the
-    /// rectangle with its aspect ratio kept.
+    /// Live screen capture, fitted into the rectangle with its aspect
+    /// ratio kept: the named source, or the one the user picks.
     Screen {
         source_types: Vec<VideoSourceKind>,
         cursor: CursorMode,
+        /// From `list_screen_sources`; `None` opens the system picker.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_id: Option<String>,
     },
 }
 

@@ -12,7 +12,14 @@ pub fn backend() -> Box<dyn CaptureBackend> {
     {
         Box::new(capture_linux::LinuxCapture::new())
     }
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(capture_api::SplitCapture {
+            video: capture_windows::WgcCapture::new(),
+            audio: capture_cpal::CpalCapture::new(),
+        })
+    }
+    #[cfg(target_os = "macos")]
     {
         Box::new(capture_cpal::CpalCapture::new())
     }

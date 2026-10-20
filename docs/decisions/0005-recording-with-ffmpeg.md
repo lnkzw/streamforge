@@ -17,7 +17,7 @@ The project owner chose option 1.
 - **Crates:**
   - `encoder-api` holds settings, statistics and errors only, with no FFmpeg dependency, so `command-api` and adapters do not link FFmpeg.
   - `encoder-ffmpeg` implements `Recorder` on `ffmpeg-next` 9 (features `codec`, `format`, `software-scaling`).
-- **Platforms:** FFmpeg is linked only on Linux for now; CI installs `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev`. On Windows and macOS, `Recorder::start` returns `Unsupported` (M9).
+- **Platforms:** (superseded by ADR 0009: FFmpeg is now linked on Linux, Windows and macOS.) FFmpeg is linked only on Linux for now; CI installs `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev`. On Windows and macOS, `Recorder::start` returns `Unsupported` (M9).
 - **Formats:**
   - Video: libx264 (`preset=veryfast`, `crf=20`), falling back to any H.264 encoder. Input is BGRA, converted to YUV 4:2:0 with swscale's default BT.601 matrix in limited range. The stream is tagged accordingly (smpte170m matrix, tv range, BT.709 primaries, sRGB transfer), so players do not assume BT.709 for HD.
   - Audio: FFmpeg's AAC at 160 kbit/s from interleaved `f32`, regrouped into 1024-sample frames. Gaps are filled with silence and counted; overlaps are dropped and counted.

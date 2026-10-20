@@ -36,12 +36,13 @@
 | `media-core` | lib | Platform-neutral media types: time model, `VideoFrame`, `FramePool`, `FrameMailbox`, `AudioRing`, latency histogram | — |
 | `capture-api` | lib | Platform-neutral capture interface: capabilities, requests, reports, `CaptureError`, `CaptureBackend` trait, allocation-free diagnostics accumulators | `media-core` |
 | `capture-linux` | lib | Linux `CaptureBackend`: XDG ScreenCast portal + PipeWire (`docs/capture-linux.md`); empty on other OSes | `capture-api` (Linux only: `ashpd`, `pipewire`) |
-| `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends | `capture-api`, `capture-linux` (Linux) |
+| `capture-cpal` | lib | Windows and macOS `CaptureBackend` (audio through `cpal`: WASAPI, CoreAudio; converted to 48 kHz stereo in the callback); screen capture reports `unsupported` until M9b; only the converter builds on Linux | `capture-api`, `media-core` (Windows, macOS: `cpal`) |
+| `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends (`docs/platforms.md`) | `capture-api`, `capture-linux` (Linux), `capture-cpal` (Windows, macOS) |
 | `audio-engine` | lib | Mixer core (gain ramps, mute, meters, clipping policy), test tones, mixer thread with bounded drift-absorbing input buffering | `media-core` |
 | `video-compositor` | lib | Scene graph, CPU reference renderer, render loop on its own thread, test patterns, PPM snapshots (ADR 0003) | `media-core` |
 | `encoder-api` | lib | Platform-neutral output vocabulary: recording and streaming settings, secret `StreamKey`, `StreamTarget` with redaction, reconnect policy, statistics, errors (no FFmpeg) | — |
-| `encoder-ffmpeg` | lib | Outputs on their own threads, each fed through a non-blocking bounded `OutputInput`: `Recorder` (H.264 + AAC → Matroska, ADR 0005) and `Streamer` (H.264 CBR + AAC → FLV over RTMP with reconnects, ADR 0006); `unsupported` on non-Linux | `encoder-api`, `media-core` (Linux only: `ffmpeg-next`) |
-| `rtmp-test-server` | lib (test-only) | In-process RTMP ingest for tests (FFmpeg listen mode); never shipped | Linux only: `ffmpeg-next` |
+| `encoder-ffmpeg` | lib | Outputs on their own threads, each fed through a non-blocking bounded `OutputInput`: `Recorder` (H.264 + AAC → Matroska, ADR 0005) and `Streamer` (H.264 CBR + AAC → FLV over RTMP with reconnects, ADR 0006); on Linux, Windows and macOS | `encoder-api`, `media-core`, `ffmpeg-next` |
+| `rtmp-test-server` | lib (test-only) | In-process RTMP ingest for tests (FFmpeg listen mode); never shipped | `ffmpeg-next` |
 | `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor`, `audio-engine`, `encoder-api` (report types) |
 | `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` and the media pipeline (compositor, mixer, fan-out) with its outputs | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |

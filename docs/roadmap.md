@@ -120,7 +120,7 @@ Acceptance:
   - the color bars and the tone RMS
 
 Known limitations, deferred:
-- Linux only; Windows and macOS return `unsupported` (M9).
+- Linux only; Windows and macOS return `unsupported` (M9). Lifted in M9a: recording works on all three (ADR 0009).
 - Fixed settings: 1920×1080@60 reference scene, x264 `veryfast`/CRF 20, AAC 160 kbit/s. No hardware encoders, no settings in the command yet.
 - Live-input drift resampling is still linear (ADR 0004).
 - A failure during recording is visible through polling (`get_status.recording_failed`); there are no push events yet. This failure path has no automated test, because an encoder failure cannot be triggered deterministically.
@@ -147,7 +147,7 @@ Acceptance:
   - the recorded file covers the whole run, with no audio drops and every video tick accounted for
 
 Known limitations, deferred:
-- Linux only (M9). `rtmps://` depends on the TLS support of the linked FFmpeg.
+- Linux only (M9); lifted in M9a, streaming works on all three (ADR 0009). `rtmps://` depends on the TLS support of the linked FFmpeg.
 - The stream uses the canvas resolution (1080p60); no scaling, no hardware encoder, one stream at a time.
 - Outputs share the sources of the first output; changing sources needs all outputs stopped (scene commands come with M7).
 - FFmpeg's own log output is disabled once streaming is used (it can contain the stream path); a redacting log callback would keep diagnostics.
@@ -198,10 +198,17 @@ Known limitations, deferred:
 
 ## M9 — Cross-platform backends
 
-- Windows capture/audio backend.
-- macOS capture/audio backend.
-- Hardware encoding paths where beneficial.
-- Document capability matrix and run platform CI.
+Delivered in steps (ADR 0009):
+
+- [ ] Windows capture/audio backend:
+  - [x] Audio through `cpal` (WASAPI), converted to 48 kHz stereo (M9a).
+  - [ ] Screen capture (M9b).
+- [ ] macOS capture/audio backend:
+  - [x] Audio through `cpal` (CoreAudio) (M9a).
+  - [ ] Screen capture (M9b).
+- [x] Recording and streaming on Windows and macOS: FFmpeg linked on every OS (M9a).
+- [ ] Hardware encoding paths where beneficial (M9c).
+- [x] Document capability matrix and run platform CI (`docs/platforms.md`): FFmpeg on all three runners; recording, streaming and acceptance tests run natively on each.
 
 Acceptance:
 - CI builds on all three operating systems.

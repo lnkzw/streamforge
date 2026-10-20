@@ -45,5 +45,7 @@ CI (`.github/workflows/ci.yml`) builds and tests on `ubuntu-latest`, `windows-la
 | Recording: decode-and-check of real files | CI | CI | CI |
 | Streaming to an in-process RTMP ingest, reconnect, give-up | CI | CI | CI |
 | Engine, desktop-model and MCP acceptance tests | CI | CI | CI |
-| Audio input | manual (dev machine); CI runners have no session | CI: the runner's devices if any, else the structured `not_found` path | CI: same; microphone permission cannot be granted on runners |
+| Audio input | manual (dev machine); CI runners have no session | CI: the runner has no input, so the structured `not_found` path; live capture still needs a manual check | CI: the runner's devices if any, else the structured error; microphone permission cannot be granted on runners |
 | Screen capture | manual (needs a human in the picker) | — | — |
+
+At the last complete CI run (ADR 0009), every test passed on Windows. On macOS, every test passed except a throughput floor, which has since been made a guard against total failure: the macOS VM skips some compositor ticks at 1080p60, and those skips are counted.

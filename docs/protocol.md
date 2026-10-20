@@ -241,7 +241,7 @@ Source parameters (all optional; any of them makes the output bring its own sour
 
 Errors:
 - `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
-- `unsupported`: no recorder on this platform (only Linux has one so far).
+- `unsupported`: no recorder on this platform (Linux, Windows and macOS have one; `docs/platforms.md`).
 - `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
 - Capture errors are the same as for the probes.
 
@@ -281,7 +281,7 @@ Targets are shown redacted: scheme, host and application. Deeper path segments b
 Errors:
 - `invalid_state`: a stream is already open, `stop_streaming` was called without one, or sources were given while the pipeline runs.
 - `unavailable`: the server could not be reached, or the connection or publish handshake failed; `details.target` holds the redacted target.
-- `unsupported`: no streaming on this platform (only Linux so far).
+- `unsupported`: no streaming on this platform (Linux, Windows and macOS have it).
 
 `stop_streaming` always returns a report, also for a failed stream: `{"streaming", "pipeline_stopped", "render", ..., "warnings"}` (pipeline fields as for recording). `streaming` contains:
 

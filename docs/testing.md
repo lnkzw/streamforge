@@ -32,7 +32,12 @@ cargo test --workspace
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
-On Linux, CI installs `libpipewire-0.3-dev` and `libclang-dev` for `capture-linux`, and `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev` for `encoder-ffmpeg`. Ubuntu's FFmpeg includes libx264, so the recording tests run there too. The runners have no desktop session, so capture capability tests there exercise the "unavailable with reason" paths.
+CI installs FFmpeg on every OS, so the recording, streaming and output acceptance tests run natively on all three:
+- **Linux:** `libpipewire-0.3-dev` and `libclang-dev` for `capture-linux`, and `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev` for `encoder-ffmpeg`.
+- **macOS:** `brew install ffmpeg pkgconf`.
+- **Windows:** BtbN's shared FFmpeg 8.1, with its SHA-256 checked against the release's checksum file.
+
+The runners have no desktop session and no microphone. Capture tests there exercise the "unavailable with reason" and `not_found` paths, and a CI step prints each runner's capture capabilities (`docs/platforms.md`).
 
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
@@ -89,6 +94,7 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
   - streaming only with a configured target, redirects refused, and the key absent from everything the agent sees (Linux, in-process RTMP ingest)
   - startup checks of the target
 - `crates/streamforge-engine/tests/stdio_protocol.rs`: `--allow read-only` denies a control command.
+- `crates/capture-cpal`: the format converter (channels, resampling, chunked output, state across callbacks), tested on every OS. `tests/native.rs` (Windows, macOS) checks capabilities, captures from the default input if there is one or expects a structured error if not, and checks unknown inputs and unsupported layouts.
 - `crates/streamforge-desktop/tests/acceptance.rs`: M7 acceptance through the UI model (the layer the widgets call), against the real engine on its worker thread. It creates a scene, adds a source, activates it and records, and checks that engine errors reach the log and that preview frames and levels arrive. The egui layer itself is checked by starting the app.
 - `crates/engine` (Linux): the recording lifecycle, including:
   - `invalid_state` on a double start, on probes while recording, and on a stop without a recording

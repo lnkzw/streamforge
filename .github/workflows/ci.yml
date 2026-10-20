@@ -104,6 +104,10 @@ jobs:
         run: cargo test --workspace --locked
       - name: "M0 acceptance: CLI status"
         run: cargo run --locked -q -p streamforge-cli -- status --json
+      - name: Capture capabilities of this runner
+        # For the record (docs/platforms.md); runners have no desktop or
+        # microphone, so most entries say why they are unavailable.
+        run: cargo run --locked -q -p streamforge-cli -- capture caps
       - name: "M1 smoke: headless engine over a shell pipe"
         run: |
           printf '%s\n' '{"id":1,"command":"get_status"}' \

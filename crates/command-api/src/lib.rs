@@ -8,19 +8,23 @@
 mod composite;
 mod error;
 mod mix;
-mod recording;
+mod outputs;
 mod registry;
 
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
-pub use recording::{RecordingReport, RecordingRequest, RecordingStarted};
-pub use registry::{CommandAccess, CommandDescriptor, CommandList, registry};
+pub use outputs::{
+    MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
+    StreamingReport, StreamingRequest, StreamingStarted,
+};
+pub use registry::{CommandAccess, CommandDescriptor, CommandList, default_sources, registry};
 
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
     VideoCaptureReport,
 };
+use encoder_api::StreamState;
 use serde::{Deserialize, Serialize};
 
 /// A typed engine command.
@@ -49,6 +53,10 @@ pub enum Command {
     StartRecording(RecordingRequest),
     /// Stop the running recording and finalize its file.
     StopRecording,
+    /// Start a live stream; returns once connected.
+    StartStreaming(StreamingRequest),
+    /// Stop the live stream and report its connection history.
+    StopStreaming,
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -68,6 +76,8 @@ pub enum CommandOutput {
     MixReport(Box<MixReport>),
     RecordingStarted(RecordingStarted),
     RecordingReport(Box<RecordingReport>),
+    StreamingStarted(StreamingStarted),
+    StreamingReport(Box<StreamingReport>),
 }
 
 /// Result of `list_audio_inputs`.
@@ -82,7 +92,11 @@ pub struct EngineStatus {
     pub version: String,
     pub media_engine_ready: bool,
     pub capture_available: bool,
+    /// A stream is open and connected, connecting or reconnecting.
     pub streaming_active: bool,
+    /// State of the open stream, if any (`failed`: reconnects exhausted;
+    /// `stop_streaming` reports why).
+    pub streaming_state: Option<StreamState>,
     /// A recording is open and its workers are running.
     pub recording_active: bool,
     /// A recording is open but stopped unexpectedly (encoder, compositor or
@@ -110,6 +124,7 @@ mod tests {
             media_engine_ready: false,
             capture_available: false,
             streaming_active: false,
+            streaming_state: None,
             recording_active: false,
             recording_failed: false,
         };
@@ -122,6 +137,7 @@ mod tests {
                 "media_engine_ready": false,
                 "capture_available": false,
                 "streaming_active": false,
+                "streaming_state": null,
                 "recording_active": false,
                 "recording_failed": false,
             })

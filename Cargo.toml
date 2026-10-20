@@ -10,6 +10,7 @@ members = [
     "crates/audio-engine",
     "crates/encoder-api",
     "crates/encoder-ffmpeg",
+    "crates/rtmp-test-server",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",

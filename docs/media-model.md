@@ -72,6 +72,7 @@ Recording (M5, ADR 0005) puts both producers on one timeline:
 - **Late frames and missing audio:** both keep their nominal timestamps, so a late frame does not shift later ones. A missing live input reads as silence in the mix (`underrun_frames`), so the audio track stays continuous.
 - **Explicit time bases:** the taps hand the recorder `MediaTimestamp`s in nanoseconds. The recorder rescales them into 1/fps and 1/48000 with checked, rounded integer arithmetic (`MediaTimestamp::rescale`). A timestamp that cannot be converted drops its item and counts it.
 - **Common end:** on stop, the engine sets one end time before stopping the producers one after the other. Items stamped at or after it are not recorded and are counted (`frames_after_end`, `blocks_after_end`), so both tracks end within one frame or block of each other.
+- **Per-output epochs:** every output's media time 0 is the moment it was attached; frames and blocks from before that are not part of it. A stream additionally restarts its timeline at 0 with each connection, starting at the connection's first video frame (a keyframe).
 - **Capture latency:** not compensated yet. Live audio is stamped when mixed, about one jitter-buffer target after capture; screen frames are stamped when composited.
 
 ## Queue policy
@@ -94,11 +95,12 @@ Implemented audio edges:
 | `AudioRing` → mixer | adaptive resampling to a bounded target fill (see above); warm-up, pad and trim only on stalls and bursts | `drift_ppm`, `warmup_frames`, `underrun_frames`, `trimmed_frames`, buffer latency min/mean/max and per-10 s trend |
 | Mixer clock | fixed 10 ms blocks; it catches up to 20 blocks back to back, then skips | `late_blocks`, `skipped_blocks` |
 
-Implemented recording edges:
+Implemented output edges (one set per attached output, so outputs never starve each other):
 
 | Edge | Capacity / policy | Metrics |
 |------|-------------------|---------|
-| Compositor → video copy pool | 8 frame buffers; with no free buffer the frame is dropped | `RecordingStats.video.frames_dropped` |
-| Taps → `recorder` queue | 256 items shared by video and audio (about 1 s), preallocated; when full the item is dropped | `video.frames_dropped`, `audio.blocks_dropped` |
+| Compositor → output's video copy pool | 8 frame buffers per output; with no free buffer the frame is dropped for that output | `video.frames_dropped` of that output |
+| Fan-out → output queue | 256 items shared by video and audio (about 1 s), preallocated; when full the item is dropped | `video.frames_dropped`, `audio.blocks_dropped` |
 | Audio timeline → AAC frames | gaps ≤ 1 s padded with silence, overlaps trimmed, larger jumps restart (the last frame before a restart and at the end is padded) | `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples` |
 | Recorder after a failure | finalizes the file, then counts everything still queued or sent as dropped until stopped | `frames_dropped`, `blocks_dropped`; `get_status.recording_failed` |
+| Streamer while disconnected (backoff, connect) or failed | everything received is dropped; audio before a connection's first video frame too | `frames_dropped_offline`, `blocks_dropped_offline` (included in the track totals); `get_status.streaming_state` |

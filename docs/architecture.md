@@ -39,10 +39,11 @@
 | `capture-platform` | lib | Picks the `CaptureBackend` for the target OS (`cfg(target_os)`); the only crate that names platform backends | `capture-api`, `capture-linux` (Linux) |
 | `audio-engine` | lib | Mixer core (gain ramps, mute, meters, clipping policy), test tones, mixer thread with bounded drift-absorbing input buffering | `media-core` |
 | `video-compositor` | lib | Scene graph, CPU reference renderer, render loop on its own thread, test patterns, PPM snapshots (ADR 0003) | `media-core` |
-| `encoder-api` | lib | Platform-neutral recording settings, statistics and errors (no FFmpeg) | — |
-| `encoder-ffmpeg` | lib | `Recorder`: H.264 + AAC into Matroska on its own thread, fed through a non-blocking bounded `RecorderInput` (ADR 0005); `unsupported` on non-Linux | `encoder-api`, `media-core` (Linux only: `ffmpeg-next`) |
+| `encoder-api` | lib | Platform-neutral output vocabulary: recording and streaming settings, secret `StreamKey`, `StreamTarget` with redaction, reconnect policy, statistics, errors (no FFmpeg) | — |
+| `encoder-ffmpeg` | lib | Outputs on their own threads, each fed through a non-blocking bounded `OutputInput`: `Recorder` (H.264 + AAC → Matroska, ADR 0005) and `Streamer` (H.264 CBR + AAC → FLV over RTMP with reconnects, ADR 0006); `unsupported` on non-Linux | `encoder-api`, `media-core` (Linux only: `ffmpeg-next`) |
+| `rtmp-test-server` | lib (test-only) | In-process RTMP ingest for tests (FFmpeg listen mode); never shipped | Linux only: `ffmpeg-next` |
 | `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor`, `audio-engine`, `encoder-api` (report types) |
-| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend`, the compositor, the mixer and the recorder | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg` |
+| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` and the media pipeline (compositor, mixer, fan-out) with its outputs | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
@@ -70,9 +71,20 @@ Since M3, real-time work has its own threads:
 - **`compositor`:** fixed-rate render loop. It takes the newest frame of each live source and renders with scoped worker threads.
 - **`audio-capture`:** PipeWire loop of a continuous audio stream. It pushes 48 kHz stereo `f32` into a bounded `AudioRing` (M4).
 - **`audio-mixer`:** fixed 10 ms block clock. It pulls each ring with bounded buffering, mixes and meters, and does not allocate (M4).
-- **`recorder`:** converts BGRA to YUV 4:2:0, encodes H.264 and AAC, and muxes Matroska (M5). Compositor and mixer feed it through output sinks (`FrameSink`, `BlockSink`). The sinks never block: the video tap copies into one of 8 pooled buffers, audio blocks travel inline in a bounded queue, and whatever does not fit is dropped and counted.
+- **`recorder`:** converts BGRA to YUV 4:2:0, encodes H.264 and AAC, and muxes Matroska (M5).
+- **`streamer`:** the same conversion and encoding (CBR), muxed as FLV over RTMP. It reconnects with backoff, and every blocking network call is bounded (M6).
+- **Feeding the outputs:** compositor and mixer feed outputs through output sinks (`FrameSink`, `BlockSink`) and a fan-out with one entry per attached output. The sinks never block:
+  - each output's video tap copies into one of its own 8 pooled buffers
+  - audio blocks travel inline in each output's bounded queue
+  - whatever does not fit is dropped and counted for that output only
 
-The engine thread only starts, waits for and stops these threads; it never touches frames. A recording (`start_recording`) keeps them running after the command returns. The engine holds the session until `stop_recording` or until it is dropped. It sets one end time for both tracks first, then stops the producers, then the recorder, then the captures. While a recording is open, commands that would compete for its devices or CPU, or block the engine thread (the probes), fail with `invalid_state`. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
+The engine thread only starts, waits for and stops these threads; it never touches frames.
+
+Outputs (ADR 0006):
+- **Lifecycle:** the media pipeline (captures, compositor, mixer, fan-out) starts with the first output and stops with the last. Outputs keep it running after their start command returns.
+- **Stopping an output:** the engine sets the output's end time for both tracks, detaches it from the fan-out, then finalizes it. Producers keep serving the remaining outputs.
+- **Exclusive commands:** while any output is open, commands that would compete for its devices or CPU, or block the engine thread (the probes), fail with `invalid_state`.
+- **Drop order:** dropping the engine stops the pipeline first, then finalizes the outputs. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
 
 ## Suggested future crates
 

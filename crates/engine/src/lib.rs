@@ -6,9 +6,11 @@
 
 mod composite;
 mod mix;
-mod recording;
+mod outputs;
+mod pipeline;
 
-use recording::RecordingSession;
+use outputs::{RecordingOutput, StreamingOutput};
+use pipeline::Pipeline;
 
 use std::path::PathBuf;
 
@@ -19,16 +21,21 @@ use command_api::{
     AudioInputList, Command, CommandError, CommandHandler, CommandList, CommandOutput,
     EngineStatus, ErrorCode,
 };
+use encoder_ffmpeg::StreamState;
 
 pub struct Engine {
+    /// Shared by the outputs; declared first so it is dropped (producers
+    /// stopped) before the outputs finalize.
+    pipeline: Option<Pipeline>,
+    /// Open outputs; dropping the engine finalizes them.
+    recording: Option<RecordingOutput>,
+    streaming: Option<StreamingOutput>,
     status: EngineStatus,
     capture: Box<dyn CaptureBackend>,
     /// Where commands may create files (snapshots); clients only name files.
     output_dir: PathBuf,
     /// Last capability query; `get_status` derives `capture_available` from it.
     capture_capabilities: Option<CaptureCapabilities>,
-    /// Running recording; dropping the engine finalizes its file.
-    recording: Option<RecordingSession>,
 }
 
 impl Engine {
@@ -48,13 +55,16 @@ impl Engine {
                 media_engine_ready: false,
                 capture_available: false,
                 streaming_active: false,
+                streaming_state: None,
                 recording_active: false,
                 recording_failed: false,
             },
             capture,
             output_dir: PathBuf::from("."),
             capture_capabilities: None,
+            pipeline: None,
             recording: None,
+            streaming: None,
         }
     }
 
@@ -62,25 +72,6 @@ impl Engine {
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
         self
-    }
-
-    /// Commands that capture, render or record need the devices and CPU a
-    /// running recording uses, and they would block `stop_recording` for
-    /// their duration; they fail with `invalid_state` while one is open.
-    fn ensure_not_recording(&self, command: &str) -> Result<(), CommandError> {
-        let Some(session) = &self.recording else {
-            return Ok(());
-        };
-        let message = if session.is_running() {
-            format!("`{command}` is not available while a recording is running; stop it first")
-        } else {
-            format!(
-                "the open recording stopped unexpectedly; call stop_recording to finalize it \
-                 and read the error before `{command}`"
-            )
-        };
-        Err(CommandError::new(ErrorCode::InvalidState, message)
-            .with_details(serde_json::json!({ "recording": session.path().display().to_string() })))
     }
 
     fn refresh_capabilities(&mut self) -> &CaptureCapabilities {
@@ -113,9 +104,19 @@ impl CommandHandler for Engine {
                 if self.capture_capabilities.is_none() {
                     self.refresh_capabilities();
                 }
-                let running = self.recording.as_ref().map(RecordingSession::is_running);
-                self.status.recording_active = running == Some(true);
-                self.status.recording_failed = running == Some(false);
+                let recording = self.recording_running();
+                self.status.recording_active = recording;
+                self.status.recording_failed = self.recording.is_some() && !recording;
+                let streaming = self.streaming_state();
+                self.status.streaming_state = streaming;
+                self.status.streaming_active = matches!(
+                    streaming,
+                    Some(
+                        StreamState::Connecting
+                            | StreamState::Connected
+                            | StreamState::Reconnecting
+                    )
+                );
                 Ok(CommandOutput::Status(self.status.clone()))
             }
             Command::ListCommands => Ok(CommandOutput::Commands(CommandList::all())),
@@ -128,44 +129,41 @@ impl CommandHandler for Engine {
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
                 .map_err(command_error),
             Command::ProbeScreenCapture(request) => {
-                self.ensure_not_recording("probe_screen_capture")?;
+                self.ensure_idle("probe_screen_capture")?;
                 self.capture
                     .probe_screen(&request)
                     .map(CommandOutput::VideoCaptureReport)
                     .map_err(command_error)
             }
             Command::ProbeAudioCapture(request) => {
-                self.ensure_not_recording("probe_audio_capture")?;
+                self.ensure_idle("probe_audio_capture")?;
                 self.capture
                     .probe_audio(&request)
                     .map(CommandOutput::AudioCaptureReport)
                     .map_err(command_error)
             }
             Command::ProbeComposite(request) => {
-                self.ensure_not_recording("probe_composite")?;
+                self.ensure_idle("probe_composite")?;
                 composite::probe(self.capture.as_mut(), &self.output_dir, &request)
                     .map(|report| CommandOutput::CompositeReport(Box::new(report)))
             }
             Command::ProbeAudioMix(request) => {
-                self.ensure_not_recording("probe_audio_mix")?;
+                self.ensure_idle("probe_audio_mix")?;
                 mix::probe(self.capture.as_mut(), &request)
                     .map(|report| CommandOutput::MixReport(Box::new(report)))
             }
-            Command::StartRecording(request) => {
-                self.ensure_not_recording("start_recording")?;
-                let (session, started) =
-                    RecordingSession::start(self.capture.as_mut(), &self.output_dir, &request)?;
-                self.recording = Some(session);
-                Ok(CommandOutput::RecordingStarted(started))
-            }
-            Command::StopRecording => {
-                let session = self.recording.take().ok_or_else(|| {
-                    CommandError::new(ErrorCode::InvalidState, "no recording is running")
-                })?;
-                session
-                    .stop()
-                    .map(|report| CommandOutput::RecordingReport(Box::new(report)))
-            }
+            Command::StartRecording(request) => self
+                .start_recording(&request)
+                .map(CommandOutput::RecordingStarted),
+            Command::StopRecording => self
+                .stop_recording()
+                .map(|report| CommandOutput::RecordingReport(Box::new(report))),
+            Command::StartStreaming(request) => self
+                .start_streaming(&request)
+                .map(CommandOutput::StreamingStarted),
+            Command::StopStreaming => self
+                .stop_streaming()
+                .map(|report| CommandOutput::StreamingReport(Box::new(report))),
         }
     }
 }
@@ -449,6 +447,10 @@ mod tests {
                     // Keep probes short; their defaults run for seconds.
                     name if name.starts_with("probe_") => Some(json!({"duration_ms": 100})),
                     "start_recording" => Some(json!({"file_name": format!("all-{index}.mkv")})),
+                    // Nothing listens there: a structured `unavailable` error.
+                    "start_streaming" => {
+                        Some(json!({"url": format!("rtmp://127.0.0.1:{}/live", free_port())}))
+                    }
                     _ => None,
                 };
                 let command = Command::decode(descriptor.name, params.as_ref()).expect("decode");
@@ -456,6 +458,13 @@ mod tests {
                 let _ = engine.handle(command);
             }
         }
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("free port")
+            .port()
     }
 
     /// Temporary directory removed when the test ends.
@@ -535,8 +544,10 @@ mod tests {
         assert!(recording.video.frames_encoded > 10, "{recording:?}");
         assert!(recording.audio.samples_encoded > 10_000, "{recording:?}");
         assert!(recording.file_bytes.is_some_and(|bytes| bytes > 1_000));
-        assert_eq!(report.audio_captures.len(), 1);
-        assert!(report.render.is_some() && report.mix.is_some());
+        // The last output stopped the pipeline and reports it.
+        assert!(report.pipeline.pipeline_stopped);
+        assert_eq!(report.pipeline.audio_captures.len(), 1);
+        assert!(report.pipeline.render.is_some() && report.pipeline.mix.is_some());
         // Both tracks end at the stop time, within a frame or a block, plus
         // any counted trailing drops on a slow machine.
         let video_end = recording.video.end_ms.expect("video");
@@ -565,6 +576,148 @@ mod tests {
             b"precious"
         );
         assert!(!status(&mut engine).recording_active);
+    }
+
+    /// Start streaming to `url`, retrying while the test server is not
+    /// listening yet.
+    #[cfg(target_os = "linux")]
+    fn start_streaming(engine: &mut Engine, params: serde_json::Value) -> CommandOutput {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let command = Command::decode("start_streaming", Some(&params)).expect("decode");
+            match engine.handle(command) {
+                Ok(output) => return output,
+                Err(err)
+                    if err.code == ErrorCode::Unavailable
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => panic!("start_streaming: {err}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streams_the_pipeline_to_a_local_server() {
+        let server = rtmp_test_server::TestServer::start(Default::default());
+        let mut engine = engine();
+        let started = start_streaming(
+            &mut engine,
+            json!({"url": server.url(), "stream_key": "k-SECRET", "video_bitrate_kbps": 2000}),
+        );
+        let CommandOutput::StreamingStarted(started) = started else {
+            panic!("unexpected output");
+        };
+        assert!(
+            started.target.ends_with("/live/<stream key>"),
+            "{}",
+            started.target
+        );
+        let connected = status(&mut engine);
+        assert!(connected.streaming_active);
+        assert_eq!(connected.streaming_state, Some(StreamState::Connected));
+        std::thread::sleep(Duration::from_millis(1500));
+        let report = match engine.handle(Command::StopStreaming).expect("stop") {
+            CommandOutput::StreamingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        assert_eq!(report.streaming.state, StreamState::Connected, "{report:?}");
+        assert_eq!(report.streaming.connects, 1);
+        assert!(report.pipeline.pipeline_stopped);
+        assert!(
+            !serde_json::to_string(&report)
+                .expect("json")
+                .contains("SECRET")
+        );
+        let stopped = status(&mut engine);
+        assert!(!stopped.streaming_active && stopped.streaming_state.is_none());
+
+        let arrived = server.join();
+        assert_eq!((arrived.width, arrived.height), (1920, 1080));
+        let video = arrived.video.expect("video");
+        assert_eq!(video.codec, "h264");
+        assert_eq!(arrived.audio.expect("audio").codec, "aac");
+        assert!(video.end_s - video.first_s > 1.0, "{video:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recording_continues_when_the_stream_fails() {
+        let dir = TempDir::new("survive");
+        let server = rtmp_test_server::TestServer::start(rtmp_test_server::ServerOptions {
+            close_after: Some(Duration::from_millis(800)),
+            ..Default::default()
+        });
+        let mut engine = engine().with_output_dir(&dir.0);
+        start(&mut engine, json!({"file_name": "keep.mkv"})).expect("start recording");
+        // Outputs share the running pipeline; they cannot bring their own sources.
+        let own_sources = Command::decode(
+            "start_streaming",
+            Some(&json!({"url": server.url(), "tones": []})),
+        )
+        .expect("decode");
+        assert_eq!(
+            engine.handle(own_sources).unwrap_err().code,
+            ErrorCode::InvalidState
+        );
+        start_streaming(
+            &mut engine,
+            json!({"url": server.url(), "reconnect_attempts": 1, "reconnect_delay_ms": 100,
+                   "video_bitrate_kbps": 2000}),
+        );
+
+        // The ingest drops the connection and never comes back.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while status(&mut engine).streaming_state != Some(StreamState::Failed) {
+            assert!(std::time::Instant::now() < deadline, "stream never failed");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let status_now = status(&mut engine);
+        assert!(!status_now.streaming_active);
+        assert!(status_now.recording_active, "{status_now:?}");
+
+        let stream = match engine.handle(Command::StopStreaming).expect("stop stream") {
+            CommandOutput::StreamingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        assert_eq!(stream.streaming.state, StreamState::Failed);
+        assert_eq!(stream.streaming.disconnects, 1);
+        // The recording still uses the pipeline.
+        assert!(!stream.pipeline.pipeline_stopped);
+        assert!(
+            stream.warnings.iter().any(|w| w.contains("failed")),
+            "{:?}",
+            stream.warnings
+        );
+        assert!(status(&mut engine).recording_active);
+
+        std::thread::sleep(Duration::from_millis(300));
+        let report = match engine
+            .handle(Command::StopRecording)
+            .expect("stop recording")
+        {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        assert!(report.pipeline.pipeline_stopped);
+        let recording = &report.recording;
+        assert_eq!(recording.audio.blocks_dropped, 0, "{recording:?}");
+        assert_eq!(recording.audio.gap_samples, 0, "{recording:?}");
+        // Every frame tick before the cut is encoded or counted.
+        let ticks = (recording.audio.end_ms.expect("audio") * 60.0 / 1000.0).round() as u64;
+        let skipped = report
+            .pipeline
+            .render
+            .as_ref()
+            .map_or(0, |r| r.skipped_ticks);
+        let accounted = recording.video.frames_encoded + recording.video.frames_dropped + skipped;
+        assert!(
+            accounted.abs_diff(ticks) <= 1,
+            "{accounted} vs {ticks}: {recording:?}"
+        );
+        let _ = server.join();
     }
 
     #[cfg(target_os = "linux")]

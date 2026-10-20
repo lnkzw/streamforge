@@ -12,3 +12,6 @@ media-core = { path = "../media-core" }
 # packages there. Other platforms get an `Unsupported` recorder (M9).
 [target.'cfg(target_os = "linux")'.dependencies]
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
+
+[dev-dependencies]
+rtmp-test-server = { path = "../rtmp-test-server" }

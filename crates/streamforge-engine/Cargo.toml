@@ -19,3 +19,4 @@ serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
+rtmp-test-server = { path = "../rtmp-test-server" }

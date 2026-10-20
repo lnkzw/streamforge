@@ -1,9 +1,15 @@
-//! Recording vocabulary: settings, statistics and errors.
+//! Output vocabulary: recording and streaming settings, statistics, errors.
 //!
 //! Free of FFmpeg so command and adapter crates can use these types without
-//! linking an encoder; `encoder-ffmpeg` implements the recorder.
+//! linking an encoder; `encoder-ffmpeg` implements the outputs.
+
+mod stream;
 
 use std::path::PathBuf;
+
+pub use stream::{
+    ReconnectPolicy, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
+};
 
 use serde::Serialize;
 use thiserror::Error;
@@ -126,6 +132,8 @@ pub enum RecorderErrorKind {
     Unsupported,
     /// The output file or container could not be created or finalized.
     Output,
+    /// A streaming server could not be reached or the connection failed.
+    Network,
     /// An encoder failed.
     Encoder,
     /// The recorder thread failed unexpectedly.

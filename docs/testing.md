@@ -62,6 +62,15 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
   - that a `pipe:` name becomes a file
   - that an unwritable path is an output error
 - `crates/media-core`: `MediaTimestamp::rescale` rounding and overflow.
+- `crates/encoder-api`: key redaction (`Debug`, redacted targets, validation messages), URL validation, reconnect backoff.
+- `crates/encoder-ffmpeg/tests/stream.rs`: streaming against the in-process RTMP ingest (`crates/rtmp-test-server`):
+  - streams arrive (codecs, size, keyframe first, A/V spans)
+  - reconnecting to a second server on the same port restarts with a keyframe at 0
+  - the output gives up after the attempts, with counted drops and a prompt stop
+  - an unreachable server is a `Network` error without the key
+  - a silent peer hits the I/O timeout instead of hanging
+- `crates/engine` (Linux): streaming via the engine, and a recording that continues when the stream fails.
+- `crates/streamforge-engine/tests/streaming.rs`: M6 acceptance through the real engine process. It streams to a local server, and a recording outlives a stream that fails for good; the recorded file is checked.
 - `crates/engine` (Linux): the recording lifecycle, including:
   - `invalid_state` on a double start, on probes while recording, and on a stop without a recording
   - `not_found` for a missing output directory
@@ -80,6 +89,7 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.
 - `cargo run --release -p streamforge-cli -- mix --input <name> --tone 1000@-12 --duration-ms 600000`: the M4 10-minute latency test; check `buffer.windows_ms` for growth.
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 60000 [--screen] [--input <name>]`: a real recording; check `frames_dropped`, `blocks_dropped`, `gap_samples` and the compositor's late frames, then `ffprobe` the file.
+- `STREAMFORGE_STREAM_KEY=… cargo run --release -p streamforge-cli -- --output-dir /tmp stream --url rtmp://127.0.0.1:1935/live --duration-ms 60000 [--record both.mkv]` against a local ingest (e.g. `ffmpeg -listen 1 -i rtmp://127.0.0.1:1935/live/x -c copy -f flv out.flv`): check the dropped frames of both outputs and the compositor's late frames.
 - Record CPU model, OS, build profile and thread count with every result (see ADR 0003).
 
 ## Reliability requirements

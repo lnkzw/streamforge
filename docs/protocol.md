@@ -75,7 +75,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
-| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "recording_active", "recording_failed"}` |
+| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed"}` |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
@@ -85,6 +85,8 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_audio_mix`          | see below | `sensitive` | Mix report |
 | `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels"}` |
 | `stop_recording`           | none   | `control`   | Recording report |
+| `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels"}` |
+| `stop_streaming`           | none   | `control`   | Streaming report |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -193,42 +195,85 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
 
 `warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
 
-### Recording
+### Outputs: recording and streaming
 
-`start_recording` records the 1920×1080@60 reference scene (the `probe_composite` scene, with an optional live screen layer) and the audio mix to H.264 + AAC in Matroska. It returns as soon as the file header is written; recording continues on its own threads until `stop_recording`. Closing the engine's stdin also stops and finalizes the recording. It is `sensitive` because it captures and stores private content.
+Outputs share one **media pipeline**: the 1920×1080@60 reference scene (the `probe_composite` scene, with an optional live screen layer) and the audio mix.
+
+- **Start and stop:** the first output to start brings the pipeline up with its source parameters. The pipeline stops when the last output stops.
+- **Joining:** an output started while another runs joins the pipeline. It must not name sources (`invalid_state` otherwise).
+- **Defaults:** without source parameters and without a running pipeline, the sources default to one 1 kHz tone at −20 dBFS.
+- **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
+- **Exclusive engine:** while any output is open, the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
+
+Source parameters (all optional; any of them makes the output bring its own sources):
+
+| Param            | Type | Default | Meaning |
+|------------------|------|---------|---------|
+| `screen`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (opens the portal picker). |
+| `inputs`         | as in `probe_audio_mix` | `[]` | Live audio inputs. |
+| `tones`          | as in `probe_audio_mix` | one 1 kHz tone at −20 dBFS if there are no `inputs` | Test tones; `[]` means no tone. |
+| `master_gain_db` | number −96..=24 | 0 | Master gain. |
+
+#### Recording
+
+`start_recording` records to H.264 + AAC in Matroska. It returns as soon as the file header is written; recording continues on its own threads until `stop_recording`. Closing the engine's stdin also stops and finalizes it. It is `sensitive` because it captures and stores private content.
 
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|
 | `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
-| `screen`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (opens the portal picker). |
-| `inputs`         | as in `probe_audio_mix` | `[]` | Live audio inputs. |
-| `tones`          | as in `probe_audio_mix` | one 1 kHz tone at −20 dBFS if there are no `inputs` | Test tones; `[]` records without a tone. |
-| `master_gain_db` | number −96..=24 | 0 | Master gain. |
 
 Errors:
-- `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. While a recording is open, the probe commands fail with `invalid_state` too. If its recorder, compositor or mixer stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
+- `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
 - `unsupported`: no recorder on this platform (only Linux has one so far).
 - `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
 - Capture errors are the same as for the probes.
 
 If `start_recording` fails, the file it created is removed.
 
-`stop_recording` stops the compositor and mixer, drains the queue, flushes the encoders, writes the trailer and ends the captures. Report: `{"recording", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
+`stop_recording` sets one end time for both tracks, detaches the output, drains its queue, flushes the encoders and writes the trailer. Report: `{"recording", "pipeline_stopped", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
 
 - **`recording`:** `path`, `container`, `duration_ms`, `file_bytes`, plus:
   - `video` (`encoder`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
-  - `audio` (`encoder`, `rate`, `channels`, `bitrate`, `samples_encoded`, `blocks_dropped`, `gap_samples`, `overlap_samples`, `discontinuities`, `blocks_after_end`, `padding_samples`, `first_pts_ms`, `end_ms`). Both tracks are cut at the stop time; `*_after_end` counts what producers emitted while stopping
-- **`render`:** the composite stats.
-- **`mix`:** the mix stats (as in `probe_audio_mix`).
-- **`audio_captures`:** as `captures` in `probe_audio_mix`.
+  - `audio` (`encoder`, `rate`, `channels`, `bitrate`, `samples_encoded`, `blocks_dropped`, `blocks_after_end`, `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples`, `first_pts_ms`, `end_ms`)
 
-If finalizing fails, the error's `details` carry the partial `recording` stats, the capture reports and `warnings`. The file is kept.
+  Both tracks are cut at the stop time; `*_after_end` counts what producers emitted while stopping.
+- **`pipeline_stopped`:** whether this output was the last one, so the pipeline stopped with it. Only then are `render` (composite stats), `mix` (as in `probe_audio_mix`), the screen capture fields and `audio_captures` (as `captures` in `probe_audio_mix`) filled in. Otherwise they are `null` or empty.
+
+If finalizing fails, the error's `details` carry the partial `recording` stats, the pipeline fields and `warnings`. The file is kept.
+
+#### Streaming
+
+`start_streaming` publishes over RTMP: H.264 with constant bit rate and a keyframe every 2 s, plus AAC, in FLV. It returns once the first connection is established. If that fails, the error is `unavailable` and nothing is retried. Later network or encoder errors trigger reconnects with exponential backoff. Each new connection uses fresh encoders and starts with a keyframe at timestamp 0. Every blocking network operation is bounded by a 5 s timeout. The command is `sensitive` because it publishes private content and handles a credential.
+
+| Param                | Type | Default | Meaning |
+|----------------------|------|---------|---------|
+| `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. |
+| `stream_key`         | string | none | Appended as the last path segment when connecting. No `/` or whitespace. **Secret:** never echoed in results, errors, logs or `Debug` output; reports show `<stream key>`. |
+| `video_bitrate_kbps` | integer 300..=50000 | 6000 | Video bit rate (CBR, buffer of 2 s). |
+| `reconnect_attempts` | integer 0..=100 | 5 | Attempts after a lost connection; `0` gives up right away. |
+| `reconnect_delay_ms` | integer 100..=60000 | 1000 | Wait before the first attempt; doubles per attempt, up to 30 s. |
+
+Targets are shown redacted: scheme, host and application. Deeper path segments become `***`, a query becomes `?***` and the key becomes `<stream key>`. Once streaming has been used, FFmpeg's own log output is turned off, because RTMP error messages can contain the stream path.
+
+`get_status.streaming_state` is one of `connecting`, `connected`, `reconnecting` or `failed`, or `null` without a stream. `failed` means the reconnect attempts are exhausted, or the pipeline stopped. From then on, media is dropped and counted until `stop_streaming`. `streaming_active` is true while the state is `connecting`, `connected` or `reconnecting`.
+
+Errors:
+- `invalid_state`: a stream is already open, `stop_streaming` was called without one, or sources were given while the pipeline runs.
+- `unavailable`: the server could not be reached, or the connection or publish handshake failed; `details.target` holds the redacted target.
+- `unsupported`: no streaming on this platform (only Linux so far).
+
+`stop_streaming` always returns a report, also for a failed stream: `{"streaming", "pipeline_stopped", "render", ..., "warnings"}` (pipeline fields as for recording). `streaming` contains:
+
+- **Target and state:** `target` (redacted), `container` (`flv`), and `state` at the moment the stop was requested: `connected`, `reconnecting` or `failed`.
+- **Connection history:** `connects`, `disconnects`, `reconnect_attempts`, `connected_ms`, and `last_error`, which never contains the key.
+- **Tracks:** `video` and `audio` with totals over all connections; their `first_pts_ms` and `end_ms` refer to the last connection.
+- **Offline drops:** `frames_dropped_offline` and `blocks_dropped_offline` count media that arrived while not connected. Audio received before a connection's first video frame counts here too. Both numbers are included in the tracks' `frames_dropped` and `blocks_dropped`.
 
 ## Example session
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"recording_active":false,"streaming_active":false,"version":"0.1.0"}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
 {"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","list_commands","get_capture_capabilities","list_audio_inputs","probe_screen_capture","probe_audio_capture"],"command":"nope"}}}
 ```
 

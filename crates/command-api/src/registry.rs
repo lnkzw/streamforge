@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
+use encoder_api::{ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
     Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_MIX_DURATION,
-    MixRequest, RecordingRequest, ToneSpec,
+    MediaSources, MixRequest, RecordingRequest, StreamingRequest, ToneSpec,
 };
 
 /// Permission class of a command.
@@ -103,17 +104,35 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
 
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
-    summary: "Start recording the 1920x1080@60 reference scene (optionally with a live screen layer) \
-              and the audio mix (live inputs and tones; one -20 dBFS 1 kHz tone if no source is given) to \
-              H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
-              output directory, never overwritten), screen, source_types, cursor, inputs, tones, \
-              master_gain_db. Returns immediately; recording continues until stop_recording.",
+    summary: "Record the media pipeline (1920x1080@60 reference scene, optional live screen layer, \
+              audio mix) to H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in \
+              the engine's output directory, never overwritten); sources (screen, source_types, \
+              cursor, inputs, tones, master_gain_db) only if no other output is running, since \
+              outputs share one pipeline; without sources and without a running pipeline, one \
+              -20 dBFS 1 kHz tone. Returns immediately; recording continues until stop_recording.",
     access: CommandAccess::Sensitive,
 };
 
 const STOP_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "stop_recording",
     summary: "Stop the running recording, finalize the file and report its statistics.",
+    access: CommandAccess::Control,
+};
+
+const START_STREAMING: CommandDescriptor = CommandDescriptor {
+    name: "start_streaming",
+    summary: "Publish the media pipeline over RTMP (H.264 CBR + AAC in FLV). Params: url \
+              (required, rtmp:// or rtmps://, no credentials), stream_key (secret, never echoed), \
+              video_bitrate_kbps (default 6000), reconnect_attempts (default 5), \
+              reconnect_delay_ms (default 1000, doubling up to 30 s), and sources as for \
+              start_recording. Returns once connected; reconnects after errors; independent of \
+              recording.",
+    access: CommandAccess::Sensitive,
+};
+
+const STOP_STREAMING: CommandDescriptor = CommandDescriptor {
+    name: "stop_streaming",
+    summary: "Stop the live stream, disconnect and report its connection history.",
     access: CommandAccess::Control,
 };
 
@@ -128,6 +147,8 @@ const COMMANDS: &[CommandDescriptor] = &[
     PROBE_AUDIO_MIX,
     START_RECORDING,
     STOP_RECORDING,
+    START_STREAMING,
+    STOP_STREAMING,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -174,6 +195,8 @@ impl Command {
             "probe_audio_mix" => decode_mix_probe(name, params).map(Self::ProbeAudioMix),
             "start_recording" => decode_start_recording(name, params).map(Self::StartRecording),
             "stop_recording" => expect_no_params(name, params).map(|()| Self::StopRecording),
+            "start_streaming" => decode_start_streaming(name, params).map(Self::StartStreaming),
+            "stop_streaming" => expect_no_params(name, params).map(|()| Self::StopStreaming),
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -197,6 +220,8 @@ impl Command {
             Self::ProbeAudioMix(_) => &PROBE_AUDIO_MIX,
             Self::StartRecording(_) => &START_RECORDING,
             Self::StopRecording => &STOP_RECORDING,
+            Self::StartStreaming(_) => &START_STREAMING,
+            Self::StopStreaming => &STOP_STREAMING,
         }
     }
 
@@ -346,6 +371,76 @@ fn mix_sources(
     })
 }
 
+/// Pipeline source fields shared by the output commands.
+struct SourceParams {
+    screen: Option<bool>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+    inputs: Option<Vec<LiveInputParams>>,
+    /// Absent: one quiet test tone if there are no `inputs`; `[]`: no tones.
+    tones: Option<Vec<ToneParams>>,
+    master_gain_db: Option<f32>,
+}
+
+const DEFAULT_OUTPUT_TONE_DBFS: f64 = -20.0;
+
+/// `None` if no source field is present: the output joins the running
+/// pipeline, or the engine starts one with [`MediaSources::default`]-like
+/// defaults (see `default_sources`).
+fn output_sources(
+    command: &str,
+    params: SourceParams,
+) -> Result<Option<MediaSources>, CommandError> {
+    let given = params.screen.is_some()
+        || params.source_types.is_some()
+        || params.cursor.is_some()
+        || params.inputs.is_some()
+        || params.tones.is_some()
+        || params.master_gain_db.is_some();
+    if !given {
+        return Ok(None);
+    }
+    let inputs = params.inputs.unwrap_or_default();
+    // Without any source, a quiet tone keeps the audio track audibly alive;
+    // with live inputs, only they are mixed.
+    let tones = match params.tones {
+        Some(tones) => tones,
+        None if inputs.is_empty() => vec![default_tone()],
+        None => Vec::new(),
+    };
+    let sources = mix_sources(command, inputs, tones, params.master_gain_db)?;
+    Ok(Some(MediaSources {
+        screen: optional_screen(command, params.screen, params.source_types, params.cursor)?,
+        inputs: sources.inputs,
+        tones: sources.tones,
+        master_gain_db: sources.master_gain_db,
+    }))
+}
+
+fn default_tone() -> ToneParams {
+    ToneParams {
+        frequency_hz: DEFAULT_TONE_HZ,
+        level_dbfs: Some(DEFAULT_OUTPUT_TONE_DBFS),
+        gain_db: None,
+        mute: None,
+    }
+}
+
+/// Sources of an output started without any: one quiet test tone.
+pub fn default_sources() -> MediaSources {
+    MediaSources {
+        screen: None,
+        inputs: Vec::new(),
+        tones: vec![ToneSpec {
+            frequency_hz: DEFAULT_TONE_HZ,
+            level_dbfs: DEFAULT_OUTPUT_TONE_DBFS,
+            gain_db: 0.0,
+            muted: false,
+        }],
+        master_gain_db: 0.0,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartRecordingParams {
@@ -353,39 +448,117 @@ struct StartRecordingParams {
     screen: Option<bool>,
     source_types: Option<Vec<VideoSourceKind>>,
     cursor: Option<CursorMode>,
-    #[serde(default)]
-    inputs: Vec<LiveInputParams>,
-    /// Absent: one quiet test tone if there are no `inputs`; `[]`: no tones.
+    inputs: Option<Vec<LiveInputParams>>,
     tones: Option<Vec<ToneParams>>,
     master_gain_db: Option<f32>,
 }
-
-const DEFAULT_RECORDING_TONE_DBFS: f64 = -20.0;
 
 fn decode_start_recording(
     command: &str,
     params: Option<&Value>,
 ) -> Result<RecordingRequest, CommandError> {
     let params: StartRecordingParams = decode_params(command, params)?;
-    // Without any source, record a quiet tone so the audio track is
-    // audibly alive; with live inputs, record only them.
-    let tones = match params.tones {
-        Some(tones) => tones,
-        None if params.inputs.is_empty() => vec![ToneParams {
-            frequency_hz: DEFAULT_TONE_HZ,
-            level_dbfs: Some(DEFAULT_RECORDING_TONE_DBFS),
-            gain_db: None,
-            mute: None,
-        }],
-        None => Vec::new(),
-    };
-    let sources = mix_sources(command, params.inputs, tones, params.master_gain_db)?;
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
-        screen: optional_screen(command, params.screen, params.source_types, params.cursor)?,
-        inputs: sources.inputs,
-        tones: sources.tones,
-        master_gain_db: sources.master_gain_db,
+        sources: output_sources(
+            command,
+            SourceParams {
+                screen: params.screen,
+                source_types: params.source_types,
+                cursor: params.cursor,
+                inputs: params.inputs,
+                tones: params.tones,
+                master_gain_db: params.master_gain_db,
+            },
+        )?,
+    })
+}
+
+const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
+const VIDEO_BITRATE_KBPS: std::ops::RangeInclusive<u32> = 300..=50_000;
+const MAX_RECONNECT_ATTEMPTS: u32 = 100;
+const RECONNECT_DELAY_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartStreamingParams {
+    url: String,
+    stream_key: Option<String>,
+    video_bitrate_kbps: Option<u32>,
+    reconnect_attempts: Option<u32>,
+    reconnect_delay_ms: Option<u64>,
+    screen: Option<bool>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+    inputs: Option<Vec<LiveInputParams>>,
+    tones: Option<Vec<ToneParams>>,
+    master_gain_db: Option<f32>,
+}
+
+fn decode_start_streaming(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<StreamingRequest, CommandError> {
+    let params: StartStreamingParams = decode_params(command, params)?;
+    // The key moves into a redacting type right away; validation messages
+    // never include it.
+    let key = StreamKey::new(params.stream_key.unwrap_or_default());
+    let target =
+        StreamTarget::new(&params.url, key).map_err(|message| invalid_params(command, message))?;
+    let video_bitrate_kbps = params
+        .video_bitrate_kbps
+        .unwrap_or(DEFAULT_VIDEO_BITRATE_KBPS);
+    if !VIDEO_BITRATE_KBPS.contains(&video_bitrate_kbps) {
+        return Err(invalid_params(
+            command,
+            format!(
+                "`video_bitrate_kbps` must be between {} and {}",
+                VIDEO_BITRATE_KBPS.start(),
+                VIDEO_BITRATE_KBPS.end()
+            ),
+        ));
+    }
+    let defaults = ReconnectPolicy::default();
+    let max_attempts = params.reconnect_attempts.unwrap_or(defaults.max_attempts);
+    if max_attempts > MAX_RECONNECT_ATTEMPTS {
+        return Err(invalid_params(
+            command,
+            format!("`reconnect_attempts` must be at most {MAX_RECONNECT_ATTEMPTS}"),
+        ));
+    }
+    let initial_delay = match params.reconnect_delay_ms {
+        None => defaults.initial_delay,
+        Some(ms) if RECONNECT_DELAY_MS.contains(&ms) => Duration::from_millis(ms),
+        Some(_) => {
+            return Err(invalid_params(
+                command,
+                format!(
+                    "`reconnect_delay_ms` must be between {} and {}",
+                    RECONNECT_DELAY_MS.start(),
+                    RECONNECT_DELAY_MS.end()
+                ),
+            ));
+        }
+    };
+    Ok(StreamingRequest {
+        target,
+        video_bitrate_kbps,
+        reconnect: ReconnectPolicy {
+            max_attempts,
+            initial_delay,
+            max_delay: defaults.max_delay.max(initial_delay),
+        },
+        sources: output_sources(
+            command,
+            SourceParams {
+                screen: params.screen,
+                source_types: params.source_types,
+                cursor: params.cursor,
+                inputs: params.inputs,
+                tones: params.tones,
+                master_gain_db: params.master_gain_db,
+            },
+        )?,
     })
 }
 
@@ -617,7 +790,11 @@ mod tests {
 
     /// Minimal valid params for commands with required parameters.
     pub(crate) fn sample_params(name: &str) -> Option<Value> {
-        (name == "start_recording").then(|| json!({"file_name": "sample.mkv"}))
+        match name {
+            "start_recording" => Some(json!({"file_name": "sample.mkv"})),
+            "start_streaming" => Some(json!({"url": "rtmp://127.0.0.1:1/live"})),
+            _ => None,
+        }
     }
 
     #[test]
@@ -881,18 +1058,30 @@ mod tests {
             panic!("decode");
         };
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
-        assert_eq!(request.screen, None);
-        assert_eq!(request.inputs.len(), 1);
+        let sources = request.sources.expect("sources given");
+        assert_eq!(sources.screen, None);
+        assert_eq!(sources.inputs.len(), 1);
         // With live inputs there is no default tone.
-        assert!(request.tones.is_empty());
+        assert!(sources.tones.is_empty());
+        // No source field at all: join the pipeline or use the defaults.
         let Ok(Command::StartRecording(no_sources)) =
             Command::decode("start_recording", Some(&json!({"file_name": "a.mkv"})))
         else {
             panic!("decode");
         };
-        // Without sources: one quiet tone.
-        assert_eq!(no_sources.tones.len(), 1);
-        assert_eq!(no_sources.tones[0].level_dbfs, -20.0);
+        assert_eq!(no_sources.sources, None);
+        let defaults = default_sources();
+        assert_eq!(defaults.tones.len(), 1);
+        assert_eq!(defaults.tones[0].level_dbfs, -20.0);
+        // Any source field counts: here only the master gain, so one tone.
+        let Ok(Command::StartRecording(gain_only)) = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "a.mkv", "master_gain_db": -3.0})),
+        ) else {
+            panic!("decode");
+        };
+        let gain_only = gain_only.sources.expect("sources given");
+        assert_eq!((gain_only.tones.len(), gain_only.master_gain_db), (1, -3.0));
         // Eight live inputs fit; the default tone does not count against them.
         let eight: Vec<_> = (0..8).map(|i| json!({"input": format!("in{i}")})).collect();
         assert!(
@@ -908,7 +1097,63 @@ mod tests {
         ) else {
             panic!("decode");
         };
+        let silent = silent.sources.expect("sources given");
         assert!(silent.tones.is_empty() && silent.inputs.is_empty());
+    }
+
+    #[test]
+    fn start_streaming_params() {
+        let Ok(Command::StartStreaming(request)) = Command::decode(
+            "start_streaming",
+            Some(&json!({
+                "url": "rtmp://live.example.com/app",
+                "stream_key": "sk_SECRET",
+                "video_bitrate_kbps": 4500,
+                "reconnect_attempts": 0,
+                "reconnect_delay_ms": 250,
+            })),
+        ) else {
+            panic!("decode");
+        };
+        assert_eq!(request.video_bitrate_kbps, 4500);
+        assert_eq!(request.reconnect.max_attempts, 0);
+        assert_eq!(request.reconnect.initial_delay, Duration::from_millis(250));
+        assert_eq!(request.sources, None);
+        assert_eq!(
+            request.target.redacted(),
+            "rtmp://live.example.com/app/<stream key>"
+        );
+        // The key never shows in debug output of the command.
+        let command = Command::StartStreaming(request);
+        assert!(!format!("{command:?}").contains("SECRET"));
+        let Ok(Command::StartStreaming(defaults)) =
+            Command::decode("start_streaming", Some(&json!({"url": "rtmp://host/app"})))
+        else {
+            panic!("decode");
+        };
+        assert_eq!(defaults.video_bitrate_kbps, 6000);
+        assert_eq!(defaults.reconnect, ReconnectPolicy::default());
+    }
+
+    #[test]
+    fn invalid_start_streaming_params_never_echo_the_key() {
+        for params in [
+            json!({}),
+            json!({"url": "http://host/app", "stream_key": "SECRET"}),
+            json!({"url": "rtmp://user:pw@host/app", "stream_key": "SECRET"}),
+            json!({"url": "rtmp://host/app", "stream_key": "bad/SECRET"}),
+            json!({"url": "rtmp://host/app", "video_bitrate_kbps": 10}),
+            json!({"url": "rtmp://host/app", "reconnect_attempts": 1000}),
+            json!({"url": "rtmp://host/app", "reconnect_delay_ms": 5}),
+            json!({"url": "rtmp://host/app", "cursor": "hidden"}),
+            json!({"url": "rtmp://host/app", "key": "SECRET"}),
+        ] {
+            let err = Command::decode("start_streaming", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+            let shown = format!("{err} {:?}", err.details);
+            assert!(!shown.contains("SECRET"), "{shown}");
+        }
+        assert!(Command::decode("stop_streaming", Some(&json!({"now": true}))).is_err());
     }
 
     #[test]
@@ -947,6 +1192,8 @@ mod tests {
         assert_eq!(access("probe_audio_mix"), Some(CommandAccess::Sensitive));
         assert_eq!(access("start_recording"), Some(CommandAccess::Sensitive));
         assert_eq!(access("stop_recording"), Some(CommandAccess::Control));
+        assert_eq!(access("start_streaming"), Some(CommandAccess::Sensitive));
+        assert_eq!(access("stop_streaming"), Some(CommandAccess::Control));
     }
 
     #[test]

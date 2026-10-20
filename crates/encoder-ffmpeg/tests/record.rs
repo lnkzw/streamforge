@@ -1,5 +1,4 @@
 //! Record synthetic media and verify the file by demuxing and decoding it.
-#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 
@@ -300,6 +299,8 @@ fn items_after_the_end_are_counted_not_recorded() {
     );
 }
 
+// `:` cannot appear in Windows file names, so the name only exists on Unix.
+#[cfg(unix)]
 #[test]
 fn output_names_are_not_read_as_protocols() {
     // A relative name starting with `pipe:` would be FFmpeg's pipe protocol

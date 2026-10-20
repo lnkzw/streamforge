@@ -1,6 +1,5 @@
 //! Stream to an in-process RTMP server and check what arrives, including
 //! reconnects and giving up.
-#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

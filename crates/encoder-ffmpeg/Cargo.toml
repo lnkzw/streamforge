@@ -8,9 +8,8 @@ license.workspace = true
 encoder-api = { path = "../encoder-api" }
 media-core = { path = "../media-core" }
 
-# FFmpeg is linked on Linux only for now; CI installs its development
-# packages there. Other platforms get an `Unsupported` recorder (M9).
-[target.'cfg(target_os = "linux")'.dependencies]
+# The FFmpeg libraries on every platform (pkg-config on Linux and macOS,
+# FFMPEG_DIR with a prebuilt shared build on Windows; docs/platforms.md).
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
 
 [dev-dependencies]

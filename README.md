@@ -20,7 +20,11 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 - Rust stable toolchain, 1.95 or newer (`rustup`, `cargo`, `rustfmt`, `clippy`; eframe needs 1.95)
 - Git
 - Linux: PipeWire headers (≥ 0.3.44), `clang`/libclang and `pkg-config`, for `capture-linux`. Runtime needs PipeWire and xdg-desktop-portal with a ScreenCast backend. See `docs/capture-linux.md`.
-- Linux: FFmpeg development libraries (libavcodec, libavformat, libavutil, libswscale; FFmpeg 6.1 (CI, Ubuntu 24.04) and 9.0 are tested; libx264 is needed for H.264), for `encoder-ffmpeg`. On Debian/Ubuntu: `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`.
+- FFmpeg libraries for `encoder-ffmpeg` (FFmpeg 6.1 or newer with libx264; 6.1, 8.1 and 9.0 are tested):
+  - Linux: development packages, on Debian/Ubuntu `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`.
+  - macOS: `brew install ffmpeg pkgconf`.
+  - Windows: a shared build with headers and import libraries (e.g. BtbN's `win64-gpl-shared`). Set `FFMPEG_DIR` to it and put its `bin` on `PATH`; `LIBCLANG_PATH` must point to LLVM.
+  - See `docs/platforms.md`, which also has the capability matrix per OS (screen capture is Linux-only so far; audio input works on all three).
 
 Install Rust using the official instructions: <https://www.rust-lang.org/tools/install>
 
@@ -80,6 +84,7 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/media-core`: platform-independent media types and time model
 - `crates/capture-api`: platform-neutral capture interface and diagnostics
 - `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
+- `crates/capture-cpal`: audio capture on Windows and macOS (cpal)
 - `crates/capture-platform`: selects the capture backend for the target OS
 - `crates/video-compositor`: scene graph, CPU renderer and render loop
 - `crates/audio-engine`: mixer, meters, test tones and mixer thread

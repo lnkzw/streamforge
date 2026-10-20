@@ -1,6 +1,5 @@
 //! M5 acceptance: record through the real engine process, then verify the
 //! file's streams, duration, A/V timestamp drift and decoded content.
-#![cfg(target_os = "linux")]
 
 mod common;
 
@@ -93,9 +92,18 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         encoded + dropped <= ticks + 1,
         "more frames than ticks: {report}"
     );
+    // A throughput floor: three quarters of the ticks. The 3-core macOS CI
+    // VM skips about a third of the compositor ticks at 1080p60 (counted
+    // above), so there it only guards against near-total failure;
+    // throughput is measured separately (docs/testing.md).
+    let (num, den) = if cfg!(target_os = "macos") {
+        (1, 3)
+    } else {
+        (3, 4)
+    };
     assert!(
-        encoded * 4 >= ticks * 3,
-        "fewer than 75% of frames encoded: {report}"
+        encoded * den >= ticks * num,
+        "fewer than {num}/{den} of the frames encoded: {report}"
     );
     assert_eq!(report["audio"]["blocks_dropped"], 0, "{report}");
     assert_eq!(report["audio"]["gap_samples"], 0, "{report}");
@@ -130,12 +138,19 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     assert_eq!(audio.rate(), 48_000);
     assert_eq!(audio.channel_layout().channels(), 2);
 
-    // Duration: the container covers what was recorded.
+    // Duration: the container covers what was recorded, at least the
+    // requested time and up to the recorder's own cut-off. (On a loaded
+    // runner `stop_recording` can arrive half a second late, which makes
+    // the file longer than `RECORD_FOR`; the cut-off accounts for that.)
     let seconds = input.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
-    let expected = RECORD_FOR.as_secs_f64();
+    let cut_off = end_ms / 1000.0;
     assert!(
-        seconds > expected - 0.3 && seconds < expected + 0.5,
+        seconds > RECORD_FOR.as_secs_f64() - 0.3,
         "duration {seconds} s"
+    );
+    assert!(
+        (seconds - cut_off).abs() < 0.15,
+        "duration {seconds} s, cut-off at {cut_off} s"
     );
 
     // Timestamps, A/V drift and decoded content.
@@ -181,9 +196,15 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         ends[0],
         ends[1]
     );
-    // Starts are not affected by drops at the end.
-    let start_drift = (starts[0] - starts[1]).abs();
-    assert!(start_drift < 0.05, "A/V start drift {start_drift:.3} s");
+    // Starts are not affected by drops at the end, but a loaded runner's
+    // compositor may skip (and count) the first ticks, so video may start
+    // up to those ticks late; audio has no such excuse.
+    let video_late = starts[0] - starts[1];
+    let allowed_late = 0.05 + skipped as f64 / 60.0;
+    assert!(
+        video_late < allowed_late && -video_late < 0.05,
+        "A/V start drift {video_late:.3} s (video minus audio; {skipped} ticks skipped)"
+    );
     let rms_db = 10.0 * (sum_squares / samples_seen as f64).log10();
     assert!((rms_db + 15.05).abs() < 0.6, "audio rms {rms_db:.2} dBFS");
 }

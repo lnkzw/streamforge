@@ -37,8 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest (arm64) jobs were repeatedly not picked up due to runner
-        # capacity (2026-10-19); the Intel image is a standard runner as well.
+        # macos-latest (arm64) was repeatedly not picked up for lack of
+        # capacity on 2026-10-19; the Intel image is a standard runner.
         os: [ubuntu-latest, windows-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -64,6 +64,34 @@ jobs:
             libpipewire-0.3-dev libclang-dev pkg-config \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
           pkg-config --modversion libpipewire-0.3 libavcodec libavformat libswscale
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        # encoder-ffmpeg links the FFmpeg libraries found through pkg-config.
+        run: |
+          brew install ffmpeg pkgconf
+          pkg-config --modversion libavcodec libavformat libswscale
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        # A prebuilt shared FFmpeg (with libx264) from BtbN/FFmpeg-Builds,
+        # checked against the release's own checksum file. ffmpeg-sys-next
+        # reads it through FFMPEG_DIR; tests load the DLLs from PATH; bindgen
+        # uses the runner's LLVM.
+        env:
+          FFMPEG_BUILD: ffmpeg-n8.1-latest-win64-gpl-shared-8.1
+        run: |
+          base=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+          curl -fsSL -o "$RUNNER_TEMP/ffmpeg.zip" "$base/$FFMPEG_BUILD.zip"
+          curl -fsSL -o "$RUNNER_TEMP/checksums.sha256" "$base/checksums.sha256"
+          expected=$(grep " $FFMPEG_BUILD.zip\$" "$RUNNER_TEMP/checksums.sha256" | cut -d' ' -f1)
+          actual=$(sha256sum < "$RUNNER_TEMP/ffmpeg.zip" | cut -d' ' -f1)
+          echo "sha256 expected $expected, got $actual"
+          test -n "$expected" && test "$expected" = "$actual"
+          7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ffmpeg.zip" > /dev/null
+          dir="$(cygpath -w "$RUNNER_TEMP/$FFMPEG_BUILD")"
+          echo "FFMPEG_DIR=$dir" >> "$GITHUB_ENV"
+          echo "$dir\bin" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+          ls "$RUNNER_TEMP/$FFMPEG_BUILD/lib" | head
       - name: Record toolchain
         run: |
           rustc --version --verbose
@@ -73,9 +101,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
       - name: Test
-        run: cargo test --workspace --locked
+        # All failures in one run, not just the first failing test binary.
+        run: cargo test --workspace --locked --no-fail-fast
       - name: "M0 acceptance: CLI status"
         run: cargo run --locked -q -p streamforge-cli -- status --json
+      - name: Capture capabilities of this runner
+        # For the record (docs/platforms.md); runners have no desktop or
+        # microphone, so most entries say why they are unavailable.
+        run: cargo run --locked -q -p streamforge-cli -- capture caps
       - name: "M1 smoke: headless engine over a shell pipe"
         run: |
           printf '%s\n' '{"id":1,"command":"get_status"}' \

@@ -91,4 +91,4 @@ In M5 a recording owned the compositor and mixer. Two outputs that run at the sa
 - `rtmps://` depends on the TLS support of the linked FFmpeg build.
 - Before the stream's first video frame, and between connections, audio is dropped (counted). A reconnect therefore loses up to the reconnect delay plus connect time of media for the viewer.
 - Disabling FFmpeg's log output after streaming starts also hides FFmpeg diagnostics of the recorder. Our errors still carry FFmpeg's error text.
-- Linux only, like recording (M9).
+- Linux only, like recording (M9). Since ADR 0009, Windows and macOS too.

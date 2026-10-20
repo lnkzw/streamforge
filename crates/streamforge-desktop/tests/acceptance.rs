@@ -90,7 +90,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
         m.scenes.as_ref().is_some_and(|list| list.active == "Show")
     });
 
-    if cfg!(target_os = "linux") {
+    {
         model.start_recording("ui.mkv");
         wait(&mut model, "the recording to start", |m| {
             m.recording.is_some()

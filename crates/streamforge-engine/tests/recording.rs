@@ -92,9 +92,12 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         encoded + dropped <= ticks + 1,
         "more frames than ticks: {report}"
     );
+    // A guard against near-total failure only: slow runners (the 3-core
+    // macOS VM) skip compositor ticks at 1080p60, which is counted above;
+    // throughput is measured separately (docs/testing.md).
     assert!(
-        encoded * 4 >= ticks * 3,
-        "fewer than 75% of frames encoded: {report}"
+        encoded * 3 >= ticks,
+        "fewer than a third of the frames encoded: {report}"
     );
     assert_eq!(report["audio"]["blocks_dropped"], 0, "{report}");
     assert_eq!(report["audio"]["gap_samples"], 0, "{report}");

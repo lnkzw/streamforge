@@ -21,10 +21,16 @@ cargo test --workspace
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` and on every pull request:
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull request. Windows minutes cost twice and macOS minutes ten times as much as Linux minutes, so a `plan` job picks the platforms:
+- **Linux, Windows and macOS:** pushes to `main`, manual runs (`workflow_dispatch`), and pull requests labeled `cross-platform`.
+- **Linux only:** every other pull request.
+
+Label a pull request `cross-platform` when it touches platform code (capture, encoding, build), and before merging anything risky for Windows or macOS.
+
+What runs:
 
 - `rustfmt` check on Linux.
-- On `ubuntu-latest`, `windows-latest` and `macos-15-intel` (no fail-fast). The arm64 `macos-latest` runner was swapped out after jobs repeatedly went unscheduled for lack of capacity:
+- On each picked platform (`ubuntu-latest`, `windows-latest`, `macos-15-intel`; no fail-fast). The arm64 `macos-latest` runner was swapped out after jobs repeatedly went unscheduled for lack of capacity:
   - `clippy -D warnings`
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)

@@ -3659,6 +3659,7 @@ dependencies = [
  "command-api",
  "encoder-api",
  "engine",
+ "ffmpeg-next",
  "rmcp",
  "rtmp-test-server",
  "serde_json",

@@ -22,7 +22,8 @@ pub use outputs::{
     SceneCaptureOutcome, StreamingReport, StreamingRequest, StreamingStarted,
 };
 pub use registry::{
-    CommandAccess, CommandDescriptor, CommandList, default_sources, params_schema, registry,
+    CommandAccess, CommandDescriptor, CommandList, decode_streaming_to, default_sources,
+    params_schema, registry,
 };
 pub use scenes::{
     AddSourceRequest, AudioSetup, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, MixerState,

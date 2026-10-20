@@ -21,7 +21,7 @@ serde_json.workspace = true
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
 # rmcp is async; the engine stays on its own thread and calls reach it
 # through `spawn_blocking`.
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
 
 [dev-dependencies]
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process"] }
@@ -29,3 +29,4 @@ tokio = { version = "1", features = ["rt", "macros", "process"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rtmp-test-server = { path = "../rtmp-test-server" }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }

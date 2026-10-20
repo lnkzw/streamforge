@@ -5,30 +5,22 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, ValueEnum};
-use command_api::{AccessPolicy, CommandAccess};
+use clap::Parser;
+use command_api::{AccessPolicy, CommandAccess, access_label};
 use encoder_api::{StreamKey, StreamTarget};
 use engine::{Engine, EngineThread};
 use rmcp::ServiceExt;
 use streamforge_mcp::{Config, StreamforgeMcp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum Allow {
-    /// Inspect status, scenes, mixer and capabilities only.
-    ReadOnly,
-    /// Also change scenes and mixer, add color bars and solid sources, and
-    /// stop outputs.
-    Control,
-    /// Also capture (screen, microphones), record, stream, delete scenes.
-    Sensitive,
-}
-
 #[derive(Debug, Parser)]
 #[command(version, about = "StreamForge MCP server (stdio)")]
 struct Args {
-    /// Highest class of commands agents may run.
-    #[arg(long, value_enum, default_value_t = Allow::ReadOnly)]
-    allow: Allow,
+    /// Highest class of commands agents may run: read-only (inspect
+    /// status, scenes, mixer), control (also edit scenes and mixer, add
+    /// color bars and solid sources, stop outputs) or sensitive (also
+    /// capture, record, stream, delete scenes).
+    #[arg(long, default_value = "read-only")]
+    allow: CommandAccess,
     /// Directory for files the engine creates (recordings, snapshots).
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
@@ -36,7 +28,8 @@ struct Args {
     /// without it, start_streaming is not offered.
     #[arg(long)]
     stream_url: Option<String>,
-    /// Environment variable holding the stream key for --stream-url.
+    /// Name of the environment variable holding the stream key for
+    /// --stream-url (the key itself never goes on the command line).
     #[arg(long, requires = "stream_url")]
     stream_key_env: Option<String>,
 }
@@ -50,14 +43,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let policy = AccessPolicy::allowing(match args.allow {
-        Allow::ReadOnly => CommandAccess::ReadOnly,
-        Allow::Control => CommandAccess::Control,
-        Allow::Sensitive => CommandAccess::Sensitive,
-    });
+    let policy = AccessPolicy::allowing(args.allow);
     eprintln!(
         "streamforge-mcp: allowing {} commands{}",
-        command_api::access_label(policy.max()),
+        access_label(policy.max()),
         stream
             .as_ref()
             .map(|target| format!("; streaming target {}", target.redacted()))
@@ -86,12 +75,22 @@ fn main() -> ExitCode {
     };
     let served = runtime.block_on(async {
         let service = server.serve(rmcp::transport::stdio()).await?;
-        service.waiting().await?;
+        // Clients usually stop stdio servers with a signal; finish cleanly
+        // then too, so open recordings and streams are finalized.
+        tokio::select! {
+            quit = service.waiting() => {
+                quit?;
+            }
+            () = shutdown_signal() => {}
+        }
         Ok::<_, Box<dyn std::error::Error>>(())
     });
-    // Dropping the runtime and then the engine finalizes open outputs.
-    drop(runtime);
+    // The engine first: queued commands are cancelled (their callers on the
+    // runtime's blocking threads get answers), the running one finishes,
+    // open outputs are finalized. Then the runtime, without waiting for its
+    // stdin reader, which blocks until the client closes stdin.
     drop(engine);
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -101,18 +100,51 @@ fn main() -> ExitCode {
     }
 }
 
+/// SIGINT or SIGTERM (Ctrl-C elsewhere).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// The configured streaming target, validated now so misconfiguration fails
-/// at startup. Errors never contain the key.
+/// at startup. Errors contain neither the key nor the variable name (in
+/// case the key was passed where the name belongs).
 fn stream_target(args: &Args) -> Result<Option<StreamTarget>, String> {
     let Some(url) = &args.stream_url else {
         return Ok(None);
     };
-    if args.allow != Allow::Sensitive {
+    if args.allow != CommandAccess::Sensitive {
         return Err("--stream-url needs --allow sensitive".to_owned());
     }
     let key = match &args.stream_key_env {
-        Some(name) => std::env::var(name)
-            .map_err(|_| format!("${name} (from --stream-key-env) is not set or not UTF-8"))?,
+        Some(name) => match std::env::var(name) {
+            Ok(key) if !key.is_empty() => key,
+            Ok(_) => {
+                return Err("the variable named by --stream-key-env is empty".to_owned());
+            }
+            Err(_) => {
+                return Err(
+                    "the variable named by --stream-key-env is not set (or not UTF-8)".to_owned(),
+                );
+            }
+        },
         None => String::new(),
     };
     StreamTarget::new(url, StreamKey::new(key))

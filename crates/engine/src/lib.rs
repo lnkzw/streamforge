@@ -15,7 +15,7 @@ mod thread;
 use outputs::{RecordingOutput, StreamingOutput};
 use pipeline::Pipeline;
 use scenes::SceneCollection;
-pub use thread::{EngineHandle, EngineThread};
+pub use thread::{EngineHandle, EngineThread, PendingReply};
 
 use std::path::PathBuf;
 use std::sync::Arc;

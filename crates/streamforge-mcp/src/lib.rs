@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use command_api::{
-    AccessPolicy, Command, CommandAccess, CommandError, CommandOutput, ErrorCode, params_schema,
-    registry,
+    AccessPolicy, Command, CommandDescriptor, CommandError, CommandOutput, ErrorCode, access_label,
+    decode_streaming_to, params_schema, registry,
 };
 use encoder_api::StreamTarget;
 use engine::EngineHandle;
@@ -41,18 +41,12 @@ pub struct StreamforgeMcp {
     tools: Vec<Tool>,
 }
 
-/// Stands in for the configured target while decoding agent parameters.
-const PLACEHOLDER_URL: &str = "rtmp://configured-target/app";
-
-/// Parameters of `start_streaming` that only the configuration sets.
-const CONFIGURED_STREAM_PARAMS: [&str; 2] = ["url", "stream_key"];
-
 impl StreamforgeMcp {
     pub fn new(engine: EngineHandle, config: Config) -> Self {
         let tools = registry()
             .iter()
-            .filter(|descriptor| offered(&config, descriptor.name, descriptor.access))
-            .map(|descriptor| tool(descriptor.name, descriptor.summary, descriptor.access))
+            .filter(|descriptor| offered(&config, descriptor))
+            .map(tool)
             .collect();
         Self {
             engine,
@@ -61,127 +55,74 @@ impl StreamforgeMcp {
         }
     }
 
-    pub fn tools(&self) -> &[Tool] {
-        &self.tools
-    }
-
     /// Validate and authorize a call; the engine only sees allowed commands.
+    /// Decoding comes first, so a denial names the access this particular
+    /// call needs (e.g. control for an `add_source` of color bars).
     fn prepare(&self, name: &str, arguments: JsonObject) -> Result<Command, CommandError> {
-        if !self.tools.iter().any(|tool| tool.name == name) {
-            return Err(self.not_offered(name));
-        }
+        let arguments = Value::Object(arguments);
         let command = if name == "start_streaming" {
-            self.streaming_command(arguments)?
+            let target = self.config.stream.clone().ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::PermissionDenied,
+                    "`start_streaming` is not available: no streaming target is configured for \
+                     this server",
+                )
+                .with_details(json!({ "command": name }))
+            })?;
+            decode_streaming_to(target, Some(&arguments))?
         } else {
-            Command::decode(name, Some(&Value::Object(arguments)))?
+            Command::decode(name, Some(&arguments))?
         };
         self.config.policy.authorize(&command)?;
         Ok(command)
     }
-
-    /// `start_streaming` to the configured target: the agent may set bit
-    /// rate, reconnects and sources, never the URL or the key.
-    fn streaming_command(&self, mut arguments: JsonObject) -> Result<Command, CommandError> {
-        let target = self
-            .config
-            .stream
-            .clone()
-            .ok_or_else(|| self.not_offered("start_streaming"))?;
-        if let Some(field) = CONFIGURED_STREAM_PARAMS
-            .iter()
-            .find(|field| arguments.contains_key(**field))
-        {
-            return Err(CommandError::new(
-                ErrorCode::PermissionDenied,
-                format!(
-                    "`{field}` is set by the person running this server; streaming goes only to \
-                     the configured target"
-                ),
-            ));
-        }
-        // Decode with a placeholder target to validate the agent's
-        // parameters, then use the configured target (which holds the key).
-        arguments.insert("url".into(), PLACEHOLDER_URL.into());
-        let mut command = Command::decode("start_streaming", Some(&Value::Object(arguments)))?;
-        if let Command::StartStreaming(request) = &mut command {
-            request.target = target;
-        }
-        Ok(command)
-    }
-
-    fn not_offered(&self, name: &str) -> CommandError {
-        match registry().iter().find(|descriptor| descriptor.name == name) {
-            Some(descriptor) => {
-                let reason = if name == "start_streaming" && self.config.stream.is_none() {
-                    "no streaming target is configured for this server".to_owned()
-                } else {
-                    format!(
-                        "it needs {} access, but this server allows only {}",
-                        level(descriptor.access),
-                        level(self.config.policy.max())
-                    )
-                };
-                CommandError::new(
-                    ErrorCode::PermissionDenied,
-                    format!("`{name}` is not available: {reason}"),
-                )
-                .with_details(json!({ "command": name }))
-            }
-            None => CommandError::new(ErrorCode::UnknownCommand, format!("unknown tool `{name}`")),
-        }
-    }
 }
 
-/// Whether to offer a command as a tool under `config`.
-fn offered(config: &Config, name: &str, access: CommandAccess) -> bool {
-    // `add_source` needs only control for color bars and solids (see
-    // `Command::required_access`); screen sources are checked per call.
-    let least = if name == "add_source" {
-        CommandAccess::Control
-    } else {
-        access
-    };
-    config.policy.allows(least) && (name != "start_streaming" || config.stream.is_some())
+/// Whether to offer a command as a tool under `config`: if some call of it
+/// is allowed, and (for streaming) a target is configured.
+fn offered(config: &Config, descriptor: &CommandDescriptor) -> bool {
+    config.policy.allows(descriptor.least_access())
+        && (descriptor.name != "start_streaming" || config.stream.is_some())
 }
 
-fn tool(name: &'static str, summary: &'static str, access: CommandAccess) -> Tool {
+fn tool(descriptor: &CommandDescriptor) -> Tool {
+    let name = descriptor.name;
     let mut schema = params_schema(name).unwrap_or_else(|| json!({"type": "object"}));
-    let mut description = summary.to_owned();
-    if name == "start_streaming" {
-        // URL and key come from the server's configuration.
+    let description = if name == "start_streaming" {
+        // The target (URL and key) comes from the server's configuration.
         if let Some(properties) = schema["properties"].as_object_mut() {
-            for field in CONFIGURED_STREAM_PARAMS {
-                properties.remove(field);
-            }
+            properties.remove("url");
+            properties.remove("stream_key");
         }
         if let Some(required) = schema["required"].as_array_mut() {
-            required
-                .retain(|field| !CONFIGURED_STREAM_PARAMS.contains(&field.as_str().unwrap_or("")));
+            required.retain(|field| !matches!(field.as_str(), Some("url" | "stream_key")));
         }
-        description.push_str(
-            " Over MCP the target (URL and key) is the one configured when the server was \
-             started; the tool takes neither.",
-        );
-    }
-    if name == "add_source" {
-        description.push_str(" Screen sources need sensitive access; others need control.");
-    }
+        "Publish the media pipeline (active scene and audio mix) over RTMP (H.264 CBR + AAC) to \
+         the target configured when this server was started; the URL and key cannot be \
+         chosen here. Params: video_bitrate_kbps (default 6000), reconnect_attempts (default \
+         5), reconnect_delay_ms (default 1000), and pipeline sources as for start_recording. \
+         Returns once connected; reconnects after errors."
+            .to_owned()
+    } else if descriptor.least_access() != descriptor.access {
+        format!(
+            "{} Needs {} access for some parameters (screen sources) and {} otherwise.",
+            descriptor.summary,
+            access_label(descriptor.access),
+            access_label(descriptor.least_access())
+        )
+    } else {
+        descriptor.summary.to_owned()
+    };
     let input_schema: JsonObject = match schema {
         Value::Object(object) => object,
         _ => JsonObject::new(),
     };
-    let annotations = match access {
-        CommandAccess::ReadOnly => ToolAnnotations::new().read_only(true),
-        _ => ToolAnnotations::new()
-            .read_only(false)
-            .destructive(matches!(name, "delete_scene" | "remove_source"))
-            .open_world(name == "start_streaming"),
-    };
+    let read_only = descriptor.access == command_api::CommandAccess::ReadOnly;
+    let annotations = ToolAnnotations::new()
+        .read_only(read_only)
+        .destructive(descriptor.destructive)
+        .open_world(descriptor.open_world);
     Tool::new(name, description, Arc::new(input_schema)).with_annotations(annotations)
-}
-
-fn level(access: CommandAccess) -> &'static str {
-    command_api::access_label(access)
 }
 
 /// Error codes on this adapter's wire, mapped explicitly so internal
@@ -237,7 +178,7 @@ impl ServerHandler for StreamforgeMcp {
                  commands. This server allows {} commands; tools above that level are not \
                  offered (the person running the server chooses the level with --allow). \
                  {streaming} Start with get_status and list_scenes.",
-                level(self.config.policy.max())
+                access_label(self.config.policy.max())
             ))
     }
 
@@ -261,18 +202,21 @@ impl ServerHandler for StreamforgeMcp {
                 None,
             ));
         }
-        let outcome = match self.prepare(&name, request.arguments.unwrap_or_default()) {
-            Ok(command) => {
-                let engine = self.engine.clone();
-                tokio::task::spawn_blocking(move || engine.call(command))
-                    .await
-                    .unwrap_or_else(|err| {
-                        Err(CommandError::new(
-                            ErrorCode::Internal,
-                            format!("the command task failed: {err}"),
-                        ))
-                    })
-            }
+        // Queue without blocking (a full queue is a `busy` error), then wait
+        // for the reply on a blocking thread; at most the queue's worth of
+        // calls wait at a time.
+        let outcome = match self
+            .prepare(&name, request.arguments.unwrap_or_default())
+            .and_then(|command| self.engine.submit(command))
+        {
+            Ok(reply) => tokio::task::spawn_blocking(move || reply.wait())
+                .await
+                .unwrap_or_else(|err| {
+                    Err(CommandError::new(
+                        ErrorCode::Internal,
+                        format!("the command task failed: {err}"),
+                    ))
+                }),
             Err(error) => Err(error),
         };
         Ok(result(outcome).into())

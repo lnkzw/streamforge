@@ -114,9 +114,22 @@ async fn read_only_by_default() {
     }));
     let status = call(&client, "get_status", json!({})).await;
     assert_eq!(ok(&status)["application"], "StreamForge");
-    // Not offered and not callable either.
+    // Not offered and not callable either; the denial names what this call
+    // needs (control for color bars, not the sensitive needed for screens).
     let create = call(&client, "create_scene", json!({"name": "Sneaky"})).await;
     assert_eq!(error_code(&create), "permission_denied");
+    let bars = call(
+        &client,
+        "add_source",
+        json!({"scene": "Test pattern", "name": "b", "kind": "color_bars"}),
+    )
+    .await;
+    assert_eq!(error_code(&bars), "permission_denied");
+    let details = &bars.structured_content.as_ref().expect("error")["details"];
+    assert_eq!(
+        (&details["required"], &details["allowed"]),
+        (&json!("control"), &json!("read_only"))
+    );
     // Unknown tools are protocol errors.
     let unknown = client
         .call_tool(CallToolRequestParams::new("format_disk"))
@@ -216,6 +229,7 @@ fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
         !started && message.contains("--allow sensitive"),
         "{message}"
     );
+    // The variable name is not echoed: it might be the key itself.
     let (started, message) = run(
         &[
             "--allow",
@@ -223,11 +237,24 @@ fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
             "--stream-url",
             "rtmp://host/app",
             "--stream-key-env",
-            "STREAMFORGE_TEST_UNSET_KEY",
+            "live_SECRET_passed_by_mistake",
         ],
         &[],
     );
     assert!(!started && message.contains("not set"), "{message}");
+    assert!(!message.contains("SECRET"), "{message}");
+    let (started, message) = run(
+        &[
+            "--allow",
+            "sensitive",
+            "--stream-url",
+            "rtmp://host/app",
+            "--stream-key-env",
+            "STREAMFORGE_TEST_EMPTY_KEY",
+        ],
+        &[("STREAMFORGE_TEST_EMPTY_KEY", "")],
+    );
+    assert!(!started && message.contains("empty"), "{message}");
     let (started, message) = run(
         &[
             "--allow",
@@ -320,4 +347,78 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
     client.cancel().await.expect("close");
     let arrived = ingest.join();
     assert_eq!(arrived.video.expect("video").codec, "h264");
+}
+
+/// A termination signal (how clients usually stop stdio servers) still
+/// finalizes an open recording. Driven over raw JSON-RPC lines, since the
+/// SDK client kills its child on close.
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_finalizes_an_open_recording() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let dir = TempDir::new("sigterm");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_streamforge-mcp"))
+        .args(["--allow", "sensitive", "--output-dir"])
+        .arg(&dir.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let (lines_tx, lines) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().expect("stdout");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut send = |message: Value| {
+        writeln!(stdin, "{message}").expect("write");
+        stdin.flush().expect("flush");
+    };
+    let response = |id: u64| loop {
+        let line = lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server answers");
+        let message: Value = serde_json::from_str(&line).expect("json");
+        if message["id"] == id {
+            break message;
+        }
+    };
+    send(
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "sigterm-test", "version": "0"}}}),
+    );
+    assert!(response(1)["result"]["serverInfo"].is_object());
+    send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    send(
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "start_recording", "arguments": {"file_name": "signal.mkv"}}}),
+    );
+    let started = response(2);
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    std::thread::sleep(Duration::from_millis(800));
+    let terminated = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(terminated.success());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline, "server did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{status:?}");
+    // Finalized: the container knows its duration (written at the end).
+    ffmpeg_next::init().expect("init");
+    let input = ffmpeg_next::format::input(&dir.0.join("signal.mkv")).expect("open recording");
+    assert!(input.duration() > 0, "duration {}", input.duration());
 }

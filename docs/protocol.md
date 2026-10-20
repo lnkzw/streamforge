@@ -76,7 +76,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
 | `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed", "preview_active"}` |
-| `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
+| `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access", "destructive", "open_world"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
@@ -102,7 +102,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 `access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
 - **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
-- **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`.
+- **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`. Parameters are decoded first, so `required` is what that call needs.
 - **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
 
 Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.

@@ -10,15 +10,21 @@ mod error;
 mod mix;
 mod outputs;
 mod registry;
+mod scenes;
 
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
-    StreamingReport, StreamingRequest, StreamingStarted,
+    SceneCaptureOutcome, StreamingReport, StreamingRequest, StreamingStarted,
 };
 pub use registry::{CommandAccess, CommandDescriptor, CommandList, default_sources, registry};
+pub use scenes::{
+    AddSourceRequest, AudioSetup, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, MixerState,
+    PreviewState, Rgba, SceneList, SceneSpec, SourceKind, SourceRect, SourceSpec, StripChange,
+    StripState, UpdateSourceRequest,
+};
 
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
@@ -57,6 +63,38 @@ pub enum Command {
     StartStreaming(StreamingRequest),
     /// Stop the live stream and report its connection history.
     StopStreaming,
+    /// List scenes and the active one.
+    ListScenes,
+    CreateScene {
+        name: String,
+    },
+    /// Delete a scene that is not active (requires `confirm: true`).
+    DeleteScene {
+        name: String,
+    },
+    /// Make a scene the one the pipeline renders (live if running).
+    SetActiveScene {
+        name: String,
+    },
+    AddSource(AddSourceRequest),
+    UpdateSource(UpdateSourceRequest),
+    RemoveSource {
+        scene: String,
+        name: String,
+    },
+    /// Mixer strips, gains and peak levels.
+    GetMixer,
+    SetMixerStrip(StripChange),
+    SetMasterGain {
+        gain_db: f32,
+    },
+    /// Configure audio inputs and tones (only while the pipeline is idle).
+    SetAudioSources(AudioSetup),
+    /// Run the pipeline for a preview (frames go to the in-process
+    /// preview mailbox) or stop doing so.
+    SetPreview {
+        enabled: bool,
+    },
 }
 
 /// Structured result of a successfully handled [`Command`].
@@ -78,6 +116,9 @@ pub enum CommandOutput {
     RecordingReport(Box<RecordingReport>),
     StreamingStarted(StreamingStarted),
     StreamingReport(Box<StreamingReport>),
+    SceneList(SceneList),
+    MixerState(MixerState),
+    PreviewState(Box<PreviewState>),
 }
 
 /// Result of `list_audio_inputs`.
@@ -102,6 +143,8 @@ pub struct EngineStatus {
     /// A recording is open but stopped unexpectedly (encoder, compositor or
     /// mixer failure); `stop_recording` finalizes it and reports the error.
     pub recording_failed: bool,
+    /// The preview keeps the pipeline running (`set_preview`).
+    pub preview_active: bool,
 }
 
 /// Executes typed commands.
@@ -127,6 +170,7 @@ mod tests {
             streaming_state: None,
             recording_active: false,
             recording_failed: false,
+            preview_active: false,
         };
         let value = serde_json::to_value(CommandOutput::Status(status)).expect("serialize status");
         assert_eq!(
@@ -140,6 +184,7 @@ mod tests {
                 "streaming_state": null,
                 "recording_active": false,
                 "recording_failed": false,
+                "preview_active": false,
             })
         );
     }

@@ -101,6 +101,8 @@ struct Strip {
     config: StripConfig,
     gain: GainRamp,
     meter: Meter,
+    /// Largest absolute sample of the last mixed block (after gain).
+    block_peak: f32,
 }
 
 impl Strip {
@@ -109,6 +111,15 @@ impl Strip {
             config,
             gain: GainRamp::new(effective_gain(config)),
             meter: Meter::default(),
+            block_peak: 0.0,
+        }
+    }
+
+    #[inline]
+    fn observe(&mut self, sample: f32) {
+        self.meter.observe(sample);
+        if sample.is_finite() {
+            self.block_peak = self.block_peak.max(sample.abs());
         }
     }
 }
@@ -154,12 +165,40 @@ impl Mixer {
         }
     }
 
+    /// Change the master gain; ramps over the next block like inputs do.
+    pub fn set_master_gain(&mut self, gain_db: f32) {
+        let config = StripConfig {
+            gain_db,
+            muted: false,
+        };
+        self.master.config = config;
+        self.master.gain.set_target(effective_gain(config));
+    }
+
+    pub fn master_gain_db(&self) -> f32 {
+        self.master.config.gain_db
+    }
+
+    /// Largest absolute sample of input `index` in the last block (linear).
+    pub fn input_block_peak(&self, index: usize) -> Option<f32> {
+        self.strips.get(index).map(|strip| strip.block_peak)
+    }
+
+    /// Largest absolute master sample in the last block (linear).
+    pub fn master_block_peak(&self) -> f32 {
+        self.master.block_peak
+    }
+
     /// Mix one block. `inputs[i]` and `out` hold the same number of
     /// interleaved samples; missing inputs count as silence.
     pub fn mix(&mut self, inputs: &[&[f32]], out: &mut [f32]) {
         let channels = self.channels;
         let frames = out.len() / channels;
         out.fill(0.0);
+        for strip in &mut self.strips {
+            strip.block_peak = 0.0;
+        }
+        self.master.block_peak = 0.0;
         for (strip, input) in self.strips.iter_mut().zip(inputs) {
             for (frame, (dst, src)) in out
                 .chunks_exact_mut(channels)
@@ -169,7 +208,7 @@ impl Mixer {
                 let gain = strip.gain.at(frame, frames);
                 for (d, s) in dst.iter_mut().zip(src) {
                     let sample = s * gain;
-                    strip.meter.observe(sample);
+                    strip.observe(sample);
                     *d += sample;
                 }
             }
@@ -186,7 +225,7 @@ impl Mixer {
                     self.clipped_samples += 1;
                     value = value.clamp(-1.0, 1.0);
                 }
-                self.master.meter.observe(value);
+                self.master.observe(value);
                 *sample = value;
             }
         }

@@ -15,8 +15,9 @@ use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
 use encoder_api::{ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
-    Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_MIX_DURATION,
-    MediaSources, MixRequest, RecordingRequest, StreamingRequest, ToneSpec,
+    AddSourceRequest, AudioSetup, Command, CommandError, CompositeRequest, ErrorCode,
+    LiveInputSpec, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest,
+    Rgba, SourceKind, SourceRect, StreamingRequest, StripChange, ToneSpec, UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -104,12 +105,13 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
 
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
-    summary: "Record the media pipeline (1920x1080@60 reference scene, optional live screen layer, \
-              audio mix) to H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in \
-              the engine's output directory, never overwritten); sources (screen, source_types, \
-              cursor, inputs, tones, master_gain_db) only if no other output is running, since \
-              outputs share one pipeline; without sources and without a running pipeline, one \
-              -20 dBFS 1 kHz tone. Returns immediately; recording continues until stop_recording.",
+    summary: "Record the media pipeline (the active scene at 1920x1080@60 and the audio mix) to \
+              H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
+              output directory, never overwritten); optional sources (screen, source_types, \
+              cursor, inputs, tones, master_gain_db) only while no preview or output runs: they \
+              replace the configured audio (set_audio_sources, which may include microphones) \
+              for this run and add a screen layer. Returns immediately; recording continues \
+              until stop_recording.",
     access: CommandAccess::Sensitive,
 };
 
@@ -136,6 +138,91 @@ const STOP_STREAMING: CommandDescriptor = CommandDescriptor {
     access: CommandAccess::Control,
 };
 
+const LIST_SCENES: CommandDescriptor = CommandDescriptor {
+    name: "list_scenes",
+    summary: "List the scenes with their sources, the active scene and the canvas size.",
+    access: CommandAccess::ReadOnly,
+};
+
+const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
+    name: "create_scene",
+    summary: "Create an empty scene. Params: name (1-64 characters, unique). Returns the scene list.",
+    access: CommandAccess::Control,
+};
+
+const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
+    name: "delete_scene",
+    summary: "Delete a scene that is not active; irreversible. Params: name, confirm (must be \
+              true). Returns the scene list.",
+    access: CommandAccess::Sensitive,
+};
+
+const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
+    name: "set_active_scene",
+    summary: "Render this scene from now on (applies live while preview or outputs run; its \
+              screen sources start capturing, which opens the system picker). Params: name. \
+              Returns the scene list.",
+    access: CommandAccess::Sensitive,
+};
+
+const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "add_source",
+    summary: "Add a source on top of a scene. Params: scene, name, kind (color_bars, solid, \
+              screen), color (#rrggbb[aa], solid), source_types and cursor (screen), x, y, width, \
+              height (canvas pixels; all or none, default the whole canvas), opacity (0-1). Screen \
+              sources start capturing (system picker) when the scene is rendered. Returns the \
+              scene list.",
+    access: CommandAccess::Sensitive,
+};
+
+const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "update_source",
+    summary: "Move, resize or fade a source. Params: scene, name, and any of x, y, width, height, \
+              opacity. Returns the scene list.",
+    access: CommandAccess::Control,
+};
+
+const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "remove_source",
+    summary: "Remove a source from a scene. Params: scene, name. Returns the scene list.",
+    access: CommandAccess::Control,
+};
+
+const GET_MIXER: CommandDescriptor = CommandDescriptor {
+    name: "get_mixer",
+    summary: "Mixer strips with gain, mute and the peak level since the previous call.",
+    access: CommandAccess::ReadOnly,
+};
+
+const SET_MIXER_STRIP: CommandDescriptor = CommandDescriptor {
+    name: "set_mixer_strip",
+    summary: "Change one strip (live if running). Params: index, gain_db (-96..24), mute. Returns \
+              the mixer state.",
+    access: CommandAccess::Control,
+};
+
+const SET_MASTER_GAIN: CommandDescriptor = CommandDescriptor {
+    name: "set_master_gain",
+    summary: "Change the master gain (live if running). Params: gain_db (-96..24). Returns the \
+              mixer state.",
+    access: CommandAccess::Control,
+};
+
+const SET_AUDIO_SOURCES: CommandDescriptor = CommandDescriptor {
+    name: "set_audio_sources",
+    summary: "Configure the pipeline's audio while it is idle. Params: inputs, tones, \
+              master_gain_db (as for probe_audio_mix; one -20 dBFS tone if neither inputs nor \
+              tones are given). Returns the mixer state.",
+    access: CommandAccess::Sensitive,
+};
+
+const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
+    name: "set_preview",
+    summary: "Run the pipeline for an in-process preview (quarter resolution, 30 FPS) or stop. \
+              Params: enabled.",
+    access: CommandAccess::Sensitive,
+};
+
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
     LIST_COMMANDS,
@@ -149,6 +236,18 @@ const COMMANDS: &[CommandDescriptor] = &[
     STOP_RECORDING,
     START_STREAMING,
     STOP_STREAMING,
+    LIST_SCENES,
+    CREATE_SCENE,
+    DELETE_SCENE,
+    SET_ACTIVE_SCENE,
+    ADD_SOURCE,
+    UPDATE_SOURCE,
+    REMOVE_SOURCE,
+    GET_MIXER,
+    SET_MIXER_STRIP,
+    SET_MASTER_GAIN,
+    SET_AUDIO_SOURCES,
+    SET_PREVIEW,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -197,6 +296,29 @@ impl Command {
             "stop_recording" => expect_no_params(name, params).map(|()| Self::StopRecording),
             "start_streaming" => decode_start_streaming(name, params).map(Self::StartStreaming),
             "stop_streaming" => expect_no_params(name, params).map(|()| Self::StopStreaming),
+            "list_scenes" => expect_no_params(name, params).map(|()| Self::ListScenes),
+            "create_scene" => {
+                decode_scene_name(name, params).map(|name| Self::CreateScene { name })
+            }
+            "delete_scene" => {
+                decode_delete_scene(name, params).map(|name| Self::DeleteScene { name })
+            }
+            "set_active_scene" => {
+                decode_scene_name(name, params).map(|name| Self::SetActiveScene { name })
+            }
+            "add_source" => decode_add_source(name, params).map(Self::AddSource),
+            "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
+            "remove_source" => decode_remove_source(name, params)
+                .map(|(scene, name)| Self::RemoveSource { scene, name }),
+            "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
+            "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
+            "set_master_gain" => {
+                decode_master_gain(name, params).map(|gain_db| Self::SetMasterGain { gain_db })
+            }
+            "set_audio_sources" => decode_audio_sources(name, params).map(Self::SetAudioSources),
+            "set_preview" => {
+                decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
+            }
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -222,6 +344,18 @@ impl Command {
             Self::StopRecording => &STOP_RECORDING,
             Self::StartStreaming(_) => &START_STREAMING,
             Self::StopStreaming => &STOP_STREAMING,
+            Self::ListScenes => &LIST_SCENES,
+            Self::CreateScene { .. } => &CREATE_SCENE,
+            Self::DeleteScene { .. } => &DELETE_SCENE,
+            Self::SetActiveScene { .. } => &SET_ACTIVE_SCENE,
+            Self::AddSource(_) => &ADD_SOURCE,
+            Self::UpdateSource(_) => &UPDATE_SOURCE,
+            Self::RemoveSource { .. } => &REMOVE_SOURCE,
+            Self::GetMixer => &GET_MIXER,
+            Self::SetMixerStrip(_) => &SET_MIXER_STRIP,
+            Self::SetMasterGain { .. } => &SET_MASTER_GAIN,
+            Self::SetAudioSources(_) => &SET_AUDIO_SOURCES,
+            Self::SetPreview { .. } => &SET_PREVIEW,
         }
     }
 
@@ -568,6 +702,335 @@ fn decode_start_streaming(
     })
 }
 
+/// Scene and source names: 1-64 characters, no control characters, no
+/// surrounding whitespace.
+fn valid_name(command: &str, field: &str, name: String) -> Result<String, CommandError> {
+    let length = name.chars().count();
+    if length == 0
+        || length > MAX_NAME_CHARS
+        || name.trim() != name
+        || name.chars().any(char::is_control)
+    {
+        return Err(invalid_params(
+            command,
+            format!(
+                "`{field}` must be 1-{MAX_NAME_CHARS} characters without control characters or \
+                 surrounding whitespace"
+            ),
+        ));
+    }
+    Ok(name)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SceneNameParams {
+    name: String,
+}
+
+fn decode_scene_name(command: &str, params: Option<&Value>) -> Result<String, CommandError> {
+    let params: SceneNameParams = decode_params(command, params)?;
+    valid_name(command, "name", params.name)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteSceneParams {
+    name: String,
+    confirm: Option<bool>,
+}
+
+fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<String, CommandError> {
+    let params: DeleteSceneParams = decode_params(command, params)?;
+    if params.confirm != Some(true) {
+        return Err(invalid_params(
+            command,
+            "deleting a scene cannot be undone; pass `confirm: true`",
+        ));
+    }
+    valid_name(command, "name", params.name)
+}
+
+/// Positions and sizes in canvas pixels stay within this magnitude.
+const MAX_COORDINATE: f32 = 16_384.0;
+
+fn coordinate(command: &str, field: &str, value: f32, size: bool) -> Result<f32, CommandError> {
+    let valid = value.is_finite()
+        && if size {
+            value > 0.0 && value <= MAX_COORDINATE
+        } else {
+            value.abs() <= MAX_COORDINATE
+        };
+    if !valid {
+        let range = if size {
+            format!("greater than 0 and at most {MAX_COORDINATE}")
+        } else {
+            format!("between -{MAX_COORDINATE} and {MAX_COORDINATE}")
+        };
+        return Err(invalid_params(
+            command,
+            format!("`{field}` must be {range}"),
+        ));
+    }
+    Ok(value)
+}
+
+fn opacity(command: &str, value: f32) -> Result<f32, CommandError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(invalid_params(command, "`opacity` must be between 0 and 1"))
+    }
+}
+
+fn parse_color(command: &str, text: &str) -> Result<Rgba, CommandError> {
+    let invalid = || invalid_params(command, "`color` must be #rrggbb or #rrggbbaa");
+    let hex = text.strip_prefix('#').ok_or_else(invalid)?;
+    if !(hex.len() == 6 || hex.len() == 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid());
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| invalid());
+    let alpha = if hex.len() == 8 { byte(6)? } else { 255 };
+    Ok(Rgba([byte(0)?, byte(2)?, byte(4)?, alpha]))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddSourceParams {
+    scene: String,
+    name: String,
+    kind: String,
+    color: Option<String>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+    x: Option<f32>,
+    y: Option<f32>,
+    width: Option<f32>,
+    height: Option<f32>,
+    opacity: Option<f32>,
+}
+
+fn decode_add_source(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<AddSourceRequest, CommandError> {
+    let params: AddSourceParams = decode_params(command, params)?;
+    let screen_only = || {
+        invalid_params(
+            command,
+            "`source_types` and `cursor` apply to screen sources only",
+        )
+    };
+    let kind = match params.kind.as_str() {
+        "color_bars" | "solid" if params.source_types.is_some() || params.cursor.is_some() => {
+            return Err(screen_only());
+        }
+        "color_bars" if params.color.is_some() => {
+            return Err(invalid_params(
+                command,
+                "`color` applies to solid sources only",
+            ));
+        }
+        "color_bars" => SourceKind::ColorBars,
+        "solid" => SourceKind::Solid {
+            color: parse_color(
+                command,
+                params
+                    .color
+                    .as_deref()
+                    .ok_or_else(|| invalid_params(command, "solid sources need a `color`"))?,
+            )?,
+        },
+        "screen" if params.color.is_some() => {
+            return Err(invalid_params(
+                command,
+                "`color` applies to solid sources only",
+            ));
+        }
+        "screen" => {
+            let selection = screen_selection(command, params.source_types, params.cursor)?;
+            SourceKind::Screen {
+                source_types: selection.source_kinds,
+                cursor: selection.cursor,
+            }
+        }
+        _ => {
+            return Err(invalid_params(
+                command,
+                "`kind` must be color_bars, solid or screen",
+            ));
+        }
+    };
+    let rect = match (params.x, params.y, params.width, params.height) {
+        (None, None, None, None) => None,
+        (Some(x), Some(y), Some(width), Some(height)) => Some(SourceRect {
+            x: coordinate(command, "x", x, false)?,
+            y: coordinate(command, "y", y, false)?,
+            width: coordinate(command, "width", width, true)?,
+            height: coordinate(command, "height", height, true)?,
+        }),
+        _ => {
+            return Err(invalid_params(
+                command,
+                "give all of x, y, width and height, or none (the whole canvas)",
+            ));
+        }
+    };
+    Ok(AddSourceRequest {
+        scene: valid_name(command, "scene", params.scene)?,
+        name: valid_name(command, "name", params.name)?,
+        kind,
+        rect,
+        opacity: opacity(command, params.opacity.unwrap_or(1.0))?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateSourceParams {
+    scene: String,
+    name: String,
+    x: Option<f32>,
+    y: Option<f32>,
+    width: Option<f32>,
+    height: Option<f32>,
+    opacity: Option<f32>,
+}
+
+fn decode_update_source(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<UpdateSourceRequest, CommandError> {
+    let params: UpdateSourceParams = decode_params(command, params)?;
+    if [
+        params.x,
+        params.y,
+        params.width,
+        params.height,
+        params.opacity,
+    ]
+    .iter()
+    .all(Option::is_none)
+    {
+        return Err(invalid_params(
+            command,
+            "give at least one of x, y, width, height or opacity",
+        ));
+    }
+    let check = |field: &str, value: Option<f32>, size: bool| {
+        value
+            .map(|value| coordinate(command, field, value, size))
+            .transpose()
+    };
+    Ok(UpdateSourceRequest {
+        scene: valid_name(command, "scene", params.scene)?,
+        name: valid_name(command, "name", params.name)?,
+        x: check("x", params.x, false)?,
+        y: check("y", params.y, false)?,
+        width: check("width", params.width, true)?,
+        height: check("height", params.height, true)?,
+        opacity: params.opacity.map(|o| opacity(command, o)).transpose()?,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveSourceParams {
+    scene: String,
+    name: String,
+}
+
+fn decode_remove_source(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<(String, String), CommandError> {
+    let params: RemoveSourceParams = decode_params(command, params)?;
+    Ok((
+        valid_name(command, "scene", params.scene)?,
+        valid_name(command, "name", params.name)?,
+    ))
+}
+
+fn gain_db(command: &str, field: &str, value: f32) -> Result<f32, CommandError> {
+    if value.is_finite() && (MIN_GAIN_DB..=MAX_GAIN_DB).contains(&value) {
+        Ok(value)
+    } else {
+        Err(invalid_params(
+            command,
+            format!("`{field}` must be between {MIN_GAIN_DB} and {MAX_GAIN_DB} dB"),
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MixerStripParams {
+    index: usize,
+    gain_db: Option<f32>,
+    mute: Option<bool>,
+}
+
+fn decode_mixer_strip(command: &str, params: Option<&Value>) -> Result<StripChange, CommandError> {
+    let params: MixerStripParams = decode_params(command, params)?;
+    if params.gain_db.is_none() && params.mute.is_none() {
+        return Err(invalid_params(command, "give `gain_db`, `mute` or both"));
+    }
+    Ok(StripChange {
+        index: params.index,
+        gain_db: params
+            .gain_db
+            .map(|value| gain_db(command, "gain_db", value))
+            .transpose()?,
+        muted: params.mute,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MasterGainParams {
+    gain_db: f32,
+}
+
+fn decode_master_gain(command: &str, params: Option<&Value>) -> Result<f32, CommandError> {
+    let params: MasterGainParams = decode_params(command, params)?;
+    gain_db(command, "gain_db", params.gain_db)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioSourcesParams {
+    #[serde(default)]
+    inputs: Vec<LiveInputParams>,
+    tones: Option<Vec<ToneParams>>,
+    master_gain_db: Option<f32>,
+}
+
+fn decode_audio_sources(command: &str, params: Option<&Value>) -> Result<AudioSetup, CommandError> {
+    let params: AudioSourcesParams = decode_params(command, params)?;
+    let tones = match params.tones {
+        Some(tones) => tones,
+        None if params.inputs.is_empty() => vec![default_tone()],
+        None => Vec::new(),
+    };
+    let sources = mix_sources(command, params.inputs, tones, params.master_gain_db)?;
+    Ok(AudioSetup {
+        inputs: sources.inputs,
+        tones: sources.tones,
+        master_gain_db: sources.master_gain_db,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewParams {
+    enabled: bool,
+}
+
+fn decode_preview(command: &str, params: Option<&Value>) -> Result<bool, CommandError> {
+    let params: PreviewParams = decode_params(command, params)?;
+    Ok(params.enabled)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompositeProbeParams {
@@ -799,7 +1262,104 @@ mod tests {
         match name {
             "start_recording" => Some(json!({"file_name": "sample.mkv"})),
             "start_streaming" => Some(json!({"url": "rtmp://127.0.0.1:1/live"})),
+            "create_scene" | "set_active_scene" => Some(json!({"name": "Scene"})),
+            "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
+            "add_source" => Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"})),
+            "update_source" => Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5})),
+            "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+            "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
+            "set_master_gain" => Some(json!({"gain_db": -3.0})),
+            "set_preview" => Some(json!({"enabled": false})),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn scene_and_source_params() {
+        let Ok(Command::AddSource(solid)) = Command::decode(
+            "add_source",
+            Some(
+                &json!({"scene": "Main", "name": "logo", "kind": "solid", "color": "#ff8000",
+                         "x": 10, "y": 20, "width": 300, "height": 100, "opacity": 0.5}),
+            ),
+        ) else {
+            panic!("decode");
+        };
+        assert_eq!(
+            solid.kind,
+            SourceKind::Solid {
+                color: Rgba([255, 128, 0, 255])
+            }
+        );
+        assert_eq!(
+            solid.rect,
+            Some(SourceRect {
+                x: 10.0,
+                y: 20.0,
+                width: 300.0,
+                height: 100.0
+            })
+        );
+        let Ok(Command::AddSource(screen)) = Command::decode(
+            "add_source",
+            Some(&json!({"scene": "Main", "name": "desk", "kind": "screen"})),
+        ) else {
+            panic!("decode");
+        };
+        assert!(matches!(screen.kind, SourceKind::Screen { .. }));
+        assert_eq!((screen.rect, screen.opacity), (None, 1.0));
+        assert_eq!(
+            serde_json::to_value(Rgba([1, 2, 3, 4])).expect("json"),
+            json!("#01020304")
+        );
+    }
+
+    #[test]
+    fn invalid_scene_params_are_rejected() {
+        for (command, params) in [
+            ("create_scene", json!({"name": ""})),
+            ("create_scene", json!({"name": " padded "})),
+            ("create_scene", json!({"name": "x".repeat(65)})),
+            ("create_scene", json!({"name": "tab\there"})),
+            ("delete_scene", json!({"name": "Main"})),
+            ("delete_scene", json!({"name": "Main", "confirm": false})),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "video"}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "solid"}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "solid", "color": "red"}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "color_bars", "x": 1}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "color_bars", "cursor": "hidden"}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "color_bars",
+                                  "x": 0, "y": 0, "width": 0, "height": 10}),
+            ),
+            (
+                "add_source",
+                json!({"scene": "Main", "name": "a", "kind": "color_bars", "opacity": 2}),
+            ),
+            ("update_source", json!({"scene": "Main", "name": "a"})),
+            ("set_mixer_strip", json!({"index": 0})),
+            ("set_mixer_strip", json!({"index": 0, "gain_db": 99})),
+            ("set_master_gain", json!({"gain_db": -200})),
+            ("set_preview", json!({})),
+        ] {
+            let err = Command::decode(command, Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{command} {params}");
         }
     }
 

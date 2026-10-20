@@ -75,7 +75,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
-| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed"}` |
+| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed", "preview_active"}` |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
@@ -87,6 +87,18 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `stop_recording`           | none   | `control`   | Recording report |
 | `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels"}` |
 | `stop_streaming`           | none   | `control`   | Streaming report |
+| `list_scenes`              | none   | `read_only` | Scene list |
+| `create_scene`             | see below | `control` | Scene list |
+| `delete_scene`             | see below | `sensitive` | Scene list |
+| `set_active_scene`         | see below | `sensitive` | Scene list |
+| `add_source`               | see below | `sensitive` | Scene list |
+| `update_source`            | see below | `control` | Scene list |
+| `remove_source`            | see below | `control` | Scene list |
+| `get_mixer`                | none   | `read_only` | Mixer state |
+| `set_mixer_strip`          | see below | `control` | Mixer state |
+| `set_master_gain`          | see below | `control` | Mixer state |
+| `set_audio_sources`        | see below | `sensitive` | Mixer state |
+| `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`. Adapters must gate `control` and `sensitive` commands behind explicit authorization. That enforcement arrives with M8. Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
 
@@ -197,11 +209,11 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
 
 ### Outputs: recording and streaming
 
-Outputs share one **media pipeline**: the 1920×1080@60 reference scene (the `probe_composite` scene, with an optional live screen layer) and the audio mix.
+Outputs share one **media pipeline**: the active scene (see below; by default the `probe_composite` reference scene) at 1920×1080@60, and the audio mix. The preview uses the same pipeline.
 
 - **Start and stop:** the first output to start brings the pipeline up with its source parameters. The pipeline stops when the last output stops.
 - **Joining:** an output started while another runs joins the pipeline. It must not name sources (`invalid_state` otherwise).
-- **Defaults:** without source parameters and without a running pipeline, the sources default to one 1 kHz tone at −20 dBFS.
+- **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured audio (`set_audio_sources`; initially one 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run, and `screen` adds a screen layer on top of the active scene.
 - **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
 - **Exclusive engine:** while any output is open, the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
 
@@ -274,11 +286,51 @@ Errors:
 - **Offline drops:** `frames_dropped_offline` and `blocks_dropped_offline` count media the streamer discarded while not connected. Audio received before a connection's first video frame counts here too. Both numbers are included in the tracks' `frames_dropped` and `blocks_dropped`, which also count producer-side drops (copy pool or queue full).
 - **Undelivered media:** `frames_undelivered` and `samples_undelivered` count media that was encoded but never reached the server because the connection broke (in the encoder or in the failed write; audio in whole encoder frames). Both are included in `frames_encoded` and `samples_encoded`.
 
+### Scenes, mixer and preview
+
+The engine keeps a collection of scenes on a 1920×1080 canvas and renders the **active** one. Changes to the active scene, or switching scenes, apply live while preview or outputs run. A live change that fails (e.g. the picker of a new screen source is cancelled) is undone and returns the error. Scenes live in memory only.
+
+At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active", "scenes": [{"name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`.
+
+- **Scene commands:**
+  - `create_scene {name}` creates an empty scene (black).
+  - `set_active_scene {name}` switches the rendered scene.
+  - `delete_scene {name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
+- **Access:** `add_source` and `set_active_scene` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
+- **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
+- **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
+- **`add_source`:** params `scene`, `name`, `kind`, optional rectangle and `opacity`.
+  - Kinds:
+    - `color_bars`: stretched to the rectangle.
+    - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
+    - `screen` with optional `source_types` and `cursor` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept.
+  - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
+  - `opacity` 0..=1.
+  - Sources are drawn in order, so later ones are on top.
+  - A screen source starts its capture, which opens the system picker, when it becomes part of the rendered scene.
+  - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
+  - While a recording or stream is open, a change that would start a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add screen sources while only the preview runs.
+  - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
+- **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
+- **`remove_source`:** params `scene`, `name`.
+
+Mixer:
+- **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
+- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level of the last 300 ms (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
+- **`set_mixer_strip {index, gain_db?, mute?}` and `set_master_gain {gain_db}`:** change gains live (ramped over one block) and keep the change in the configuration.
+- **`set_audio_sources {inputs, tones, master_gain_db}`:** parameters as for `probe_audio_mix`. Without inputs and without `tones`, one −20 dBFS tone is used. It configures what the pipeline mixes, but only while the pipeline is idle (`invalid_state` otherwise). It is `sensitive` because the inputs are microphones. An output that brings its own source parameters overrides this configuration for its run.
+
+Preview:
+- **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
+- **Access:** `sensitive`, because it renders (and can capture) private content.
+- **Lifecycle:** the pipeline stops when the preview and all outputs are off.
+- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames). If that stopped the pipeline, `pipeline` (as in output reports) and `warnings` carry its report.
+
 ## Example session
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
 {"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","list_commands","get_capture_capabilities","list_audio_inputs","probe_screen_capture","probe_audio_capture"],"command":"nope"}}}
 ```
 

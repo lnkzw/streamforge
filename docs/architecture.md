@@ -47,6 +47,7 @@
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
+| `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, egui panels | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
 
 `engine` and `control-protocol` do not depend on each other. Only the binaries combine them. A future socket transport, JSON-RPC or MCP adapter would be another crate that calls `CommandHandler`, next to `control-protocol`.
 
@@ -84,7 +85,17 @@ Outputs (ADR 0006):
 - **Lifecycle:** the media pipeline (captures, compositor, mixer, fan-out) starts with the first output and stops with the last. Outputs keep it running after their start command returns.
 - **Stopping an output:** the engine sets the output's end time for both tracks, detaches it from the fan-out, then finalizes it. Producers keep serving the remaining outputs.
 - **Exclusive commands:** while any output is open, commands that would compete for its devices or CPU, or block the engine thread (the probes), fail with `invalid_state`.
-- **Drop order:** dropping the engine stops the pipeline first, then finalizes the outputs. Editing the scene while it runs, which the UI needs (M7), will go through a bounded command channel into the compositor thread. See ADRs 0002 and 0003.
+- **Drop order:** dropping the engine stops the pipeline first, then finalizes the outputs. See ADRs 0002 and 0003.
+
+Scenes, mixer and preview (ADR 0007):
+- **Scene state:** scenes are engine state, changed only through scene commands. The pipeline renders the active scene (default: the reference scene `Test pattern`).
+- **Live scene edits:** an edit to the rendered scene reaches the running compositor through a newest-wins slot that the render thread only try-locks (`Compositor::update`); a failed live edit is undone.
+- **Mixer control:** gain changes reach the running mixer the same way (`MixerControl`), and levels come back as atomics.
+- **Preview:** the preview is a fan-out consumer that publishes downscaled frames to a mailbox (`Engine::preview_frames`). It runs on the media plane; control goes through commands.
+
+The desktop UI is an adapter like the CLI:
+- **Worker thread:** it builds the engine on its own thread and executes commands there via `Command::decode` and `CommandHandler::handle`. Channels are bounded, and the UI thread never blocks.
+- **Model:** its model turns user actions into commands with the protocol's names and parameters. The widgets only call the model.
 
 ## Suggested future crates
 
@@ -93,7 +104,6 @@ Add only when a milestone needs them (the socket transport, if needed, extends `
 - `capture-windows`
 - `capture-macos`
 - `output-rtmp`
-- `desktop-app`
 - `mcp-server`
 
 ## Cross-platform policy

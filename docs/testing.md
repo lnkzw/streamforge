@@ -71,6 +71,15 @@ A newer stable toolchain can bring new clippy lints. Before pushing, you can run
   - a silent peer hits the I/O timeout instead of hanging
 - `crates/engine` (Linux): streaming via the engine, and a recording that continues when the stream fails.
 - `crates/streamforge-engine/tests/streaming.rs`: M6 acceptance through the real engine process. It streams to a local server, and a recording outlives a stream that fails for good; the recorded file is checked.
+- `crates/video-compositor`: live scene updates (keep unchanged sources, retire removed ones, reject a canvas change) and the preview downscaler.
+- `crates/audio-engine`: live gain/mute changes and peak levels of the running mixer.
+- `crates/engine` (scenes):
+  - scene rules (unique names, the active scene cannot be deleted)
+  - live edits checked through preview pixels
+  - rollback of a failing live change
+  - mixer control with levels
+  - a recording of a user scene
+- `crates/streamforge-desktop/tests/acceptance.rs`: M7 acceptance through the UI model (the layer the widgets call), against the real engine on its worker thread. It creates a scene, adds a source, activates it and records, and checks that engine errors reach the log and that preview frames and levels arrive. The egui layer itself is checked by starting the app.
 - `crates/engine` (Linux): the recording lifecycle, including:
   - `invalid_state` on a double start, on probes while recording, and on a stop without a recording
   - `not_found` for a missing output directory

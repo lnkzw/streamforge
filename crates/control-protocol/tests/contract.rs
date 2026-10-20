@@ -30,6 +30,7 @@ impl CommandHandler for FakeHandler {
                 streaming_state: None,
                 recording_active: true,
                 recording_failed: false,
+                preview_active: false,
             }),
             Command::ListCommands => CommandOutput::Commands(CommandList::all()),
             other => {
@@ -87,6 +88,7 @@ fn get_status_success_envelope() {
                 "streaming_state": null,
                 "recording_active": true,
                 "recording_failed": false,
+                "preview_active": false,
             },
         })
     );

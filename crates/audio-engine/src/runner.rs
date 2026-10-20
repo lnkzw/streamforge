@@ -7,8 +7,8 @@
 //! up to [`MAX_CATCH_UP_BLOCKS`]; anything beyond that is skipped and counted.
 //! The loop does not allocate after start-up.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -114,10 +114,147 @@ pub struct MixStats {
     pub inputs: Vec<InputStats>,
 }
 
+/// Peak levels cover the most recent blocks (300 ms).
+pub const LEVEL_WINDOW_BLOCKS: usize = 30;
+
+/// Live control of a running mixer: gain and mute changes, and peak levels
+/// for meters. Cloneable and usable from any thread.
+///
+/// Changes wait in a preallocated slot that the mixer thread only
+/// try-locks once per block, so a caller never stalls the mixer and the
+/// mixer never allocates. Levels are atomics with the highest peak of the
+/// last [`LEVEL_WINDOW_BLOCKS`] blocks, written by the mixer thread; reading
+/// them changes nothing, so any number of readers see the same levels.
+#[derive(Clone)]
+pub struct MixerControl {
+    shared: Arc<ControlShared>,
+}
+
+struct ControlShared {
+    pending: Mutex<PendingChanges>,
+    input_peaks: Vec<AtomicU32>,
+    master_peak: AtomicU32,
+}
+
+struct PendingChanges {
+    strips: Vec<Option<StripConfig>>,
+    master_gain_db: Option<f32>,
+}
+
+/// Peaks of the recent window, in dBFS (`None`: silence).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LevelReading {
+    pub inputs: Vec<Option<f64>>,
+    pub master: Option<f64>,
+}
+
+impl MixerControl {
+    fn new(inputs: usize) -> Self {
+        Self {
+            shared: Arc::new(ControlShared {
+                pending: Mutex::new(PendingChanges {
+                    strips: vec![None; inputs],
+                    master_gain_db: None,
+                }),
+                input_peaks: (0..inputs).map(|_| AtomicU32::new(0)).collect(),
+                master_peak: AtomicU32::new(0),
+            }),
+        }
+    }
+
+    /// Change input `index` from the next block on (ramped). Returns `false`
+    /// for an unknown index.
+    pub fn set_input(&self, index: usize, config: StripConfig) -> bool {
+        let mut pending = lock(&self.shared.pending);
+        match pending.strips.get_mut(index) {
+            Some(slot) => {
+                *slot = Some(config);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_master_gain(&self, gain_db: f32) {
+        lock(&self.shared.pending).master_gain_db = Some(gain_db);
+    }
+
+    /// Peaks of the last [`LEVEL_WINDOW_BLOCKS`] blocks.
+    pub fn levels(&self) -> LevelReading {
+        let to_db = |peak: &AtomicU32| {
+            let linear = f64::from(f32::from_bits(peak.load(Ordering::Relaxed)));
+            (linear > 0.0).then(|| 20.0 * linear.log10())
+        };
+        LevelReading {
+            inputs: self.shared.input_peaks.iter().map(to_db).collect(),
+            master: to_db(&self.shared.master_peak),
+        }
+    }
+
+    /// Mixer thread: apply pending changes if the slot is free right now.
+    fn apply(&self, mixer: &mut Mixer) {
+        let mut pending = match self.shared.pending.try_lock() {
+            Ok(pending) => pending,
+            Err(TryLockError::Poisoned(pending)) => pending.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
+        for (index, slot) in pending.strips.iter_mut().enumerate() {
+            if let Some(config) = slot.take() {
+                mixer.set_input(index, config);
+            }
+        }
+        if let Some(gain_db) = pending.master_gain_db.take() {
+            mixer.set_master_gain(gain_db);
+        }
+    }
+
+    /// Mixer thread: record the block's peaks and publish each window's
+    /// maximum.
+    fn publish(&self, mixer: &Mixer, window: &mut PeakWindow) {
+        let slot = window.next;
+        window.next = (window.next + 1) % LEVEL_WINDOW_BLOCKS;
+        let targets = self
+            .shared
+            .input_peaks
+            .iter()
+            .chain(std::iter::once(&self.shared.master_peak));
+        for (index, (history, published)) in window.history.iter_mut().zip(targets).enumerate() {
+            history[slot] = if index < self.shared.input_peaks.len() {
+                mixer.input_block_peak(index).unwrap_or(0.0)
+            } else {
+                mixer.master_block_peak()
+            };
+            let peak = history.iter().copied().fold(0.0f32, f32::max);
+            published.store(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Recent block peaks per input plus master; owned by the mixer thread and
+/// allocated once at start.
+struct PeakWindow {
+    history: Vec<[f32; LEVEL_WINDOW_BLOCKS]>,
+    next: usize,
+}
+
+impl PeakWindow {
+    fn new(inputs: usize) -> Self {
+        Self {
+            history: vec![[0.0; LEVEL_WINDOW_BLOCKS]; inputs + 1],
+            next: 0,
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A running mixer; [`MixerThread::stop`] returns its statistics. Dropping
 /// it without `stop` still stops and joins the thread.
 pub struct MixerThread {
     stop: Arc<AtomicBool>,
+    control: MixerControl,
     thread: Option<JoinHandle<MixStats>>,
 }
 
@@ -137,17 +274,25 @@ impl MixerThread {
             }
         }
         let stop = Arc::new(AtomicBool::new(false));
+        let control = MixerControl::new(config.inputs.len());
         let thread = thread::Builder::new()
             .name("audio-mixer".to_owned())
             .spawn({
                 let stop = Arc::clone(&stop);
-                move || run(config, &stop)
+                let control = control.clone();
+                move || run(config, &stop, &control)
             })
             .map_err(MixerError::Spawn)?;
         Ok(Self {
             stop,
+            control,
             thread: Some(thread),
         })
+    }
+
+    /// Live gain/mute control and levels of this mixer.
+    pub fn control(&self) -> MixerControl {
+        self.control.clone()
     }
 
     pub fn is_finished(&self) -> bool {
@@ -242,7 +387,7 @@ struct InputState {
     trimmed: u64,
 }
 
-fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
+fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixStats {
     let mut sink = config.sink;
     let channels = CHANNELS as usize;
     let windows = (config.expected_duration.as_secs() / 10 + 2) as usize;
@@ -267,6 +412,7 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
         .collect();
     let mut out = vec![0.0f32; BLOCK_FRAMES * channels];
     let mut mix_times = LatencyHistogram::new();
+    let mut peaks = PeakWindow::new(inputs.len());
 
     let period_ns = BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(RATE);
     let due =
@@ -290,6 +436,7 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
         }
 
         let mix_start = Instant::now();
+        control.apply(&mut mixer);
         for input in &mut inputs {
             match &mut input.source {
                 Source::Live(live, trend) => {
@@ -312,6 +459,7 @@ fn run(config: MixerConfig, stop: &AtomicBool) -> MixStats {
             }
             mixer.mix(&views[..inputs.len().min(MAX_INPUTS)], &mut out);
         }
+        control.publish(&mixer, &mut peaks);
         if let Some(sink) = &mut sink {
             sink.block(&out, due(start, block));
         }
@@ -440,6 +588,63 @@ mod tests {
         fn block(&mut self, samples: &[f32], at: Instant) {
             self.0.lock().expect("lock").push((samples.len(), at));
         }
+    }
+
+    /// Poll `levels` until `done` holds (bounded), so slow runners pass.
+    fn wait_levels(control: &MixerControl, done: impl Fn(&LevelReading) -> bool) -> LevelReading {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let levels = control.levels();
+            if done(&levels) || Instant::now() >= deadline {
+                return levels;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn live_control_changes_gain_and_reports_levels() {
+        let mixer = MixerThread::spawn(MixerConfig {
+            inputs: vec![MixerInput {
+                name: "tone".into(),
+                source: InputSource::Tone(Tone::new(1000.0, -6.0, RATE)),
+                strip: StripConfig {
+                    gain_db: 0.0,
+                    muted: false,
+                },
+            }],
+            master_gain_db: 0.0,
+            expected_duration: Duration::from_secs(1),
+            sink: None,
+        })
+        .expect("spawn");
+        let control = mixer.control();
+        let before = wait_levels(&control, |levels| levels.inputs[0].is_some());
+        let peak = before.inputs[0].expect("tone level");
+        assert!((peak + 6.0).abs() < 0.1, "{before:?}");
+        assert!(before.master.is_some());
+        // Reading does not consume the levels.
+        assert!(control.levels().inputs[0].is_some());
+        assert!(control.set_input(
+            0,
+            StripConfig {
+                gain_db: 0.0,
+                muted: true
+            }
+        ));
+        assert!(!control.set_input(
+            5,
+            StripConfig {
+                gain_db: 0.0,
+                muted: false
+            }
+        ));
+        // Silence once the window has passed the mute.
+        let muted = wait_levels(&control, |levels| levels.inputs[0].is_none());
+        assert_eq!(muted.inputs[0], None, "{muted:?}");
+        assert_eq!(muted.master, None);
+        let stats = mixer.stop().expect("stop");
+        assert!(stats.inputs[0].muted);
     }
 
     #[test]

@@ -26,7 +26,8 @@ pub use mixer::{
     GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, Mixer, StripConfig, db_to_linear,
 };
 pub use runner::{
-    BLOCK_FRAMES, BlockSink, BufferLatency, CHANNELS, InputSource, InputStats, MAX_INPUTS,
-    MixStats, MixerConfig, MixerError, MixerInput, MixerThread, RATE,
+    BLOCK_FRAMES, BlockSink, BufferLatency, CHANNELS, InputSource, InputStats, LEVEL_WINDOW_BLOCKS,
+    LevelReading, MAX_INPUTS, MixStats, MixerConfig, MixerControl, MixerError, MixerInput,
+    MixerThread, RATE,
 };
 pub use tone::Tone;

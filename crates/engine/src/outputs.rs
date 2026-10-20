@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
 use command_api::{
-    CommandError, ErrorCode, MediaSources, PipelineReport, RecordingReport, RecordingRequest,
-    RecordingStarted, StreamingReport, StreamingRequest, StreamingStarted, default_sources,
+    AudioSetup, CommandError, ErrorCode, MediaSources, PipelineReport, RecordingReport,
+    RecordingRequest, RecordingStarted, StreamingReport, StreamingRequest, StreamingStarted,
 };
 use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
@@ -72,6 +72,7 @@ impl Engine {
         let open: Vec<&str> = [
             self.recording.as_ref().map(|_| "recording"),
             self.streaming.as_ref().map(|_| "streaming"),
+            self.preview_enabled.then_some("preview"),
         ]
         .into_iter()
         .flatten()
@@ -87,38 +88,53 @@ impl Engine {
     }
 
     /// Make sure the pipeline runs; returns whether this call started it.
-    fn ensure_pipeline(&mut self, sources: Option<&MediaSources>) -> Result<bool, CommandError> {
+    /// It renders the active scene and mixes the configured audio, unless
+    /// `sources` (an output's own) replace the audio and add a screen layer.
+    pub(crate) fn ensure_pipeline(
+        &mut self,
+        sources: Option<&MediaSources>,
+    ) -> Result<bool, CommandError> {
         match &self.pipeline {
             Some(_) if sources.is_some() => Err(CommandError::new(
                 ErrorCode::InvalidState,
-                "the media pipeline already runs for another output; omit the source \
-                 parameters (screen, source_types, cursor, inputs, tones, master_gain_db) \
-                 to join it",
+                "the media pipeline already runs (for the preview or another output); omit the \
+                 source parameters (screen, source_types, cursor, inputs, tones, \
+                 master_gain_db) to join it, or turn the preview off first",
             )),
             Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
                 ErrorCode::InvalidState,
-                "the media pipeline stopped unexpectedly; stop the open outputs to collect \
-                 their reports",
+                "the media pipeline stopped unexpectedly; turn the preview off and stop the \
+                 open outputs to collect their reports",
             )),
             Some(_) => Ok(false),
             None => {
-                let defaults;
-                let sources = match sources {
-                    Some(sources) => sources,
-                    None => {
-                        defaults = default_sources();
-                        &defaults
-                    }
+                let (audio, from_setup, screen) = match sources {
+                    Some(sources) => (
+                        AudioSetup {
+                            inputs: sources.inputs.clone(),
+                            tones: sources.tones.clone(),
+                            master_gain_db: sources.master_gain_db,
+                        },
+                        false,
+                        sources.screen.as_ref(),
+                    ),
+                    None => (self.audio.clone(), true, None),
                 };
-                self.pipeline = Some(Pipeline::start(self.capture.as_mut(), sources)?);
+                self.pipeline = Some(Pipeline::start(
+                    self.capture.as_mut(),
+                    self.scenes.active(),
+                    audio,
+                    from_setup,
+                    screen,
+                )?);
                 Ok(true)
             }
         }
     }
 
-    /// Stop the pipeline if no output uses it anymore.
-    fn release_pipeline(&mut self) -> (PipelineReport, Vec<String>) {
-        if self.recording.is_some() || self.streaming.is_some() {
+    /// Stop the pipeline if no output or preview uses it anymore.
+    pub(crate) fn release_pipeline(&mut self) -> (PipelineReport, Vec<String>) {
+        if self.recording.is_some() || self.streaming.is_some() || self.preview_enabled {
             return (PipelineReport::default(), Vec::new());
         }
         match self.pipeline.take() {

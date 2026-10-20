@@ -25,7 +25,7 @@ tokio = { version = "1", features = ["rt", "macros", "signal"] }
 
 [dev-dependencies]
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process"] }
-tokio = { version = "1", features = ["rt", "macros", "process"] }
+tokio = { version = "1", features = ["rt", "macros", "process", "sync"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 rtmp-test-server = { path = "../rtmp-test-server" }

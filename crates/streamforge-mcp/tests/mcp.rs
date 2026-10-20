@@ -13,6 +13,10 @@ use tokio::process::Command;
 
 type Client = RunningService<RoleClient, ()>;
 
+/// Tests that run encoders take turns, so small CI runners keep up.
+#[cfg(target_os = "linux")]
+static MEDIA: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct TempDir(std::path::PathBuf);
 
 impl TempDir {
@@ -272,6 +276,7 @@ fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
+    let _media = MEDIA.lock().await;
     use rtmp_test_server::{ServerOptions, TestServer};
     use std::time::Instant;
 
@@ -355,6 +360,7 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
 #[cfg(target_os = "linux")]
 #[test]
 fn sigterm_finalizes_an_open_recording() {
+    let _media = MEDIA.blocking_lock();
     use std::io::{BufRead, BufReader, Write};
 
     let dir = TempDir::new("sigterm");

@@ -36,6 +36,8 @@ On Linux, CI installs `libpipewire-0.3-dev` and `libclang-dev` for `capture-linu
 
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
+Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. The drops are counted, but these tests assert that nothing is lost. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+
 ## Where tests live
 
 - `crates/command-api`: unit tests for registry consistency, parameter decoding and result serialization.

@@ -101,7 +101,8 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
       - name: Test
-        run: cargo test --workspace --locked
+        # All failures in one run, not just the first failing test binary.
+        run: cargo test --workspace --locked --no-fail-fast
       - name: "M0 acceptance: CLI status"
         run: cargo run --locked -q -p streamforge-cli -- status --json
       - name: Capture capabilities of this runner

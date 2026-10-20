@@ -196,9 +196,15 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         ends[0],
         ends[1]
     );
-    // Starts are not affected by drops at the end.
-    let start_drift = (starts[0] - starts[1]).abs();
-    assert!(start_drift < 0.05, "A/V start drift {start_drift:.3} s");
+    // Starts are not affected by drops at the end, but a loaded runner's
+    // compositor may skip (and count) the first ticks, so video may start
+    // up to those ticks late; audio has no such excuse.
+    let video_late = starts[0] - starts[1];
+    let allowed_late = 0.05 + skipped as f64 / 60.0;
+    assert!(
+        video_late < allowed_late && -video_late < 0.05,
+        "A/V start drift {video_late:.3} s (video minus audio; {skipped} ticks skipped)"
+    );
     let rms_db = 10.0 * (sum_squares / samples_seen as f64).log10();
     assert!((rms_db + 15.05).abs() < 0.6, "audio rms {rms_db:.2} dBFS");
 }

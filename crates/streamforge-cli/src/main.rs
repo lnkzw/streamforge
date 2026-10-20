@@ -42,27 +42,36 @@ enum Commands {
         /// Recording length in milliseconds.
         #[arg(long, default_value_t = 10_000)]
         duration_ms: u64,
-        /// Add a live screen layer (opens the system picker).
+        #[command(flatten)]
+        sources: SourceArgs,
+    },
+    /// Stream the 1920x1080@60 reference scene and the audio mix over RTMP (H.264 CBR + AAC),
+    /// optionally recording at the same time, then print the reports. Output is JSON.
+    ///
+    /// The stream key is read from an environment variable, never from the command line
+    /// (which other users and shell histories can see).
+    Stream {
+        /// Server URL without the key, e.g. rtmp://live.example.com/app.
         #[arg(long)]
-        screen: bool,
-        /// With --screen: offered source type (monitor, window, virtual). Repeatable.
-        #[arg(long = "source", requires = "screen")]
-        sources: Vec<String>,
-        /// With --screen: cursor mode (hidden, embedded, metadata).
-        #[arg(long, requires = "screen")]
-        cursor: Option<String>,
-        /// Live input as NAME or NAME=GAIN_DB. Repeatable.
-        #[arg(long = "input")]
-        inputs: Vec<String>,
-        /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS. Repeatable; default one 1 kHz tone at -20 dBFS.
-        #[arg(long = "tone", conflicts_with = "no_tone")]
-        tones: Vec<String>,
-        /// Record without the default test tone.
+        url: String,
+        /// Environment variable holding the stream key (must be set if given; without this
+        /// flag, STREAMFORGE_STREAM_KEY is used if set).
         #[arg(long)]
-        no_tone: bool,
-        /// Master gain in dB (default 0).
+        key_env: Option<String>,
+        /// Streaming length in milliseconds.
+        #[arg(long, default_value_t = 10_000)]
+        duration_ms: u64,
+        /// Video bit rate in kbit/s (constant).
         #[arg(long)]
-        master_gain_db: Option<f32>,
+        bitrate_kbps: Option<u32>,
+        /// Reconnect attempts after the connection is lost.
+        #[arg(long)]
+        reconnect_attempts: Option<u32>,
+        /// Also record to this plain .mkv file name in --output-dir.
+        #[arg(long)]
+        record: Option<String>,
+        #[command(flatten)]
+        sources: SourceArgs,
     },
     /// Mix audio inputs and test tones at 48 kHz stereo; reports meters and buffering. Output is JSON.
     Mix {
@@ -153,7 +162,7 @@ fn main() -> Result<ExitCode> {
                 println!("Recording active: {}", status.recording_active);
                 println!();
                 println!(
-                    "Capture probes: `streamforge capture --help`. Recording: `streamforge record --help` (Linux). Streaming is not implemented yet."
+                    "Capture probes: `streamforge capture --help`. Recording and streaming (Linux): `streamforge record --help`, `streamforge stream --help`."
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -177,15 +186,9 @@ fn main() -> Result<ExitCode> {
         Commands::Record {
             file,
             duration_ms,
-            screen,
             sources,
-            cursor,
-            inputs,
-            tones,
-            no_tone,
-            master_gain_db,
         } => {
-            let mut params = match mix_params(&inputs, &tones, master_gain_db, None) {
+            let mut params = match sources.params() {
                 Ok(params) => params,
                 Err(message) => {
                     eprintln!("error: {message}");
@@ -193,19 +196,66 @@ fn main() -> Result<ExitCode> {
                 }
             };
             params.insert("file_name".into(), file.into());
-            if no_tone {
-                params.insert("tones".into(), Value::Array(Vec::new()));
-            }
-            if screen {
-                params.insert("screen".into(), true.into());
-            }
-            if !sources.is_empty() {
-                params.insert("source_types".into(), sources.into());
-            }
-            if let Some(cursor) = cursor {
-                params.insert("cursor".into(), cursor.into());
-            }
             record(&mut engine, params, Duration::from_millis(duration_ms))
+        }
+        Commands::Stream {
+            url,
+            key_env,
+            duration_ms,
+            bitrate_kbps,
+            reconnect_attempts,
+            record,
+            sources,
+        } => {
+            let source_params = match sources.params() {
+                Ok(params) => params,
+                Err(message) => {
+                    eprintln!("error: {message}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            let explicit = key_env.is_some();
+            let key_env = key_env.unwrap_or_else(|| DEFAULT_KEY_ENV.to_owned());
+            let key = match std::env::var(&key_env) {
+                Ok(key) => key,
+                // A named but missing variable is a mistake, not "no key".
+                Err(std::env::VarError::NotPresent) if explicit => {
+                    eprintln!("error: --key-env names ${key_env}, which is not set");
+                    return Ok(ExitCode::FAILURE);
+                }
+                Err(std::env::VarError::NotPresent) => String::new(),
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    eprintln!("error: ${key_env} is not valid UTF-8");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            let mut stream_params = Map::new();
+            stream_params.insert("url".into(), url.into());
+            if !key.is_empty() {
+                stream_params.insert("stream_key".into(), key.into());
+            }
+            if let Some(kbps) = bitrate_kbps {
+                stream_params.insert("video_bitrate_kbps".into(), kbps.into());
+            }
+            if let Some(attempts) = reconnect_attempts {
+                stream_params.insert("reconnect_attempts".into(), attempts.into());
+            }
+            // The first output brings the pipeline up with the sources; a
+            // stream started alongside a recording joins it.
+            let record_params = record.map(|file| {
+                let mut params = source_params.clone();
+                params.insert("file_name".into(), file.into());
+                params
+            });
+            if record_params.is_none() {
+                stream_params.extend(source_params);
+            }
+            stream(
+                &mut engine,
+                record_params,
+                stream_params,
+                Duration::from_millis(duration_ms),
+            )
         }
         Commands::Compose {
             duration_ms,
@@ -338,6 +388,131 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
         }
     };
     (name, params)
+}
+
+/// Read for the stream key when `--key-env` is not given.
+const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
+
+/// Pipeline source flags shared by `record` and `stream`.
+#[derive(clap::Args, Debug)]
+struct SourceArgs {
+    /// Add a live screen layer (opens the system picker).
+    #[arg(long)]
+    screen: bool,
+    /// With --screen: offered source type (monitor, window, virtual). Repeatable.
+    #[arg(long = "source", requires = "screen")]
+    source_types: Vec<String>,
+    /// With --screen: cursor mode (hidden, embedded, metadata).
+    #[arg(long, requires = "screen")]
+    cursor: Option<String>,
+    /// Live input as NAME or NAME=GAIN_DB. Repeatable.
+    #[arg(long = "input")]
+    inputs: Vec<String>,
+    /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS. Repeatable; without inputs or tones, one
+    /// 1 kHz tone at -20 dBFS.
+    #[arg(long = "tone", conflicts_with = "no_tone")]
+    tones: Vec<String>,
+    /// No default test tone.
+    #[arg(long)]
+    no_tone: bool,
+    /// Master gain in dB (default 0).
+    #[arg(long)]
+    master_gain_db: Option<f32>,
+}
+
+impl SourceArgs {
+    fn params(&self) -> Result<Map<String, Value>, String> {
+        let mut params = mix_params(&self.inputs, &self.tones, self.master_gain_db, None)?;
+        if self.no_tone {
+            params.insert("tones".into(), Value::Array(Vec::new()));
+        }
+        if self.screen {
+            params.insert("screen".into(), true.into());
+        }
+        if !self.source_types.is_empty() {
+            params.insert("source_types".into(), self.source_types.clone().into());
+        }
+        if let Some(cursor) = &self.cursor {
+            params.insert("cursor".into(), cursor.clone().into());
+        }
+        Ok(params)
+    }
+}
+
+/// Stream (and optionally record) for `duration`, then stop both and print
+/// `{"streaming": ..., "recording": ...}`. The stream is stopped first so a
+/// recording covers all of it.
+fn stream(
+    engine: &mut Engine,
+    record_params: Option<Map<String, Value>>,
+    stream_params: Map<String, Value>,
+    duration: Duration,
+) -> Result<ExitCode> {
+    let recording = record_params.is_some();
+    if let Some(params) = record_params {
+        match start(engine, "start_recording", params) {
+            Ok(CommandOutput::RecordingStarted(started)) => {
+                eprintln!("recording {} ...", started.path);
+            }
+            Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
+            Err(err) => return Ok(report_error(&err)),
+        }
+    }
+    match start(engine, "start_streaming", stream_params) {
+        Ok(CommandOutput::StreamingStarted(started)) => {
+            eprintln!(
+                "streaming to {} for {:.1} s ...",
+                started.target,
+                duration.as_secs_f64()
+            );
+        }
+        Ok(other) => bail!("engine returned unexpected output for start_streaming: {other:?}"),
+        Err(err) => {
+            let code = report_error(&err);
+            if recording {
+                // Finalize the recording that was already started.
+                let _ = engine.handle(Command::StopRecording);
+            }
+            return Ok(code);
+        }
+    }
+    std::thread::sleep(duration);
+    let mut output = Map::new();
+    let mut failed = false;
+    match engine.handle(Command::StopStreaming) {
+        Ok(report) => {
+            output.insert("streaming".into(), serde_json::to_value(&report)?);
+        }
+        Err(err) => {
+            report_error(&err);
+            failed = true;
+        }
+    }
+    if recording {
+        match engine.handle(Command::StopRecording) {
+            Ok(report) => {
+                output.insert("recording".into(), serde_json::to_value(&report)?);
+            }
+            Err(err) => {
+                report_error(&err);
+                failed = true;
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&Value::Object(output))?);
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+fn start(
+    engine: &mut Engine,
+    name: &str,
+    params: Map<String, Value>,
+) -> Result<CommandOutput, command_api::CommandError> {
+    Command::decode(name, Some(&Value::Object(params))).and_then(|command| engine.handle(command))
 }
 
 /// Start a recording, wait, stop it and print the report. Progress goes to

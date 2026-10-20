@@ -1,13 +1,9 @@
-//! FFmpeg implementation of the recorder thread (Linux).
+//! FFmpeg implementation of the output threads (Linux): encoder tracks and
+//! containers shared by the recorder and the streamer.
 //!
-//! All FFmpeg objects are created and used on the `recorder` thread. The
-//! output is finalized (encoders flushed, trailer written) on every path that
-//! got past the header, including encoder errors. After a failure the thread
-//! keeps receiving until the stop marker and counts everything as dropped.
+//! All FFmpeg objects of an output are created and used on its thread.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ff::format::Pixel;
 use ff::format::Sample;
@@ -19,131 +15,118 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 use crate::audio_fifo::AudioFifo;
 use crate::{
-    AudioSettings, AudioTrackStats, Item, RecorderConfig, RecorderError, RecorderErrorKind,
-    RecordingStats, Shared, VideoSettings, VideoTrackStats,
+    AudioSettings, AudioTrackStats, Item, RecorderError, RecorderErrorKind, Shared, VideoSettings,
+    VideoTrackStats,
 };
 
-const CONTAINER: &str = "matroska";
+mod interrupt;
+pub(crate) mod record;
+pub(crate) mod stream;
 
-pub(crate) fn run(
-    config: RecorderConfig,
-    rx: Receiver<Item>,
-    ready: SyncSender<Result<(), RecorderError>>,
-    shared: Arc<Shared>,
-) -> Result<RecordingStats, RecorderError> {
-    let (mut output, mut video, mut audio) = match open(&config) {
-        Ok(opened) => {
-            let _ = ready.send(Ok(()));
-            opened
-        }
-        Err(error) => {
-            let _ = ready.send(Err(error.clone()));
-            return Err(error);
-        }
-    };
+use interrupt::Interrupt;
 
-    let mut failure = None;
-    while let Ok(item) = rx.recv() {
-        let end_ns = shared.end_ns.load(Ordering::Acquire);
-        let result = match item {
-            Item::Video { frame, pts } => video.encode(&mut output, &frame, pts, end_ns),
-            Item::Audio { samples, len, pts } => {
-                audio.push(&mut output, &samples[..len], pts, end_ns)
-            }
-            Item::Stop => break,
-        };
-        if let Err(error) = result {
-            shared.failed.store(true, Ordering::Release);
-            failure = Some(error);
-            break;
-        }
-    }
+/// Once a stream was opened, FFmpeg's own log output stays off: RTMP error
+/// messages can contain the stream path, i.e. the key. The lock makes the
+/// check and the switch one step, so a concurrent recorder start cannot turn
+/// logging back on after a streamer turned it off.
+static QUIET: Mutex<bool> = Mutex::new(false);
 
-    // Flush both tracks even if one fails, then write the trailer; the first
-    // error wins.
-    let video_flushed = video.flush(&mut output);
-    let audio_flushed = audio.flush(&mut output);
-    let trailer = output
-        .write_trailer()
-        .map_err(|err| error(RecorderErrorKind::Output, "cannot finalize the file", err));
-    drop(output);
-    if failure.is_some() {
-        // Producers run until the owner stops them: count what they still
-        // queue instead of letting it vanish with the channel.
-        for item in &rx {
-            match item {
-                Item::Video { .. } => video.frames_dropped += 1,
-                Item::Audio { .. } => audio.blocks_dropped += 1,
-                Item::Stop => break,
-            }
-        }
-    }
-    drop(rx);
-
-    let stats = RecordingStats {
-        path: config.path.display().to_string(),
-        container: CONTAINER.to_owned(),
-        duration_ms: video.end_ms().max(audio.end_ms()),
-        file_bytes: std::fs::metadata(&config.path).ok().map(|m| m.len()),
-        video: video.stats(shared.video_dropped.load(Ordering::Relaxed)),
-        audio: audio.stats(shared.audio_dropped.load(Ordering::Relaxed)),
-    };
-    let first_error = failure
-        .or(video_flushed.err())
-        .or(audio_flushed.err())
-        .or(trailer.err());
-    match first_error {
-        None => Ok(stats),
-        Some(mut error) => {
-            error.partial = Some(Box::new(stats));
-            Err(error)
-        }
-    }
-}
-
-fn open(
-    config: &RecorderConfig,
-) -> Result<(format::context::Output, VideoTrack, AudioTrack), RecorderError> {
+fn init(quiet: bool) -> Result<(), RecorderError> {
     ff::init()
         .map_err(|err| error(RecorderErrorKind::Internal, "cannot initialize FFmpeg", err))?;
-    // FFmpeg logs to stderr; keep it to real errors.
-    ff::log::set_level(ff::log::Level::Error);
-    let path = config.path.to_str().ok_or_else(|| {
-        RecorderError::new(
-            RecorderErrorKind::Output,
-            format!(
-                "the output path {} is not valid UTF-8",
-                config.path.display()
-            ),
-        )
-    })?;
-    // The `file:` prefix keeps FFmpeg from reading the name as another
-    // protocol (e.g. `pipe:1.mkv`); the container is fixed, not guessed.
-    let url = format!("file:{path}");
-    let mut output = format::output_as(&url, CONTAINER).map_err(|err| {
-        error(
-            RecorderErrorKind::Output,
-            &format!("cannot create {}", config.path.display()),
-            err,
-        )
-    })?;
-    let global_header = output
-        .format()
-        .flags()
-        .contains(format::Flags::GLOBAL_HEADER);
-    let mut video = VideoTrack::open(&mut output, &config.video, global_header)?;
-    let mut audio = AudioTrack::open(&mut output, &config.audio, global_header)?;
-    output.write_header().map_err(|err| {
-        error(
-            RecorderErrorKind::Output,
-            "cannot write the file header",
-            err,
-        )
-    })?;
-    // The muxer may pick its own stream time bases while writing the header.
-    video.stream_time_base = stream_time_base(&output, video.stream);
-    audio.stream_time_base = stream_time_base(&output, audio.stream);
-    Ok((output, video, audio))
+    let mut stays_quiet = QUIET.lock().unwrap_or_else(PoisonError::into_inner);
+    *stays_quiet |= quiet;
+    ff::log::set_level(if *stays_quiet {
+        ff::log::Level::Quiet
+    } else {
+        // FFmpeg logs to stderr; keep it to real errors.
+        ff::log::Level::Error
+    });
+    Ok(())
+}
+
+/// One open container with its two encoded tracks. Field order is drop
+/// order: the output (whose I/O may still call the interrupt callback while
+/// closing) goes before the interrupt state it points to.
+struct Session {
+    output: format::context::Output,
+    video: VideoTrack,
+    audio: AudioTrack,
+    interrupt: Arc<Interrupt>,
+}
+
+impl Session {
+    /// Open `url` with the muxer `container` (FFmpeg protocol `options`, e.g.
+    /// timeouts), add both tracks and write the header. Errors name the
+    /// output as `display` (never `url`, which may hold a secret) and use
+    /// `kind` for failures to open or write the output.
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        url: &str,
+        container: &str,
+        options: Dictionary,
+        display: &str,
+        kind: RecorderErrorKind,
+        video: &VideoSettings,
+        audio: &AudioSettings,
+        shared: Arc<Shared>,
+    ) -> Result<Self, RecorderError> {
+        let interrupt = Interrupt::new(shared);
+        let mut output = interrupt::open_output(url, container, options, &interrupt)
+            .map_err(|err| error(kind, &format!("cannot open {display}"), err))?;
+        let global_header = output
+            .format()
+            .flags()
+            .contains(format::Flags::GLOBAL_HEADER);
+        let mut video = VideoTrack::open(&mut output, video, global_header)?;
+        let mut audio = AudioTrack::open(&mut output, audio, global_header)?;
+        output
+            .write_header()
+            .map_err(|err| error(kind, &format!("cannot start {display}"), err))?;
+        // The muxer may pick its own stream time bases while writing the header.
+        video.stream_time_base = stream_time_base(&output, video.stream);
+        audio.stream_time_base = stream_time_base(&output, audio.stream);
+        Ok(Self {
+            output,
+            video,
+            audio,
+            interrupt,
+        })
+    }
+
+    /// Make the session's blocked and future I/O fail at once (the peer is
+    /// gone; do not wait for timeouts while closing).
+    fn abort(&self) {
+        self.interrupt.abort();
+    }
+
+    /// Encode one item; items stamped at or after `end_ns` are counted as
+    /// after the end. The stop marker is ignored (the caller handles it).
+    fn write(&mut self, item: Item, end_ns: i64) -> Result<(), RecorderError> {
+        match item {
+            Item::Video { frame, pts } => self.video.encode(&mut self.output, &frame, pts, end_ns),
+            Item::Audio { samples, len, pts } => {
+                self.audio
+                    .push(&mut self.output, &samples[..len], pts, end_ns)
+            }
+            Item::Stop => Ok(()),
+        }
+    }
+
+    /// Flush both tracks even if one fails, then write the trailer and close
+    /// the output; the first error wins.
+    fn finish(mut self) -> (VideoTrack, AudioTrack, Result<(), RecorderError>) {
+        let video_flushed = self.video.flush(&mut self.output);
+        let audio_flushed = self.audio.flush(&mut self.output);
+        let trailer = self
+            .output
+            .write_trailer()
+            .map_err(|err| error(RecorderErrorKind::Output, "cannot finalize the output", err));
+        drop(self.output);
+        drop(self.interrupt);
+        let result = video_flushed.and(audio_flushed).and(trailer);
+        (self.video, self.audio, result)
+    }
 }
 
 fn stream_time_base(output: &format::context::Output, index: usize) -> Rational {
@@ -165,6 +148,7 @@ fn drain(
     stream: usize,
     encoder_time_base: Rational,
     stream_time_base: Rational,
+    written: &mut u64,
 ) -> Result<(), RecorderError> {
     let mut packet = Packet::empty();
     loop {
@@ -185,6 +169,7 @@ fn drain(
         packet
             .write_interleaved(output)
             .map_err(|err| error(RecorderErrorKind::Output, "cannot write a packet", err))?;
+        *written += 1;
     }
 }
 
@@ -222,8 +207,10 @@ struct VideoTrack {
     /// Reused BGRA staging frame; only the scaler reads it.
     staging: frame::Video,
     frames_encoded: u64,
-    frames_dropped: u64,
+    pub(super) frames_dropped: u64,
     frames_after_end: u64,
+    /// Packets handed to the muxer without error.
+    packets_written: u64,
     first_pts: Option<i64>,
     last_pts: Option<i64>,
 }
@@ -309,6 +296,7 @@ impl VideoTrack {
             frames_encoded: 0,
             frames_dropped: 0,
             frames_after_end: 0,
+            packets_written: 0,
             first_pts: None,
             last_pts: None,
         })
@@ -361,6 +349,7 @@ impl VideoTrack {
             self.stream,
             self.time_base,
             self.stream_time_base,
+            &mut self.packets_written,
         )
     }
 
@@ -378,6 +367,7 @@ impl VideoTrack {
             self.stream,
             self.time_base,
             self.stream_time_base,
+            &mut self.packets_written,
         )
     }
 
@@ -387,6 +377,11 @@ impl VideoTrack {
 
     fn end_ms(&self) -> f64 {
         self.last_pts.map_or(0.0, |pts| self.pts_ms(pts + 1))
+    }
+
+    /// Frames accepted by the encoder that never reached the muxer.
+    fn undelivered(&self) -> u64 {
+        self.frames_encoded.saturating_sub(self.packets_written)
     }
 
     fn stats(&self, queue_dropped: u64) -> VideoTrackStats {
@@ -417,8 +412,10 @@ struct AudioTrack {
     /// De-interleaving scratch, one buffer per channel.
     planes: Vec<Vec<f32>>,
     samples_encoded: u64,
-    blocks_dropped: u64,
+    pub(super) blocks_dropped: u64,
     blocks_after_end: u64,
+    /// Packets (one encoder frame each) handed to the muxer without error.
+    packets_written: u64,
     padding_samples: u64,
     first_pts: Option<i64>,
     end_pts: Option<i64>,
@@ -502,6 +499,7 @@ impl AudioTrack {
             samples_encoded: 0,
             blocks_dropped: 0,
             blocks_after_end: 0,
+            packets_written: 0,
             padding_samples: 0,
             first_pts: None,
             end_pts: None,
@@ -577,6 +575,7 @@ impl AudioTrack {
                 self.stream,
                 self.time_base,
                 self.stream_time_base,
+                &mut self.packets_written,
             )?;
         }
     }
@@ -596,6 +595,7 @@ impl AudioTrack {
             self.stream,
             self.time_base,
             self.stream_time_base,
+            &mut self.packets_written,
         )
     }
 
@@ -605,6 +605,13 @@ impl AudioTrack {
 
     fn end_ms(&self) -> f64 {
         self.end_pts.map_or(0.0, |pts| self.pts_ms(pts))
+    }
+
+    /// Samples accepted by the encoder that never reached the muxer, in
+    /// whole encoder frames.
+    fn undelivered(&self) -> u64 {
+        let delivered = self.packets_written.saturating_mul(self.frame_size as u64);
+        self.samples_encoded.saturating_sub(delivered)
     }
 
     fn stats(&self, queue_dropped: u64) -> AudioTrackStats {

@@ -11,8 +11,9 @@ This repository is an **architecture and workflow scaffold**, not a working stre
 - M3 (first compositor): CPU compositor with scene graph, a 1080p/60 render loop on its own thread, and continuous screen capture as a live source.
 - M4 (audio mixer): a 48 kHz stereo mixer with gain, mute, meters and an explicit clipping and drift policy. It takes continuous audio capture and test tones.
 - M5 (first recording, Linux): the composited scene and the audio mix are recorded to H.264 + AAC in Matroska through the FFmpeg libraries.
+- M6 (live output, Linux): RTMP streaming with reconnects, running alongside a recording; the two fail independently.
 
-Streaming and a desktop UI are not implemented.
+A desktop UI is not implemented.
 
 ## Prerequisites
 
@@ -53,6 +54,10 @@ cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-m
 
 # Recording (H.264 + AAC in Matroska; never overwrites an existing file)
 cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 10000 [--screen] [--input <name>]
+
+# Streaming over RTMP; the key comes from an environment variable, never from the command line
+export STREAMFORGE_STREAM_KEY=…   # e.g. read it with `read -rs STREAMFORGE_STREAM_KEY`
+cargo run --release -p streamforge-cli -- --output-dir /tmp stream --url rtmp://live.example.com/app --duration-ms 60000 [--record take.mkv]
 ```
 
 StreamForge is not a replacement for OBS yet.
@@ -69,8 +74,9 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/capture-platform`: selects the capture backend for the target OS
 - `crates/video-compositor`: scene graph, CPU renderer and render loop
 - `crates/audio-engine`: mixer, meters, test tones and mixer thread
-- `crates/encoder-api`: recording settings, statistics and errors
-- `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska via FFmpeg)
+- `crates/encoder-api`: recording and streaming settings, secret stream key, statistics and errors
+- `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska) and streamer (→ FLV over RTMP) via FFmpeg
+- `crates/rtmp-test-server`: in-process RTMP ingest for tests
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)

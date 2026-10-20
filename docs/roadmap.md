@@ -129,13 +129,31 @@ Known limitations, deferred:
 
 ## M6 — Live output
 
-- Add RTMP output.
-- Handle reconnect, network errors, encoder failure and shutdown.
-- Keep recording and streaming as separate output consumers.
+- [x] Add RTMP output: H.264 (CBR, 2 s GOP) + AAC in FLV via FFmpeg's RTMP protocol on the `streamer` thread (`start_streaming`, `stop_streaming`, ADR 0006).
+- [x] Handle reconnect, network errors, encoder failure and shutdown:
+  - exponential-backoff reconnects with fresh encoders, keyframe first
+  - connect, handshake and writes bounded (5 s); stop interrupts blocked I/O after a 2 s grace, so a dead or silent peer cannot stall the output or its shutdown
+  - the reconnect count restarts only after a stable connection, so accept-and-drop servers still end in `failed`
+  - a `failed` state after the attempts, with counted drops
+  - the stream key handled as a secret
+- [x] Keep recording and streaming as separate output consumers: one shared media pipeline fans out to outputs with their own copy pools, queues, encoders and threads.
 
 Acceptance:
-- Stream to a local test server.
-- Recording can continue if streaming output fails, where the graph configuration allows it.
+- [x] Stream to a local test server: an in-process FFmpeg RTMP ingest (`rtmp-test-server`). The tests check codecs, 1920×1080, a keyframe first and A/V spans; reconnect and give-up are covered too.
+  - Manual check (2026-10-20, release): `streamforge stream --record` against `ffmpeg -listen 1` streamed 300 frames at 1080p60 / 6 Mbit/s with 0 dropped, while the recording got 317 frames with 0 dropped.
+- [x] Recording can continue if streaming output fails, where the graph configuration allows it (`crates/streamforge-engine/tests/streaming.rs`):
+  - the ingest drops the connection and never returns
+  - the stream ends in `failed`, while `recording_active` stays true
+  - the recorded file covers the whole run, with no audio drops and every video tick accounted for
+
+Known limitations, deferred:
+- Linux only (M9). `rtmps://` depends on the TLS support of the linked FFmpeg.
+- The stream uses the canvas resolution (1080p60); no scaling, no hardware encoder, one stream at a time.
+- Outputs share the sources of the first output; changing sources needs all outputs stopped (scene commands come with M7).
+- FFmpeg's own log output is disabled once streaming is used (it can contain the stream path); a redacting log callback would keep diagnostics.
+- Name resolution inside FFmpeg is neither bounded by the I/O timeout nor interruptible.
+- Each output copies every frame and converts it separately (isolation over memory bandwidth).
+- No push events for state changes; clients poll `get_status`.
 
 ## M7 — Desktop UI
 

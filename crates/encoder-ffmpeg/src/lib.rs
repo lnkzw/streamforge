@@ -116,7 +116,18 @@ impl OutputInput {
     /// Count a video frame the producer could not even prepare (e.g. no free
     /// copy buffer), so it shows up in `frames_dropped`.
     pub fn count_dropped_video(&self) {
-        self.shared.video_dropped.fetch_add(1, Ordering::Relaxed);
+        self.count_dropped(1, 0);
+    }
+
+    /// Count frames and audio blocks that never reached this output (e.g. a
+    /// producer that did not deliver before the output ended).
+    pub fn count_dropped(&self, video: u64, audio: u64) {
+        self.shared
+            .video_dropped
+            .fetch_add(video, Ordering::Relaxed);
+        self.shared
+            .audio_dropped
+            .fetch_add(audio, Ordering::Relaxed);
     }
 
     /// Like [`Self::send_video`] but waits for queue space instead of

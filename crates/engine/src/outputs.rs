@@ -205,11 +205,12 @@ impl Engine {
             .recording
             .take()
             .ok_or_else(|| CommandError::new(ErrorCode::InvalidState, "no recording is running"))?;
-        // One end for both tracks: what the producers emit until they are
-        // detached is cut (and counted).
-        recorder.end_at(now_since(t0));
+        // One end for both tracks: what the producers emit after it is cut
+        // (and counted); what they owe before it is waited for.
+        let end = now_since(t0);
+        recorder.end_at(end);
         if let Some(pipeline) = &self.pipeline {
-            pipeline.detach(OutputId::Recording);
+            pipeline.finish_output(OutputId::Recording, end);
         }
         let result = recorder.stop();
         let (pipeline, mut warnings) = self.release_pipeline();
@@ -294,9 +295,10 @@ impl Engine {
             .streaming
             .take()
             .ok_or_else(|| CommandError::new(ErrorCode::InvalidState, "no stream is open"))?;
-        streamer.end_at(now_since(t0));
+        let end = now_since(t0);
+        streamer.end_at(end);
         if let Some(pipeline) = &self.pipeline {
-            pipeline.detach(OutputId::Streaming);
+            pipeline.finish_output(OutputId::Streaming, end);
         }
         let result = streamer.stop();
         let (pipeline, mut warnings) = self.release_pipeline();

@@ -787,8 +787,12 @@ mod tests {
         let recording = &report.recording;
         assert_eq!(recording.audio.blocks_dropped, 0, "{recording:?}");
         assert_eq!(recording.audio.gap_samples, 0, "{recording:?}");
-        // Every frame tick before the cut is encoded or counted.
-        let ticks = (recording.audio.end_ms.expect("audio") * 60.0 / 1000.0).round() as u64;
+        // No silent loss: every tick from the first frame to the cut is
+        // encoded, dropped or skipped (skips cover the whole pipeline run,
+        // so they can exceed the output's share), and no frame is invented.
+        let first = recording.video.first_pts_ms.expect("video start");
+        let end = recording.audio.end_ms.expect("audio");
+        let ticks = ((end - first) * 60.0 / 1000.0).round() as u64;
         let skipped = report
             .pipeline
             .render
@@ -796,8 +800,12 @@ mod tests {
             .map_or(0, |r| r.skipped_ticks);
         let accounted = recording.video.frames_encoded + recording.video.frames_dropped + skipped;
         assert!(
-            accounted.abs_diff(ticks) <= 1,
+            accounted + 2 >= ticks,
             "{accounted} vs {ticks}: {recording:?}"
+        );
+        assert!(
+            recording.video.frames_encoded + recording.video.frames_dropped <= ticks + 1,
+            "{recording:?}"
         );
         let _ = server.join();
     }

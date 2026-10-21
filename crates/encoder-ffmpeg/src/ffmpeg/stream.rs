@@ -19,7 +19,7 @@ use media_core::MediaTimestamp;
 use super::{AudioTrack, EncoderChoice, Session, VideoTrack, init};
 use crate::{
     AudioTrackStats, Item, Ready, RecorderError, RecorderErrorKind, Shared, StreamConfig,
-    StreamState, StreamStats, VideoTrackStats,
+    StreamState, StreamStats, VideoEncoderInfo, VideoTrackStats,
 };
 
 const CONTAINER: &str = "flv";
@@ -285,9 +285,11 @@ impl<'a> Stream<'a> {
         let settings = &self.config;
         let mut video = self.video.unwrap_or_else(|| VideoTrackStats {
             // No connection got as far as opening an encoder.
-            encoder: "none".to_owned(),
-            hardware: false,
-            encoders_skipped: self.encoders.skipped.clone(),
+            encoder: VideoEncoderInfo {
+                encoder: "none".to_owned(),
+                hardware: false,
+                skipped: Vec::new(),
+            },
             width: settings.video.width,
             height: settings.video.height,
             fps: settings.video.fps,

@@ -13,8 +13,8 @@ GPUs and media engines encode H.264 with little CPU, but which one exists, and w
 ### Choosing an encoder
 
 - **Preference:** `VideoSettings` has a preference (`EncoderPreference`) and a rate control (`RateControl`). Encoder names and x264 options no longer live in `encoder-api`; `encoder-ffmpeg` maps the preference and the rate to encoders and options.
-  - `auto` (default): this OS's hardware candidates, then libx264 (then OpenH264, for builds without the GPL).
-  - `software`: libx264 (or OpenH264) only.
+  - `auto` (default): this OS's hardware candidates, then the software ones: libx264, OpenH264 (builds without the GPL), and finally whatever H.264 encoder the build has (e.g. `h264_mf` in an LGPL Windows build).
+  - `software`: the software candidates only.
   - `hardware`: hardware candidates only; the output fails with `unsupported` if none opens.
 - **Candidates, most common first:**
 
@@ -24,13 +24,14 @@ GPUs and media engines encode H.264 with little CPU, but which one exists, and w
   | Windows | `h264_nvenc`, `h264_qsv`, `h264_amf` |
   | macOS | `h264_videotoolbox` |
 
-- **Trying them:** the first candidate that opens is used.
-  - A missing GPU, driver or runtime fails at open, quickly; FFmpeg's log is muted while hardware candidates are tried, because those failures are expected.
+- **Trying them:** the first candidate that works is used.
+  - "Works" means it opens and encodes a test frame: some drivers accept the session and reject the first frame. A throwaway instance encodes one frame and is flushed; then the real one is opened.
+  - A missing GPU, driver or runtime fails quickly. FFmpeg's log is muted while hardware candidates are tried, because those failures are expected; no lock is held meanwhile, and the level comes back afterwards (also after a panic).
   - Each failure is kept with its reason (`skipped`).
-  - A stream keeps the encoder of its first connection for its reconnects, instead of trying failing candidates again.
+  - The encoder that worked moves to the front of the list: a stream's reconnects try it first and still fall back to the others if it stops working (a GPU reset, a session limit).
 - **Reporting:**
   - `start_recording` and `start_streaming` return `video_encoder: {encoder, hardware, skipped}`.
-  - The final report's video track has `encoder`, `hardware` and `encoders_skipped`.
+  - The final report's video track carries the same fields (`encoder`, `hardware`, `skipped`), from one `VideoEncoderInfo`, for the last session.
   - The desktop UI logs the encoder, and the CLI takes `--video-encoder`.
 
 ### Rate control per encoder
@@ -43,6 +44,8 @@ The same intent maps to each encoder's own options. The table in `encoders.rs` i
   - VAAPI: `rc_mode=CBR`
   - NVENC: `rc=cbr`, `tune=ll`, forced IDR
   - AMF: `rc=cbr`, low-latency usage
+  - OpenH264: `rc_mode=bitrate`
+  - VideoToolbox: average bit rate within `maxrate`, not strict CBR. Its `constant_bit_rate` exists on Apple silicon only and would make the encoder fail to open on Intel Macs. RTMP ingests accept this.
 
 ### Frames
 
@@ -53,17 +56,22 @@ The same intent maps to each encoder's own options. The table in `encoders.rs` i
   - its invariants (ownership of every buffer reference, frame ownership, single thread) are documented in the module. Apart from `ffmpeg/interrupt.rs`, it is the only `unsafe` code of the outputs.
 - The colour tags (BT.601 matrix, limited range, BT.709 primaries, sRGB transfer) are set on every encoder context, as before.
 - An encoder that never received a frame is not flushed: FFmpeg 8's `h264_vaapi` crashes when flushed empty.
+- `vaapi.rs` has its own tests. Where a device exists, they create surfaces, upload a frame and attach the surfaces to an encoder twice without leaking. Without one (CI), creation must fail with a clean error.
 
 ## Verification
 
 - **Development machine (Linux, AMD RX 6800, Mesa VAAPI):**
   - `auto` picks `h264_vaapi`, and every recording, streaming and acceptance test runs on it and passes, including decoded colour bars, colour tags and A/V sync.
   - A 5 s reference recording took 2.0 s of user CPU time with VAAPI against 4.0 s with libx264, both with 300 frames encoded and none dropped.
-  - `h264_amf` fails to open there (no AMF runtime) and is reported as skipped.
+  - FFmpeg's `h264_amf` fails to open there (no AMF runtime); it is not a Linux candidate.
 - **CI runners have no GPU:**
   - The tests cover the fallback (`auto` → libx264 with every hardware candidate's reason), the `hardware` error and libx264 itself.
   - A CI step prints which encoder `auto` picked on each runner.
 - **Untested:** NVENC, Quick Sync, AMF and VideoToolbox on real hardware. Their options follow FFmpeg's documentation; an option an encoder does not know is ignored by FFmpeg, and an encoder that fails to open falls back.
+
+## Dependencies
+
+`encoder-api` now depends on `schemars` (already a workspace dependency of `capture-api` and `command-api`): `EncoderPreference` derives `JsonSchema`, so the `video_encoder` parameter appears in the commands' parameter schemas and MCP tool definitions. No new crate enters the build.
 
 ## Consequences
 

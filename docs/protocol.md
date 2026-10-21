@@ -258,7 +258,7 @@ If `start_recording` fails, the file it created is removed.
 `stop_recording` sets one end time for both tracks, detaches the output, drains its queue, flushes the encoders and writes the trailer. Report: `{"recording", "pipeline_stopped", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
 
 - **`recording`:** `path`, `container`, `duration_ms`, `file_bytes`, plus:
-  - `video` (`encoder`, `hardware`, `encoders_skipped`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
+  - `video` (`encoder`, `hardware`, `skipped`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
   - `audio` (`encoder`, `rate`, `channels`, `bitrate`, `samples_encoded`, `blocks_dropped`, `blocks_after_end`, `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples`, `first_pts_ms`, `end_ms`)
 
   Both tracks are cut at the stop time; `*_after_end` counts what producers emitted while stopping.

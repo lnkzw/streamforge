@@ -91,7 +91,8 @@ pub struct VideoEncoderInfo {
     pub encoder: String,
     /// The encoder runs on a GPU or media engine.
     pub hardware: bool,
-    /// Encoders tried before `encoder`, in order.
+    /// Encoders tried before `encoder`, in order (empty when the first one
+    /// worked).
     pub skipped: Vec<SkippedEncoder>,
 }
 
@@ -122,12 +123,10 @@ impl AudioSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoTrackStats {
-    pub encoder: String,
-    /// The encoder runs on a GPU or media engine.
-    pub hardware: bool,
-    /// Encoders tried before `encoder`, in order (empty when the first one
-    /// worked). Unchanged for the rest of a stream after a reconnect.
-    pub encoders_skipped: Vec<SkippedEncoder>,
+    /// The encoder of the (last) session and the candidates tried before
+    /// it; serialized as `encoder`, `hardware` and `skipped`.
+    #[serde(flatten)]
+    pub encoder: VideoEncoderInfo,
     pub width: u32,
     pub height: u32,
     pub fps: u32,

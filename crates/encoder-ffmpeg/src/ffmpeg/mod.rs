@@ -34,32 +34,47 @@ use interrupt::Interrupt;
 /// logging back on after a streamer turned it off.
 static QUIET: Mutex<bool> = Mutex::new(false);
 
-/// Run `f` with FFmpeg's log output off, e.g. while trying hardware
-/// encoders whose failures are expected and reported elsewhere.
-fn quietly<T>(f: impl FnOnce() -> T) -> T {
-    let stays_quiet = QUIET.lock().unwrap_or_else(PoisonError::into_inner);
-    ff::log::set_level(ff::log::Level::Quiet);
-    let result = f();
-    if !*stays_quiet {
-        ff::log::set_level(ff::log::Level::Error);
+/// Mutes FFmpeg's log output while it lives: trying hardware encoders
+/// fails noisily where a GPU, driver or runtime is missing, and those
+/// failures are reported in `skipped`. The level comes back when the guard
+/// drops (also on a panic), unless a streamer has turned logging off for
+/// good meanwhile. No lock is held while the guard lives; other outputs'
+/// FFmpeg messages are muted for those few moments too.
+struct Muted;
+
+impl Muted {
+    fn new() -> Self {
+        ff::log::set_level(ff::log::Level::Quiet);
+        Self
     }
-    result
 }
 
-/// The encoders an output may still try. After one opened, only that one
-/// is left, so a stream's reconnects do not try failing encoders again;
-/// `skipped` keeps why the others were not used.
+impl Drop for Muted {
+    fn drop(&mut self) {
+        let stays_quiet = QUIET.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*stays_quiet {
+            ff::log::set_level(ff::log::Level::Error);
+        }
+    }
+}
+
+/// The order in which an output tries encoders. The one that opened moves
+/// to the front, so a stream's reconnects try it first and still fall back
+/// to the others if it stops working.
 pub(crate) struct EncoderChoice {
     candidates: Vec<encoders::Candidate>,
-    skipped: Vec<SkippedEncoder>,
 }
 
 impl EncoderChoice {
     pub(crate) fn new(settings: &VideoSettings) -> Self {
         Self {
             candidates: encoders::candidates(settings.encoders),
-            skipped: Vec::new(),
         }
+    }
+
+    fn prefer(&mut self, chosen: encoders::Candidate) {
+        self.candidates.retain(|candidate| *candidate != chosen);
+        self.candidates.insert(0, chosen);
     }
 }
 
@@ -255,26 +270,64 @@ struct VideoTrack {
     last_pts: Option<i64>,
 }
 
-/// Open one candidate; the error says why it cannot be used here.
-fn open_encoder(
+/// The codec a candidate names (`ANY_H264`: FFmpeg's default H.264 encoder).
+fn find_codec(candidate: encoders::Candidate) -> Option<ff::Codec> {
+    if candidate.name == encoders::ANY_H264 {
+        encoder::find(codec::Id::H264)
+    } else {
+        encoder::find_by_name(candidate.name)
+    }
+}
+
+/// Opening alone does not prove an encoder works: some drivers accept the
+/// session and reject the first frame. So a throwaway instance encodes one
+/// frame first; only then is the real one opened.
+fn try_encoder(
+    codec: ff::Codec,
     candidate: encoders::Candidate,
     settings: &VideoSettings,
+    fps: i32,
     global_header: bool,
 ) -> Result<Opened, String> {
-    let codec = encoder::find_by_name(candidate.name)
-        .ok_or_else(|| "not in this FFmpeg build".to_owned())?;
+    let mut probe = open_encoder(codec, candidate, settings, fps, global_header)?;
+    let mut picture = frame::Video::new(probe.picture_format, settings.width, settings.height);
+    #[cfg(target_os = "linux")]
+    if let Some(surfaces) = &probe.surfaces {
+        picture = surfaces.upload(&picture)?;
+    }
+    picture.set_pts(Some(0));
+    probe
+        .encoder
+        .send_frame(&picture)
+        .and_then(|()| probe.encoder.send_eof())
+        .map_err(|err| format!("rejects frames: {err}"))?;
+    let mut packet = Packet::empty();
+    loop {
+        match probe.encoder.receive_packet(&mut packet) {
+            Ok(()) => {}
+            Err(ff::Error::Eof) => break,
+            Err(err) => return Err(format!("rejects frames: {err}")),
+        }
+    }
+    drop(probe);
+    open_encoder(codec, candidate, settings, fps, global_header)
+}
+
+/// Open one candidate; the error says why it cannot be used here.
+fn open_encoder(
+    codec: ff::Codec,
+    candidate: encoders::Candidate,
+    settings: &VideoSettings,
+    fps: i32,
+    global_header: bool,
+) -> Result<Opened, String> {
     let mut context = codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()
         .map_err(|err| format!("cannot create the encoder: {err}"))?;
-    let fps = i32::try_from(settings.fps)
-        .ok()
-        .filter(|fps| *fps > 0)
-        .ok_or_else(|| format!("frame rate {} is out of range", settings.fps))?;
-    let time_base = Rational::new(1, fps);
     context.set_width(settings.width);
     context.set_height(settings.height);
-    context.set_time_base(time_base);
+    context.set_time_base(Rational::new(1, fps));
     context.set_frame_rate(Some(Rational::new(fps, 1)));
     // Tag what the conversion produces: swscale's default BGRA to YUV
     // matrix is BT.601 with limited range. The canvas is sRGB (BT.709
@@ -321,7 +374,7 @@ fn open_encoder(
     // No typed setter for the transfer in ffmpeg-next; it is a codec
     // context option.
     options.set("color_trc", "iec61966-2-1");
-    for (key, value) in encoders::options(candidate.name, settings.rate, settings.fps) {
+    for (key, value) in encoders::options(codec.name(), settings.rate, settings.fps) {
         options.set(key, &value);
     }
     let encoder = context
@@ -353,36 +406,43 @@ impl VideoTrack {
         choice: &mut EncoderChoice,
         global_header: bool,
     ) -> Result<Self, RecorderError> {
+        let fps = positive_i32(settings.fps, "frame rate")?;
+        let time_base = Rational::new(1, fps);
+        let mut skipped: Vec<SkippedEncoder> = Vec::new();
         let mut opened = None;
         for candidate in &choice.candidates {
+            let Some(codec) = find_codec(*candidate) else {
+                if candidate.name != encoders::ANY_H264 {
+                    skipped.push(SkippedEncoder {
+                        encoder: candidate.name.to_owned(),
+                        reason: "not in this FFmpeg build".to_owned(),
+                    });
+                }
+                continue;
+            };
+            // FFmpeg's default H.264 encoder is usually one tried already.
+            if skipped.iter().any(|skip| skip.encoder == codec.name()) {
+                continue;
+            }
             let attempt = if candidate.hardware {
-                // Missing GPUs and drivers are expected; the report says why.
-                quietly(|| open_encoder(*candidate, settings, global_header))
+                let _muted = Muted::new();
+                try_encoder(codec, *candidate, settings, fps, global_header)
             } else {
-                open_encoder(*candidate, settings, global_header)
+                try_encoder(codec, *candidate, settings, fps, global_header)
             };
             match attempt {
                 Ok(encoder) => {
                     opened = Some((*candidate, encoder));
                     break;
                 }
-                Err(reason) => {
-                    if !choice
-                        .skipped
-                        .iter()
-                        .any(|skip| skip.encoder == candidate.name)
-                    {
-                        choice.skipped.push(SkippedEncoder {
-                            encoder: candidate.name.to_owned(),
-                            reason,
-                        });
-                    }
-                }
+                Err(reason) => skipped.push(SkippedEncoder {
+                    encoder: codec.name().to_owned(),
+                    reason,
+                }),
             }
         }
         let Some((candidate, opened)) = opened else {
-            let tried: Vec<String> = choice
-                .skipped
+            let tried: Vec<String> = skipped
                 .iter()
                 .map(|skip| format!("{}: {}", skip.encoder, skip.reason))
                 .collect();
@@ -396,8 +456,7 @@ impl VideoTrack {
                 format!("no {kind}H.264 encoder opened ({})", tried.join("; ")),
             ));
         };
-        choice.candidates = vec![candidate];
-        let time_base = Rational::new(1, positive_i32(settings.fps, "frame rate")?);
+        choice.prefer(candidate);
         let stream = {
             let mut stream = output.add_stream(opened.codec).map_err(|err| {
                 error(
@@ -427,10 +486,10 @@ impl VideoTrack {
             )
         })?;
         Ok(Self {
+            name: opened.codec.name().to_owned(),
             encoder: opened.encoder,
-            name: candidate.name.to_owned(),
             hardware: candidate.hardware,
-            skipped: choice.skipped.clone(),
+            skipped,
             settings: settings.clone(),
             picture_format: opened.picture_format,
             #[cfg(target_os = "linux")]
@@ -555,9 +614,7 @@ impl VideoTrack {
 
     fn stats(&self, queue_dropped: u64) -> VideoTrackStats {
         VideoTrackStats {
-            encoder: self.name.clone(),
-            hardware: self.hardware,
-            encoders_skipped: self.skipped.clone(),
+            encoder: self.info(),
             width: self.settings.width,
             height: self.settings.height,
             fps: self.settings.fps,

@@ -10,6 +10,7 @@ pub(crate) enum Upload {
     /// Software frames (YUV 4:2:0 or NV12, whichever the encoder takes).
     Software,
     /// NV12 frames uploaded to VAAPI surfaces first (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Vaapi,
 }
 
@@ -46,7 +47,12 @@ const HARDWARE: &[Candidate] = &[hardware("h264_videotoolbox", Upload::Software)
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 const HARDWARE: &[Candidate] = &[];
 
-/// Software encoders: libx264, else OpenH264 (for builds without the GPL).
+/// Stands for FFmpeg's default H.264 encoder, whatever the build has
+/// (e.g. `h264_mf` in an LGPL Windows build); reported by its real name.
+pub(crate) const ANY_H264: &str = "h264";
+
+/// Software encoders: libx264, else OpenH264 (for builds without the GPL),
+/// else whatever H.264 encoder the build has.
 const SOFTWARE: &[Candidate] = &[
     Candidate {
         name: "libx264",
@@ -55,6 +61,11 @@ const SOFTWARE: &[Candidate] = &[
     },
     Candidate {
         name: "libopenh264",
+        hardware: false,
+        upload: Upload::Software,
+    },
+    Candidate {
+        name: ANY_H264,
         hardware: false,
         upload: Upload::Software,
     },
@@ -131,7 +142,10 @@ pub(crate) fn options(encoder: &str, rate: RateControl, fps: u32) -> Vec<(&'stat
                 ],
                 "h264_qsv" => &[("preset", "veryfast")],
                 "h264_amf" => &[("usage", "lowlatency"), ("rc", "cbr")],
+                // Average bit rate within `maxrate`: VideoToolbox's strict
+                // CBR (`constant_bit_rate`) exists on Apple silicon only.
                 "h264_videotoolbox" => &[("realtime", "1")],
+                "libopenh264" => &[("rc_mode", "bitrate")],
                 _ => &[],
             };
             options.extend(owned(extra));
@@ -155,7 +169,7 @@ mod tests {
     fn auto_tries_hardware_first_and_ends_with_software() {
         let auto = candidates(EncoderPreference::Auto);
         let software = names(EncoderPreference::Software);
-        assert_eq!(software, ["libx264", "libopenh264"]);
+        assert_eq!(software, ["libx264", "libopenh264", ANY_H264]);
         assert!(auto.ends_with(&candidates(EncoderPreference::Software)));
         assert!(
             candidates(EncoderPreference::Hardware)

@@ -132,3 +132,60 @@ impl Drop for Surfaces {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ff::format::Pixel;
+
+    /// With a VAAPI device (e.g. the development machine) surfaces are
+    /// created and filled; without one (CI) creation fails cleanly.
+    #[test]
+    fn surfaces_upload_frames_or_fail_without_a_device() {
+        ff::init().expect("init");
+        match Surfaces::new(64, 64) {
+            Ok(surfaces) => {
+                let software = frame::Video::new(Pixel::NV12, 64, 64);
+                let uploaded = surfaces.upload(&software).expect("upload");
+                assert_eq!(uploaded.format(), Pixel::VAAPI);
+                assert_eq!((uploaded.width(), uploaded.height()), (64, 64));
+                // Surfaces return to the pool; the pool outlives a frame.
+                drop(surfaces);
+                drop(uploaded);
+            }
+            Err(reason) => {
+                println!("no VAAPI here: {reason}");
+                assert!(reason.contains("VAAPI"), "{reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_encoder_context_takes_its_own_reference() {
+        ff::init().expect("init");
+        let (Ok(surfaces), Some(codec)) =
+            (Surfaces::new(64, 64), encoder::find_by_name("h264_vaapi"))
+        else {
+            return;
+        };
+        let mut context = ff::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .expect("context");
+        surfaces.attach(&mut context).expect("attach");
+        // Attaching again replaces the reference instead of leaking it.
+        surfaces.attach(&mut context).expect("attach again");
+        // SAFETY: reading a field of the live context.
+        assert!(unsafe { !(*context.as_ptr()).hw_frames_ctx.is_null() });
+        drop(surfaces);
+        // The context still holds its reference and frees it on drop.
+        drop(context);
+    }
+
+    #[test]
+    fn impossible_sizes_are_errors() {
+        ff::init().expect("init");
+        assert!(Surfaces::new(u32::MAX, 64).is_err());
+        assert!(Surfaces::new(0, 0).is_err());
+    }
+}

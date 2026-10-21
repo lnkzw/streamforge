@@ -343,7 +343,7 @@ fn the_software_preference_records_with_x264() {
     assert_eq!(info.encoder, "libx264");
     assert!(!info.hardware && info.skipped.is_empty(), "{info:?}");
     let stats = feed(recorder);
-    assert_eq!(stats.video.encoder, "libx264");
+    assert_eq!(stats.video.encoder.encoder, "libx264");
     assert_eq!(stats.video.frames_encoded, u64::from(SECONDS * FPS));
 }
 
@@ -356,7 +356,7 @@ fn the_hardware_preference_uses_hardware_or_says_why_not() {
             println!("hardware encoder: {info:?}");
             assert!(info.hardware, "{info:?}");
             let stats = feed(recorder);
-            assert!(stats.video.hardware);
+            assert!(stats.video.encoder.hardware);
             assert_eq!(stats.video.frames_encoded, u64::from(SECONDS * FPS));
             assert_eq!(stats.video.frames_dropped, 0);
         }
@@ -387,6 +387,5 @@ fn auto_falls_back_to_software_and_says_why() {
         assert!(info.skipped.iter().all(|skip| !skip.reason.is_empty()));
     }
     let stats = feed(recorder);
-    assert_eq!(stats.video.encoder, info.encoder);
-    assert_eq!(stats.video.encoders_skipped, info.skipped);
+    assert_eq!(stats.video.encoder, info);
 }

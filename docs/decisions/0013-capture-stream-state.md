@@ -41,17 +41,23 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
 
 ### Restarting a source (`restart_source`)
 
-- **Command:** `restart_source {scene, name}`, `sensitive` like `add_source`, because it starts a screen capture. It returns the scene list.
-- **Scope:** screen sources of the active scene, while a pipeline runs.
-  - Other kinds are `invalid_params`.
-  - Another scene, or no pipeline, is `invalid_state`: nothing captures them.
+- **Command:** `restart_source {scene, name, source_id?}`. It is `sensitive` like `add_source`, because it starts a screen capture, and destructive (ADR 0008's rule): it ends the running capture, and a picker choice is lost. It returns the scene list.
+- **Scope:** screen sources with a running capture, while the pipeline runs.
+  - Those are the active scene's sources and those kept for other scenes (captures keep running while their source is in any scene).
+  - Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped (where a new capture would never be rendered) is `invalid_state`.
   - Audio inputs and the legacy screen layer cannot be restarted: the mixer's inputs are fixed while it runs. They need a new pipeline.
-- **How:** the old capture leaves the list of running captures, and the scene is applied again through the path of a scene change.
-  - That path starts the source's capture and gives the compositor the new mailbox. The compositor treats it as a new source and retires the old one's statistics.
-  - On success, the old capture is stopped, and its outcome joins `scene_captures`. On error, it goes back into the list unchanged.
-  - The new capture starts before the old one ends, so a failed start leaves the old one (possibly ended) in place.
-- **Pickers:** a picker source would ask the user again. While a recording or stream is open this is refused (`invalid_state`), with the same rule and message as for adding one. A named source (`source_id`) restarts at any time.
-- **Outputs keep running.** Until the new capture's first frame, the source is not drawn, and the compositor counts `missing_ticks`. The output gets every frame, so the file has no gap.
+- **`source_id`:** restart on another source from `list_screen_sources`, kept by the scene. This is what makes restarting useful for windows:
+  - Window ids name a handle (Windows: process and handle; macOS: window number), so a closed window's id never comes back.
+  - A display's id does come back when it reconnects, so the same id works then.
+  - On Linux every screen source is a picker source (no named sources yet), so a restart there asks the user and works only while no output is open.
+- **How:**
+  - The old capture leaves the list of running captures.
+  - A source of the rendered scene goes through the path of a scene change: it starts the capture and gives the compositor the new mailbox. The compositor treats it as a new source and retires the old one's statistics.
+  - A kept source of another scene starts alone; nothing renders it until its scene is active.
+  - On success, the old capture is stopped, and its outcome joins `scene_captures`.
+  - On error, the old capture goes back into the list unchanged and the scene keeps its old `source_id`. The new capture starts before the old one ends, so a failed start leaves the old one (possibly ended) in place. A new capture that started before a later error is stopped and reported.
+- **Pickers:** a picker source would ask the user again. While a recording or stream is open this is refused (`invalid_state`), as for adding one. A named source restarts at any time.
+- **Outputs keep running.** The compositor renders every tick whatever its sources do. Until the new capture's first frame, the source is not drawn, and the compositor counts `missing_ticks`. Output drops, if any, are counted as always. Whether a restart costs output frames has not been measured (assessment step 7).
 
 ## Alternatives considered
 
@@ -71,7 +77,9 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
   - CLI: progress line with an ended capture
 - **Engine tests (fake backend):**
   - A recording runs, the fake screen stream ends, and `get_health` shows `ended` with the reason while the recording keeps running. After the stop, `captures` is empty.
-  - `restart_source` on the ended named source starts a new capture during the recording. Health shows it `running`, frames keep being encoded, the compositor consumes the new capture's frame, and the stop report has both captures. The test also covers the refusals: no pipeline, another scene, a non-screen source, an unknown source.
+  - `restart_source` on the ended named source starts a new capture during the recording. Health shows it `running`, frames keep being encoded, the compositor consumes the new capture's frame, and the stop report has both captures. The test also covers the refusals: no pipeline, a source without a capture, a non-screen source, an unknown source.
+  - Restarting on a gone `source_id` fails with `not_found` and changes nothing (old id, old capture); on another id, the scene keeps the new one.
+  - A kept capture of a scene that is not rendered restarts.
   - A picker source is refused while recording, and its running capture stays. With only the preview left, it restarts.
 - **Native tests on CI:**
   - Windows: a PowerShell form with a unique title is captured, its process is killed, and the stream must report `ended` within 10 s.

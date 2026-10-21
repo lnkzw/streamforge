@@ -96,7 +96,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `add_source`               | see below | `sensitive` | Scene list |
 | `update_source`            | see below | `control` | Scene list |
 | `remove_source`            | see below | `control` | Scene list |
-| `restart_source`           | see below | `sensitive` | Scene list |
+| `restart_source`           | see below | `sensitive`, destructive | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `set_mixer_strip`          | see below | `control` | Mixer state |
 | `set_master_gain`          | see below | `control` | Mixer state |
@@ -356,12 +356,14 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
 - **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
 - **`remove_source`:** params `scene`, `name`.
-- **`restart_source`:** params `scene`, `name`. Ends a screen source's capture and starts it again, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, the source is not drawn (counted in `missing_ticks`).
-  - Only screen sources (`invalid_params` otherwise) of the active scene while a pipeline runs (`invalid_state` otherwise) restart.
-  - A picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`), as for `add_source`. A named source restarts any time.
-  - The new capture starts before the old one ends. If it fails, the old capture keeps running and the error is returned.
+- **`restart_source`:** params `scene`, `name`, optional `source_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
+  - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
+  - **`source_id`:** capture this source from `list_screen_sources` from now on; the scene keeps it. A closed window's id never comes back, so restarting a window source needs the id of a window that exists. A display's id returns when the display reconnects, so the same id works then.
+  - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `source_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
+  - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `source_id`, and the error is returned (e.g. `not_found` for a gone source).
   - Both captures' reports are in the output reports' `scene_captures`.
   - Live audio inputs and the screen layer cannot be restarted: the mixer's inputs are fixed while it runs.
+  - It is destructive: it ends a running capture, and a picker choice is gone.
 
 Mixer:
 - **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.

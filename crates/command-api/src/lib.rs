@@ -103,6 +103,8 @@ pub enum Command {
     RestartSource {
         scene: String,
         name: String,
+        /// Capture this source from now on (the scene keeps it).
+        source_id: Option<String>,
     },
     /// Mixer strips, gains and peak levels.
     GetMixer,

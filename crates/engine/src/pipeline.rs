@@ -20,7 +20,8 @@ use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThre
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
     AudioSetup, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
-    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, StripChange, StripState,
+    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, SourceSpec, StripChange,
+    StripState,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -238,30 +239,62 @@ impl Pipeline {
         }
     }
 
-    /// Start screen source `id` of the rendered `scene` again, through the
-    /// same path as a scene change (the compositor gets the new capture's
-    /// frames), then end its old capture. On error the old capture keeps
-    /// running and nothing changes.
+    /// Start the running capture of screen source `source` again, then end
+    /// the old one. A source of the rendered scene goes through the path of
+    /// a scene change, so the compositor gets the new capture's frames; a
+    /// kept source of another scene starts alone. On error the old capture
+    /// keeps running (a new one that started first is stopped and reported).
     pub fn restart_screen(
         &mut self,
         capture: &mut dyn CaptureBackend,
-        scene: &SceneSpec,
-        id: u32,
+        rendered: &SceneSpec,
+        source: &SourceSpec,
         keep: &[u32],
         allow_new_captures: bool,
     ) -> Result<(), CommandError> {
         let index = self
             .scene_screens
             .iter()
-            .position(|screen| screen.id == id)
+            .position(|screen| screen.id == source.id)
             .ok_or_else(|| {
                 CommandError::new(
                     ErrorCode::InvalidState,
-                    "this source is not capturing; it starts when its scene is rendered",
+                    format!(
+                        "`{}` has no running capture: its scene was not rendered since the \
+                         pipeline started",
+                        source.name
+                    ),
                 )
             })?;
+        let picker = matches!(
+            source.kind,
+            SourceKind::Screen {
+                source_id: None,
+                ..
+            }
+        );
+        if picker && !allow_new_captures {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "restarting `{}` would open the system picker, which would block the engine \
+                     while recording or streaming; restart it while only the preview runs, or \
+                     pass a `source_id` from list_screen_sources",
+                    source.name
+                ),
+            ));
+        }
         let old = self.scene_screens.remove(index);
-        match self.apply_scene(capture, scene, keep, allow_new_captures) {
+        let started = if rendered.sources.iter().any(|other| other.id == source.id) {
+            self.apply_scene(capture, rendered, keep, allow_new_captures)
+        } else {
+            let alone = SceneSpec {
+                name: String::new(),
+                sources: vec![source.clone()],
+            };
+            start_screens(capture, &alone, &[]).map(|started| self.scene_screens.extend(started))
+        };
+        match started {
             Ok(()) => {
                 self.retire(stop_scene_capture(old));
                 Ok(())

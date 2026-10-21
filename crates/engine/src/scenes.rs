@@ -222,6 +222,31 @@ impl SceneCollection {
             .ok_or_else(|| not_found("source", name))
     }
 
+    /// Capture screen source `name` from `id` from now on.
+    pub fn set_screen_source_id(
+        &mut self,
+        scene: &str,
+        name: &str,
+        id: &str,
+    ) -> Result<(), CommandError> {
+        let source = self
+            .get_mut(scene)?
+            .sources
+            .iter_mut()
+            .find(|source| source.name == name)
+            .ok_or_else(|| not_found("source", name))?;
+        match &mut source.kind {
+            SourceKind::Screen { source_id, .. } => {
+                *source_id = Some(id.to_owned());
+                Ok(())
+            }
+            _ => Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                format!("`{name}` is not a screen source"),
+            )),
+        }
+    }
+
     pub fn remove_source(&mut self, scene: &str, name: &str) -> Result<(), CommandError> {
         let scene = self.get_mut(scene)?;
         let before = scene.sources.len();

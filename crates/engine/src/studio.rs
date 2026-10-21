@@ -37,10 +37,7 @@ impl Engine {
         let before = self.scenes.snapshot();
         let rendered = self.scenes.active().clone();
         change(&mut self.scenes)?;
-        // Open outputs must not wait for a picker; the preview alone means
-        // someone is at the UI.
-        let allow_new_captures = self.recording.is_none() && self.streaming.is_none();
-        let keep = self.scenes.screen_source_ids();
+        let (allow_new_captures, keep) = self.capture_policy();
         if let Some(pipeline) = &mut self.pipeline
             && *self.scenes.active() != rendered
             && let Err(error) = pipeline.apply_scene(
@@ -90,12 +87,14 @@ impl Engine {
         self.edit_scenes(|scenes| scenes.remove_source(scene, name))
     }
 
-    /// Restart a screen source's capture (e.g. after it ended) while the
-    /// pipeline and its outputs keep running.
+    /// Restart a screen source's capture (e.g. after it ended), optionally
+    /// on another source (`source_id`, kept by the scene), while the
+    /// pipeline and its outputs keep running. On error nothing changes.
     pub(crate) fn restart_source(
         &mut self,
         scene: &str,
         name: &str,
+        source_id: Option<&str>,
     ) -> Result<SceneList, CommandError> {
         let source = self.scenes.source(scene, name)?;
         if !matches!(source.kind, SourceKind::Screen { .. }) {
@@ -104,34 +103,49 @@ impl Engine {
                 format!("`{name}` does not capture; only screen sources can be restarted"),
             ));
         }
-        let id = source.id;
-        if self.scenes.active().name != scene {
-            return Err(CommandError::new(
-                ErrorCode::InvalidState,
-                format!(
-                    "`{scene}` is not the active scene; only sources of the rendered scene capture"
-                ),
-            ));
+        match &self.pipeline {
+            None => return Err(no_pipeline(name)),
+            Some(pipeline) if !pipeline.is_running() => {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidState,
+                    "the media pipeline stopped unexpectedly, so a new capture would not be \
+                     rendered; turn the preview off and stop the open outputs to collect their \
+                     reports",
+                ));
+            }
+            Some(_) => {}
         }
-        let Some(pipeline) = &mut self.pipeline else {
-            return Err(CommandError::new(
-                ErrorCode::InvalidState,
-                format!(
-                    "nothing captures `{name}`: no pipeline runs (start the preview or an output)"
-                ),
-            ));
+        let before = self.scenes.snapshot();
+        if let Some(id) = source_id {
+            self.scenes.set_screen_source_id(scene, name, id)?;
+        }
+        let source = self.scenes.source(scene, name)?.clone();
+        let (allow_new_captures, keep) = self.capture_policy();
+        let restarted = match &mut self.pipeline {
+            Some(pipeline) => pipeline.restart_screen(
+                self.capture.as_mut(),
+                self.scenes.active(),
+                &source,
+                &keep,
+                allow_new_captures,
+            ),
+            None => Err(no_pipeline(name)),
         };
-        // As for scene edits: open outputs must not wait for a picker.
-        let allow_new_captures = self.recording.is_none() && self.streaming.is_none();
-        let keep = self.scenes.screen_source_ids();
-        pipeline.restart_screen(
-            self.capture.as_mut(),
-            self.scenes.active(),
-            id,
-            &keep,
-            allow_new_captures,
-        )?;
+        if let Err(error) = restarted {
+            self.scenes.restore(before);
+            return Err(error);
+        }
         Ok(self.scenes.list())
+    }
+
+    /// Whether new captures may start (open outputs must not wait for a
+    /// picker; the preview alone means someone is at the UI), and the
+    /// screen sources whose captures keep running.
+    fn capture_policy(&self) -> (bool, Vec<u32>) {
+        (
+            self.recording.is_none() && self.streaming.is_none(),
+            self.scenes.screen_source_ids(),
+        )
     }
 
     pub(crate) fn mixer_state(&self) -> MixerState {
@@ -223,4 +237,11 @@ impl Engine {
         state.enabled = self.preview_enabled;
         Ok(state)
     }
+}
+
+fn no_pipeline(name: &str) -> CommandError {
+    CommandError::new(
+        ErrorCode::InvalidState,
+        format!("nothing captures `{name}`: no pipeline runs (start the preview or an output)"),
+    )
 }

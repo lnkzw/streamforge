@@ -119,6 +119,11 @@ jobs:
         # For the record (docs/platforms.md); runners have no desktop or
         # microphone, so most entries say why they are unavailable.
         run: cargo run --locked -q -p streamforge-cli -- capture caps
+      - name: Screen sources of this runner
+        # For the record: Windows lists its monitor; macOS needs a
+        # screen-recording permission (`permission_denied` without it);
+        # Linux has only the portal picker. Failing here is expected.
+        run: cargo run --locked -q -p streamforge-cli -- capture sources || true
       - name: "M1 smoke: headless engine over a shell pipe"
         run: |
           printf '%s\n' '{"id":1,"command":"get_status"}' \

@@ -6,6 +6,7 @@ members = [
     "crates/capture-api",
     "crates/capture-linux",
     "crates/capture-cpal",
+    "crates/capture-windows",
     "crates/capture-platform",
     "crates/video-compositor",
     "crates/audio-engine",

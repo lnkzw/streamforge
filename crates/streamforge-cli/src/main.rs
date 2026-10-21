@@ -94,9 +94,12 @@ enum Commands {
         /// Run time in milliseconds (100..=60000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
-        /// Add a live screen layer (opens the system picker).
+        /// Add a live screen layer (the --source-id source, else the system picker).
         #[arg(long)]
         screen: bool,
+        /// With --screen: capture this source from `capture sources` (no picker).
+        #[arg(long, requires = "screen")]
+        source_id: Option<String>,
         /// With --screen: offered source type (monitor, window, virtual). Repeatable.
         #[arg(long = "source", requires = "screen")]
         sources: Vec<String>,
@@ -116,11 +119,17 @@ enum CaptureCommand {
     Caps,
     /// List audio input devices.
     Inputs,
-    /// Capture a screen or window chosen in the system dialog and report diagnostics.
+    /// List monitors and windows that can be captured by id (where the platform allows it).
+    Sources,
+    /// Capture a screen or window and report diagnostics: the --source-id source, or the one
+    /// chosen in the system dialog.
     Screen {
         /// Probe duration in milliseconds (100..=60000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
+        /// Source id from `capture sources`.
+        #[arg(long)]
+        source_id: Option<String>,
         /// Offered source type: monitor, window or virtual. Repeatable; default monitor and window.
         #[arg(long = "source")]
         sources: Vec<String>,
@@ -162,7 +171,7 @@ fn main() -> Result<ExitCode> {
                 println!("Recording active: {}", status.recording_active);
                 println!();
                 println!(
-                    "Capture probes: `streamforge capture --help`. Recording and streaming (Linux): `streamforge record --help`, `streamforge stream --help`."
+                    "Capture probes: `streamforge capture --help`. Recording and streaming: `streamforge record --help`, `streamforge stream --help`."
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -260,6 +269,7 @@ fn main() -> Result<ExitCode> {
         Commands::Compose {
             duration_ms,
             screen,
+            source_id,
             sources,
             cursor,
             snapshot,
@@ -270,6 +280,9 @@ fn main() -> Result<ExitCode> {
             }
             if screen {
                 params.insert("screen".into(), true.into());
+            }
+            if let Some(source_id) = source_id {
+                params.insert("source_id".into(), source_id.into());
             }
             if !sources.is_empty() {
                 params.insert("source_types".into(), sources.into());
@@ -361,13 +374,18 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
     let name = match command {
         CaptureCommand::Caps => "get_capture_capabilities",
         CaptureCommand::Inputs => "list_audio_inputs",
+        CaptureCommand::Sources => "list_screen_sources",
         CaptureCommand::Screen {
             duration_ms,
+            source_id,
             sources,
             cursor,
         } => {
             if let Some(duration_ms) = duration_ms {
                 params.insert("duration_ms".into(), duration_ms.into());
+            }
+            if let Some(source_id) = source_id {
+                params.insert("source_id".into(), source_id.into());
             }
             if !sources.is_empty() {
                 params.insert("source_types".into(), sources.into());
@@ -396,9 +414,12 @@ const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
 /// Pipeline source flags shared by `record` and `stream`.
 #[derive(clap::Args, Debug)]
 struct SourceArgs {
-    /// Add a live screen layer (opens the system picker).
+    /// Add a live screen layer (the --source-id source, else the system picker).
     #[arg(long)]
     screen: bool,
+    /// With --screen: capture this source from `capture sources` (no picker).
+    #[arg(long, requires = "screen")]
+    source_id: Option<String>,
     /// With --screen: offered source type (monitor, window, virtual). Repeatable.
     #[arg(long = "source", requires = "screen")]
     source_types: Vec<String>,
@@ -428,6 +449,9 @@ impl SourceArgs {
         }
         if self.screen {
             params.insert("screen".into(), true.into());
+        }
+        if let Some(source_id) = &self.source_id {
+            params.insert("source_id".into(), source_id.clone().into());
         }
         if !self.source_types.is_empty() {
             params.insert("source_types".into(), self.source_types.clone().into());
@@ -569,6 +593,7 @@ mod tests {
     fn screen_arguments_become_protocol_params() {
         let (name, params) = capture_request(CaptureCommand::Screen {
             duration_ms: Some(1500),
+            source_id: None,
             sources: vec!["window".into()],
             cursor: Some("hidden".into()),
         });
@@ -576,6 +601,19 @@ mod tests {
         assert_eq!(
             Value::Object(params),
             serde_json::json!({"duration_ms": 1500, "source_types": ["window"], "cursor": "hidden"})
+        );
+        let (_, params) = capture_request(CaptureCommand::Screen {
+            duration_ms: None,
+            source_id: Some("monitor:1".into()),
+            sources: Vec::new(),
+            cursor: None,
+        });
+        let params = Value::Object(params);
+        assert_eq!(params, serde_json::json!({"source_id": "monitor:1"}));
+        assert!(Command::decode("probe_screen_capture", Some(&params)).is_ok());
+        assert_eq!(
+            capture_request(CaptureCommand::Sources).0,
+            "list_screen_sources"
         );
     }
 

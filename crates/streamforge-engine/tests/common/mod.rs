@@ -6,6 +6,7 @@
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -14,6 +15,27 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An empty directory for one test, removed on drop.
+pub struct TempDir(pub PathBuf);
+
+impl TempDir {
+    pub fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "streamforge-engine-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        Self(dir)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 pub struct EngineProcess {
     child: Child,

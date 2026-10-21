@@ -5,7 +5,7 @@ use media_core::{AudioRing, FrameMailbox};
 use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
     AudioStreamRequest, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
+    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
 };
 
 /// A running audio capture delivering interleaved `f32` samples until stopped.
@@ -48,6 +48,14 @@ pub trait CaptureBackend {
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError>;
 
+    /// Screen sources that can be captured by id, for backends whose
+    /// capability has `source_list`; the default has none.
+    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
+        Err(CaptureError::unsupported(
+            "this capture backend cannot list screen sources",
+        ))
+    }
+
     fn probe_screen(
         &mut self,
         request: &ScreenCaptureRequest,
@@ -58,7 +66,8 @@ pub trait CaptureBackend {
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError>;
 
-    /// Let the user pick a screen source and capture it continuously.
+    /// Capture the selected screen source continuously (the named one, or
+    /// the one the user picks).
     fn start_screen_stream(
         &mut self,
         selection: &ScreenSelection,
@@ -113,6 +122,10 @@ impl CaptureBackend for UnsupportedCapture {
         Err(self.error())
     }
 
+    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
+        Err(self.error())
+    }
+
     fn probe_screen(
         &mut self,
         _request: &ScreenCaptureRequest,
@@ -142,6 +155,64 @@ impl CaptureBackend for UnsupportedCapture {
     }
 }
 
+/// Screen capture from one backend and audio capture from another, e.g.
+/// native screen capture with `cpal` audio.
+#[derive(Debug)]
+pub struct SplitCapture<V, A> {
+    pub video: V,
+    pub audio: A,
+}
+
+impl<V: CaptureBackend, A: CaptureBackend> CaptureBackend for SplitCapture<V, A> {
+    fn capabilities(&mut self) -> CaptureCapabilities {
+        let video = self.video.capabilities();
+        let audio = self.audio.capabilities();
+        CaptureCapabilities {
+            platform: video.platform,
+            desktop: video.desktop.or(audio.desktop),
+            session_type: video.session_type.or(audio.session_type),
+            screen: video.screen,
+            audio: audio.audio,
+        }
+    }
+
+    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
+        self.audio.audio_inputs()
+    }
+
+    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
+        self.video.screen_sources()
+    }
+
+    fn probe_screen(
+        &mut self,
+        request: &ScreenCaptureRequest,
+    ) -> Result<VideoCaptureReport, CaptureError> {
+        self.video.probe_screen(request)
+    }
+
+    fn probe_audio(
+        &mut self,
+        request: &AudioCaptureRequest,
+    ) -> Result<AudioCaptureReport, CaptureError> {
+        self.audio.probe_audio(request)
+    }
+
+    fn start_screen_stream(
+        &mut self,
+        selection: &ScreenSelection,
+    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        self.video.start_screen_stream(selection)
+    }
+
+    fn start_audio_stream(
+        &mut self,
+        request: &AudioStreamRequest,
+    ) -> Result<Box<dyn AudioStream>, CaptureError> {
+        self.audio.start_audio_stream(request)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +232,7 @@ mod tests {
                 selection: ScreenSelection {
                     source_kinds: vec![VideoSourceKind::Monitor],
                     cursor: CursorMode::Embedded,
+                    source: None,
                 },
                 duration: DEFAULT_PROBE_DURATION,
             })
@@ -170,6 +242,32 @@ mod tests {
         assert_eq!(
             backend.audio_inputs().unwrap_err().kind,
             CaptureErrorKind::Unsupported
+        );
+        assert_eq!(
+            backend.screen_sources().unwrap_err().kind,
+            CaptureErrorKind::Unsupported
+        );
+    }
+
+    #[test]
+    fn split_capture_takes_screen_and_audio_from_their_backends() {
+        let mut split = SplitCapture {
+            video: UnsupportedCapture::new("no screen here"),
+            audio: UnsupportedCapture::new("no audio here"),
+        };
+        let caps = split.capabilities();
+        assert_eq!(
+            caps.screen.unavailable_reason.as_deref(),
+            Some("no screen here")
+        );
+        assert_eq!(
+            caps.audio.unavailable_reason.as_deref(),
+            Some("no audio here")
+        );
+        assert_eq!(split.audio_inputs().unwrap_err().message, "no audio here");
+        assert_eq!(
+            split.screen_sources().unwrap_err().message,
+            "no screen here"
         );
     }
 }

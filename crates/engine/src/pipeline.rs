@@ -160,9 +160,10 @@ impl Pipeline {
     /// screen sources (opens the picker), then swap the compositor's scene,
     /// then end captures of screen sources no longer in any scene (`keep`
     /// lists those that still exist, so switching back and forth between
-    /// scenes does not ask again). Starting a capture waits for the picker,
-    /// which `allow_new_captures: false` refuses (open outputs must not
-    /// stall behind a human). On error nothing changes.
+    /// scenes does not ask again). Starting a picker source waits for the
+    /// picker, which `allow_new_captures: false` refuses (open outputs must
+    /// not stall behind a human); named sources start without one. On error
+    /// nothing changes.
     pub fn apply_scene(
         &mut self,
         capture: &mut dyn CaptureBackend,
@@ -172,19 +173,24 @@ impl Pipeline {
     ) -> Result<(), CommandError> {
         if !allow_new_captures
             && let Some(source) = scene.sources.iter().find(|source| {
-                matches!(source.kind, SourceKind::Screen { .. })
-                    && !self
-                        .scene_screens
-                        .iter()
-                        .any(|screen| screen.id == source.id)
+                matches!(
+                    source.kind,
+                    SourceKind::Screen {
+                        source_id: None,
+                        ..
+                    }
+                ) && !self
+                    .scene_screens
+                    .iter()
+                    .any(|screen| screen.id == source.id)
             })
         {
             return Err(CommandError::new(
                 ErrorCode::InvalidState,
                 format!(
-                    "screen source `{}` would start a capture, which waits for the system \
-                     picker and would block the engine while recording or streaming; add \
-                     screen sources while only the preview runs",
+                    "screen source `{}` would open the system picker, which would block \
+                     the engine while recording or streaming; add picker sources while only \
+                     the preview runs, or name a source (`source_id`)",
                     source.name
                 ),
             ));
@@ -400,6 +406,7 @@ fn start_screens(
         let SourceKind::Screen {
             source_types,
             cursor,
+            source_id,
         } = &source.kind
         else {
             continue;
@@ -410,6 +417,7 @@ fn start_screens(
         let selection = ScreenSelection {
             source_kinds: source_types.clone(),
             cursor: *cursor,
+            source: source_id.clone(),
         };
         let stream = capture.start_screen_stream(&selection).map_err(|error| {
             command_error(error).with_details(serde_json::json!({ "source": source.name }))

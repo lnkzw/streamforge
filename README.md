@@ -47,7 +47,9 @@ Capture diagnostics (Linux; output is JSON):
 ```bash
 cargo run -p streamforge-cli -- capture caps
 cargo run -p streamforge-cli -- capture inputs
-cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker
+cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker (Linux)
+cargo run -p streamforge-cli -- capture sources                         # monitors and windows by id (Windows)
+cargo run -p streamforge-cli -- capture screen --source-id 'monitor:\\.\DISPLAY1'  # no picker
 cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
 
 # Audio mixer (live inputs and/or test tones; no audio is stored)
@@ -85,6 +87,7 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/capture-api`: platform-neutral capture interface and diagnostics
 - `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
 - `crates/capture-cpal`: audio capture on Windows and macOS (cpal)
+- `crates/capture-windows`: screen capture on Windows (Windows.Graphics.Capture)
 - `crates/capture-platform`: selects the capture backend for the target OS
 - `crates/video-compositor`: scene graph, CPU renderer and render loop
 - `crates/audio-engine`: mixer, meters, test tones and mixer thread

@@ -26,7 +26,8 @@ type Reply = Result<CommandOutput, CommandError>;
 type Notify = Box<dyn Fn() + Send + Sync>;
 
 enum Job {
-    Run(Command, SyncSender<Reply>),
+    // Boxed: commands are large and the queue holds up to `QUEUE` jobs.
+    Run(Box<Command>, SyncSender<Reply>),
     Shutdown,
 }
 
@@ -128,7 +129,7 @@ fn serve(mut engine: Engine, queue: &Receiver<Job>, shared: &Shared) {
                 format!("the engine stopped after an internal failure: {message}"),
             ))
         } else {
-            match panic::catch_unwind(AssertUnwindSafe(|| engine.handle(command))) {
+            match panic::catch_unwind(AssertUnwindSafe(|| engine.handle(*command))) {
                 Ok(result) => result,
                 Err(payload) => {
                     let message = panic_message(payload.as_ref());
@@ -172,7 +173,7 @@ impl EngineHandle {
             ));
         }
         let (reply, answer) = sync_channel(1);
-        match self.jobs.try_send(Job::Run(command, reply)) {
+        match self.jobs.try_send(Job::Run(Box::new(command), reply)) {
             Ok(()) => Ok(PendingReply(answer)),
             Err(TrySendError::Full(_)) => Err(CommandError::new(
                 ErrorCode::Unavailable,

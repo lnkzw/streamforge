@@ -312,7 +312,7 @@ impl DesktopApp {
                 });
             }
             if form.kind == SourceType::Screen {
-                ui.label(RichText::new("The system picker opens when the source starts.").weak());
+                screen_source_picker(ui, &mut self.model, form);
             }
             let mut whole = form.rect.is_none();
             if ui.checkbox(&mut whole, "Whole canvas").changed() {
@@ -456,6 +456,56 @@ impl eframe::App for DesktopApp {
         } else {
             Duration::from_millis(250)
         });
+    }
+}
+
+/// Choose a listed screen source, or leave it to the system picker.
+fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceForm) {
+    if ui.button("Find screen sources").clicked() {
+        model.find_screen_sources();
+    }
+    // An id that is no longer listed (e.g. its window closed) is not sent.
+    let listed = |id: &String| matches!(&model.screen_sources, Some(Ok(sources)) if sources.iter().any(|source| &source.id == id));
+    if form.screen_source.as_ref().is_some_and(|id| !listed(id)) {
+        form.screen_source = None;
+    }
+    const PICKER: &str = "System picker (if the platform has one)";
+    match &model.screen_sources {
+        Some(Ok(sources)) if !sources.is_empty() => {
+            let selected = form
+                .screen_source
+                .as_ref()
+                .and_then(|id| sources.iter().find(|source| &source.id == id))
+                .map_or(PICKER, |source| source.name.as_str());
+            egui::ComboBox::from_label("Source")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut form.screen_source, None, PICKER);
+                    for source in sources {
+                        let label = format!("{} ({})", source.name, source.kind.as_str());
+                        ui.selectable_value(
+                            &mut form.screen_source,
+                            Some(source.id.clone()),
+                            label,
+                        );
+                    }
+                });
+        }
+        Some(Ok(_)) => {
+            ui.label(RichText::new("No screen sources found.").weak());
+        }
+        Some(Err(reason)) => {
+            ui.label(RichText::new(reason.as_str()).weak());
+        }
+        None => {
+            ui.label(
+                RichText::new(
+                    "Find screen sources to choose one; otherwise the system picker opens \
+                     when the source starts, where the platform has one.",
+                )
+                .weak(),
+            );
+        }
     }
 }
 

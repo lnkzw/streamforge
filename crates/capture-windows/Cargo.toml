@@ -1,0 +1,15 @@
+[package]
+name = "capture-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+capture-api = { path = "../capture-api" }
+media-core = { path = "../media-core" }
+
+# Screen capture through Windows.Graphics.Capture. `windows-capture` wraps
+# the WinRT/D3D11 plumbing (capture thread, frame pool, staging copies)
+# behind a safe API, so this crate needs no unsafe code of its own.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-capture = "=2.0.1"

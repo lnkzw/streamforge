@@ -113,10 +113,21 @@ const LIST_AUDIO_INPUTS: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const LIST_SCREEN_SOURCES: CommandDescriptor = CommandDescriptor {
+    name: "list_screen_sources",
+    summary: "List monitors and windows that can be captured by id without a picker (where the \
+              platform allows it; see get_capture_capabilities). Window titles can reveal private \
+              content.",
+    access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
+};
+
 const PROBE_SCREEN_CAPTURE: CommandDescriptor = CommandDescriptor {
     name: "probe_screen_capture",
-    summary: "Capture a user-selected screen or window and report format, timestamps, FPS and drops. \
-              Params: duration_ms (100..=60000, default 5000), source_types ([\"monitor\",\"window\",\"virtual\"], \
+    summary: "Capture a screen or window and report format, timestamps, FPS and drops. \
+              Params: duration_ms (100..=60000, default 5000), source_id (from list_screen_sources; \
+              without it the user picks in the system dialog), source_types ([\"monitor\",\"window\",\"virtual\"], \
               default [\"monitor\",\"window\"]), cursor (\"hidden\"|\"embedded\"|\"metadata\", default \"embedded\").",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -237,10 +248,11 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "add_source",
     summary: "Add a source on top of a scene. Params: scene, name, kind (color_bars, solid, \
-              screen), color (#rrggbb[aa], solid), source_types and cursor (screen), x, y, width, \
-              height (canvas pixels; all or none, default the whole canvas), opacity (0-1). Screen \
-              sources start capturing (system picker) when the scene is rendered. Returns the \
-              scene list.",
+              screen), color (#rrggbb[aa], solid), source_id, source_types and cursor (screen), x, \
+              y, width, height (canvas pixels; all or none, default the whole canvas), opacity \
+              (0-1). Screen sources start capturing when the scene is rendered: the source_id from \
+              list_screen_sources, or else the one the user picks in the system dialog. Returns \
+              the scene list.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -313,6 +325,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     LIST_COMMANDS,
     GET_CAPTURE_CAPABILITIES,
     LIST_AUDIO_INPUTS,
+    LIST_SCREEN_SOURCES,
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
     PROBE_COMPOSITE,
@@ -338,6 +351,8 @@ const COMMANDS: &[CommandDescriptor] = &[
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
     [VideoSourceKind::Monitor, VideoSourceKind::Window];
 const DEFAULT_CURSOR: CursorMode = CursorMode::Embedded;
+/// Longest accepted screen source id, in characters.
+const MAX_SOURCE_ID_CHARS: usize = 256;
 
 /// All commands known to this build, in a stable order.
 pub fn registry() -> &'static [CommandDescriptor] {
@@ -371,6 +386,9 @@ impl Command {
                 expect_no_params(name, params).map(|()| Self::GetCaptureCapabilities)
             }
             "list_audio_inputs" => expect_no_params(name, params).map(|()| Self::ListAudioInputs),
+            "list_screen_sources" => {
+                expect_no_params(name, params).map(|()| Self::ListScreenSources)
+            }
             "probe_screen_capture" => {
                 decode_screen_probe(name, params).map(Self::ProbeScreenCapture)
             }
@@ -440,6 +458,7 @@ impl Command {
             Self::ListCommands => &LIST_COMMANDS,
             Self::GetCaptureCapabilities => &GET_CAPTURE_CAPABILITIES,
             Self::ListAudioInputs => &LIST_AUDIO_INPUTS,
+            Self::ListScreenSources => &LIST_SCREEN_SOURCES,
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
             Self::ProbeComposite(_) => &PROBE_COMPOSITE,
@@ -473,6 +492,8 @@ impl Command {
 struct ScreenProbeParams {
     /// Run time in milliseconds.
     duration_ms: Option<u64>,
+    /// Screen source id from list_screen_sources: capture it without a picker.
+    source_id: Option<String>,
     /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
@@ -628,6 +649,7 @@ fn mix_sources(
 /// Pipeline source fields shared by the output commands.
 struct SourceParams {
     screen: Option<bool>,
+    source_id: Option<String>,
     source_types: Option<Vec<VideoSourceKind>>,
     cursor: Option<CursorMode>,
     inputs: Option<Vec<LiveInputParams>>,
@@ -646,6 +668,7 @@ fn output_sources(
     params: SourceParams,
 ) -> Result<Option<MediaSources>, CommandError> {
     let given = params.screen.is_some()
+        || params.source_id.is_some()
         || params.source_types.is_some()
         || params.cursor.is_some()
         || params.inputs.is_some()
@@ -664,7 +687,13 @@ fn output_sources(
     };
     let sources = mix_sources(command, inputs, tones, params.master_gain_db)?;
     Ok(Some(MediaSources {
-        screen: optional_screen(command, params.screen, params.source_types, params.cursor)?,
+        screen: optional_screen(
+            command,
+            params.screen,
+            params.source_id,
+            params.source_types,
+            params.cursor,
+        )?,
         inputs: sources.inputs,
         tones: sources.tones,
         master_gain_db: sources.master_gain_db,
@@ -702,6 +731,8 @@ struct StartRecordingParams {
     file_name: String,
     /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source id from list_screen_sources: capture it without a picker.
+    source_id: Option<String>,
     /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
@@ -725,6 +756,7 @@ fn decode_start_recording(
             command,
             SourceParams {
                 screen: params.screen,
+                source_id: params.source_id,
                 source_types: params.source_types,
                 cursor: params.cursor,
                 inputs: params.inputs,
@@ -758,6 +790,8 @@ struct StartStreamingParams {
     reconnect_delay_ms: Option<u64>,
     /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source id from list_screen_sources: capture it without a picker.
+    source_id: Option<String>,
     /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
@@ -864,6 +898,7 @@ fn decode_start_streaming(
             command,
             SourceParams {
                 screen: params.screen,
+                source_id: params.source_id,
                 source_types: params.source_types,
                 cursor: params.cursor,
                 inputs: params.inputs,
@@ -981,6 +1016,8 @@ struct AddSourceParams {
     kind: String,
     /// Solid sources: #rrggbb or #rrggbbaa.
     color: Option<String>,
+    /// Screen source id from list_screen_sources: capture it without a picker.
+    source_id: Option<String>,
     /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
@@ -1005,11 +1042,15 @@ fn decode_add_source(
     let screen_only = || {
         invalid_params(
             command,
-            "`source_types` and `cursor` apply to screen sources only",
+            "`source_id`, `source_types` and `cursor` apply to screen sources only",
         )
     };
     let kind = match params.kind.as_str() {
-        "color_bars" | "solid" if params.source_types.is_some() || params.cursor.is_some() => {
+        "color_bars" | "solid"
+            if params.source_id.is_some()
+                || params.source_types.is_some()
+                || params.cursor.is_some() =>
+        {
             return Err(screen_only());
         }
         "color_bars" if params.color.is_some() => {
@@ -1035,10 +1076,16 @@ fn decode_add_source(
             ));
         }
         "screen" => {
-            let selection = screen_selection(command, params.source_types, params.cursor)?;
+            let selection = screen_selection(
+                command,
+                params.source_id,
+                params.source_types,
+                params.cursor,
+            )?;
             SourceKind::Screen {
                 source_types: selection.source_kinds,
                 cursor: selection.cursor,
+                source_id: selection.source,
             }
         }
         _ => {
@@ -1242,6 +1289,8 @@ struct CompositeProbeParams {
     duration_ms: Option<u64>,
     /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
+    /// Screen source id from list_screen_sources: capture it without a picker.
+    source_id: Option<String>,
     /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
@@ -1255,7 +1304,13 @@ fn decode_composite_probe(
     params: Option<&Value>,
 ) -> Result<CompositeRequest, CommandError> {
     let params: CompositeProbeParams = decode_params(command, params)?;
-    let screen = optional_screen(command, params.screen, params.source_types, params.cursor)?;
+    let screen = optional_screen(
+        command,
+        params.screen,
+        params.source_id,
+        params.source_types,
+        params.cursor,
+    )?;
     Ok(CompositeRequest {
         duration: probe_duration(command, params.duration_ms)?,
         screen,
@@ -1270,16 +1325,17 @@ fn decode_composite_probe(
 fn optional_screen(
     command: &str,
     screen: Option<bool>,
+    source_id: Option<String>,
     source_types: Option<Vec<VideoSourceKind>>,
     cursor: Option<CursorMode>,
 ) -> Result<Option<ScreenSelection>, CommandError> {
     if screen.unwrap_or(false) {
-        return screen_selection(command, source_types, cursor).map(Some);
+        return screen_selection(command, source_id, source_types, cursor).map(Some);
     }
-    if source_types.is_some() || cursor.is_some() {
+    if source_id.is_some() || source_types.is_some() || cursor.is_some() {
         return Err(invalid_params(
             command,
-            "`source_types` and `cursor` require `screen: true`",
+            "`source_id`, `source_types` and `cursor` require `screen: true`",
         ));
     }
     Ok(None)
@@ -1321,7 +1377,12 @@ fn decode_screen_probe(
 ) -> Result<ScreenCaptureRequest, CommandError> {
     let params: ScreenProbeParams = decode_params(command, params)?;
     Ok(ScreenCaptureRequest {
-        selection: screen_selection(command, params.source_types, params.cursor)?,
+        selection: screen_selection(
+            command,
+            params.source_id,
+            params.source_types,
+            params.cursor,
+        )?,
         duration: probe_duration(command, params.duration_ms)?,
     })
 }
@@ -1329,9 +1390,24 @@ fn decode_screen_probe(
 /// Defaults, deduplication and validation shared by all screen commands.
 fn screen_selection(
     command: &str,
+    source_id: Option<String>,
     source_types: Option<Vec<VideoSourceKind>>,
     cursor: Option<CursorMode>,
 ) -> Result<ScreenSelection, CommandError> {
+    let valid_id = |id: &String| {
+        !id.is_empty()
+            && id.chars().count() <= MAX_SOURCE_ID_CHARS
+            && !id.chars().any(char::is_control)
+    };
+    if source_id.as_ref().is_some_and(|id| !valid_id(id)) {
+        return Err(invalid_params(
+            command,
+            format!(
+                "`source_id` must be an id from list_screen_sources \
+                 (1 to {MAX_SOURCE_ID_CHARS} characters)"
+            ),
+        ));
+    }
     let mut source_kinds = Vec::new();
     for kind in source_types.unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec()) {
         if !source_kinds.contains(&kind) {
@@ -1344,6 +1420,7 @@ fn screen_selection(
     Ok(ScreenSelection {
         source_kinds,
         cursor: cursor.unwrap_or(DEFAULT_CURSOR),
+        source: source_id,
     })
 }
 
@@ -1428,6 +1505,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "list_commands"
         | "get_capture_capabilities"
         | "list_audio_inputs"
+        | "list_screen_sources"
         | "stop_recording"
         | "stop_streaming"
         | "list_scenes"
@@ -1681,6 +1759,7 @@ mod tests {
                 selection: ScreenSelection {
                     source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
                     cursor: CursorMode::Embedded,
+                    source: None,
                 },
                 duration: Duration::from_secs(5),
             }))
@@ -1700,6 +1779,7 @@ mod tests {
                 selection: ScreenSelection {
                     source_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
                     cursor: CursorMode::Hidden,
+                    source: None,
                 },
                 duration: Duration::from_millis(1500),
             }))
@@ -1716,6 +1796,10 @@ mod tests {
             json!({"source_types": ["printer"]}),
             json!({"cursor": "sparkly"}),
             json!({"seconds": 5}),
+            json!({"source_id": ""}),
+            json!({"source_id": "monitor:\n1"}),
+            json!({"source_id": "m".repeat(257)}),
+            json!({"source_id": 1}),
         ] {
             let err = Command::decode("probe_screen_capture", Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
@@ -1723,6 +1807,68 @@ mod tests {
                 err.details.expect("details")["command"],
                 "probe_screen_capture"
             );
+        }
+    }
+
+    #[test]
+    fn named_screen_sources_are_decoded_everywhere() {
+        assert_eq!(
+            Command::decode("list_screen_sources", None),
+            Ok(Command::ListScreenSources)
+        );
+        let probe = Command::decode(
+            "probe_screen_capture",
+            Some(&json!({"source_id": "monitor:1"})),
+        );
+        let Ok(Command::ProbeScreenCapture(request)) = probe else {
+            panic!("{probe:?}");
+        };
+        assert_eq!(request.selection.source.as_deref(), Some("monitor:1"));
+
+        let recording = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "a.mkv", "screen": true, "source_id": "window:0x2a"})),
+        );
+        let Ok(Command::StartRecording(request)) = recording else {
+            panic!("{recording:?}");
+        };
+        let screen = request.sources.and_then(|sources| sources.screen);
+        assert_eq!(
+            screen.and_then(|screen| screen.source).as_deref(),
+            Some("window:0x2a")
+        );
+
+        let add = Command::decode(
+            "add_source",
+            Some(
+                &json!({"scene": "S", "name": "desk", "kind": "screen", "source_id": "monitor:2"}),
+            ),
+        );
+        let Ok(Command::AddSource(request)) = add else {
+            panic!("{add:?}");
+        };
+        let SourceKind::Screen { source_id, .. } = &request.kind else {
+            panic!("{request:?}");
+        };
+        assert_eq!(source_id.as_deref(), Some("monitor:2"));
+    }
+
+    #[test]
+    fn source_ids_need_a_screen_source() {
+        for (name, params) in [
+            (
+                "start_recording",
+                json!({"file_name": "a.mkv", "source_id": "monitor:1"}),
+            ),
+            ("probe_composite", json!({"source_id": "monitor:1"})),
+            (
+                "add_source",
+                json!({"scene": "S", "name": "b", "kind": "color_bars", "source_id": "monitor:1"}),
+            ),
+        ] {
+            let err = Command::decode(name, Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{name}: {params}");
+            assert!(err.message.contains("source_id"), "{}", err.message);
         }
     }
 
@@ -1785,6 +1931,7 @@ mod tests {
                 screen: Some(ScreenSelection {
                     source_kinds: vec![VideoSourceKind::Window],
                     cursor: CursorMode::Embedded,
+                    source: None,
                 }),
                 snapshot_path: Some(PathBuf::from("frame.PPM")),
             }))
@@ -2116,6 +2263,11 @@ mod tests {
             Some(CommandAccess::ReadOnly)
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
+        // Window titles can reveal private content.
+        assert_eq!(
+            access("list_screen_sources"),
+            Some(CommandAccess::Sensitive)
+        );
         assert_eq!(
             access("probe_screen_capture"),
             Some(CommandAccess::Sensitive)

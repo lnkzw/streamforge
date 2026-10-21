@@ -200,9 +200,9 @@ Known limitations, deferred:
 
 Delivered in steps (ADR 0009):
 
-- [ ] Windows capture/audio backend:
+- [x] Windows capture/audio backend:
   - [x] Audio through `cpal` (WASAPI), converted to 48 kHz stereo (M9a).
-  - [ ] Screen capture (M9b).
+  - [x] Screen capture through Windows.Graphics.Capture: monitors and windows named by `list_screen_sources`, verified on the CI runner (M9b, ADR 0010). A system picker is not offered yet.
 - [ ] macOS capture/audio backend:
   - [x] Audio through `cpal` (CoreAudio) (M9a).
   - [ ] Screen capture (M9b).

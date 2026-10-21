@@ -79,6 +79,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access", "destructive", "open_world"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
+| `list_screen_sources`      | none   | `sensitive` | `{"sources": [{"id", "kind", "name", "width", "height"}]}` |
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
@@ -105,7 +106,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 - **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`. Parameters are decoded first, so `required` is what that call needs.
 - **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
 
-Both probes are `sensitive` because they capture private content. Screen capture goes through the portal picker, but some pickers can auto-select or remember a choice. Microphone capture has no system consent dialog at all.
+Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`source_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_screen_sources` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
 
 `capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`.
 
@@ -113,19 +114,23 @@ Both probes are `sensitive` because they capture private content. Screen capture
 
 `screen` and `audio` each carry `backend`, `available` and `unavailable_reason`. The reason is a string when the capability is unavailable, otherwise `null`. In addition:
 
-- `screen` has `portal_version`, `source_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`).
+- `screen` has `portal_version`, `source_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`). An empty `cursor_modes` means the backend cannot select a cursor mode; the request is then ignored, with a warning.
+- `screen` also says how a source is chosen:
+  - `picker`: without `source_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
+  - `source_list`: `list_screen_sources` lists monitors and windows, and screen commands capture one by its `source_id` without a dialog (Windows).
 - `audio` has `server_version`.
 
 ### Capture probes
 
-Probes capture briefly and return diagnostics. No media is stored or returned. A probe **blocks the engine** for its duration plus any user interaction: the screen probe opens the system's source picker and waits up to 120 s. Other requests on the same connection are answered afterwards.
+Probes capture briefly and return diagnostics. No media is stored or returned. A probe **blocks the engine** for its duration plus any user interaction: without `source_id`, the screen probe opens the system's source picker and waits up to 120 s. Other requests on the same connection are answered afterwards.
 
 `probe_screen_capture` params (all optional):
 
 | Param          | Type | Default | Meaning |
 |----------------|------|---------|---------|
 | `duration_ms`  | integer 100..=60000 | 5000 | Capture time after the source is selected. |
-| `source_types` | array of `"monitor"`, `"window"`, `"virtual"` | `["monitor","window"]` | Source types offered in the picker; duplicates are ignored. |
+| `source_id`    | string (1 to 256 characters) | none | An `id` from `list_screen_sources`: capture that source without a picker. Needs `source_list`; without it, the backend needs `picker`, else the call fails with `invalid_params`. Unknown or closed sources fail with `not_found`. |
+| `source_types` | array of `"monitor"`, `"window"`, `"virtual"` | `["monitor","window"]` | Source types offered in the picker; duplicates are ignored. Not checked with `source_id` (the source has its own kind). |
 | `cursor`       | `"hidden"`, `"embedded"`, `"metadata"` | `"embedded"` | Cursor handling; must be one of `cursor_modes`. |
 
 `probe_audio_capture` params (all optional):
@@ -170,8 +175,8 @@ It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_pat
 | Param           | Type | Default | Meaning |
 |-----------------|------|---------|---------|
 | `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
-| `screen`        | boolean | `false` | Add the live screen layer; opens the system picker. |
-| `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
+| `screen`        | boolean | `false` | Add the live screen layer: the `source_id` source, else the one picked in the system dialog. |
+| `source_id`, `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
 | `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. Directories, `..` and absolute paths are rejected with `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
 
 Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
@@ -226,7 +231,7 @@ Source parameters (all optional; any of them makes the output bring its own sour
 
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|
-| `screen`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (opens the portal picker). |
+| `screen`, `source_id`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (the named source, else the system picker). |
 | `inputs`         | as in `probe_audio_mix` | `[]` | Live audio inputs. |
 | `tones`          | as in `probe_audio_mix` | one 1 kHz tone at −20 dBFS if there are no `inputs` | Test tones; `[]` means no tone. |
 | `master_gain_db` | number −96..=24 | 0 | Master gain. |
@@ -308,13 +313,13 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - Kinds:
     - `color_bars`: stretched to the rectangle.
     - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
-    - `screen` with optional `source_types` and `cursor` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept.
+    - `screen` with optional `source_id`, `source_types` and `cursor` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept. The scene list shows `source_id` when one is set.
   - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
   - `opacity` 0..=1.
   - Sources are drawn in order, so later ones are on top.
-  - A screen source starts its capture, which opens the system picker, when it becomes part of the rendered scene.
+  - A screen source starts its capture when it becomes part of the rendered scene: the named source directly, otherwise through the system picker.
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
-  - While a recording or stream is open, a change that would start a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add screen sources while only the preview runs.
+  - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`source_id`) start without waiting and are allowed.
   - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
 - **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
 - **`remove_source`:** params `scene`, `name`.

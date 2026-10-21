@@ -12,3 +12,6 @@ capture-linux = { path = "../capture-linux" }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 capture-cpal = { path = "../capture-cpal" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+capture-windows = { path = "../capture-windows" }

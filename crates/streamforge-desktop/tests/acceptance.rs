@@ -76,6 +76,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
             color: [255, 0, 0, 255],
             rect: None,
             opacity: 1.0,
+            screen_source: None,
         },
     );
     wait(&mut model, "the new source", |m| {
@@ -168,4 +169,22 @@ fn preview_frames_reach_the_ui() {
     }
     model.set_preview(false);
     wait(&mut model, "the preview to stop", |m| !m.preview_enabled);
+}
+
+#[test]
+fn screen_sources_are_listed_or_explained_without_logging_an_error() {
+    let dir = TempDir::new("sources");
+    let mut model = model(&dir);
+    model.find_screen_sources();
+    wait(&mut model, "the screen source answer", |m| {
+        m.screen_sources.is_some()
+    });
+    // The engine here has no capture backend: no list, but a reason.
+    let reason = model
+        .screen_sources
+        .clone()
+        .expect("answer")
+        .expect_err("no source list without a capture backend");
+    assert!(!reason.is_empty());
+    assert!(errors(&model).is_empty(), "{:?}", model.log);
 }

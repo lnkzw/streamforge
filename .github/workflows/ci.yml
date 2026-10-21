@@ -111,11 +111,6 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Build
         run: cargo build --workspace --locked
-      - name: Test
-        # All failures in one run, not just the first failing test binary.
-        run: cargo test --workspace --locked --no-fail-fast
-      - name: "M0 acceptance: CLI status"
-        run: cargo run --locked -q -p streamforge-cli -- status --json
       - name: Capture capabilities of this runner
         # For the record (docs/platforms.md); runners have no desktop or
         # microphone, so most entries say why they are unavailable.
@@ -133,6 +128,11 @@ jobs:
         # screen-recording permission (`permission_denied` without it);
         # Linux has only the portal picker. Failing here is expected.
         run: cargo run --locked -q -p streamforge-cli -- capture sources || true
+      - name: Test
+        # All failures in one run, not just the first failing test binary.
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: "M0 acceptance: CLI status"
+        run: cargo run --locked -q -p streamforge-cli -- status --json
       - name: "M1 smoke: headless engine over a shell pipe"
         run: |
           printf '%s\n' '{"id":1,"command":"get_status"}' \

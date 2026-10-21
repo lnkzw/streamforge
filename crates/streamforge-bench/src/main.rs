@@ -307,7 +307,7 @@ fn measure(args: &Args, scenarios: &[Scenario], dir: &Path) -> Vec<ScenarioResul
         Scenario::Record
     };
     let file = next_file();
-    if let Err(error) = run_once(warm_up, WARM_UP_SECONDS, args, dir, &file) {
+    if let Err(error) = run_once(warm_up, WARM_UP_SECONDS, args, dir, &file, "warm-up") {
         eprintln!("warm-up: {error:#}");
     }
     let _ = std::fs::remove_file(dir.join(&file));
@@ -330,10 +330,10 @@ fn measure(args: &Args, scenarios: &[Scenario], dir: &Path) -> Vec<ScenarioResul
             let index = (step + round as usize) % count;
             let scenario = scenarios[index];
             let file = next_file();
-            let outcome = run_once(scenario, args.seconds, args, dir, &file);
+            let label = format!("{} run {}/{}", scenario.name(), round + 1, args.runs);
+            let outcome = run_once(scenario, args.seconds, args, dir, &file, &label);
             // Each recording is only needed for its report.
             let _ = std::fs::remove_file(dir.join(&file));
-            let label = format!("{} run {}/{}", scenario.name(), round + 1, args.runs);
             match outcome {
                 Ok(run) => {
                     eprintln!("{label}: {}", run_line(&run));
@@ -369,6 +369,7 @@ fn run_once(
     args: &Args,
     dir: &Path,
     file_name: &str,
+    label: &str,
 ) -> Result<Run> {
     let mut engine = Engine::new().with_output_dir(dir);
     let ingest = scenario.streams().then(Ingest::spawn).transpose()?;
@@ -414,7 +415,7 @@ fn run_once(
             CommandOutput::StreamingReport(report) => report,
             other => bail!("unexpected stop_streaming output: {other:?}"),
         };
-        print_warnings("stream", &report.warnings);
+        print_warnings(label, "stream", &report.warnings);
         invalid = stream_problem(&report);
         outputs.push(stream_output(&report));
         if let Some(error) = ingest.finish()? {
@@ -425,7 +426,7 @@ fn run_once(
         CommandOutput::RecordingReport(report) => report,
         other => bail!("unexpected stop_recording output: {other:?}"),
     };
-    print_warnings("recording", &report.warnings);
+    print_warnings(label, "recording", &report.warnings);
     outputs.insert(0, recording_output(&report));
     let render = report
         .pipeline
@@ -500,9 +501,9 @@ fn stream_problem(report: &StreamingReport) -> Option<String> {
     })
 }
 
-fn print_warnings(output: &str, warnings: &[String]) {
+fn print_warnings(label: &str, output: &str, warnings: &[String]) {
     for warning in warnings {
-        eprintln!("{output}: {warning}");
+        eprintln!("{label}: {output}: {warning}");
     }
 }
 

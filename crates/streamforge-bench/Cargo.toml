@@ -1,6 +1,6 @@
 [package]
 name = "streamforge-bench"
-description = "Measurement harness: records (and streams to an in-process ingest) for a fixed time and reports render, encoder and CPU figures"
+description = "Measurement harness: records (and streams to a local ingest in a child process) for a fixed time and reports render, encoder and CPU figures"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

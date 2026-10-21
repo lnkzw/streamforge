@@ -130,7 +130,7 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
 
 - **Scenarios:**
   - `record`: one recording
-  - `record-stream`: a recording and a stream to an in-process RTMP ingest, from one pipeline
+  - `record-stream`: a recording and a stream to a local RTMP ingest, from one pipeline
   - `record-polled` and `record-stream-polled`: the same, polling `get_health` every 100 ms
 - **Method:**
   - Each run starts a fresh engine on the reference scene with the default tone, through the same commands every client uses. No capture backend is involved.
@@ -145,23 +145,25 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
   - The polled scenarios call `get_health` every 100 ms and serialize the result to JSON, as an adapter would.
 - **Use:** compare numbers on one machine, before and after a change; record CPU model, OS and encoder with them. Measure on an idle machine: a game or a build running at the same time changes CPU and GPU (VAAPI) figures by more than the spread.
 
-**Baseline** (2026-10-22, development machine: Linux, Intel Core i5-13600KF with 20 threads, AMD Radeon RX 6800 with Mesa VAAPI, release build, 3 runs × 10 s). Run to run, CPU stayed within ±1 %, render mean within ±2 % and render p95 within ±6 %.
+**Baseline** (2026-10-22, development machine: Linux, Intel Core i5-13600KF with 20 threads, AMD Radeon RX 6800 with Mesa VAAPI, release build, idle, 3 runs × 10 s). Run to run, CPU stayed within ±2 % and the render mean within ±2 %. Render p95 varied by ±1 to ±12 %: it covers the whole pipeline run, setup and flush included, so a few slow frames move it (one run at 2.0 ms instead of 1.65 ms).
 
 | Scenario | Encoder | CPU (% of one core) | Render mean | Render p95 | Skipped / late | Lost |
 |---|---|---|---|---|---|---|
-| record | `h264_vaapi` | 44.7 | 1.53 ms | 1.75 ms | 0 / 0 | 0 |
-| record-polled | `h264_vaapi` | 44.4 | 1.53 ms | 1.65 ms | 0 / 0 | 0 |
-| record-stream | `h264_vaapi` × 2 | 75.7 | 2.11 ms | 2.40 ms | 0 / 0 | 0 |
-| record-stream-polled | `h264_vaapi` × 2 | 75.6 | 2.12 ms | 2.40 ms | 0 / 0 | 0 |
-| record | `libx264` | 78.0 | 1.55 ms | 1.70 ms | 0 / 0 | 0 |
-| record-polled | `libx264` | 77.7 | 1.54 ms | 1.65 ms | 0 / 0 | 0 |
-| record-stream | `libx264` × 2 | 153.0 | 2.14 ms | 2.45 ms | 0 / 0 | 0 |
-| record-stream-polled | `libx264` × 2 | 151.5 | 2.11 ms | 2.40 ms | 0 / 0 | 0 |
+| record | `h264_vaapi` | 44.7 | 1.53 ms | 1.70 ms | 0 / 0 | 0 |
+| record-polled | `h264_vaapi` | 45.5 | 1.56 ms | 1.75 ms | 0 / 0 | 0 |
+| record-stream | `h264_vaapi` × 2 | 74.4 | 2.14 ms | 2.30 ms | 0 / 0 | 0 |
+| record-stream-polled | `h264_vaapi` × 2 | 75.9 | 2.15 ms | 2.45 ms | 0 / 0 | 0 |
+| record | `libx264` | 78.2 | 1.54 ms | 1.65 ms | 0 / 0 | 0 |
+| record-polled | `libx264` | 79.1 | 1.56 ms | 1.65 ms | 0 / 0 | 0 |
+| record-stream | `libx264` × 2 | 153.8 | 2.16 ms | 2.45 ms | 0 / 0 | 0 |
+| record-stream-polled | `libx264` × 2 | 152.2 | 2.13 ms | 2.45 ms | 0 / 0 | 0 |
+
+11 of the 12 stream runs dropped one audio block before their first video frame (`start`, by design), the other none. One of the 26 runs, warm-up included, reported a late frame outside the measured window.
 
 What the baseline shows:
-- **Polling `get_health` every 100 ms costs nothing measurable:** the polled and unpolled scenarios differ by less than their run-to-run spread (ADR 0012).
-- **A second output costs about 31 % of a core with VAAPI and 75 % with libx264.** Each output converts BGRA frames on the CPU (and uploads them for VAAPI) on its own.
-- **A second output also raises the render mean from 1.53 to 2.11 ms**, although the scene is the same. The render time includes handing the frame to the outputs, and the engine's frame tap copies each 1920×1080 BGRA frame (8 MB) once per output on the render thread: about 0.6 ms per copy here. This is the copy and conversion work of the assessment (§6.1.1), and the baseline to measure it against.
+- **Polling `get_health` every 100 ms costs less than the harness can resolve** (ADR 0012). The polled medians differ from the unpolled ones by +0.8, +1.4, +0.8 and −1.6 % of a core. The sign changes, and polling cannot make a run cheaper, so the differences are noise between scenarios, which is larger than the spread within one.
+- **A second output costs about 30 % of a core with VAAPI and 76 % with libx264.** Each output converts BGRA frames on the CPU (and uploads them for VAAPI) on its own.
+- **A second output also raises the render mean from about 1.54 to 2.15 ms**, although the scene is the same. The render time includes handing the frame to the outputs, and the engine's frame tap copies each 1920×1080 BGRA frame (8 MB) once per output on the render thread: about 0.6 ms per copy here. This is the copy and conversion work of the assessment (§6.1.1), and the baseline to measure it against.
 
 ### Other measurements
 

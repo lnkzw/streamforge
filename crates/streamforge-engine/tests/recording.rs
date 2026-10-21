@@ -167,12 +167,14 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         }
     }
     assert!(first_picture_checked, "no video frame decoded");
-    // Dropped trailing frames shorten the video track; allow exactly them.
-    let drift = (ends[0] - ends[1]).abs();
-    let allowed = 0.05 + dropped as f64 / 60.0;
+    // Dropped trailing frames and skipped (counted) trailing ticks shorten
+    // the video track; allow exactly those. Video must not outlast audio.
+    let video_short = ends[1] - ends[0];
+    let allowed_short = 0.05 + (dropped + skipped) as f64 / 60.0;
     assert!(
-        drift < allowed,
-        "A/V end drift {drift:.3} s > {allowed:.3} s (video {:.3}, audio {:.3})",
+        video_short < allowed_short && -video_short < 0.05,
+        "A/V end drift {video_short:.3} s (audio minus video; allowed {allowed_short:.3} s for \
+         {dropped} dropped, {skipped} skipped; video {:.3}, audio {:.3})",
         ends[0],
         ends[1]
     );

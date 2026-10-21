@@ -5,29 +5,10 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use common::EngineProcess;
+use common::{EngineProcess, TempDir};
 use serde_json::{Value, json};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("streamforge-screen-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        Self(dir)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn call(engine: &mut EngineProcess, id: u64, command: &str, params: Value) -> Value {
     let request = json!({"id": id, "command": command, "params": params});

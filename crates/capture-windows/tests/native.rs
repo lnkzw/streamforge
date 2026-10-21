@@ -107,6 +107,7 @@ fn bad_selections_are_structured_errors() {
     if !screen.available {
         return;
     }
+    let sources = capture.screen_sources().expect("sources");
     let mut error = |selection: ScreenSelection| {
         capture
             .start_screen_stream(&selection)
@@ -115,12 +116,30 @@ fn bad_selections_are_structured_errors() {
     };
     let picker = error(selection(None, CursorMode::Embedded));
     assert_eq!(picker.kind, CaptureErrorKind::InvalidRequest, "{picker:?}");
-    for id in ["monitor:no-such-display", "window:0x1", "printer:1"] {
+    for id in ["monitor:no-such-display", "window:1:0x1", "printer:1"] {
         let missing = error(selection(Some(id), CursorMode::Embedded));
         assert_eq!(
             missing.kind,
             CaptureErrorKind::NotFound,
             "{id}: {missing:?}"
+        );
+    }
+    // A listed window under another process id: a reused handle must not
+    // resolve to a different window.
+    if let Some(window) = sources
+        .iter()
+        .find(|source| source.kind == VideoSourceKind::Window)
+    {
+        let (process, handle) = window.id["window:".len()..]
+            .split_once(':')
+            .expect("window id");
+        let process: u32 = process.parse().expect("process id");
+        let other = format!("window:{}:{handle}", process.wrapping_add(1));
+        let reused = error(selection(Some(&other), CursorMode::Embedded));
+        assert_eq!(
+            reused.kind,
+            CaptureErrorKind::NotFound,
+            "{other}: {reused:?}"
         );
     }
     // Without cursor selection every mode is accepted (and reported ignored).

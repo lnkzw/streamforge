@@ -26,6 +26,14 @@ const STREAM_BUFFERS: usize = 4;
 
 pub(crate) const BACKEND: &str = "xdg-desktop-portal+pipewire";
 
+/// The portal always asks the user and cannot capture a named source.
+pub(crate) fn no_source_list() -> CaptureError {
+    CaptureError::unsupported(
+        "the ScreenCast portal cannot capture a named source (`source_id`); \
+         omit it and the user picks one in the system dialog",
+    )
+}
+
 /// A portal session whose source the user has picked.
 struct OpenCast {
     cast: Cast,
@@ -34,6 +42,11 @@ struct OpenCast {
 }
 
 fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
+    // Before any portal I/O: a named source can never work here, and the
+    // caller may be the engine thread while an output runs.
+    if selection.source.is_some() {
+        return Err(no_source_list());
+    }
     let info = portal::query(QUERY_TIMEOUT)?;
     selection.check_supported(&ScreenCaptureCapability {
         backend: None,

@@ -23,7 +23,7 @@ Notes:
   - Each report warns about these conversions.
 - **macOS microphone access:** it needs permission for the app that runs StreamForge (System Settings → Privacy & Security → Microphone). Without it, CoreAudio delivers silence, which the capture report flags.
 - **Device names:** audio inputs are selected by the host's device id (as listed by `list_audio_inputs`) or by their display name.
-- **Choosing a screen source:** `get_capture_capabilities` says how (ADR 0010). With `picker` (Linux) the user picks in the system dialog. With `source_list` (Windows) `list_screen_sources` returns ids such as `monitor:\\.\DISPLAY1` or `window:0x2a0b6`, and screen commands take one as `source_id`; the desktop UI shows that list.
+- **Choosing a screen source:** `get_capture_capabilities` says how (ADR 0010). With `picker` (Linux) the user picks in the system dialog. With `source_list` (Windows) `list_screen_sources` returns ids such as `monitor:\\.\DISPLAY1` or `window:4242:0x2a0b6` (process id and window handle), and screen commands take one as `source_id`; the desktop UI shows that list.
 - **Windows screen capture:** needs Windows 10 version 1903 or newer. Windows draws a border around captured content (its privacy indicator). Frames arrive when the content changes; a static screen delivers few. Window ids are valid while the window exists; a closed window ends its capture with a warning.
 
 ## Building

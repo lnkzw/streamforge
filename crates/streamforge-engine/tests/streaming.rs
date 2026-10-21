@@ -3,34 +3,13 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::EngineProcess;
+use common::{EngineProcess, TempDir};
 use ffmpeg_next as ff;
 use rtmp_test_server::{ServerOptions, TestServer};
 use serde_json::{Value, json};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "streamforge-streaming-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        Self(dir)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn spawn(dir: &TempDir) -> EngineProcess {
     EngineProcess::spawn_with(&[std::ffi::OsStr::new("--output-dir"), dir.0.as_os_str()])

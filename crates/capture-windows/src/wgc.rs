@@ -123,11 +123,15 @@ impl CaptureBackend for WgcCapture {
             .map_err(|err| CaptureError::backend(format!("cannot list windows: {err}")))?;
         for window in windows {
             let title = window.title().unwrap_or_default();
+            let Ok(process) = window.process_id() else {
+                continue;
+            };
             if title.is_empty() {
                 continue;
             }
+            let handle = window.as_raw_hwnd().addr();
             sources.push(ScreenSource {
-                id: SourceRef::Window(window.as_raw_hwnd().addr()).id(),
+                id: SourceRef::Window { process, handle }.id(),
                 kind: VideoSourceKind::Window,
                 name: title,
                 width: window.width().ok().and_then(|w| u32::try_from(w).ok()),
@@ -195,10 +199,11 @@ fn resolve(id: &str) -> Result<(Item, VideoSourceInfo), CaptureError> {
             };
             Ok((Item::Monitor(monitor), info))
         }
-        SourceRef::Window(handle) => {
+        SourceRef::Window { process, handle } => {
             // A handle value, not a pointer: it carries no provenance.
             let window = Window::from_raw_hwnd(std::ptr::without_provenance_mut(handle));
-            if !window.is_valid() {
+            // A reused handle belongs to another process (see `ids`).
+            if !window.is_valid() || window.process_id().ok() != Some(process) {
                 return Err(not_found());
             }
             let info = VideoSourceInfo {

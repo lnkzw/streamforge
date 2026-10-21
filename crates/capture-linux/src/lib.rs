@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream,
     AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoStream,
+    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoStream,
 };
 
 /// Upper bound for each portal or PipeWire query. Screen and audio
@@ -91,6 +91,10 @@ impl CaptureBackend for LinuxCapture {
             screen,
             audio,
         }
+    }
+
+    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
+        Err(screen::no_source_list())
     }
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {

@@ -113,6 +113,9 @@ pub struct ScreenSource {
     pub kind: VideoSourceKind,
     /// Display name or window title.
     pub name: String,
+    /// Size as the system reports it. For windows this is approximate: the
+    /// window rectangle can include invisible borders and differ from the
+    /// captured frames with display scaling; reports carry the real size.
     pub width: Option<u32>,
     pub height: Option<u32>,
 }
@@ -182,6 +185,14 @@ impl ScreenSelection {
         &self,
         capability: &ScreenCaptureCapability,
     ) -> Result<(), CaptureError> {
+        if !capability.available {
+            return Err(CaptureError::unsupported(
+                capability
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "screen capture is not available".to_owned()),
+            ));
+        }
         match (&self.source, capability.source_list, capability.picker) {
             (Some(_), false, _) => {
                 return Err(CaptureError::unsupported(
@@ -316,6 +327,16 @@ mod tests {
             cursor,
             source: None,
         }
+    }
+
+    #[test]
+    fn unavailable_capture_reports_its_reason() {
+        let unavailable = ScreenCaptureCapability::unavailable(None, "no desktop session");
+        let err = request(&[VideoSourceKind::Monitor], CursorMode::Embedded)
+            .check_supported(&unavailable)
+            .unwrap_err();
+        assert_eq!(err.kind, CaptureErrorKind::Unsupported);
+        assert_eq!(err.message, "no desktop session");
     }
 
     #[test]

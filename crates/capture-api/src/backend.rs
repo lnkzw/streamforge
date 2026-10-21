@@ -52,8 +52,7 @@ pub trait CaptureBackend {
     /// capability has `source_list`; the default has none.
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
         Err(CaptureError::unsupported(
-            "this capture backend cannot list screen sources; \
-             the user picks one in the system dialog instead",
+            "this capture backend cannot list screen sources",
         ))
     }
 

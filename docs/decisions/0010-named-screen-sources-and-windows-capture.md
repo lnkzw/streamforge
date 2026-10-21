@@ -30,8 +30,10 @@ Until M9a, screen capture existed only on Linux, and only through the XDG Screen
 - **Crate:** `capture-windows` builds on `windows-capture` =2.0.1 (MIT). The crate wraps the WinRT and D3D11 plumbing (capture thread, frame pool, staging copy) behind a safe API, so `capture-windows` has no `unsafe` code of its own. Writing it on the `windows` crate directly would mean a few hundred lines of COM/WinRT FFI.
 - **Ids:**
   - `monitor:<GDI device name>`, e.g. `monitor:\\.\DISPLAY1`, stable while the monitor is connected; the enumeration index can change.
-  - `window:<handle in hex>`, valid while the window exists.
+  - `window:<process id>:<handle in hex>`, valid while the window exists. Windows reuses handle values; with the process id in the id, a stored id whose handle now belongs to another process's window fails with `not_found` instead of capturing that window.
   - The id format is pure code and is unit-tested on every OS.
+- **Unavailable capture:** `check_supported` first checks `available` and returns the backend's reason, so a client is not sent back and forth between "omit `source_id`" and "name a source".
+- **Linux:** the portal backend rejects a `source_id` before any D-Bus call, so a named source added during a recording fails at once instead of blocking the engine thread.
 - **Frames:**
   - The handler maps each frame (BGRA8), copies it with its row pitch into one of 4 pooled buffers and publishes it to the stream's mailbox.
   - When no buffer is free the frame is discarded and counted (`frames_discarded`).
@@ -58,6 +60,8 @@ On the `windows-latest` CI runner, Windows.Graphics.Capture is available (the CI
 
 - Windows has native screen capture, and automated tests cover it on real hardware paths, not only by compiling.
 - There is no system picker on Windows yet; clients choose from the list (the desktop UI shows it).
-- Each frame is copied twice on the way to the compositor: GPU to a staging texture inside `windows-capture`, then into the pool. GPU-side composition would avoid both and is future work.
+- Each frame is copied twice on the way to the compositor: GPU to a staging texture inside `windows-capture`, which creates and maps a new staging texture for every frame, then into the pool. A reused staging texture, or GPU-side composition, would avoid that and is future work; at 1080p on the CI runner it keeps up.
+- When a captured window closes, its capture ends. The compositor keeps the last frame, and the report says so only when the output stops (`the captured window was closed`). Live capture state in `get_status` is future work.
+- Listed window sizes come from the window rectangle and are approximate (borders, display scaling); capture reports carry the real frame size.
 - WGC delivers frames when content changes. A static screen yields few frames; the compositor keeps showing the newest one.
 - The dependency adds `windows-capture` and its transitive crates (`windows`, `rayon`, `parking_lot`) on Windows only.

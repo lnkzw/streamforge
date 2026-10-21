@@ -3,34 +3,14 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use common::EngineProcess;
+use common::{EngineProcess, TempDir};
 use ffmpeg_next as ff;
 use serde_json::Value;
 
 const RECORD_FOR: Duration = Duration::from_millis(2_000);
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "streamforge-recording-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        Self(dir)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// Send requests one by one (waiting, bounded, for each response) to a fresh
 /// engine, then close stdin and wait for a clean exit.

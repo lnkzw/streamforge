@@ -51,7 +51,7 @@ fn backend_name(host: &cpal::Host) -> String {
 
 fn screen_unsupported() -> String {
     format!(
-        "screen capture on {} is not implemented yet (a later M9 step); audio capture works",
+        "screen capture on {} is not part of the cpal backend (capture-platform adds the native one); audio capture works",
         std::env::consts::OS
     )
 }

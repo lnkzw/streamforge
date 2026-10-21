@@ -9,6 +9,11 @@
 //! update waits in a single "newest wins" slot that the render thread only
 //! try-locks before a frame, so editing never blocks rendering and pending
 //! edits never queue up.
+//!
+//! Live statistics ([`Compositor::live`]) work the other way round: every
+//! [`LIVE_PUBLISH_MS`] the render thread updates a shared snapshot in place,
+//! again only after a successful try-lock, so a reader never delays a frame
+//! and publishing allocates only when the source list grows.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
@@ -24,6 +29,8 @@ use crate::scene::{Scene, SceneError, SourceId};
 use crate::stats::{LatencyHistogram, LatencySummary};
 
 pub const MAX_FPS: u32 = 240;
+/// How often the render thread refreshes [`Compositor::live`].
+pub const LIVE_PUBLISH_MS: u64 = 250;
 /// Sources removed by updates whose stats are kept for the report (the
 /// most recent ones; `RenderStats::retired_sources` counts all).
 pub const MAX_RETIRED_SOURCES: usize = 64;
@@ -130,6 +137,33 @@ pub struct RenderStats {
     pub sources: Vec<SourceStats>,
 }
 
+/// A running compositor's counters so far (see [`Compositor::live`]); the
+/// same meaning as in [`RenderStats`], refreshed every [`LIVE_PUBLISH_MS`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct LiveRenderStats {
+    pub elapsed_ms: u64,
+    pub frames_rendered: u64,
+    pub skipped_ticks: u64,
+    pub late_frames: u64,
+    pub render_time: Option<LatencySummary>,
+    pub sources: Vec<LiveSourceStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiveSourceStats {
+    pub id: SourceId,
+    pub name: String,
+    /// `static` or `live`.
+    pub kind: &'static str,
+    pub frames_consumed: u64,
+    pub stale_ticks: u64,
+    pub missing_ticks: u64,
+    /// Time since this live source last delivered a new frame (`None` for
+    /// static sources and before the first frame). A stalled or ended
+    /// capture shows up here while the output runs.
+    pub last_frame_age_ms: Option<u64>,
+}
+
 pub struct CompositorRun {
     pub stats: RenderStats,
     /// The most recently rendered canvas.
@@ -142,6 +176,7 @@ pub struct CompositorRun {
 pub struct Compositor {
     stop: Arc<AtomicBool>,
     pending: Arc<Mutex<Option<SceneUpdate>>>,
+    live: Arc<Mutex<LiveRenderStats>>,
     canvas: (u32, u32),
     thread: Option<JoinHandle<Result<CompositorRun, CompositorError>>>,
 }
@@ -157,17 +192,20 @@ impl Compositor {
         let canvas = (config.scene.width, config.scene.height);
         let stop = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(None));
+        let live = Arc::new(Mutex::new(LiveRenderStats::default()));
         let thread = thread::Builder::new()
             .name("compositor".to_owned())
             .spawn({
                 let stop = Arc::clone(&stop);
                 let pending = Arc::clone(&pending);
-                move || run(config, target, &stop, &pending)
+                let live = Arc::clone(&live);
+                move || run(config, target, &stop, &pending, &live)
             })
             .map_err(CompositorError::Spawn)?;
         Ok(Self {
             stop,
             pending,
+            live,
             canvas,
             thread: Some(thread),
         })
@@ -187,6 +225,15 @@ impl Compositor {
         }
         *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(update);
         Ok(())
+    }
+
+    /// Counters so far, at most [`LIVE_PUBLISH_MS`] old. Never delays the
+    /// render thread (it skips a refresh while this copies).
+    pub fn live(&self) -> LiveRenderStats {
+        self.live
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The render thread ended on its own (it failed or panicked).
@@ -227,6 +274,8 @@ struct SourceState {
     consumed: u64,
     stale: u64,
     missing: u64,
+    /// Tick at which a live source last delivered a new frame.
+    last_new_tick: Option<u64>,
 }
 
 impl SourceState {
@@ -244,6 +293,7 @@ impl SourceState {
             consumed: 0,
             stale: 0,
             missing: 0,
+            last_new_tick: None,
         }
     }
 
@@ -259,7 +309,7 @@ impl SourceState {
             }
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, tick: u64) {
         let Current::Live { mailbox, frame } = &mut self.current else {
             return;
         };
@@ -268,6 +318,7 @@ impl SourceState {
                 // The previous frame's pooled buffer returns to its producer.
                 *frame = Some(new);
                 self.consumed += 1;
+                self.last_new_tick = Some(tick);
             }
             None if frame.is_some() => self.stale += 1,
             None => self.missing += 1,
@@ -278,6 +329,27 @@ impl SourceState {
         match &self.current {
             Current::Static(frame) => Some(frame),
             Current::Live { frame, .. } => frame.as_ref(),
+        }
+    }
+
+    /// Write this source's live counters into `into`, reusing its name's
+    /// allocation.
+    fn live_into(&self, into: &mut LiveSourceStats, tick: u64, period_ns: u64) {
+        into.id = self.id;
+        into.name.clone_from(&self.name);
+        into.kind = self.kind();
+        into.frames_consumed = self.consumed;
+        into.stale_ticks = self.stale;
+        into.missing_ticks = self.missing;
+        into.last_frame_age_ms = self
+            .last_new_tick
+            .map(|at| tick.saturating_sub(at).saturating_mul(period_ns) / 1_000_000);
+    }
+
+    fn kind(&self) -> &'static str {
+        match &self.current {
+            Current::Static(_) => "static",
+            Current::Live { .. } => "live",
         }
     }
 
@@ -350,11 +422,55 @@ impl Retired {
     }
 }
 
+/// Refresh the shared snapshot in place, unless a reader holds it now.
+fn publish(
+    live: &Mutex<LiveRenderStats>,
+    start: Instant,
+    counts: (u64, u64, u64),
+    render_times: &LatencyHistogram,
+    sources: &[SourceState],
+    tick: u64,
+    period_ns: u64,
+) {
+    let mut snapshot = match live.try_lock() {
+        Ok(snapshot) => snapshot,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    let (rendered, skipped, late) = counts;
+    snapshot.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    snapshot.frames_rendered = rendered;
+    snapshot.skipped_ticks = skipped;
+    snapshot.late_frames = late;
+    snapshot.render_time = render_times.summary();
+    snapshot.sources.truncate(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        match snapshot.sources.get_mut(index) {
+            Some(entry) => source.live_into(entry, tick, period_ns),
+            None => {
+                // Only when the source list grows.
+                let mut entry = LiveSourceStats {
+                    id: source.id,
+                    name: String::new(),
+                    kind: "static",
+                    frames_consumed: 0,
+                    stale_ticks: 0,
+                    missing_ticks: 0,
+                    last_frame_age_ms: None,
+                };
+                source.live_into(&mut entry, tick, period_ns);
+                snapshot.sources.push(entry);
+            }
+        }
+    }
+}
+
 fn run(
     config: CompositorConfig,
     mut target: VideoFrame,
     stop: &AtomicBool,
     pending: &Mutex<Option<SceneUpdate>>,
+    live: &Mutex<LiveRenderStats>,
 ) -> Result<CompositorRun, CompositorError> {
     let CompositorConfig {
         mut scene,
@@ -373,6 +489,7 @@ fn run(
         |start: Instant, tick: u64| start + Duration::from_nanos(period_ns.saturating_mul(tick));
     let mut render_times = LatencyHistogram::new();
     let (mut tick, mut rendered, mut skipped, mut late) = (0u64, 0u64, 0u64, 0u64);
+    let publish_every = (u64::from(fps) * LIVE_PUBLISH_MS / 1000).max(1);
     let start = Instant::now();
 
     while !stop.load(Ordering::Acquire) {
@@ -398,7 +515,7 @@ fn run(
             updates += 1;
         }
         for source in &mut sources {
-            source.poll();
+            source.poll(tick);
         }
         if let Some(animate) = animation {
             animate(&mut scene, tick);
@@ -422,6 +539,17 @@ fn run(
         rendered += 1;
         if finished > due(start, tick + 1) {
             late += 1;
+        }
+        if rendered % publish_every == 1 || publish_every == 1 {
+            publish(
+                live,
+                start,
+                (rendered, skipped, late),
+                &render_times,
+                &sources,
+                tick,
+                period_ns,
+            );
         }
         tick += 1;
     }
@@ -721,5 +849,67 @@ mod tests {
         // The newest live frame is drawn over the bars.
         assert_eq!(run.last_frame.pixel(9, 9), [200, 200, 200, 255]);
         assert_eq!(run.last_frame.pixel(0, 0), pattern::BARS[0]);
+    }
+
+    #[test]
+    fn live_stats_follow_the_run_and_show_a_stalled_source() {
+        let mailbox = Arc::new(FrameMailbox::new());
+        let pool = FramePool::new(2);
+        let compositor = Compositor::spawn(config(
+            vec![SourceConfig {
+                id: SourceId(7),
+                name: "capture".into(),
+                input: SourceInput::Live(Arc::clone(&mailbox)),
+            }],
+            vec![Layer::new("capture", SourceId(7), Transform::IDENTITY)],
+        ))
+        .expect("spawn");
+        assert_eq!(compositor.live().frames_rendered, 0, "nothing yet");
+        let mut buffer = pool.acquire(4 * 4 * 4).expect("buffer");
+        buffer.fill(9);
+        mailbox
+            .publish(VideoFrame::new(4, 4, 16, PixelFormat::Bgrx8, None, buffer).expect("frame"));
+        // One frame, then the source stalls: its age grows while rendering goes on.
+        wait_until("an aged source", || {
+            compositor.live().sources.first().is_some_and(|source| {
+                source.frames_consumed == 1
+                    && source.last_frame_age_ms.is_some_and(|age| age >= 300)
+            })
+        });
+        let live = compositor.live();
+        assert!(
+            live.frames_rendered > 0 && live.render_time.is_some(),
+            "{live:?}"
+        );
+        let source = &live.sources[0];
+        assert_eq!(
+            (source.id, source.name.as_str(), source.kind),
+            (SourceId(7), "capture", "live")
+        );
+        assert!(source.stale_ticks > 0, "{source:?}");
+        let run = compositor.stop().expect("stop");
+        // The snapshot is at most one publish interval behind the final count.
+        let behind = run.stats.frames_rendered - live.frames_rendered;
+        assert!(behind <= 100, "{behind} frames behind");
+    }
+
+    #[test]
+    fn a_reader_holding_the_snapshot_does_not_delay_rendering() {
+        let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut config = config(vec![], vec![]);
+        config.sink = Some(Box::new(CountingSink(Arc::clone(&times))));
+        let compositor = Compositor::spawn(config).expect("spawn");
+        wait_until("a first snapshot", || compositor.live().frames_rendered > 0);
+        let held = compositor.live.lock().expect("lock");
+        let before = times.lock().expect("lock").len();
+        thread::sleep(Duration::from_millis(300));
+        let during = times.lock().expect("lock").len() - before;
+        drop(held);
+        compositor.stop().expect("stop");
+        // About 30 frames at 100 FPS; rendering went on with the snapshot locked.
+        assert!(
+            during >= 10,
+            "only {during} frames while the snapshot was held"
+        );
     }
 }

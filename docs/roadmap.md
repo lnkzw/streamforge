@@ -213,3 +213,18 @@ Delivered in steps (ADR 0009):
 Acceptance:
 - CI builds on all three operating systems.
 - Capture/recording integration tests run on available native runners; limitations are explicit.
+
+## M10 — Live health and reliability
+
+From the architecture assessment (`docs/architecture/CURRENT_STATE_ASSESSMENT.md`, §9), one PR per step:
+
+- [x] Steps 0–2: live counters in compositor, mixer and outputs, the `get_health` command, a truthful `get_status` (`media_engine_ready`, `pipeline_running`), CLI progress lines, stale documentation fixed (ADR 0012).
+- [ ] Step 3: health in the desktop UI (outputs, render, per-source state).
+- [ ] Step 4: capture stream state (`running`, `stalled`, `ended` with a reason) from every backend, shown in `get_health`.
+- [ ] Step 5: `restart_source` without stopping outputs.
+- [ ] Step 6: versioned project file (save, load, validate; atomic write; no secrets).
+- [ ] Step 7: measurement harness (render, encode and CPU baselines for one and two outputs).
+
+Acceptance:
+- Failures of sources and outputs are visible while they run, through the same command surface for every client.
+- Every step keeps the existing tests and adds tests for its behavior.

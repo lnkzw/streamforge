@@ -73,6 +73,9 @@ pub(crate) fn run(
             return Ok(stream.finish(StreamState::Reconnecting));
         }
         stream.reconnect_attempts += 1;
+        shared
+            .reconnect_attempts
+            .store(stream.reconnect_attempts, Ordering::Relaxed);
         // A failed attempt is recorded in `last_error`; the loop retries.
         session = stream.connect().ok();
     }
@@ -155,6 +158,7 @@ impl<'a> Stream<'a> {
         match opened {
             Ok(session) => {
                 self.connects += 1;
+                self.shared.connects.store(self.connects, Ordering::Relaxed);
                 self.connected_since = Some(Instant::now());
                 self.origin_ns = None;
                 self.set_state(StreamState::Connected);
@@ -169,14 +173,34 @@ impl<'a> Stream<'a> {
 
     fn serve(&mut self, live: &mut Session, rx: &Receiver<Item>) -> Served {
         while let Ok(item) = rx.recv() {
+            self.shared.received(&item);
             if matches!(item, Item::Stop) {
                 return Served::Stopped;
             }
-            if let Err(error) = self.write(live, item) {
+            let written = self.write(live, item);
+            self.publish(Some(live));
+            if let Err(error) = written {
                 return Served::Broken(error);
             }
         }
         Served::Stopped
+    }
+
+    /// Publish totals over all connections, the current one included, and
+    /// what arrived while offline.
+    fn publish(&self, live: Option<&Session>) {
+        let mut counts = live.map(Session::counts).unwrap_or_default();
+        if let Some(video) = &self.video {
+            counts.frames_encoded += video.frames_encoded;
+            counts.frames_dropped += video.frames_dropped;
+        }
+        if let Some(audio) = &self.audio {
+            counts.samples_encoded += audio.samples_encoded;
+            counts.blocks_dropped += audio.blocks_dropped;
+        }
+        counts.frames_dropped += self.frames_offline;
+        counts.blocks_dropped += self.blocks_offline;
+        self.shared.publish(counts);
     }
 
     /// Shift `item` onto the connection's timeline and encode it.
@@ -248,6 +272,7 @@ impl<'a> Stream<'a> {
         self.samples_undelivered += audio.undelivered();
         merge_video(&mut self.video, video.stats(0));
         merge_audio(&mut self.audio, audio.stats(0));
+        self.publish(None);
         lasted
     }
 
@@ -260,22 +285,30 @@ impl<'a> Stream<'a> {
             if remaining.is_zero() {
                 return false;
             }
-            match rx.recv_timeout(remaining) {
-                Ok(Item::Stop) | Err(RecvTimeoutError::Disconnected) => return true,
-                Ok(Item::Video { .. }) => self.frames_offline += 1,
-                Ok(Item::Audio { .. }) => self.blocks_offline += 1,
+            let item = match rx.recv_timeout(remaining) {
+                Ok(item) => item,
+                Err(RecvTimeoutError::Disconnected) => return true,
                 Err(RecvTimeoutError::Timeout) => return false,
+            };
+            self.shared.received(&item);
+            match item {
+                Item::Stop => return true,
+                Item::Video { .. } => self.frames_offline += 1,
+                Item::Audio { .. } => self.blocks_offline += 1,
             }
+            self.publish(None);
         }
     }
 
     fn drain_until_stop(&mut self, rx: &Receiver<Item>) {
         for item in rx {
+            self.shared.received(&item);
             match item {
                 Item::Video { .. } => self.frames_offline += 1,
                 Item::Audio { .. } => self.blocks_offline += 1,
                 Item::Stop => break,
             }
+            self.publish(None);
         }
     }
 

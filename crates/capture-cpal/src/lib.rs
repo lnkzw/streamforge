@@ -1,10 +1,11 @@
 //! Audio capture through cpal: WASAPI on Windows, CoreAudio on macOS.
 //!
 //! [`CpalCapture`] implements the audio half of [`capture_api::CaptureBackend`]
-//! (inputs, probes, continuous streams into a bounded `AudioRing`); screen
-//! capture on these platforms comes with a later M9 step and reports
-//! `unsupported` until then. The device format is converted to the
-//! requested rate and stereo in the callback ([`Converter`]).
+//! (inputs, probes, continuous streams into a bounded `AudioRing`). Screen
+//! capture comes from `capture-windows` and `capture-macos`;
+//! `capture-platform` combines them with this backend. The device format is
+//! converted to the requested rate and stereo in the callback
+//! ([`Converter`]).
 
 mod convert;
 

@@ -81,6 +81,17 @@ impl CommandDescriptor {
     }
 }
 
+const GET_HEALTH: CommandDescriptor = CommandDescriptor {
+    name: "get_health",
+    summary: "Live counters while the pipeline runs: render (frames, skipped and late ticks, \
+              render time, per-source frame age), mix (blocks, underruns, fill, drift), and per \
+              output (frames encoded and dropped, samples, queue depth, stream state, \
+              reconnects, encoder). Totals since start; poll it (cheap).",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
 const GET_STATUS: CommandDescriptor = CommandDescriptor {
     name: "get_status",
     summary: "Report engine status.",
@@ -323,6 +334,7 @@ const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
 
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
+    GET_HEALTH,
     LIST_COMMANDS,
     GET_CAPTURE_CAPABILITIES,
     LIST_AUDIO_INPUTS,
@@ -386,6 +398,7 @@ impl Command {
             "get_capture_capabilities" => {
                 expect_no_params(name, params).map(|()| Self::GetCaptureCapabilities)
             }
+            "get_health" => expect_no_params(name, params).map(|()| Self::GetHealth),
             "list_audio_inputs" => expect_no_params(name, params).map(|()| Self::ListAudioInputs),
             "list_screen_sources" => {
                 expect_no_params(name, params).map(|()| Self::ListScreenSources)
@@ -458,6 +471,7 @@ impl Command {
             Self::GetStatus => &GET_STATUS,
             Self::ListCommands => &LIST_COMMANDS,
             Self::GetCaptureCapabilities => &GET_CAPTURE_CAPABILITIES,
+            Self::GetHealth => &GET_HEALTH,
             Self::ListAudioInputs => &LIST_AUDIO_INPUTS,
             Self::ListScreenSources => &LIST_SCREEN_SOURCES,
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
@@ -1511,6 +1525,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "get_status"
         | "list_commands"
         | "get_capture_capabilities"
+        | "get_health"
         | "list_audio_inputs"
         | "list_screen_sources"
         | "stop_recording"
@@ -2301,6 +2316,7 @@ mod tests {
             Some(CommandAccess::ReadOnly)
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
+        assert_eq!(access("get_health"), Some(CommandAccess::ReadOnly));
         // Window titles can reveal private content.
         assert_eq!(
             access("list_screen_sources"),

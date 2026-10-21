@@ -16,7 +16,7 @@
 mod audio_fifo;
 mod ffmpeg;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -26,10 +26,10 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 pub use audio_fifo::{AudioFifo, FifoStats, MAX_GAP_FILL};
 pub use encoder_api::{
-    AudioSettings, AudioTrackStats, EncoderPreference, RateControl, ReconnectPolicy,
-    RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, SkippedEncoder, StreamConfig,
-    StreamKey, StreamState, StreamStats, StreamTarget, VideoEncoderInfo, VideoSettings,
-    VideoTrackStats,
+    AudioSettings, AudioTrackStats, EncoderPreference, LiveOutputStats, RateControl,
+    ReconnectPolicy, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
+    SkippedEncoder, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
+    VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
 
 /// Largest interleaved audio block accepted by [`OutputInput::send_audio`].
@@ -78,6 +78,17 @@ pub(crate) struct Shared {
     /// Deadline ([`monotonic_ns`]) after which blocked FFmpeg I/O is
     /// interrupted; `i64::MAX` while not stopping.
     pub abort_after_ns: AtomicI64,
+    /// Totals the output thread publishes after each item (see
+    /// [`LiveOutputStats`]); drops here are the output thread's own.
+    pub frames_encoded: AtomicU64,
+    pub frames_dropped: AtomicU64,
+    pub samples_encoded: AtomicU64,
+    pub blocks_dropped: AtomicU64,
+    /// Sent minus received media items; may dip below zero for a moment
+    /// (a producer counts after sending), so readers clamp it.
+    pub queued: AtomicI64,
+    pub connects: AtomicU32,
+    pub reconnect_attempts: AtomicU32,
 }
 
 impl Default for Shared {
@@ -89,6 +100,59 @@ impl Default for Shared {
             failed: AtomicBool::new(false),
             state: AtomicU8::new(StreamState::Connecting.as_u8()),
             abort_after_ns: AtomicI64::new(i64::MAX),
+            frames_encoded: AtomicU64::new(0),
+            frames_dropped: AtomicU64::new(0),
+            samples_encoded: AtomicU64::new(0),
+            blocks_dropped: AtomicU64::new(0),
+            queued: AtomicI64::new(0),
+            connects: AtomicU32::new(0),
+            reconnect_attempts: AtomicU32::new(0),
+        }
+    }
+}
+
+/// Totals of the output thread's own work, published as a whole.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Counts {
+    pub frames_encoded: u64,
+    pub frames_dropped: u64,
+    pub samples_encoded: u64,
+    pub blocks_dropped: u64,
+}
+
+impl Shared {
+    pub(crate) fn publish(&self, counts: Counts) {
+        self.frames_encoded
+            .store(counts.frames_encoded, Ordering::Relaxed);
+        self.frames_dropped
+            .store(counts.frames_dropped, Ordering::Relaxed);
+        self.samples_encoded
+            .store(counts.samples_encoded, Ordering::Relaxed);
+        self.blocks_dropped
+            .store(counts.blocks_dropped, Ordering::Relaxed);
+    }
+
+    /// The output thread took a media item off the queue.
+    pub(crate) fn received(&self, item: &Item) {
+        if !matches!(item, Item::Stop) {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn sent(&self) {
+        self.queued.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn live(&self) -> LiveOutputStats {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        LiveOutputStats {
+            frames_encoded: load(&self.frames_encoded),
+            frames_dropped: load(&self.frames_dropped) + load(&self.video_dropped),
+            samples_encoded: load(&self.samples_encoded),
+            blocks_dropped: load(&self.blocks_dropped) + load(&self.audio_dropped),
+            queue_depth: u64::try_from(self.queued.load(Ordering::Relaxed)).unwrap_or(0),
+            connects: self.connects.load(Ordering::Relaxed),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
         }
     }
 }
@@ -105,7 +169,9 @@ impl OutputInput {
     /// (and counts a drop) if the queue is full or the output has ended.
     pub fn send_video(&self, frame: VideoFrame, pts: MediaTimestamp) -> bool {
         let sent = self.tx.try_send(Item::Video { frame, pts }).is_ok();
-        if !sent {
+        if sent {
+            self.shared.sent();
+        } else {
             self.count_dropped_video();
         }
         sent
@@ -132,7 +198,11 @@ impl OutputInput {
     /// dropping; for offline sources that may produce faster than real time.
     /// Returns `false` only if the output has stopped.
     pub fn send_video_blocking(&self, frame: VideoFrame, pts: MediaTimestamp) -> bool {
-        self.tx.send(Item::Video { frame, pts }).is_ok()
+        let sent = self.tx.send(Item::Video { frame, pts }).is_ok();
+        if sent {
+            self.shared.sent();
+        }
+        sent
     }
 
     /// Queue interleaved samples whose first frame has timestamp `pts`.
@@ -150,7 +220,9 @@ impl OutputInput {
                 })
                 .is_ok()
         };
-        if !sent {
+        if sent {
+            self.shared.sent();
+        } else {
             self.shared.audio_dropped.fetch_add(1, Ordering::Relaxed);
         }
         sent
@@ -165,13 +237,18 @@ impl OutputInput {
         }
         let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
         block[..samples.len()].copy_from_slice(samples);
-        self.tx
+        let sent = self
+            .tx
             .send(Item::Audio {
                 samples: block,
                 len: samples.len(),
                 pts,
             })
-            .is_ok()
+            .is_ok();
+        if sent {
+            self.shared.sent();
+        }
+        sent
     }
 }
 
@@ -304,6 +381,11 @@ impl Recorder {
         &self.worker.encoder
     }
 
+    /// Counters so far; never waits for the recorder thread.
+    pub fn live(&self) -> LiveOutputStats {
+        self.worker.input.shared.live()
+    }
+
     /// Set the end of the recording: items stamped at or after `end` are not
     /// recorded (counted as `*_after_end`). Producers run on until they are
     /// stopped, so this gives both tracks the same end.
@@ -348,6 +430,11 @@ impl Streamer {
     /// The video encoder of the first connection; reconnects keep it.
     pub fn video_encoder(&self) -> &VideoEncoderInfo {
         &self.worker.encoder
+    }
+
+    /// Totals over all connections so far; never waits for the streamer.
+    pub fn live(&self) -> LiveOutputStats {
+        self.worker.input.shared.live()
     }
 
     /// Redacted target, safe to show.

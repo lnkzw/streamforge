@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use audio_engine::{BlockSink, MixerConfig, MixerControl, MixerThread, StripConfig};
+use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread, StripConfig};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
     AudioSetup, CommandError, ErrorCode, ErrorSummary, MixerState, PipelineReport,
@@ -24,7 +24,9 @@ use command_api::{
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
-use video_compositor::{Compositor, CompositorConfig, CpuRenderer, FrameSink, downscale};
+use video_compositor::{
+    Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats, downscale,
+};
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::scenes::{self, FrameCache, LiveFrames};
@@ -150,6 +152,11 @@ impl Pipeline {
     /// `false` once the compositor or the mixer has stopped on its own.
     pub fn is_running(&self) -> bool {
         !self.compositor.is_finished() && !self.mixer.is_finished()
+    }
+
+    /// Compositor and mixer counters so far; never waits for their threads.
+    pub fn live(&self) -> (LiveRenderStats, LiveMixStats) {
+        (self.compositor.live(), self.control.live())
     }
 
     pub fn audio_from_setup(&self) -> bool {

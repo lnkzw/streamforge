@@ -15,8 +15,8 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 use crate::audio_fifo::AudioFifo;
 use crate::{
-    AudioSettings, AudioTrackStats, EncoderPreference, Item, RecorderError, RecorderErrorKind,
-    Shared, SkippedEncoder, VideoEncoderInfo, VideoSettings, VideoTrackStats,
+    AudioSettings, AudioTrackStats, Counts, EncoderPreference, Item, RecorderError,
+    RecorderErrorKind, Shared, SkippedEncoder, VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
 
 pub(crate) mod encoders;
@@ -146,6 +146,18 @@ impl Session {
     /// gone; do not wait for timeouts while closing).
     fn abort(&self) {
         self.interrupt.abort();
+    }
+
+    /// This session's totals so far.
+    fn counts(&self) -> Counts {
+        let (frames_encoded, frames_dropped) = self.video.counts();
+        let (samples_encoded, blocks_dropped) = self.audio.counts();
+        Counts {
+            frames_encoded,
+            frames_dropped,
+            samples_encoded,
+            blocks_dropped,
+        }
     }
 
     /// Encode one item; items stamped at or after `end_ns` are counted as
@@ -604,6 +616,11 @@ impl VideoTrack {
         self.frames_encoded.saturating_sub(self.packets_written)
     }
 
+    /// Frames encoded and dropped by this track so far.
+    fn counts(&self) -> (u64, u64) {
+        (self.frames_encoded, self.frames_dropped)
+    }
+
     fn info(&self) -> VideoEncoderInfo {
         VideoEncoderInfo {
             encoder: self.name.clone(),
@@ -840,6 +857,11 @@ impl AudioTrack {
     fn undelivered(&self) -> u64 {
         let delivered = self.packets_written.saturating_mul(self.frame_size as u64);
         self.samples_encoded.saturating_sub(delivered)
+    }
+
+    /// Samples encoded and blocks dropped by this track so far.
+    fn counts(&self) -> (u64, u64) {
+        (self.samples_encoded, self.blocks_dropped)
     }
 
     fn stats(&self, queue_dropped: u64) -> AudioTrackStats {

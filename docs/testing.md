@@ -47,7 +47,12 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
 
 ## Where tests live
 
-- `crates/command-api`: unit tests for registry consistency, parameter decoding and result serialization.
+- `crates/command-api`: unit tests for registry consistency, parameter decoding and result serialization (including the health report's JSON shape).
+- Live health (ADR 0012):
+  - `video-compositor` and `audio-engine` test that their snapshots follow the run and that a reader holding a snapshot never delays a frame or block.
+  - `encoder-ffmpeg` tests that live output counters match the reports.
+  - The engine's stream-failure test checks `get_health` while the stream has failed and the recording continues.
+  - `streamforge-engine/tests/stdio_protocol.rs` checks `get_health` during a preview.
 - `crates/control-protocol/src/*`: unit tests for bounded line reading and envelope encoding.
 - `crates/control-protocol/tests/contract.rs`: wire-contract tests against a fake `CommandHandler`. These cover every error code, ID echoing, ordering and oversized lines.
 - `crates/engine`: unit tests showing that every registered command is handled.

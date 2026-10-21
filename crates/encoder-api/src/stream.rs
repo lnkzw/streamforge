@@ -204,6 +204,17 @@ pub enum StreamState {
 }
 
 impl StreamState {
+    /// The wire name, e.g. `reconnecting`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+
     pub const fn as_u8(self) -> u8 {
         match self {
             Self::Connecting => 0,

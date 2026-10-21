@@ -1,4 +1,5 @@
-//! Typed command vocabulary shared by CLI, UI, JSON-RPC, and future MCP adapters.
+//! Typed command vocabulary shared by the CLI, the desktop UI, the JSON-lines
+//! protocol and the MCP server.
 //!
 //! Adapters decode their input into a [`Command`], pass it to a
 //! [`CommandHandler`], and encode the returned [`CommandOutput`] or
@@ -8,6 +9,7 @@
 mod access;
 mod composite;
 mod error;
+mod health;
 mod mix;
 mod outputs;
 mod registry;
@@ -16,6 +18,7 @@ mod scenes;
 pub use access::{AccessPolicy, Gated, label as access_label};
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
+pub use health::{HealthReport, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
@@ -37,9 +40,10 @@ use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
     VideoCaptureReport,
 };
-use encoder_api::StreamState;
 /// Output encoder types, for adapters that do not use `encoder-api`.
-pub use encoder_api::{EncoderPreference, SkippedEncoder, VideoEncoderInfo};
+pub use encoder_api::{
+    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamState, VideoEncoderInfo,
+};
 use serde::{Deserialize, Serialize};
 
 /// A typed engine command.
@@ -54,6 +58,8 @@ pub enum Command {
     ListCommands,
     /// Query screen and audio capture capabilities of the running system.
     GetCaptureCapabilities,
+    /// Live counters of the pipeline and the open outputs.
+    GetHealth,
     /// List audio input devices.
     ListAudioInputs,
     /// List screen sources that can be captured by id (no picker).
@@ -116,6 +122,7 @@ pub enum Command {
 #[serde(untagged)]
 pub enum CommandOutput {
     Status(EngineStatus),
+    Health(Box<HealthReport>),
     Commands(CommandList),
     CaptureCapabilities(CaptureCapabilities),
     AudioInputs(AudioInputList),
@@ -149,7 +156,11 @@ pub struct ScreenSourceList {
 pub struct EngineStatus {
     pub application: String,
     pub version: String,
+    /// The media engine (compositor, mixer, encoders) is built in and can
+    /// start outputs. Always true since M5; kept for protocol version 1.
     pub media_engine_ready: bool,
+    /// A media pipeline runs (for outputs or the preview).
+    pub pipeline_running: bool,
     pub capture_available: bool,
     /// A stream is open and connected, connecting or reconnecting.
     pub streaming_active: bool,
@@ -182,7 +193,8 @@ mod tests {
         let status = EngineStatus {
             application: "StreamForge".to_owned(),
             version: "0.1.0".to_owned(),
-            media_engine_ready: false,
+            media_engine_ready: true,
+            pipeline_running: false,
             capture_available: false,
             streaming_active: false,
             streaming_state: None,
@@ -196,7 +208,8 @@ mod tests {
             serde_json::json!({
                 "application": "StreamForge",
                 "version": "0.1.0",
-                "media_engine_ready": false,
+                "media_engine_ready": true,
+                "pipeline_running": false,
                 "capture_available": false,
                 "streaming_active": false,
                 "streaming_state": null,

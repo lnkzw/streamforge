@@ -14,7 +14,7 @@ use ffmpeg_next as ff;
 
 use super::{EncoderChoice, Session, init};
 use crate::{
-    Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
+    Counts, Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
 };
 
 const CONTAINER: &str = "matroska";
@@ -38,10 +38,13 @@ pub(crate) fn run(
 
     let mut failure = None;
     while let Ok(item) = rx.recv() {
+        shared.received(&item);
         if matches!(item, Item::Stop) {
             break;
         }
-        if let Err(error) = session.write(item, shared.end_ns.load(Ordering::Acquire)) {
+        let written = session.write(item, shared.end_ns.load(Ordering::Acquire));
+        shared.publish(session.counts());
+        if let Err(error) = written {
             shared.failed.store(true, Ordering::Release);
             failure = Some(error);
             break;
@@ -53,11 +56,20 @@ pub(crate) fn run(
         // Producers run until the owner stops them: count what they still
         // queue instead of letting it vanish with the channel.
         for item in &rx {
+            shared.received(&item);
             match item {
                 Item::Video { .. } => video.frames_dropped += 1,
                 Item::Audio { .. } => audio.blocks_dropped += 1,
                 Item::Stop => break,
             }
+            let (frames_encoded, frames_dropped) = video.counts();
+            let (samples_encoded, blocks_dropped) = audio.counts();
+            shared.publish(Counts {
+                frames_encoded,
+                frames_dropped,
+                samples_encoded,
+                blocks_dropped,
+            });
         }
     }
     drop(rx);

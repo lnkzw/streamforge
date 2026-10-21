@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
 use command_api::{
-    AudioSetup, CommandError, ErrorCode, MediaSources, PipelineReport, RecordingReport,
-    RecordingRequest, RecordingStarted, StreamingReport, StreamingRequest, StreamingStarted,
+    AudioSetup, CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, PipelineReport,
+    RecordingReport, RecordingRequest, RecordingStarted, StreamingReport, StreamingRequest,
+    StreamingStarted,
 };
 use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
@@ -40,8 +41,42 @@ pub(crate) struct StreamingOutput {
 }
 
 impl Engine {
-    fn pipeline_running(&self) -> bool {
+    pub(crate) fn pipeline_running(&self) -> bool {
         self.pipeline.as_ref().is_some_and(Pipeline::is_running)
+    }
+
+    /// Live counters of the pipeline and the open outputs (`get_health`).
+    /// Reads atomics and snapshots only; never waits for a media thread.
+    pub(crate) fn health(&self) -> HealthReport {
+        let live = self.pipeline.as_ref().map(Pipeline::live);
+        let elapsed_ms = |t0: Instant| u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let recording = self.recording.as_ref().map(|output| OutputHealth {
+            target: display_path(&output.path),
+            elapsed_ms: elapsed_ms(output.t0),
+            running: self.recording_running(),
+            state: None,
+            video_encoder: output.recorder.video_encoder().clone(),
+            counters: output.recorder.live(),
+        });
+        let streaming = self.streaming.as_ref().map(|output| {
+            let state = self.streaming_state();
+            OutputHealth {
+                target: output.streamer.target().to_owned(),
+                elapsed_ms: elapsed_ms(output.t0),
+                running: state.is_some_and(|state| state != StreamState::Failed),
+                state,
+                video_encoder: output.streamer.video_encoder().clone(),
+                counters: output.streamer.live(),
+            }
+        });
+        let (render, mix) = live.unzip();
+        HealthReport {
+            pipeline_running: self.pipeline_running(),
+            render,
+            mix,
+            recording,
+            streaming,
+        }
     }
 
     /// The recording is open and all its workers run.

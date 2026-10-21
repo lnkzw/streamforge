@@ -19,7 +19,7 @@ fn capabilities_report_the_platform_and_what_is_missing() {
             .screen
             .unavailable_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("not implemented"))
+            .is_some_and(|reason| reason.contains("not part of the cpal backend"))
     );
     let backend = capabilities.audio.backend.as_deref().unwrap_or_default();
     assert!(backend.starts_with("cpal ("), "{backend}");

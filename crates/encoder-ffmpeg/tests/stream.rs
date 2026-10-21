@@ -215,6 +215,14 @@ fn gives_up_after_the_reconnect_attempts() {
     );
     assert!(failed, "state {:?}", streamer.state());
     feeder.run_until(|| false, Duration::from_millis(300));
+    // While failed, the live counters show the attempts and the drops.
+    let live = streamer.live();
+    assert_eq!((live.connects, live.reconnect_attempts), (1, 2), "{live:?}");
+    assert!(live.frames_encoded > 0, "{live:?}");
+    assert!(
+        live.frames_dropped > 0 && live.blocks_dropped > 0,
+        "{live:?}"
+    );
     let stopping = Instant::now();
     let stats = streamer.stop().expect("stop");
     assert!(
@@ -228,6 +236,9 @@ fn gives_up_after_the_reconnect_attempts() {
     // Media after the failure is counted, not silently lost.
     assert!(stats.frames_dropped_offline > 0 && stats.blocks_dropped_offline > 0);
     assert!(stats.video.frames_dropped >= stats.frames_dropped_offline);
+    // The final report counts at least what the live counters showed.
+    assert!(stats.video.frames_encoded >= live.frames_encoded);
+    assert!(stats.video.frames_dropped >= live.frames_dropped);
     let _ = server.join();
 }
 

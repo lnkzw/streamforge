@@ -7,6 +7,7 @@ members = [
     "crates/capture-linux",
     "crates/capture-cpal",
     "crates/capture-windows",
+    "crates/capture-macos",
     "crates/capture-platform",
     "crates/video-compositor",
     "crates/audio-engine",

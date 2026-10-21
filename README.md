@@ -49,6 +49,7 @@ cargo run -p streamforge-cli -- capture caps
 cargo run -p streamforge-cli -- capture inputs
 cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker (Linux)
 cargo run -p streamforge-cli -- capture sources                         # monitors and windows by id (Windows, macOS)
+cargo run -p streamforge-cli -- record --file take.mkv --video-encoder hardware  # GPU encoder or an error saying why
 cargo run -p streamforge-cli -- capture screen --source-id 'monitor:\\.\DISPLAY1'  # no picker
 cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
 

@@ -120,6 +120,14 @@ jobs:
         # For the record (docs/platforms.md); runners have no desktop or
         # microphone, so most entries say why they are unavailable.
         run: cargo run --locked -q -p streamforge-cli -- capture caps
+      - name: Video encoder of this runner
+        # For the record: which H.264 encoder `auto` picks here, and why
+        # the hardware candidates were skipped (runners have no GPU).
+        run: |
+          cargo run --locked -q -p streamforge-cli -- record --file ci-encoder.mkv \
+            --output-dir "$RUNNER_TEMP" --duration-ms 1000 > "$RUNNER_TEMP/encoder.json"
+          py=$(command -v python3 || command -v python)
+          "$py" -c "import json,sys; t=open(sys.argv[1]).read(); v=json.loads(t[t.index('{'):])['recording']['video']; print(json.dumps({k: v[k] for k in ('encoder', 'hardware', 'encoders_skipped')}, indent=2))" "$RUNNER_TEMP/encoder.json"
       - name: Screen sources of this runner
         # For the record: Windows lists its monitor; macOS needs a
         # screen-recording permission (`permission_denied` without it);

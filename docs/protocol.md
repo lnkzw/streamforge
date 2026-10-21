@@ -84,9 +84,9 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
 | `probe_audio_mix`          | see below | `sensitive` | Mix report |
-| `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels"}` |
+| `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels", "video_encoder"}` |
 | `stop_recording`           | none   | `control`   | Recording report |
-| `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels"}` |
+| `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels", "video_encoder"}` |
 | `stop_streaming`           | none   | `control`   | Streaming report |
 | `list_scenes`              | none   | `read_only` | Scene list |
 | `create_scene`             | see below | `control` | Scene list |
@@ -243,10 +243,13 @@ Source parameters (all optional; any of them makes the output bring its own sour
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|
 | `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
+| `video_encoder`  | `"auto"`, `"software"`, `"hardware"` | `"auto"` | H.264 encoder (ADR 0011). `auto` tries this platform's hardware encoders first and falls back to libx264. `software` uses libx264 only. `hardware` fails with `unsupported` (listing each candidate and why it did not open) when no hardware encoder opens. |
+
+The result's `video_encoder` is `{"encoder", "hardware", "skipped": [{"encoder", "reason"}]}`: the encoder in use and the candidates tried before it.
 
 Errors:
 - `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
-- `unsupported`: no recorder on this platform (Linux, Windows and macOS have one; `docs/platforms.md`).
+- `unsupported`: no recorder on this platform (Linux, Windows and macOS have one; `docs/platforms.md`), or no H.264 encoder of the requested kind opened (the message lists why for each).
 - `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
 - Capture errors are the same as for the probes.
 
@@ -255,7 +258,7 @@ If `start_recording` fails, the file it created is removed.
 `stop_recording` sets one end time for both tracks, detaches the output, drains its queue, flushes the encoders and writes the trailer. Report: `{"recording", "pipeline_stopped", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
 
 - **`recording`:** `path`, `container`, `duration_ms`, `file_bytes`, plus:
-  - `video` (`encoder`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
+  - `video` (`encoder`, `hardware`, `encoders_skipped`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
   - `audio` (`encoder`, `rate`, `channels`, `bitrate`, `samples_encoded`, `blocks_dropped`, `blocks_after_end`, `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples`, `first_pts_ms`, `end_ms`)
 
   Both tracks are cut at the stop time; `*_after_end` counts what producers emitted while stopping.
@@ -276,6 +279,7 @@ If finalizing fails, the error's `details` carry the partial `recording` stats, 
 | `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. |
 | `stream_key`         | string | none | Appended as the last path segment when connecting. No `/` or whitespace. **Secret:** never echoed in results, errors, logs or `Debug` output; reports show `<stream key>`. |
 | `video_bitrate_kbps` | integer 300..=50000 | 6000 | Video bit rate (CBR, buffer of 2 s). |
+| `video_encoder`      | as for `start_recording` | `"auto"` | The encoder that opens on the first connection is kept for reconnects. |
 | `reconnect_attempts` | integer 0..=100 | 5 | Attempts after a lost connection; `0` gives up right away. The count restarts after a connection stayed up for 10 s. |
 | `reconnect_delay_ms` | integer 100..=60000 | 1000 | Wait before the first attempt; doubles per attempt, up to 30 s. |
 

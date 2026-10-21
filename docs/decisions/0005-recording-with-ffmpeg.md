@@ -61,5 +61,5 @@ The StreamForge sources remain MIT OR Apache-2.0. `ffmpeg-next` is WTFPL. FFmpeg
 - Live-input drift resampling is linear (ADR 0004); recordings with live inputs carry its high-frequency modulation until a better resampler lands.
 - Capture latency is not compensated. Live audio is stamped when mixed (about one jitter-buffer target, ~30 ms, after capture) and screen frames when composited. That is within common lip-sync tolerances, but it is a systematic offset; per-source latency compensation is future work.
 - The recorder allocates one YUV frame per picture (the encoder may keep references) and copies each frame twice: in the tap, and into the staging frame. This happens on the recorder and compositor threads, not in audio callbacks.
-- Encoding uses the CPU (x264). VAAPI/NVENC/AMF are available in the linked FFmpeg and can be offered as encoder options later.
+- Encoding uses the CPU (x264). VAAPI/NVENC/AMF are available in the linked FFmpeg and can be offered as encoder options later. (Since ADR 0011, hardware encoders are tried first, with x264 as the fallback.)
 - Without a signal handler, Ctrl-C on the CLI ends the process without finalizing the file. Matroska keeps the file playable, but its index is missing. Use `--duration-ms`, or `stop_recording` over the protocol.

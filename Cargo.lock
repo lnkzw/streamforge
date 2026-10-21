@@ -1356,6 +1356,7 @@ dependencies = [
 name = "encoder-api"
 version = "0.1.0"
 dependencies = [
+ "schemars",
  "serde",
  "thiserror 2.0.21",
 ]

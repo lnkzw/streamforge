@@ -167,7 +167,8 @@ impl Engine {
         };
         let recorder = Recorder::start(RecorderConfig {
             path: path.clone(),
-            video: VideoSettings::h264(CANVAS_WIDTH, CANVAS_HEIGHT, FPS),
+            video: VideoSettings::h264(CANVAS_WIDTH, CANVAS_HEIGHT, FPS)
+                .with_encoders(request.video_encoder),
             audio: AudioSettings::aac(RATE, CHANNELS),
         });
         let recorder = match recorder {
@@ -195,6 +196,7 @@ impl Engine {
             fps: FPS,
             sample_rate: RATE,
             channels: CHANNELS,
+            video_encoder: recorder.video_encoder().clone(),
         };
         self.recording = Some(RecordingOutput { recorder, path, t0 });
         Ok(started)
@@ -255,7 +257,8 @@ impl Engine {
                 CANVAS_HEIGHT,
                 FPS,
                 request.video_bitrate_kbps,
-            ),
+            )
+            .with_encoders(request.video_encoder),
             audio: AudioSettings::aac_live(RATE, CHANNELS),
             reconnect: request.reconnect,
             io_timeout: STREAM_IO_TIMEOUT,
@@ -285,6 +288,7 @@ impl Engine {
             video_bitrate_kbps: request.video_bitrate_kbps,
             sample_rate: RATE,
             channels: CHANNELS,
+            video_encoder: streamer.video_encoder().clone(),
         };
         self.streaming = Some(StreamingOutput { streamer, t0 });
         Ok(started)

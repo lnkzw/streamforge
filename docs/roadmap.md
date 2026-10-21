@@ -207,7 +207,7 @@ Delivered in steps (ADR 0009):
   - [x] Audio through `cpal` (CoreAudio) (M9a).
   - [x] Screen capture through ScreenCaptureKit: displays and windows named by `list_screen_sources`, verified on the CI runner, whose image allows screen recording (M9b, ADR 0010). Without the permission, capture fails with a structured `permission_denied`.
 - [x] Recording and streaming on Windows and macOS: FFmpeg linked on every OS (M9a).
-- [ ] Hardware encoding paths where beneficial (M9c).
+- [x] Hardware encoding paths where beneficial (M9c, ADR 0011): `video_encoder` (`auto` by default) tries VAAPI or NVENC (Linux), NVENC, Quick Sync or AMF (Windows), VideoToolbox (macOS), then libx264. Verified with VAAPI on an AMD GPU (half the CPU time of libx264 for the reference recording); without a GPU on the CI runners, only the fallback and error paths are tested there.
 - [x] Document capability matrix and run platform CI (`docs/platforms.md`): FFmpeg on all three runners; recording, streaming and acceptance tests run natively on each.
 
 Acceptance:

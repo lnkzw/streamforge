@@ -214,6 +214,14 @@ impl SceneCollection {
         Ok(())
     }
 
+    pub fn source(&self, scene: &str, name: &str) -> Result<&SourceSpec, CommandError> {
+        self.get(scene)?
+            .sources
+            .iter()
+            .find(|source| source.name == name)
+            .ok_or_else(|| not_found("source", name))
+    }
+
     pub fn remove_source(&mut self, scene: &str, name: &str) -> Result<(), CommandError> {
         let scene = self.get_mut(scene)?;
         let before = scene.sources.len();

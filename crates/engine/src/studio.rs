@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use command_api::{
     AddSourceRequest, AudioSetup, CommandError, ErrorCode, MixerState, PreviewState, SceneList,
-    StripChange, UpdateSourceRequest,
+    SourceKind, StripChange, UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
@@ -88,6 +88,50 @@ impl Engine {
         name: &str,
     ) -> Result<SceneList, CommandError> {
         self.edit_scenes(|scenes| scenes.remove_source(scene, name))
+    }
+
+    /// Restart a screen source's capture (e.g. after it ended) while the
+    /// pipeline and its outputs keep running.
+    pub(crate) fn restart_source(
+        &mut self,
+        scene: &str,
+        name: &str,
+    ) -> Result<SceneList, CommandError> {
+        let source = self.scenes.source(scene, name)?;
+        if !matches!(source.kind, SourceKind::Screen { .. }) {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                format!("`{name}` does not capture; only screen sources can be restarted"),
+            ));
+        }
+        let id = source.id;
+        if self.scenes.active().name != scene {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "`{scene}` is not the active scene; only sources of the rendered scene capture"
+                ),
+            ));
+        }
+        let Some(pipeline) = &mut self.pipeline else {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "nothing captures `{name}`: no pipeline runs (start the preview or an output)"
+                ),
+            ));
+        };
+        // As for scene edits: open outputs must not wait for a picker.
+        let allow_new_captures = self.recording.is_none() && self.streaming.is_none();
+        let keep = self.scenes.screen_source_ids();
+        pipeline.restart_screen(
+            self.capture.as_mut(),
+            self.scenes.active(),
+            id,
+            &keep,
+            allow_new_captures,
+        )?;
+        Ok(self.scenes.list())
     }
 
     pub(crate) fn mixer_state(&self) -> MixerState {

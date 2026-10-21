@@ -238,6 +238,41 @@ impl Pipeline {
         }
     }
 
+    /// Start screen source `id` of the rendered `scene` again, through the
+    /// same path as a scene change (the compositor gets the new capture's
+    /// frames), then end its old capture. On error the old capture keeps
+    /// running and nothing changes.
+    pub fn restart_screen(
+        &mut self,
+        capture: &mut dyn CaptureBackend,
+        scene: &SceneSpec,
+        id: u32,
+        keep: &[u32],
+        allow_new_captures: bool,
+    ) -> Result<(), CommandError> {
+        let index = self
+            .scene_screens
+            .iter()
+            .position(|screen| screen.id == id)
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::InvalidState,
+                    "this source is not capturing; it starts when its scene is rendered",
+                )
+            })?;
+        let old = self.scene_screens.remove(index);
+        match self.apply_scene(capture, scene, keep, allow_new_captures) {
+            Ok(()) => {
+                self.retire(stop_scene_capture(old));
+                Ok(())
+            }
+            Err(error) => {
+                self.scene_screens.insert(index, old);
+                Err(error)
+            }
+        }
+    }
+
     /// State of every running capture; never blocks.
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {

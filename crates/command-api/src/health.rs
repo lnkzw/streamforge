@@ -22,7 +22,7 @@ pub struct HealthReport {
     pub streaming: Option<OutputHealth>,
     /// Every running capture: screen sources of the scenes, the legacy
     /// screen layer and live audio inputs. An `ended` capture delivers
-    /// nothing more.
+    /// nothing more; `restart_source` starts a screen source again.
     pub captures: Vec<CaptureHealth>,
 }
 

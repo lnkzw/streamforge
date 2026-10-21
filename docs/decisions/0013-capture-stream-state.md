@@ -1,4 +1,4 @@
-# ADR 0013: Capture stream state
+# ADR 0013: Capture stream state and source restart
 
 - **Status:** Accepted
 - **Date:** 2026-10-21
@@ -39,12 +39,28 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
   - Ended captures stay in the list until they are stopped. Their outputs keep running, and the compositor keeps showing the source's last frame, as before.
 - **CLI:** progress lines name ended captures with their reason.
 
+### Restarting a source (`restart_source`)
+
+- **Command:** `restart_source {scene, name}`, `sensitive` like `add_source`, because it starts a screen capture. It returns the scene list.
+- **Scope:** screen sources of the active scene, while a pipeline runs.
+  - Other kinds are `invalid_params`.
+  - Another scene, or no pipeline, is `invalid_state`: nothing captures them.
+  - Audio inputs and the legacy screen layer cannot be restarted: the mixer's inputs are fixed while it runs. They need a new pipeline.
+- **How:** the old capture leaves the list of running captures, and the scene is applied again through the path of a scene change.
+  - That path starts the source's capture and gives the compositor the new mailbox. The compositor treats it as a new source and retires the old one's statistics.
+  - On success, the old capture is stopped, and its outcome joins `scene_captures`. On error, it goes back into the list unchanged.
+  - The new capture starts before the old one ends, so a failed start leaves the old one (possibly ended) in place.
+- **Pickers:** a picker source would ask the user again. While a recording or stream is open this is refused (`invalid_state`), with the same rule and message as for adding one. A named source (`source_id`) restarts at any time.
+- **Outputs keep running.** Until the new capture's first frame, the source is not drawn, and the compositor counts `missing_ticks`. The output gets every frame, so the file has no gap.
+
 ## Alternatives considered
 
 1. **A `stalled` state, decided by the backend.** A timeout per source kind would misreport static windows and idle displays as failures. The frame age already carries the information, without a guess.
 2. **End the outputs, or remove the source, when a capture ends.** A recording that keeps the last frame is more useful than a recording that stops because a window closed. What to do next (restart, remove, switch scenes) is the client's decision, made through commands.
 3. **Push an event when a capture ends.** As in ADR 0012: polling first, events later.
 4. **For cpal, a list of error kinds that end a stream.** The first version did this, and the review of the cpal 0.18 WASAPI source showed it wrong both ways: errors outside the list stop the capture loop, and `StreamInvalidated` does not. Watching the data callbacks works the same on every host.
+5. **Restart automatically when a capture ends.** A closed window usually stays closed, and a picker source would ask the user at an unexpected moment. Restarting is the client's decision.
+6. **Restart in place, keeping the compositor's source state.** It would keep showing the last frame until the new one, but the compositor matches live sources by their mailbox. A second way to swap inputs would add a path that scene changes do not test.
 
 ## Validation
 
@@ -53,7 +69,10 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
   - cpal: the end rule (no error, data after the error, within and after the grace period, never any data), and the state naming the last error and returning to `running` when data comes back; on every OS
   - command-api: JSON shape of `captures`
   - CLI: progress line with an ended capture
-- **Engine test (fake backend):** a recording runs, the fake screen stream ends, and `get_health` shows `ended` with the reason while the recording keeps running. After the stop, `captures` is empty.
+- **Engine tests (fake backend):**
+  - A recording runs, the fake screen stream ends, and `get_health` shows `ended` with the reason while the recording keeps running. After the stop, `captures` is empty.
+  - `restart_source` on the ended named source starts a new capture during the recording. Health shows it `running`, frames keep being encoded, the compositor consumes the new capture's frame, and the stop report has both captures. The test also covers the refusals: no pipeline, another scene, a non-screen source, an unknown source.
+  - A picker source is refused while recording, and its running capture stays. With only the preview left, it restarts.
 - **Native tests on CI:**
   - Windows: a PowerShell form with a unique title is captured, its process is killed, and the stream must report `ended` within 10 s.
   - Windows and macOS: the monitor and display stream tests check `running` while frames arrive.
@@ -65,5 +84,5 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
 
 ## Consequences
 
-- Clients can show which source is gone and why, while outputs run. Restarting a source is the next step (assessment §9, step 5).
+- Clients can show which source is gone and why while outputs run, and bring a screen source back without stopping them.
 - The `ended` state is as good as each system's notification. A capture that hangs without an error still shows as `running` with a growing frame age.

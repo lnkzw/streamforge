@@ -207,6 +207,9 @@ impl CommandHandler for Engine {
             Command::RemoveSource { scene, name } => self
                 .remove_source(&scene, &name)
                 .map(CommandOutput::SceneList),
+            Command::RestartSource { scene, name } => self
+                .restart_source(&scene, &name)
+                .map(CommandOutput::SceneList),
             Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
             Command::SetMixerStrip(change) => {
                 self.set_mixer_strip(change).map(CommandOutput::MixerState)
@@ -568,7 +571,9 @@ mod tests {
                     "update_source" => {
                         Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5}))
                     }
-                    "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+                    "remove_source" | "restart_source" => {
+                        Some(json!({"scene": "Scene", "name": "bars"}))
+                    }
                     "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
                     "set_master_gain" => Some(json!({"gain_db": -3.0})),
                     "set_preview" => Some(json!({"enabled": false})),
@@ -1187,6 +1192,154 @@ mod tests {
         assert!(ended.recording.expect("recording").running);
         engine.handle(Command::StopRecording).expect("stop");
         assert!(health(&mut engine).captures.is_empty());
+    }
+
+    #[test]
+    fn an_ended_screen_source_restarts_while_recording() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("restart");
+        let (engine, starts, ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        let restart = |engine: &mut Engine, scene: &str, name: &str| {
+            let command = Command::decode(
+                "restart_source",
+                Some(&json!({"scene": scene, "name": name})),
+            )
+            .expect("decode");
+            engine.handle(command)
+        };
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
+                   "source_id": "fake:1"}),
+        );
+        // Nothing captures yet.
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "desk")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidState
+        );
+        start(&mut engine, json!({"file_name": "restart.mkv"})).expect("start");
+        assert_eq!(starts.get(), 1);
+        let desk = |health: &command_api::HealthReport| {
+            health
+                .captures
+                .iter()
+                .find(|capture| capture.name == "desk")
+                .cloned()
+                .expect("desk capture")
+        };
+        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        assert!(matches!(
+            desk(&health(&mut engine)).state,
+            capture_api::CaptureState::Ended { .. }
+        ));
+
+        // Restarting starts a new capture while the recording keeps going.
+        let before = health(&mut engine)
+            .recording
+            .expect("recording")
+            .counters
+            .frames_encoded;
+        restart(&mut engine, "Test pattern", "desk").expect("restart");
+        assert_eq!(starts.get(), 2);
+        assert_eq!(
+            desk(&health(&mut engine)).state,
+            capture_api::CaptureState::Running
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let after = health(&mut engine);
+        let recording = after.recording.expect("recording");
+        assert!(recording.running);
+        assert!(recording.counters.frames_encoded > before, "{recording:?}");
+
+        // Only screen sources of the active scene restart.
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "color_bars")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        run(&mut engine, "create_scene", json!({"name": "Other"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Other", "name": "cam", "kind": "screen", "source_id": "fake:2"}),
+        );
+        assert_eq!(
+            restart(&mut engine, "Other", "cam").unwrap_err().code,
+            ErrorCode::InvalidState
+        );
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "nope")
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        // The replaced capture and the final one are both reported.
+        let desks = report
+            .pipeline
+            .scene_captures
+            .iter()
+            .filter(|outcome| outcome.source == "desk")
+            .count();
+        assert_eq!(desks, 2, "{:?}", report.pipeline.scene_captures);
+        // The compositor took the new capture's frame.
+        let render = report.pipeline.render.expect("render stats");
+        assert_eq!(render.retired_sources, 1, "{render:?}");
+        let desk = render
+            .sources
+            .iter()
+            .find(|source| source.name == "desk")
+            .expect("desk");
+        assert_eq!(desk.frames_consumed, 1, "{desk:?}");
+    }
+
+    #[test]
+    fn a_picker_source_restarts_only_while_no_output_is_open() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("restart-picker");
+        let (engine, starts, _ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        let restart = |engine: &mut Engine| {
+            let command = Command::decode(
+                "restart_source",
+                Some(&json!({"scene": "Test pattern", "name": "desk"})),
+            )
+            .expect("decode");
+            engine.handle(command)
+        };
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen"}),
+        );
+        assert_eq!(starts.get(), 1);
+        start(&mut engine, json!({"file_name": "picker.mkv"})).expect("start");
+        let err = restart(&mut engine).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidState);
+        assert!(err.message.contains("picker"), "{err}");
+        assert_eq!(starts.get(), 1);
+        // The refused restart kept the running capture.
+        let captures = health(&mut engine).captures;
+        assert!(
+            captures.iter().any(|capture| capture.name == "desk"
+                && capture.state == capture_api::CaptureState::Running),
+            "{captures:?}"
+        );
+        engine.handle(Command::StopRecording).expect("stop");
+        // Only the preview runs: the picker may ask again.
+        restart(&mut engine).expect("restart");
+        assert_eq!(starts.get(), 2);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
     #[test]

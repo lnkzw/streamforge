@@ -287,6 +287,17 @@ const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "restart_source",
+    summary: "Start a screen source's capture again and end the old one, e.g. after get_health \
+              reports it ended (a window closed, a device was removed); outputs keep running. Params: \
+              scene (the active one), name. A picker source asks the user again, so it is \
+              refused while recording or streaming. Returns the scene list.",
+    access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
+};
+
 const GET_MIXER: CommandDescriptor = CommandDescriptor {
     name: "get_mixer",
     summary: "Mixer strips with gain, mute and the peak level since the previous call.",
@@ -354,6 +365,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     ADD_SOURCE,
     UPDATE_SOURCE,
     REMOVE_SOURCE,
+    RESTART_SOURCE,
     GET_MIXER,
     SET_MIXER_STRIP,
     SET_MASTER_GAIN,
@@ -427,6 +439,8 @@ impl Command {
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
             "remove_source" => decode_remove_source(name, params)
                 .map(|(scene, name)| Self::RemoveSource { scene, name }),
+            "restart_source" => decode_remove_source(name, params)
+                .map(|(scene, name)| Self::RestartSource { scene, name }),
             "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
             "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
             "set_master_gain" => {
@@ -489,6 +503,7 @@ impl Command {
             Self::AddSource(_) => &ADD_SOURCE,
             Self::UpdateSource(_) => &UPDATE_SOURCE,
             Self::RemoveSource { .. } => &REMOVE_SOURCE,
+            Self::RestartSource { .. } => &RESTART_SOURCE,
             Self::GetMixer => &GET_MIXER,
             Self::SetMixerStrip(_) => &SET_MIXER_STRIP,
             Self::SetMasterGain { .. } => &SET_MASTER_GAIN,
@@ -1515,7 +1530,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "delete_scene" => of::<DeleteSceneParams>(),
         "add_source" => of::<AddSourceParams>(),
         "update_source" => of::<UpdateSourceParams>(),
-        "remove_source" => of::<RemoveSourceParams>(),
+        "remove_source" | "restart_source" => of::<RemoveSourceParams>(),
         "set_mixer_strip" => of::<MixerStripParams>(),
         "set_master_gain" => of::<MasterGainParams>(),
         "set_audio_sources" => of::<AudioSourcesParams>(),
@@ -1625,7 +1640,7 @@ mod tests {
             "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
             "add_source" => Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"})),
             "update_source" => Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5})),
-            "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+            "remove_source" | "restart_source" => Some(json!({"scene": "Scene", "name": "bars"})),
             "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
             "set_master_gain" => Some(json!({"gain_db": -3.0})),
             "set_preview" => Some(json!({"enabled": false})),
@@ -2317,6 +2332,8 @@ mod tests {
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
         assert_eq!(access("get_health"), Some(CommandAccess::ReadOnly));
+        // Restarting starts a capture again, like adding a screen source.
+        assert_eq!(access("restart_source"), Some(CommandAccess::Sensitive));
         // Window titles can reveal private content.
         assert_eq!(
             access("list_screen_sources"),

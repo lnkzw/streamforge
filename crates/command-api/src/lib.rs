@@ -99,6 +99,11 @@ pub enum Command {
         scene: String,
         name: String,
     },
+    /// Restart a screen source's capture while outputs keep running.
+    RestartSource {
+        scene: String,
+        name: String,
+    },
     /// Mixer strips, gains and peak levels.
     GetMixer,
     SetMixerStrip(StripChange),

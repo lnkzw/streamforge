@@ -96,6 +96,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `add_source`               | see below | `sensitive` | Scene list |
 | `update_source`            | see below | `control` | Scene list |
 | `remove_source`            | see below | `control` | Scene list |
+| `restart_source`           | see below | `sensitive` | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `set_mixer_strip`          | see below | `control` | Mixer state |
 | `set_master_gain`          | see below | `control` | Mixer state |
@@ -338,7 +339,7 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - `create_scene {name}` creates an empty scene (black).
   - `set_active_scene {name}` switches the rendered scene.
   - `delete_scene {name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
-- **Access:** `add_source` and `set_active_scene` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
+- **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
 - **`add_source`:** params `scene`, `name`, `kind`, optional rectangle and `opacity`.
@@ -355,6 +356,12 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
 - **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
 - **`remove_source`:** params `scene`, `name`.
+- **`restart_source`:** params `scene`, `name`. Ends a screen source's capture and starts it again, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, the source is not drawn (counted in `missing_ticks`).
+  - Only screen sources (`invalid_params` otherwise) of the active scene while a pipeline runs (`invalid_state` otherwise) restart.
+  - A picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`), as for `add_source`. A named source restarts any time.
+  - The new capture starts before the old one ends. If it fails, the old capture keeps running and the error is returned.
+  - Both captures' reports are in the output reports' `scene_captures`.
+  - Live audio inputs and the screen layer cannot be restarted: the mixer's inputs are fixed while it runs.
 
 Mixer:
 - **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
@@ -373,7 +380,7 @@ Preview:
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.

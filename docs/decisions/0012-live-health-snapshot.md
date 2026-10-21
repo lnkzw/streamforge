@@ -23,10 +23,10 @@ While running, clients saw a few booleans (`get_status`) and mixer peaks (`get_m
 
   It is `read_only`, like `get_status`; targets are paths or redacted stream targets.
 - **Compositor and mixer:** every 250 ms (`LIVE_PUBLISH_MS`, `LIVE_PUBLISH_BLOCKS`) the render or mix thread refreshes a shared snapshot (`LiveRenderStats`, `LiveMixStats`).
-  - It updates the snapshot in place, and only after a successful `try_lock`. A reader that holds the snapshot makes the thread skip one refresh; the thread never waits. Tests hold the lock and count frames and blocks that continue meanwhile.
-  - The compositor reuses the snapshot's allocations (`String::clone_from`) and allocates only when the source list grows.
+  - It updates the snapshot in place, and only after a successful `try_lock`. A refresh that finds a reader holding the snapshot is retried on the next frame or block; the thread never waits. Tests hold the lock and count frames and blocks that continue meanwhile.
+  - The compositor reuses the snapshot's allocations (`String::clone_from`). It allocates only after a scene update (more sources, or longer names); scene updates already allocate on the render thread when the source list is rebuilt.
   - The mixer's input list is created with its control, so publishing never allocates.
-  - New per-source field `last_frame_age_ms`: the time since a live source last delivered a frame. A stalled or ended capture becomes visible while outputs run. Its explicit `ended` state with a reason is the next step (assessment §9, step 4).
+  - New per-source field `last_frame_age_ms`: the time since a live source last delivered a frame, or since it was added if it never did. A stalled or ended capture becomes visible while outputs run. Its explicit `ended` state with a reason is the next step (assessment §9, step 4).
 - **Outputs:** the output thread publishes its totals (atomics in `Shared`) after each item. The totals cover every connection of a stream and media dropped while offline. Producer-side drops are added when the totals are read.
   - `queue_depth` is sent minus received items. It can dip below zero for a moment (a producer counts after sending), so readers clamp it to zero.
   - `Recorder::live` and `Streamer::live` read the atomics without involving the output thread.
@@ -46,8 +46,8 @@ While running, clients saw a few booleans (`get_status`) and mixer peaks (`get_m
 
 ## Trade-offs
 
-- `render` and `mix` can be up to 250 ms old; output counters are current to the last item.
-- A reader polling much faster than 4 Hz could in theory starve refreshes by always holding the lock. Holding it takes only a clone, so refreshes are skipped at most occasionally.
+- `render` and `mix` can be about 250 ms old, plus one frame or block when a refresh had to be retried. Output counters are current to the last item.
+- The CLI ends a `record` or `stream` run early once every open output has stopped running; a recording keeps going when only the stream failed.
 - The snapshot costs the media threads a few relaxed atomic stores per item and one in-place copy every 250 ms. This has not been measured; the measurement harness (assessment step 7) will quantify it. A 3 s CLI recording on the development machine showed the same 0 drops as before.
 
 ## Validation

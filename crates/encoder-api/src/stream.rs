@@ -369,6 +369,11 @@ mod tests {
             StreamState::Stopped,
         ] {
             assert_eq!(StreamState::from_u8(state.as_u8()), state);
+            // `as_str` is the wire name serde produces.
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::Value::from(state.as_str())
+            );
         }
     }
 }

@@ -4,6 +4,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+/// Whole milliseconds of `duration`, saturating (after about 584 million years).
+pub fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 const BUCKET_NS: u64 = 50_000;
 /// 50 µs buckets up to 100 ms; slower samples land in the last bucket.
 const BUCKETS: usize = 2_000;

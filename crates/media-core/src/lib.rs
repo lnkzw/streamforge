@@ -7,7 +7,7 @@ pub mod metrics;
 pub mod video;
 
 pub use audio::{AudioRing, AudioRingStats};
-pub use metrics::{LatencyHistogram, LatencySummary};
+pub use metrics::{LatencyHistogram, LatencySummary, duration_millis};
 pub use video::{
     FrameBuffer, FrameMailbox, FramePool, MailboxStats, PixelFormat, VideoFrame, VideoFrameError,
 };

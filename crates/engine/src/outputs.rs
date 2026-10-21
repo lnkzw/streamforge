@@ -19,7 +19,7 @@ use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
     StreamConfig, StreamState, StreamStats, Streamer, VideoSettings,
 };
-use media_core::MediaTimestamp;
+use media_core::{MediaTimestamp, duration_millis};
 use serde_json::{Map, Value, json};
 
 use crate::Engine;
@@ -32,6 +32,8 @@ const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct RecordingOutput {
     recorder: Recorder,
     path: PathBuf,
+    /// `path` as shown to clients, computed once at start.
+    display: String,
     t0: Instant,
 }
 
@@ -49,9 +51,9 @@ impl Engine {
     /// Reads atomics and snapshots only; never waits for a media thread.
     pub(crate) fn health(&self) -> HealthReport {
         let live = self.pipeline.as_ref().map(Pipeline::live);
-        let elapsed_ms = |t0: Instant| u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed_ms = |t0: Instant| duration_millis(t0.elapsed());
         let recording = self.recording.as_ref().map(|output| OutputHealth {
-            target: display_path(&output.path),
+            target: output.display.clone(),
             elapsed_ms: elapsed_ms(output.t0),
             running: self.recording_running(),
             state: None,
@@ -233,7 +235,12 @@ impl Engine {
             channels: CHANNELS,
             video_encoder: recorder.video_encoder().clone(),
         };
-        self.recording = Some(RecordingOutput { recorder, path, t0 });
+        self.recording = Some(RecordingOutput {
+            recorder,
+            display: display_path(&path),
+            path,
+            t0,
+        });
         Ok(started)
     }
 

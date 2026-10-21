@@ -127,8 +127,8 @@ Both probes are `sensitive` because they capture private content. Screen capture
 ```
 
 - **Without a pipeline:** `render` and `mix` are `null`, and so are `recording` and `streaming` while no output is open.
-- **Freshness:** `render` and `mix` are refreshed every 250 ms; output counters after every encoded item.
-- **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame (`null` for static sources and before the first frame). A capture that stalled or ended (a closed window, a removed device) keeps growing here while outputs run.
+- **Freshness:** `render` and `mix` are refreshed every 250 ms; a refresh that finds a reader copying the snapshot is retried on the next frame or block. Output counters are refreshed after every item.
+- **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). A capture that stalled or ended (a closed window, a removed device) keeps growing here while outputs run; `frames_consumed: 0` means it never delivered.
 - **Silent inputs:** a live audio input whose `underrun_frames` grow while `fill_ms` stays near 0 has stopped delivering.
 - **Drops:** `frames_dropped` and `blocks_dropped` cover every cause the stop report counts: producer side (copy pool or queue full), encoder side, and, for streams, media while offline.
 - **Backpressure:** `queue_depth` is the number of items waiting for the output thread. A growing queue means the encoder or the network cannot keep up.

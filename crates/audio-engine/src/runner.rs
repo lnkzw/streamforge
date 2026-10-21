@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary};
+use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary, duration_millis};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -449,8 +449,9 @@ enum Source {
     Tone(Tone),
 }
 
-/// Refresh the shared snapshot in place, unless a reader holds it now.
-/// Does not allocate: the input list was created with the control.
+/// Refresh the shared snapshot in place; `false` if a reader holds it now
+/// (the caller retries on the next block). Does not allocate: the input
+/// list was created with the control.
 fn publish_live(
     live: &Mutex<LiveMixStats>,
     start: Instant,
@@ -458,13 +459,13 @@ fn publish_live(
     mix_times: &LatencyHistogram,
     mixer: &Mixer,
     inputs: &[InputState],
-) {
+) -> bool {
     let mut snapshot = match live.try_lock() {
         Ok(snapshot) => snapshot,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return,
+        Err(TryLockError::WouldBlock) => return false,
     };
-    snapshot.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    snapshot.elapsed_ms = duration_millis(start.elapsed());
     snapshot.blocks_mixed = mixed;
     snapshot.late_blocks = late;
     snapshot.skipped_blocks = skipped;
@@ -481,6 +482,7 @@ fn publish_live(
             entry.overrun_frames = Some(live.ring().stats().overrun_frames);
         }
     }
+    true
 }
 
 struct InputState {
@@ -523,6 +525,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
     let due =
         |start: Instant, block: u64| start + Duration::from_nanos(period_ns.saturating_mul(block));
     let (mut block, mut mixed, mut late, mut skipped) = (0u64, 0u64, 0u64, 0u64);
+    let mut publish_due = false;
     let start = Instant::now();
 
     while !stop.load(Ordering::Acquire) {
@@ -574,8 +577,9 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         if finished > due(start, block + 1) {
             late += 1;
         }
-        if mixed % LIVE_PUBLISH_BLOCKS == 1 {
-            publish_live(
+        publish_due |= (mixed - 1) % LIVE_PUBLISH_BLOCKS == 0;
+        if publish_due {
+            publish_due = !publish_live(
                 &control.shared.live,
                 start,
                 (mixed, late, skipped),
@@ -592,7 +596,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         rate: RATE,
         channels: CHANNELS,
         block_frames: BLOCK_FRAMES,
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms: duration_millis(elapsed),
         blocks_mixed: mixed,
         late_blocks: late,
         skipped_blocks: skipped,

@@ -12,15 +12,20 @@
 //!
 //! Live statistics ([`Compositor::live`]) work the other way round: every
 //! [`LIVE_PUBLISH_MS`] the render thread updates a shared snapshot in place,
-//! again only after a successful try-lock, so a reader never delays a frame
-//! and publishing allocates only when the source list grows.
+//! again only after a successful try-lock, so a reader never delays a frame.
+//! A refresh that finds the snapshot busy is retried on the next frame.
+//! Publishing reuses the snapshot's allocations; it allocates only after a
+//! scene update (more sources, or longer names), which already allocates in
+//! `rebuild`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use media_core::{FrameMailbox, MailboxStats, PixelFormat, VideoFrame, VideoFrameError};
+use media_core::{
+    FrameMailbox, MailboxStats, PixelFormat, VideoFrame, VideoFrameError, duration_millis,
+};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -158,9 +163,10 @@ pub struct LiveSourceStats {
     pub frames_consumed: u64,
     pub stale_ticks: u64,
     pub missing_ticks: u64,
-    /// Time since this live source last delivered a new frame (`None` for
-    /// static sources and before the first frame). A stalled or ended
-    /// capture shows up here while the output runs.
+    /// Time since this live source last delivered a new frame, or since it
+    /// was added if it never did (`None` for static sources). A stalled or
+    /// ended capture keeps growing here while outputs run; `frames_consumed`
+    /// of 0 tells "never delivered" from "stopped delivering".
     pub last_frame_age_ms: Option<u64>,
 }
 
@@ -274,12 +280,13 @@ struct SourceState {
     consumed: u64,
     stale: u64,
     missing: u64,
-    /// Tick at which a live source last delivered a new frame.
-    last_new_tick: Option<u64>,
+    /// Tick at which a live source last delivered a new frame, or was
+    /// added (so a source that never delivers ages too).
+    last_new_tick: u64,
 }
 
 impl SourceState {
-    fn new(source: SourceConfig) -> Self {
+    fn new(source: SourceConfig, tick: u64) -> Self {
         Self {
             id: source.id,
             name: source.name,
@@ -293,7 +300,7 @@ impl SourceState {
             consumed: 0,
             stale: 0,
             missing: 0,
-            last_new_tick: None,
+            last_new_tick: tick,
         }
     }
 
@@ -318,7 +325,7 @@ impl SourceState {
                 // The previous frame's pooled buffer returns to its producer.
                 *frame = Some(new);
                 self.consumed += 1;
-                self.last_new_tick = Some(tick);
+                self.last_new_tick = tick;
             }
             None if frame.is_some() => self.stale += 1,
             None => self.missing += 1,
@@ -341,9 +348,11 @@ impl SourceState {
         into.frames_consumed = self.consumed;
         into.stale_ticks = self.stale;
         into.missing_ticks = self.missing;
-        into.last_frame_age_ms = self
-            .last_new_tick
-            .map(|at| tick.saturating_sub(at).saturating_mul(period_ns) / 1_000_000);
+        into.last_frame_age_ms = matches!(self.current, Current::Live { .. }).then(|| {
+            tick.saturating_sub(self.last_new_tick)
+                .saturating_mul(period_ns)
+                / 1_000_000
+        });
     }
 
     fn kind(&self) -> &'static str {
@@ -386,6 +395,7 @@ fn rebuild(
     mut current: Vec<SourceState>,
     sources: Vec<SourceConfig>,
     retired: &mut Retired,
+    tick: u64,
 ) -> Vec<SourceState> {
     let mut next = Vec::with_capacity(sources.len());
     for source in sources {
@@ -395,7 +405,7 @@ fn rebuild(
                 state.name = source.name;
                 next.push(state);
             }
-            None => next.push(SourceState::new(source)),
+            None => next.push(SourceState::new(source, tick)),
         }
     }
     for state in &current {
@@ -422,7 +432,8 @@ impl Retired {
     }
 }
 
-/// Refresh the shared snapshot in place, unless a reader holds it now.
+/// Refresh the shared snapshot in place; `false` if a reader holds it now
+/// (the caller retries on the next frame).
 fn publish(
     live: &Mutex<LiveRenderStats>,
     start: Instant,
@@ -431,14 +442,14 @@ fn publish(
     sources: &[SourceState],
     tick: u64,
     period_ns: u64,
-) {
+) -> bool {
     let mut snapshot = match live.try_lock() {
         Ok(snapshot) => snapshot,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return,
+        Err(TryLockError::WouldBlock) => return false,
     };
     let (rendered, skipped, late) = counts;
-    snapshot.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    snapshot.elapsed_ms = duration_millis(start.elapsed());
     snapshot.frames_rendered = rendered;
     snapshot.skipped_ticks = skipped;
     snapshot.late_frames = late;
@@ -463,6 +474,7 @@ fn publish(
             }
         }
     }
+    true
 }
 
 fn run(
@@ -480,7 +492,10 @@ fn run(
         mut renderer,
         mut sink,
     } = config;
-    let mut sources: Vec<SourceState> = sources.into_iter().map(SourceState::new).collect();
+    let mut sources: Vec<SourceState> = sources
+        .into_iter()
+        .map(|source| SourceState::new(source, 0))
+        .collect();
     let mut retired = Retired::default();
     let mut updates = 0u64;
 
@@ -490,6 +505,7 @@ fn run(
     let mut render_times = LatencyHistogram::new();
     let (mut tick, mut rendered, mut skipped, mut late) = (0u64, 0u64, 0u64, 0u64);
     let publish_every = (u64::from(fps) * LIVE_PUBLISH_MS / 1000).max(1);
+    let mut publish_due = false;
     let start = Instant::now();
 
     while !stop.load(Ordering::Acquire) {
@@ -511,7 +527,7 @@ fn run(
         if let Some(update) = take_update(pending) {
             scene = update.scene;
             animation = update.animation;
-            sources = rebuild(sources, update.sources, &mut retired);
+            sources = rebuild(sources, update.sources, &mut retired, tick);
             updates += 1;
         }
         for source in &mut sources {
@@ -540,8 +556,9 @@ fn run(
         if finished > due(start, tick + 1) {
             late += 1;
         }
-        if rendered % publish_every == 1 || publish_every == 1 {
-            publish(
+        publish_due |= (rendered - 1) % publish_every == 0;
+        if publish_due {
+            publish_due = !publish(
                 live,
                 start,
                 (rendered, skipped, late),
@@ -561,7 +578,7 @@ fn run(
         width: scene.width,
         height: scene.height,
         target_fps: fps,
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms: duration_millis(elapsed),
         frames_rendered: rendered,
         skipped_ticks: skipped,
         late_frames: late,
@@ -856,11 +873,18 @@ mod tests {
         let mailbox = Arc::new(FrameMailbox::new());
         let pool = FramePool::new(2);
         let compositor = Compositor::spawn(config(
-            vec![SourceConfig {
-                id: SourceId(7),
-                name: "capture".into(),
-                input: SourceInput::Live(Arc::clone(&mailbox)),
-            }],
+            vec![
+                SourceConfig {
+                    id: SourceId(7),
+                    name: "capture".into(),
+                    input: SourceInput::Live(Arc::clone(&mailbox)),
+                },
+                SourceConfig {
+                    id: SourceId(8),
+                    name: "never".into(),
+                    input: SourceInput::Live(Arc::new(FrameMailbox::new())),
+                },
+            ],
             vec![Layer::new("capture", SourceId(7), Transform::IDENTITY)],
         ))
         .expect("spawn");
@@ -887,6 +911,14 @@ mod tests {
             (SourceId(7), "capture", "live")
         );
         assert!(source.stale_ticks > 0, "{source:?}");
+        // A source that never delivered ages from when it was added.
+        let never = &live.sources[1];
+        assert_eq!(never.frames_consumed, 0);
+        assert!(never.missing_ticks > 0, "{never:?}");
+        assert!(
+            never.last_frame_age_ms.is_some_and(|age| age >= 300),
+            "{never:?}"
+        );
         let run = compositor.stop().expect("stop");
         // The snapshot is at most one publish interval behind the final count.
         let behind = run.stats.frames_rendered - live.frames_rendered;

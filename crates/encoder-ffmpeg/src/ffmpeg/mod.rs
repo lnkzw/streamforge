@@ -150,14 +150,7 @@ impl Session {
 
     /// This session's totals so far.
     fn counts(&self) -> Counts {
-        let (frames_encoded, frames_dropped) = self.video.counts();
-        let (samples_encoded, blocks_dropped) = self.audio.counts();
-        Counts {
-            frames_encoded,
-            frames_dropped,
-            samples_encoded,
-            blocks_dropped,
-        }
+        counts_of(&self.video, &self.audio)
     }
 
     /// Encode one item; items stamped at or after `end_ns` are counted as
@@ -254,6 +247,18 @@ fn positive_i32(value: u32, what: &str) -> Result<i32, RecorderError> {
 
 fn frames_i64(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// Totals of a session's tracks (also after the session was finished).
+fn counts_of(video: &VideoTrack, audio: &AudioTrack) -> Counts {
+    let (frames_encoded, frames_dropped) = video.counts();
+    let (samples_encoded, blocks_dropped) = audio.counts();
+    Counts {
+        frames_encoded,
+        frames_dropped,
+        samples_encoded,
+        blocks_dropped,
+    }
 }
 
 struct VideoTrack {

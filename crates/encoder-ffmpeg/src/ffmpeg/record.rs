@@ -12,9 +12,9 @@ use std::sync::mpsc::Receiver;
 use ff::Dictionary;
 use ffmpeg_next as ff;
 
-use super::{EncoderChoice, Session, init};
+use super::{EncoderChoice, Session, counts_of, init};
 use crate::{
-    Counts, Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
+    Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
 };
 
 const CONTAINER: &str = "matroska";
@@ -52,6 +52,8 @@ pub(crate) fn run(
     }
 
     let (mut video, mut audio, finished) = session.finish();
+    // Flushing encoded what the encoders still held.
+    shared.publish(counts_of(&video, &audio));
     if failure.is_some() {
         // Producers run until the owner stops them: count what they still
         // queue instead of letting it vanish with the channel.
@@ -62,14 +64,7 @@ pub(crate) fn run(
                 Item::Audio { .. } => audio.blocks_dropped += 1,
                 Item::Stop => break,
             }
-            let (frames_encoded, frames_dropped) = video.counts();
-            let (samples_encoded, blocks_dropped) = audio.counts();
-            shared.publish(Counts {
-                frames_encoded,
-                frames_dropped,
-                samples_encoded,
-                blocks_dropped,
-            });
+            shared.publish(counts_of(&video, &audio));
         }
     }
     drop(rx);

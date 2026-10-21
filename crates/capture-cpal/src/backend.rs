@@ -19,14 +19,15 @@ use std::time::Instant;
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
     AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureBackend, CaptureCapabilities,
-    CaptureError, CaptureErrorKind, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
-    VideoCaptureReport, VideoStream,
+    CaptureError, CaptureErrorKind, CaptureState, ScreenCaptureCapability, ScreenCaptureRequest,
+    ScreenSelection, VideoCaptureReport, VideoStream,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use media_core::AudioRing;
 
 use crate::convert::Converter;
+use crate::liveness::Liveness;
 
 /// Seconds of audio the ring holds (as on Linux).
 const RING_SECONDS: usize = 1;
@@ -155,12 +156,14 @@ impl CaptureBackend for CpalCapture {
         ));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (stop_tx, stop_rx) = mpsc::channel();
+        let liveness = Arc::new(Liveness::new());
         let thread = thread::Builder::new()
             .name("audio-capture".to_owned())
             .spawn({
                 let request = request.clone();
                 let ring = Arc::clone(&ring);
-                move || run(&request, ring, &ready_tx, &stop_rx)
+                let liveness = Arc::clone(&liveness);
+                move || run(&request, ring, &liveness, &ready_tx, &stop_rx)
             })
             .map_err(|err| {
                 CaptureError::backend(format!("cannot start the capture thread: {err}"))
@@ -168,6 +171,7 @@ impl CaptureBackend for CpalCapture {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Box::new(CpalStream {
                 ring,
+                liveness,
                 stop: Some(stop_tx),
                 thread: Some(thread),
             })),
@@ -186,6 +190,7 @@ impl CaptureBackend for CpalCapture {
 
 struct CpalStream {
     ring: Arc<AudioRing>,
+    liveness: Arc<Liveness>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<Result<AudioCaptureReport, CaptureError>>>,
 }
@@ -193,6 +198,10 @@ struct CpalStream {
 impl AudioStream for CpalStream {
     fn samples(&self) -> Arc<AudioRing> {
         Arc::clone(&self.ring)
+    }
+
+    fn state(&self) -> CaptureState {
+        self.liveness.state()
     }
 
     fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {
@@ -300,6 +309,7 @@ struct Callback {
     scratch: Vec<f32>,
     sink: Sink,
     start: Instant,
+    liveness: Arc<Liveness>,
 }
 
 /// Where converted frames go: the ring and the statistics.
@@ -325,6 +335,7 @@ impl Callback {
             self.sink.observe(arrival, &[]);
             return;
         }
+        self.liveness.data();
         let sink = &mut self.sink;
         self.converter.convert(
             data.iter().map(|sample| sample.to_sample::<f32>()),
@@ -390,6 +401,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     mut callback: Callback,
     errors: Arc<Mutex<Vec<String>>>,
+    liveness: Arc<Liveness>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
@@ -400,9 +412,11 @@ where
         move |data: &[T], _info| callback.on_data(data),
         // Rare and not in the data path; keep the first few messages.
         move |err| {
+            let message = err.to_string();
+            liveness.error(&message);
             let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
             if errors.len() < 8 {
-                errors.push(err.to_string());
+                errors.push(message);
             }
         },
         None,
@@ -412,6 +426,7 @@ where
 fn run(
     request: &AudioStreamRequest,
     ring: Arc<AudioRing>,
+    liveness: &Arc<Liveness>,
     ready: &SyncSender<Result<(), CaptureError>>,
     stop: &Receiver<()>,
 ) -> Result<AudioCaptureReport, CaptureError> {
@@ -443,16 +458,17 @@ fn run(
                 unobserved_frames: Arc::clone(&unobserved_frames),
             },
             start: Instant::now(),
+            liveness: Arc::clone(liveness),
         };
-        let errors = Arc::clone(&errors);
+        let (errors, liveness) = (Arc::clone(&errors), Arc::clone(liveness));
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, &config, callback, errors),
-            SampleFormat::F64 => build::<f64>(&device, &config, callback, errors),
-            SampleFormat::I16 => build::<i16>(&device, &config, callback, errors),
-            SampleFormat::I32 => build::<i32>(&device, &config, callback, errors),
-            SampleFormat::U16 => build::<u16>(&device, &config, callback, errors),
-            SampleFormat::I8 => build::<i8>(&device, &config, callback, errors),
-            SampleFormat::U8 => build::<u8>(&device, &config, callback, errors),
+            SampleFormat::F32 => build::<f32>(&device, &config, callback, errors, liveness),
+            SampleFormat::F64 => build::<f64>(&device, &config, callback, errors, liveness),
+            SampleFormat::I16 => build::<i16>(&device, &config, callback, errors, liveness),
+            SampleFormat::I32 => build::<i32>(&device, &config, callback, errors, liveness),
+            SampleFormat::U16 => build::<u16>(&device, &config, callback, errors, liveness),
+            SampleFormat::I8 => build::<i8>(&device, &config, callback, errors, liveness),
+            SampleFormat::U8 => build::<u8>(&device, &config, callback, errors, liveness),
             other => {
                 return Err(CaptureError::unsupported(format!(
                     "sample format {other:?} is not supported"

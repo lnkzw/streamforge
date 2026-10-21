@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, PixelFormat, VideoFrame};
 
 use crate::{
-    BufferKind, FrameObservation, Rational, VideoCaptureReport, VideoFormatInfo, VideoSourceInfo,
-    VideoStatsAccumulator,
+    BufferKind, CaptureEnd, CaptureState, FrameObservation, Rational, VideoCaptureReport,
+    VideoFormatInfo, VideoSourceInfo, VideoStatsAccumulator,
 };
 
 /// Frames in flight per stream (mailbox, compositor, one being filled).
@@ -37,8 +37,6 @@ pub struct MappedFrame<'a> {
 struct State {
     stats: VideoStatsAccumulator,
     format: Option<VideoFormatInfo>,
-    /// Why the system ended the capture, if it did.
-    ended: Option<String>,
     errors: Vec<String>,
 }
 
@@ -55,6 +53,8 @@ pub struct FrameSink {
     /// meaningful for a layer).
     format: PixelFormat,
     state: Mutex<State>,
+    /// Outside `state`, so reading it never waits for a callback.
+    end: CaptureEnd,
 }
 
 impl FrameSink {
@@ -69,6 +69,7 @@ impl FrameSink {
             pixel_format,
             format: PixelFormat::Bgrx8,
             state: Mutex::new(State::default()),
+            end: CaptureEnd::new(),
         }
     }
 
@@ -178,11 +179,16 @@ impl FrameSink {
     /// The system ended the capture (e.g. the window closed). The first
     /// reason is kept.
     pub fn end(&self, reason: impl Into<String>) {
-        self.lock().ended.get_or_insert_with(|| reason.into());
+        self.end.end(|| reason.into());
     }
 
     pub fn ended(&self) -> bool {
-        self.lock().ended.is_some()
+        self.end.reason().is_some()
+    }
+
+    /// The capture's state for [`crate::VideoStream::state`]; never waits.
+    pub fn state(&self) -> CaptureState {
+        self.end.state()
     }
 
     /// The report for a capture of `elapsed`, with the backend's own
@@ -195,10 +201,10 @@ impl FrameSink {
         mut warnings: Vec<String>,
         elapsed: Duration,
     ) -> VideoCaptureReport {
-        let state = self.lock();
-        if let Some(reason) = &state.ended {
+        if let Some(reason) = self.end.reason() {
             warnings.push(format!("the capture ended early: {reason}"));
         }
+        let state = self.lock();
         warnings.extend(
             state
                 .errors
@@ -269,9 +275,16 @@ mod tests {
         sink.observe_frame(20, 1280, 720, Some(33), Some(Err("lost".into())));
         sink.observe_empty(30);
         assert!(!sink.ended());
+        assert_eq!(sink.state(), CaptureState::Running);
         sink.end("the window closed");
         sink.end("a later reason");
         assert!(sink.ended());
+        assert_eq!(
+            sink.state(),
+            CaptureState::Ended {
+                reason: "the window closed".to_owned()
+            }
+        );
         let report = sink.report(
             "test",
             VideoSourceInfo {

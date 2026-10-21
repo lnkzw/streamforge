@@ -2,6 +2,7 @@
 //! reports count, while it happens.
 
 use audio_engine::LiveMixStats;
+use capture_api::CaptureState;
 use encoder_api::{LiveOutputStats, StreamState, VideoEncoderInfo};
 use serde::Serialize;
 use video_compositor::LiveRenderStats;
@@ -19,6 +20,39 @@ pub struct HealthReport {
     pub mix: Option<LiveMixStats>,
     pub recording: Option<OutputHealth>,
     pub streaming: Option<OutputHealth>,
+    /// Every running capture: screen sources of the scenes, the legacy
+    /// screen layer and live audio inputs. An `ended` capture delivers
+    /// nothing more.
+    pub captures: Vec<CaptureHealth>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureKind {
+    Screen,
+    Audio,
+}
+
+impl CaptureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CaptureHealth {
+    pub kind: CaptureKind,
+    /// The scene source's `id`, as in `list_scenes` and `render.sources`
+    /// (screen sources of a scene only).
+    pub id: Option<u32>,
+    /// Scene source name, `screen layer`, or the audio input's name.
+    pub name: String,
+    /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
+    #[serde(flatten)]
+    pub state: CaptureState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -45,12 +79,27 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn capture_kind_names_match_the_wire() {
+        for kind in [CaptureKind::Screen, CaptureKind::Audio] {
+            assert_eq!(json!(kind), json!(kind.as_str()));
+        }
+    }
+
+    #[test]
     fn output_counters_are_flat_fields_of_the_output() {
         let health = HealthReport {
             pipeline_running: true,
             render: None,
             mix: None,
             recording: None,
+            captures: vec![CaptureHealth {
+                kind: CaptureKind::Screen,
+                id: Some(3),
+                name: "desk".to_owned(),
+                state: CaptureState::Ended {
+                    reason: "the captured window was closed".to_owned(),
+                },
+            }],
             streaming: Some(OutputHealth {
                 target: "rtmp://example.com/live/<stream key>".to_owned(),
                 elapsed_ms: 1500,
@@ -80,5 +129,10 @@ mod tests {
         assert_eq!(stream["queue_depth"], 2);
         assert_eq!(stream["video_encoder"]["encoder"], "libx264");
         assert!(stream.get("counters").is_none(), "{stream}");
+        assert_eq!(
+            value["captures"][0],
+            json!({"kind": "screen", "id": 3, "name": "desk", "state": "ended",
+                   "reason": "the captured window was closed"})
+        );
     }
 }

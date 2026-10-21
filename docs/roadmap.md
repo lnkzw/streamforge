@@ -220,7 +220,7 @@ From the architecture assessment (`docs/architecture/CURRENT_STATE_ASSESSMENT.md
 
 - [x] Steps 0–2: live counters in compositor, mixer and outputs, the `get_health` command, a truthful `get_status` (`media_engine_ready`, `pipeline_running`), CLI progress lines, stale documentation fixed (ADR 0012).
 - [ ] Step 3: health in the desktop UI (outputs, render, per-source state).
-- [ ] Step 4: capture stream state (`running`, `stalled`, `ended` with a reason) from every backend, shown in `get_health`.
+- [x] Step 4: capture stream state (`running`, or `ended` with a reason) from every backend, shown in `get_health` (`captures`). Stalls show through the frame age, not as a state. Verified on the Windows runner by closing a captured window (ADR 0013).
 - [ ] Step 5: `restart_source` without stopping outputs.
 - [ ] Step 6: versioned project file (save, load, validate; atomic write; no secrets).
 - [ ] Step 7: measurement harness (render, encode and CPU baselines for one and two outputs).

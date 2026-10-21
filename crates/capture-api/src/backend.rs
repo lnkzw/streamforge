@@ -4,7 +4,7 @@ use media_core::{AudioRing, FrameMailbox};
 
 use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-    AudioStreamRequest, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
+    AudioStreamRequest, CaptureCapabilities, CaptureError, CaptureState, ScreenCaptureCapability,
     ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
 };
 
@@ -16,6 +16,11 @@ pub trait AudioStream: Send {
     /// Samples in the requested rate and channel count; the ring is bounded
     /// and counts overruns when the consumer falls behind.
     fn samples(&self) -> Arc<AudioRing>;
+
+    /// Whether the capture still delivers; never blocks. Required, so a
+    /// stream (or a wrapper) cannot report a dead capture as running by
+    /// forgetting it; a backend that cannot tell returns `Running`.
+    fn state(&self) -> CaptureState;
 
     /// Stop capturing and return diagnostics for the whole session.
     fn stop(self: Box<Self>) -> Result<AudioCaptureReport, CaptureError>;
@@ -31,6 +36,10 @@ pub trait VideoStream: Send {
     fn frames(&self) -> Arc<FrameMailbox>;
 
     fn source(&self) -> &VideoSourceInfo;
+
+    /// Whether the capture still delivers; never blocks. Required, like
+    /// [`AudioStream::state`].
+    fn state(&self) -> CaptureState;
 
     /// Stop capturing and return diagnostics for the whole session.
     fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError>;

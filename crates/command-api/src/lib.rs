@@ -18,7 +18,7 @@ mod scenes;
 pub use access::{AccessPolicy, Gated, label as access_label};
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
-pub use health::{HealthReport, OutputHealth};
+pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
@@ -34,12 +34,12 @@ pub use scenes::{
     StripState, UpdateSourceRequest,
 };
 
-/// Entries of [`ScreenSourceList`], for adapters that do not use `capture-api`.
-pub use capture_api::ScreenSource;
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
     VideoCaptureReport,
 };
+/// Capture types in results, for adapters that do not use `capture-api`.
+pub use capture_api::{CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
 pub use encoder_api::{
     EncoderPreference, LiveOutputStats, SkippedEncoder, StreamState, VideoEncoderInfo,

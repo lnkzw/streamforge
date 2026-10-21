@@ -8,6 +8,9 @@
 //! ([`Converter`]).
 
 mod convert;
+// Used by the backend (Windows, macOS); tested everywhere.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+mod liveness;
 
 pub use convert::Converter;
 

@@ -78,6 +78,11 @@ impl Engine {
             mix,
             recording,
             streaming,
+            captures: self
+                .pipeline
+                .as_ref()
+                .map(Pipeline::captures)
+                .unwrap_or_default(),
         }
     }
 

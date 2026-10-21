@@ -123,12 +123,15 @@ Both probes are `sensitive` because they capture private content. Screen capture
          "inputs": [{"name", "kind", "warmup_frames", "underrun_frames", "trimmed_frames", "fill_ms", "drift_ppm", "overrun_frames"}]},
  "recording": {"target", "elapsed_ms", "running", "state": null, "video_encoder": {"encoder", "hardware", "skipped"},
                "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth", "connects", "reconnect_attempts"},
- "streaming": {... the same fields; "state" is the stream state}}
+ "streaming": {... the same fields; "state" is the stream state},
+ "captures": [{"kind": "screen", "id": 3, "name": "desk", "state": "running"},
+              {"kind": "audio", "id": null, "name": "default", "state": "ended", "reason": "..."}]}
 ```
 
-- **Without a pipeline:** `render` and `mix` are `null`, and so are `recording` and `streaming` while no output is open.
+- **Without a pipeline:** `render` and `mix` are `null`, `captures` is empty, and `recording` and `streaming` are `null` while no output is open.
 - **Freshness:** `render` and `mix` are refreshed every 250 ms; a refresh that finds a reader copying the snapshot is retried on the next frame or block. Output counters are refreshed after every item.
-- **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). A capture that stalled or ended (a closed window, a removed device) keeps growing here while outputs run; `frames_consumed: 0` means it never delivered.
+- **Ended captures:** `captures` lists every running capture (ADR 0013): the scenes' screen sources (with their `id`, as in `list_scenes` and `render.sources`), the screen layer and live audio inputs (named as in `mix.inputs`). `state` is `ended`, with the system's `reason`, once the capture delivers nothing more: a closed window, an ended portal session, a removed device, a revoked permission. Outputs keep running, and the source shows its last frame.
+- **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). Screen captures may deliver only when the content changes, so a long age alone is not an error; an ended capture's age keeps growing too. `frames_consumed: 0` means it never delivered.
 - **Silent inputs:** a live audio input whose `underrun_frames` grow while `fill_ms` stays near 0 has stopped delivering.
 - **Drops:** `frames_dropped` and `blocks_dropped` cover every cause the stop report counts: producer side (copy pool or queue full), encoder side, and, for streams, media while offline.
 - **Backpressure:** `queue_depth` is the number of items waiting for the output thread. A growing queue means the encoder or the network cannot keep up.

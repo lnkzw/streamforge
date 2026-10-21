@@ -1,0 +1,69 @@
+# ADR 0013: Capture stream state
+
+- **Status:** Accepted
+- **Date:** 2026-10-21
+
+## Context
+
+A capture can end while outputs run. A captured window can close, the portal session can end, a microphone can be unplugged, or a permission can be revoked. Every backend already noticed this, but only reported it when the capture stopped:
+- WGC `on_closed`
+- the SCK delegate's `did_stop_with_error`
+- the end of the PipeWire stream
+- cpal's error callback
+
+While running, `get_health` (ADR 0012) showed such a source only indirectly, through a growing `last_frame_age_ms`. A quiet source looks the same: WGC and SCK deliver frames only when the content changes. Clients could not tell "nothing moved" from "this source is gone" (assessment §9, step 4).
+
+## Decision
+
+- **`capture-api`:** a new `CaptureState`, `Running` or `Ended { reason }`.
+  - `VideoStream::state` and `AudioStream::state` return it. They never block, and they have no default: a new backend or a wrapper stream that forgot them would report every capture as running. A backend that cannot tell returns `Running` explicitly.
+  - `CaptureEnd` keeps the first reason, set by whichever thread notices the end, and is read without a lock. `FrameSink` (WGC, SCK) and the PipeWire streams use it.
+  - "Stalled" is not a capture state: some systems deliver frames only when the content changes. Clients judge stalls from `last_frame_age_ms` and the source kind.
+- **Backends:**
+
+  | Backend | Ends when | Reason |
+  |---------|-----------|--------|
+  | WGC (Windows) | the item is closed (`on_closed`), or the capture thread ended | "the captured window was closed" or "the captured display went away", by item kind; for the thread, a pointer to the capture report, which gets its error at the stop |
+  | SCK (macOS) | the delegate reports `did_stop_with_error`, or a frame reports `Stopped` | the system's error, or "ScreenCaptureKit stopped the capture" |
+  | PipeWire (Linux) | the capture thread returns, or panics, before a stop: a stream error, or the stream went unconnected after streaming | the error, "the PipeWire stream ended", or the panic |
+  | cpal (Windows, macOS audio) | an error was reported and no data followed for 500 ms | the last error's message |
+
+  - **cpal: what follows an error decides, not its kind.** Hosts differ: in cpal 0.18, WASAPI's capture loop ends on any error, but keeps capturing after `StreamInvalidated` (a new default device), and other hosts pause on some errors. A stream that reported an error and delivered no data since, for 500 ms (many device periods), has ended. If data comes back, it reads `running` again.
+    - The data callback stores a timestamp (no lock, no allocation).
+    - The error callback, off the data path, stores the message in a reused buffer.
+    - Errors stay warnings in the stop report, as before.
+  - **PipeWire, named audio inputs:** the stream sets `node.dont-reconnect`. Without it, the session manager moves a stream whose input went away to another source: on a machine with a default source, a different microphone would be recorded under the input's name, and on the development machine (no default) the stream went silent and stayed `running`. With it, WirePlumber ends the stream with "target not found". The default input (no name) still follows the default source.
+- **`get_health`** gains `captures`: one entry per running capture.
+  - The entries cover the scenes' screen sources, the legacy screen layer and live audio inputs.
+  - Each entry has `kind` (`screen` or `audio`), `id` (the scene source's id, as in `list_scenes` and `render.sources`; scene sources only), `name` (for audio, the mixer's input name), `state`, and `reason` when the capture ended.
+  - Ended captures stay in the list until they are stopped. Their outputs keep running, and the compositor keeps showing the source's last frame, as before.
+- **CLI:** progress lines name ended captures with their reason.
+
+## Alternatives considered
+
+1. **A `stalled` state, decided by the backend.** A timeout per source kind would misreport static windows and idle displays as failures. The frame age already carries the information, without a guess.
+2. **End the outputs, or remove the source, when a capture ends.** A recording that keeps the last frame is more useful than a recording that stops because a window closed. What to do next (restart, remove, switch scenes) is the client's decision, made through commands.
+3. **Push an event when a capture ends.** As in ADR 0012: polling first, events later.
+4. **For cpal, a list of error kinds that end a stream.** The first version did this, and the review of the cpal 0.18 WASAPI source showed it wrong both ways: errors outside the list stop the capture loop, and `StreamInvalidated` does not. Watching the data callbacks works the same on every host.
+
+## Validation
+
+- **Unit tests:**
+  - `FrameSink`: state before and after `end`, first reason kept
+  - cpal: the end rule (no error, data after the error, within and after the grace period, never any data), and the state naming the last error and returning to `running` when data comes back; on every OS
+  - command-api: JSON shape of `captures`
+  - CLI: progress line with an ended capture
+- **Engine test (fake backend):** a recording runs, the fake screen stream ends, and `get_health` shows `ended` with the reason while the recording keeps running. After the stop, `captures` is empty.
+- **Native tests on CI:**
+  - Windows: a PowerShell form with a unique title is captured, its process is killed, and the stream must report `ended` within 10 s.
+  - Windows and macOS: the monitor and display stream tests check `running` while frames arrive.
+- **Development machine (Linux, PipeWire 1.x, WirePlumber):** a recording with a named input from a virtual source (`support.null-audio-sink`), whose node was destroyed after 3 s. With `node.dont-reconnect`, the CLI showed the input `ended: ... target not found` from then on, and the recording finished with all 420 frames. Without it, the stream stopped delivering and stayed `running`.
+- **Not tested on a real system:**
+  - SCK ending through the delegate (macOS)
+  - PipeWire screen streams ending (the portal picker needs a person)
+  - cpal device removal (no microphone on the CI runners)
+
+## Consequences
+
+- Clients can show which source is gone and why, while outputs run. Restarting a source is the next step (assessment §9, step 5).
+- The `ended` state is as good as each system's notification. A capture that hangs without an error still shows as `running` with a growing frame age.

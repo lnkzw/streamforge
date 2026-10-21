@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -256,6 +257,53 @@ pub struct AudioStreamRequest {
     pub input: Option<String>,
     pub rate: u32,
     pub channels: u32,
+}
+
+/// Whether a running capture still delivers (see [`crate::VideoStream::state`]).
+///
+/// "Stalled" is deliberately not a state here: some systems deliver frames
+/// only when the content changes, so a quiet source is not a failure.
+/// Consumers see stalls from the frame age instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CaptureState {
+    Running,
+    /// The system ended the capture (a window closed, a device was removed,
+    /// a permission was revoked); it delivers nothing more until restarted.
+    Ended {
+        reason: String,
+    },
+}
+
+/// Why a capture ended on its own: set once, by whichever thread notices
+/// first, and read without waiting. Streams build their
+/// [`crate::VideoStream::state`] from it.
+#[derive(Debug, Default)]
+pub struct CaptureEnd(OnceLock<String>);
+
+impl CaptureEnd {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record why the capture ended; the first reason is kept, and later
+    /// calls do not run `reason`.
+    pub fn end(&self, reason: impl FnOnce() -> String) {
+        let _ = self.0.get_or_init(reason);
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        self.0.get().map(String::as_str)
+    }
+
+    pub fn state(&self) -> CaptureState {
+        match self.reason() {
+            Some(reason) => CaptureState::Ended {
+                reason: reason.to_owned(),
+            },
+            None => CaptureState::Running,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

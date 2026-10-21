@@ -634,6 +634,15 @@ fn progress_line(health: &command_api::HealthReport, elapsed: Duration) -> Strin
             render.late_frames, render.skipped_ticks
         ));
     }
+    for capture in &health.captures {
+        if let command_api::CaptureState::Ended { reason } = &capture.state {
+            parts.push(format!(
+                "{} `{}` ended: {reason}",
+                capture.kind.as_str(),
+                capture.name
+            ));
+        }
+    }
     format!("{:>5.1} s  {}", elapsed.as_secs_f64(), parts.join(" | "))
 }
 
@@ -715,11 +724,20 @@ mod tests {
             mix: None,
             recording: Some(output(None, false)),
             streaming: Some(output(Some(command_api::StreamState::Reconnecting), true)),
+            captures: vec![command_api::CaptureHealth {
+                kind: command_api::CaptureKind::Screen,
+                id: Some(3),
+                name: "desk".into(),
+                state: command_api::CaptureState::Ended {
+                    reason: "the captured window was closed".into(),
+                },
+            }],
         };
         assert_eq!(
             progress_line(&health, Duration::from_secs(2)),
             "  2.0 s  recording failed 120 frames, 2 dropped, queue 1 | \
-             stream reconnecting 120 frames, 2 dropped, queue 1"
+             stream reconnecting 120 frames, 2 dropped, queue 1 | \
+             screen `desk` ended: the captured window was closed"
         );
     }
 

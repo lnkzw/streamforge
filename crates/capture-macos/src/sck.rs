@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream,
     AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
-    CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo, VideoSourceKind,
-    VideoStream,
+    CaptureState, CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability,
+    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
+    VideoSourceKind, VideoStream,
 };
 use media_core::FrameMailbox;
 use screencapturekit::cm::{CMSampleBufferExt, SCFrameStatus};
@@ -418,6 +418,10 @@ impl VideoStream for SckStream {
 
     fn source(&self) -> &VideoSourceInfo {
         &self.source
+    }
+
+    fn state(&self) -> CaptureState {
+        self.sink.state()
     }
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {

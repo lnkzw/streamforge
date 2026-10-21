@@ -64,6 +64,16 @@ jobs:
             libpipewire-0.3-dev libclang-dev pkg-config \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
           pkg-config --modversion libpipewire-0.3 libavcodec libavformat libswscale
+      - name: Select Xcode (macOS)
+        if: runner.os == 'macOS'
+        # capture-macos builds the Swift bridge of `screencapturekit`, whose
+        # Metal bindings need the macOS 26 SDK (Xcode 26 or newer).
+        run: |
+          ls -d /Applications/Xcode*.app
+          newest=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         # encoder-ffmpeg links the FFmpeg libraries found through pkg-config.

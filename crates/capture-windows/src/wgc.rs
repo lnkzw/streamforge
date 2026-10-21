@@ -1,23 +1,24 @@
 //! Screen capture through Windows.Graphics.Capture (`windows-capture`).
 //!
 //! Each stream runs on the crate's capture thread. The frame handler maps
-//! each frame (a D3D11 staging copy made by `windows-capture`), copies it
-//! into a pooled buffer and publishes it to the stream's mailbox; when no
-//! pooled buffer is free the frame is discarded and counted. Windows draws
-//! a border around captured content, its privacy indicator; it stays on.
+//! each frame (a D3D11 staging copy made by `windows-capture`) and hands it
+//! to a `capture_api::FrameSink`, which copies it into a pooled buffer and
+//! publishes it, or discards and counts it when no buffer is free. Windows
+//! draws a border around captured content, its privacy indicator; it stays
+//! on.
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-    AudioStreamRequest, BufferKind, CaptureBackend, CaptureCapabilities, CaptureError,
-    CaptureErrorKind, CursorMode, FrameObservation, Rational, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoFormatInfo,
-    VideoSourceInfo, VideoSourceKind, VideoStatsAccumulator, VideoStream,
+    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
+    CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability, ScreenCaptureRequest,
+    ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo, VideoSourceKind,
+    VideoStream,
 };
-use media_core::{FrameMailbox, FramePool, MediaTimestamp, PixelFormat, VideoFrame};
+use media_core::FrameMailbox;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl};
@@ -31,8 +32,6 @@ use windows_capture::window::Window;
 use crate::ids::SourceRef;
 
 pub(crate) const BACKEND: &str = "Windows.Graphics.Capture";
-/// Frames in flight per stream (mailbox, compositor, one being filled).
-const POOL_BUFFERS: usize = 4;
 
 /// Screen capture of named monitors and windows. Audio is not handled
 /// here (see `capture-cpal`).
@@ -239,23 +238,15 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
         ));
         CursorCaptureSettings::Default
     };
-    let mailbox = Arc::new(FrameMailbox::new());
-    let shared = Arc::new(Mutex::new(Shared::default()));
-    let flags = Flags {
-        mailbox: Arc::clone(&mailbox),
-        shared: Arc::clone(&shared),
-        start: Instant::now(),
-        deliver,
-    };
+    let sink = Arc::new(FrameSink::new(deliver, "BGRA8"));
     let control = match item {
-        Item::Monitor(monitor) => run(monitor, cursor, flags),
-        Item::Window(window) => run(window, cursor, flags),
+        Item::Monitor(monitor) => run(monitor, cursor, Arc::clone(&sink)),
+        Item::Window(window) => run(window, cursor, Arc::clone(&sink)),
     }?;
     Ok(WgcStream {
         control: Some(control),
-        mailbox,
+        sink,
         source,
-        shared,
         started: Instant::now(),
         warnings,
     })
@@ -264,7 +255,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
 fn run<T>(
     item: T,
     cursor: CursorCaptureSettings,
-    flags: Flags,
+    sink: Arc<FrameSink>,
 ) -> Result<CaptureControl<Handler, String>, CaptureError>
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
@@ -277,7 +268,7 @@ where
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
-        flags,
+        sink,
     );
     Handler::start_free_threaded(settings).map_err(|err| {
         CaptureError::new(
@@ -287,73 +278,36 @@ where
     })
 }
 
-/// State the capture thread updates and the stream handle reads.
-#[derive(Default)]
-struct Shared {
-    stats: VideoStatsAccumulator,
-    format: Option<VideoFormatInfo>,
-    /// The captured window was closed.
-    closed: bool,
-    /// The first few frame errors.
-    errors: Vec<String>,
-}
-
-fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-struct Flags {
-    mailbox: Arc<FrameMailbox>,
-    shared: Arc<Mutex<Shared>>,
-    start: Instant,
-    /// Copy frames into the mailbox (streams) or only observe them (probes).
-    deliver: bool,
-}
-
 struct Handler {
-    flags: Flags,
-    pool: FramePool,
+    sink: Arc<FrameSink>,
 }
 
 impl Handler {
-    /// Copy the mapped frame into a pooled buffer and publish it. `Ok(false)`
-    /// means no pooled buffer was free. Allocates only while the pool warms
-    /// up or when the size grows; `windows-capture` maps a staging texture.
-    fn deliver(&mut self, frame: &mut Frame, pts: Option<MediaTimestamp>) -> Result<bool, String> {
+    /// Map the frame (`windows-capture` creates and maps a staging texture)
+    /// and hand it to the sink.
+    fn publish(frame: &mut Frame, sink: &FrameSink, pts_ns: Option<i64>) -> Result<bool, String> {
         let mut buffer = frame.buffer().map_err(|err| err.to_string())?;
         let (width, height) = (buffer.width(), buffer.height());
         let stride = buffer.row_pitch() as usize;
-        let needed =
-            VideoFrame::required_len(width, height, stride).map_err(|err| err.to_string())?;
         let data = buffer.as_raw_buffer();
-        if data.len() < needed {
-            return Err(format!(
-                "the mapped frame holds {} bytes, {width}x{height} needs {needed}",
-                data.len()
-            ));
-        }
-        let Some(mut pooled) = self.pool.acquire(needed) else {
-            return Ok(false);
-        };
-        pooled.copy_from_slice(&data[..needed]);
-        // BGRA from the compositor; the alpha of captured content is not
-        // meaningful for a layer, so it is treated as opaque.
-        let frame = VideoFrame::new(width, height, stride, PixelFormat::Bgrx8, pts, pooled)
-            .map_err(|err| err.to_string())?;
-        self.flags.mailbox.publish(frame);
-        Ok(true)
+        sink.publish(
+            MappedFrame {
+                width,
+                height,
+                stride,
+                data,
+            },
+            pts_ns,
+        )
     }
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-    type Flags = Flags;
+    type Flags = Arc<FrameSink>;
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            flags: ctx.flags,
-            pool: FramePool::new(POOL_BUFFERS),
-        })
+        Ok(Self { sink: ctx.flags })
     }
 
     fn on_frame_arrived(
@@ -361,71 +315,40 @@ impl GraphicsCaptureApiHandler for Handler {
         frame: &mut Frame,
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        let arrival_ns = u64::try_from(self.flags.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let arrival_ns = self.sink.elapsed_ns();
         // SystemRelativeTime in 100 ns units (the QPC clock).
         let pts_ns = frame
             .timestamp()
             .ok()
             .and_then(|time| time.Duration.checked_mul(100));
         let (width, height) = (frame.width(), frame.height());
-        let delivered = if self.flags.deliver {
-            let pts = pts_ns.and_then(|ns| MediaTimestamp::new(ns, 1, 1_000_000_000).ok());
-            Some(self.deliver(frame, pts))
-        } else {
-            None
-        };
+        let delivered = self
+            .sink
+            .delivers()
+            .then(|| Self::publish(frame, &self.sink, pts_ns));
         // Errors stay in the report; returning one would end the capture.
-        let mut shared = lock(&self.flags.shared);
-        shared.stats.observe(FrameObservation {
-            arrival_ns,
-            pts_ns,
-            seq: None,
-            kind: BufferKind::Frame,
-        });
-        let changed = shared
-            .format
-            .as_ref()
-            .is_none_or(|format| (format.width, format.height) != (width, height));
-        if changed {
-            shared.format = Some(VideoFormatInfo {
-                pixel_format: "BGRA8".to_owned(),
-                width,
-                height,
-                // Frames arrive when the content changes.
-                framerate: Rational { num: 0, den: 1 },
-            });
-        }
-        match delivered {
-            Some(Ok(false)) => shared.stats.frame_discarded(),
-            Some(Err(error)) => {
-                shared.stats.frame_discarded();
-                if shared.errors.len() < 8 {
-                    shared.errors.push(error);
-                }
-            }
-            Some(Ok(true)) | None => {}
-        }
+        self.sink
+            .observe_frame(arrival_ns, width, height, pts_ns, delivered);
         Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        lock(&self.flags.shared).closed = true;
+        self.sink.end("the captured window was closed");
         Ok(())
     }
 }
 
 struct WgcStream {
     control: Option<CaptureControl<Handler, String>>,
-    mailbox: Arc<FrameMailbox>,
+    sink: Arc<FrameSink>,
     source: VideoSourceInfo,
-    shared: Arc<Mutex<Shared>>,
     started: Instant,
     warnings: Vec<String>,
 }
 
 impl VideoStream for WgcStream {
     fn frames(&self) -> Arc<FrameMailbox> {
-        Arc::clone(&self.mailbox)
+        self.sink.mailbox()
     }
 
     fn source(&self) -> &VideoSourceInfo {
@@ -443,25 +366,13 @@ impl VideoStream for WgcStream {
         };
         let elapsed = self.started.elapsed();
         stopped?;
-        let shared = lock(&self.shared);
-        let mut warnings = std::mem::take(&mut self.warnings);
-        if shared.closed {
-            warnings.push("the captured window was closed".to_owned());
-        }
-        warnings.extend(
-            shared
-                .errors
-                .iter()
-                .map(|error| format!("frame not delivered: {error}")),
-        );
-        Ok(VideoCaptureReport {
-            backend: BACKEND.to_owned(),
-            source: self.source.clone(),
-            format: shared.format.clone(),
-            buffer_memory: Some("d3d11 staging copy".to_owned()),
-            stats: shared.stats.finish(elapsed),
-            warnings,
-        })
+        Ok(self.sink.report(
+            BACKEND,
+            self.source.clone(),
+            "d3d11 staging copy",
+            std::mem::take(&mut self.warnings),
+            elapsed,
+        ))
     }
 }
 

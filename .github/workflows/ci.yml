@@ -70,7 +70,8 @@ jobs:
         # Metal bindings need the macOS 26 SDK (Xcode 26 or newer).
         run: |
           ls -d /Applications/Xcode*.app
-          newest=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          # Released versions only (betas are named e.g. Xcode_26.1_beta.app).
+          newest=$(ls -d /Applications/Xcode_*.app | grep -E '/Xcode_[0-9.]+\.app$' | sort -V | tail -1)
           sudo xcode-select -s "$newest"
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version

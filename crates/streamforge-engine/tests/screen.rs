@@ -55,6 +55,12 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
     ];
     for (n, (command, params)) in steps.into_iter().enumerate() {
         let response = call(&mut engine, 10 + n as u64, command, params);
+        // Listing can be allowed while capturing is not (macOS).
+        if command == "start_recording" && response["error"]["code"] == "permission_denied" {
+            println!("capturing is not permitted here: {response}");
+            assert!(engine.finish().success());
+            return;
+        }
         assert_eq!(response["ok"], true, "{command}: {response}");
     }
     std::thread::sleep(Duration::from_millis(1500));

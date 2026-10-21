@@ -113,9 +113,10 @@ pub struct ScreenSource {
     pub kind: VideoSourceKind,
     /// Display name or window title.
     pub name: String,
-    /// Size as the system reports it. For windows this is approximate: the
-    /// window rectangle can include invisible borders and differ from the
-    /// captured frames with display scaling; reports carry the real size.
+    /// Size as the system reports it (macOS: points, not pixels). For
+    /// windows this is approximate: the window rectangle can include
+    /// invisible borders and differ from the captured frames with display
+    /// scaling. Capture reports carry the real frame size.
     pub width: Option<u32>,
     pub height: Option<u32>,
 }

@@ -1,7 +1,8 @@
 //! M9b acceptance: through the real engine process, record a screen
 //! source named from `list_screen_sources`, on platforms whose capture
-//! backend lists sources (Windows). Elsewhere the listing must fail with a
-//! structured error, and the test says so.
+//! backend lists sources (Windows, macOS). Elsewhere the listing must fail
+//! with a structured error, and so must it where screen recording is not
+//! permitted (macOS without the permission); the test says which.
 
 mod common;
 
@@ -27,6 +28,12 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
         assert_eq!(listed["ok"], false, "{listed}");
         assert!(listed["error"]["message"].is_string(), "{listed}");
         println!("this platform has no screen source list; nothing to record");
+        assert!(engine.finish().success());
+        return;
+    }
+    // macOS CI runners cannot grant screen recording; the error must say so.
+    if listed["error"]["code"] == "permission_denied" {
+        println!("screen recording is not permitted here; nothing to record");
         assert!(engine.finish().success());
         return;
     }

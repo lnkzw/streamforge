@@ -279,7 +279,12 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
     use std::time::Instant;
 
     let dir = TempDir::new("stream");
-    let ingest = TestServer::start(ServerOptions::default());
+    // The ingest waits for one publisher; starting the MCP server first can
+    // take longer than the default accept timeout on a loaded runner.
+    let ingest = TestServer::start(ServerOptions {
+        accept_timeout: Duration::from_secs(60),
+        ..ServerOptions::default()
+    });
     let url = ingest.url();
     let client = connect(
         &dir,
@@ -334,6 +339,12 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
+    // Every attempt, not just the last, if starting never succeeded.
+    assert_eq!(
+        started.is_error,
+        Some(false),
+        "start_streaming kept failing: {seen}"
+    );
     assert!(
         ok(&started)["target"]
             .as_str()

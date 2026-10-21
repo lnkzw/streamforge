@@ -12,7 +12,7 @@ use std::sync::mpsc::Receiver;
 use ff::Dictionary;
 use ffmpeg_next as ff;
 
-use super::{Session, init};
+use super::{EncoderChoice, Session, init};
 use crate::{
     Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
 };
@@ -27,7 +27,7 @@ pub(crate) fn run(
 ) -> Result<RecordingStats, RecorderError> {
     let mut session = match open(&config, &shared) {
         Ok(session) => {
-            let _ = ready.send(Ok(()));
+            let _ = ready.send(Ok(session.video.info()));
             session
         }
         Err(error) => {
@@ -99,6 +99,7 @@ fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, Record
         &config.path.display().to_string(),
         RecorderErrorKind::Output,
         &config.video,
+        &mut EncoderChoice::new(&config.video),
         &config.audio,
         // File I/O is never interrupted: the recorder has no stop deadline.
         Arc::clone(shared),

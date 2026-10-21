@@ -87,7 +87,7 @@ In M5 a recording owned the compositor and mixer. Two outputs that run at the sa
 
 - Recording and streaming run together and fail independently. Each additional output costs one extra x264 encode at canvas resolution.
 - Each output also gets its own copy of every frame (8 MB at 1080p, made on the compositor thread) and its own colour conversion. Sharing one copy would let a stalled stream starve the recording's buffers, so isolation wins over memory bandwidth for now; the measurement above showed 0 late frames with two outputs.
-- Stream resolution equals the canvas (1080p60). Scaling for streams, hardware encoders and multiple simultaneous streams are future work.
+- Stream resolution equals the canvas (1080p60). Scaling for streams and multiple simultaneous streams are future work; hardware encoders came with ADR 0011.
 - `rtmps://` depends on the TLS support of the linked FFmpeg build.
 - Before the stream's first video frame, and between connections, audio is dropped (counted). A reconnect therefore loses up to the reconnect delay plus connect time of media for the viewer.
 - Disabling FFmpeg's log output after streaming starts also hides FFmpeg diagnostics of the recorder. Our errors still carry FFmpeg's error text.

@@ -66,7 +66,9 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
   - gain and mute are exact
   - clipping is counted
 - `crates/encoder-ffmpeg/src/audio_fifo.rs`: audio timeline regrouping (gap fill, overlap trim, discontinuity restart).
-- `crates/encoder-ffmpeg/tests/record.rs`: records a synthetic 2 s clip, then demuxes and decodes it. It checks:
+- `crates/encoder-ffmpeg/src/ffmpeg/encoders.rs`: candidate order per OS and preference, and the rate-control options of every encoder.
+- `crates/encoder-ffmpeg/tests/record.rs`: `software` records with libx264; `hardware` uses a hardware encoder or fails with every candidate's reason; `auto` falls back and reports what it skipped. With a GPU (e.g. VAAPI on the development machine) every recording test runs on the hardware encoder; CI runners have none, so there they cover libx264 and the fallback.
+- `crates/encoder-ffmpeg/tests/record.rs` also records a synthetic 2 s clip, then demuxes and decodes it. It checks:
   - stream metadata and color tags, duration and start timestamps
   - A/V end drift
   - decoded pixel colors and tone RMS

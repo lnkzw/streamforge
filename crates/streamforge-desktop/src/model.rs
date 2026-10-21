@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use command_api::{
     CommandError, CommandOutput, EngineStatus, MixerState, RecordingStarted, SceneList,
-    ScreenSource, StreamingStarted,
+    ScreenSource, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -328,7 +328,14 @@ impl Model {
                 }
             }
             CommandOutput::RecordingStarted(started) => {
-                self.push(Level::Info, format!("Recording to {}", started.path));
+                self.push(
+                    Level::Info,
+                    format!(
+                        "Recording to {} ({})",
+                        started.path,
+                        encoder_label(&started.video_encoder)
+                    ),
+                );
                 self.recording = Some(started);
             }
             CommandOutput::RecordingReport(report) => {
@@ -349,7 +356,14 @@ impl Model {
                 }
             }
             CommandOutput::StreamingStarted(started) => {
-                self.push(Level::Info, format!("Streaming to {}", started.target));
+                self.push(
+                    Level::Info,
+                    format!(
+                        "Streaming to {} ({})",
+                        started.target,
+                        encoder_label(&started.video_encoder)
+                    ),
+                );
                 self.streaming = Some(started);
             }
             CommandOutput::StreamingReport(report) => {
@@ -381,4 +395,14 @@ impl Model {
         }
         self.push(Level::Error, format!("{name}: {}", error.message));
     }
+}
+
+/// E.g. `h264_vaapi, hardware` or `libx264, software`.
+fn encoder_label(info: &VideoEncoderInfo) -> String {
+    let kind = if info.hardware {
+        "hardware"
+    } else {
+        "software"
+    };
+    format!("{}, {kind}", info.encoder)
 }

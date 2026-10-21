@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use audio_engine::MixStats;
 use capture_api::{ScreenSelection, VideoCaptureReport};
-use encoder_api::{ReconnectPolicy, RecordingStats, StreamStats, StreamTarget};
+use encoder_api::{
+    EncoderPreference, ReconnectPolicy, RecordingStats, StreamStats, StreamTarget, VideoEncoderInfo,
+};
 use serde::Serialize;
 use video_compositor::RenderStats;
 
@@ -30,6 +32,8 @@ pub struct MediaSources {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingRequest {
     pub file_name: PathBuf,
+    /// Which H.264 encoders to try (ADR 0011).
+    pub video_encoder: EncoderPreference,
     /// `None`: join the running pipeline, or start it with the default
     /// sources (one quiet test tone).
     pub sources: Option<MediaSources>,
@@ -40,6 +44,7 @@ pub struct RecordingRequest {
 pub struct StreamingRequest {
     pub target: StreamTarget,
     pub video_bitrate_kbps: u32,
+    pub video_encoder: EncoderPreference,
     pub reconnect: ReconnectPolicy,
     pub sources: Option<MediaSources>,
 }
@@ -52,6 +57,7 @@ pub struct RecordingStarted {
     pub fps: u32,
     pub sample_rate: u32,
     pub channels: u32,
+    pub video_encoder: VideoEncoderInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,6 +70,7 @@ pub struct StreamingStarted {
     pub video_bitrate_kbps: u32,
     pub sample_rate: u32,
     pub channels: u32,
+    pub video_encoder: VideoEncoderInfo,
 }
 
 /// The pipeline part of an output's report. Its stats are present only if

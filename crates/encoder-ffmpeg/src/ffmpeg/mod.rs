@@ -1,4 +1,4 @@
-//! FFmpeg implementation of the output threads (Linux): encoder tracks and
+//! FFmpeg implementation of the output threads: encoder tracks and
 //! containers shared by the recorder and the streamer.
 //!
 //! All FFmpeg objects of an output are created and used on its thread.
@@ -15,13 +15,16 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 use crate::audio_fifo::AudioFifo;
 use crate::{
-    AudioSettings, AudioTrackStats, Item, RecorderError, RecorderErrorKind, Shared, VideoSettings,
-    VideoTrackStats,
+    AudioSettings, AudioTrackStats, EncoderPreference, Item, RecorderError, RecorderErrorKind,
+    Shared, SkippedEncoder, VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
 
+pub(crate) mod encoders;
 mod interrupt;
 pub(crate) mod record;
 pub(crate) mod stream;
+#[cfg(target_os = "linux")]
+mod vaapi;
 
 use interrupt::Interrupt;
 
@@ -30,6 +33,50 @@ use interrupt::Interrupt;
 /// check and the switch one step, so a concurrent recorder start cannot turn
 /// logging back on after a streamer turned it off.
 static QUIET: Mutex<bool> = Mutex::new(false);
+
+/// Mutes FFmpeg's log output while it lives: trying hardware encoders
+/// fails noisily where a GPU, driver or runtime is missing, and those
+/// failures are reported in `skipped`. The level comes back when the guard
+/// drops (also on a panic), unless a streamer has turned logging off for
+/// good meanwhile. No lock is held while the guard lives; other outputs'
+/// FFmpeg messages are muted for those few moments too.
+struct Muted;
+
+impl Muted {
+    fn new() -> Self {
+        ff::log::set_level(ff::log::Level::Quiet);
+        Self
+    }
+}
+
+impl Drop for Muted {
+    fn drop(&mut self) {
+        let stays_quiet = QUIET.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*stays_quiet {
+            ff::log::set_level(ff::log::Level::Error);
+        }
+    }
+}
+
+/// The order in which an output tries encoders. The one that opened moves
+/// to the front, so a stream's reconnects try it first and still fall back
+/// to the others if it stops working.
+pub(crate) struct EncoderChoice {
+    candidates: Vec<encoders::Candidate>,
+}
+
+impl EncoderChoice {
+    pub(crate) fn new(settings: &VideoSettings) -> Self {
+        Self {
+            candidates: encoders::candidates(settings.encoders),
+        }
+    }
+
+    fn prefer(&mut self, chosen: encoders::Candidate) {
+        self.candidates.retain(|candidate| *candidate != chosen);
+        self.candidates.insert(0, chosen);
+    }
+}
 
 fn init(quiet: bool) -> Result<(), RecorderError> {
     ff::init()
@@ -68,6 +115,7 @@ impl Session {
         display: &str,
         kind: RecorderErrorKind,
         video: &VideoSettings,
+        encoders: &mut EncoderChoice,
         audio: &AudioSettings,
         shared: Arc<Shared>,
     ) -> Result<Self, RecorderError> {
@@ -78,7 +126,7 @@ impl Session {
             .format()
             .flags()
             .contains(format::Flags::GLOBAL_HEADER);
-        let mut video = VideoTrack::open(&mut output, video, global_header)?;
+        let mut video = VideoTrack::open(&mut output, video, encoders, global_header)?;
         let mut audio = AudioTrack::open(&mut output, audio, global_header)?;
         output
             .write_header()
@@ -199,7 +247,14 @@ fn frames_i64(count: usize) -> i64 {
 struct VideoTrack {
     encoder: encoder::Video,
     name: String,
+    hardware: bool,
+    skipped: Vec<SkippedEncoder>,
     settings: VideoSettings,
+    /// What the scaler produces and the encoder (or upload) takes.
+    picture_format: Pixel,
+    /// VAAPI surfaces when the encoder needs them (`h264_vaapi`).
+    #[cfg(target_os = "linux")]
+    surfaces: Option<vaapi::Surfaces>,
     stream: usize,
     time_base: Rational,
     stream_time_base: Rational,
@@ -215,62 +270,202 @@ struct VideoTrack {
     last_pts: Option<i64>,
 }
 
+/// The codec a candidate names (`ANY_H264`: FFmpeg's default H.264 encoder).
+fn find_codec(candidate: encoders::Candidate) -> Option<ff::Codec> {
+    if candidate.name == encoders::ANY_H264 {
+        encoder::find(codec::Id::H264)
+    } else {
+        encoder::find_by_name(candidate.name)
+    }
+}
+
+/// Opening alone does not prove an encoder works: some drivers accept the
+/// session and reject the first frame. So a throwaway instance encodes one
+/// frame first; only then is the real one opened.
+fn try_encoder(
+    codec: ff::Codec,
+    candidate: encoders::Candidate,
+    settings: &VideoSettings,
+    fps: i32,
+    global_header: bool,
+) -> Result<Opened, String> {
+    let mut probe = open_encoder(codec, candidate, settings, fps, global_header)?;
+    let mut picture = frame::Video::new(probe.picture_format, settings.width, settings.height);
+    #[cfg(target_os = "linux")]
+    if let Some(surfaces) = &probe.surfaces {
+        picture = surfaces.upload(&picture)?;
+    }
+    picture.set_pts(Some(0));
+    probe
+        .encoder
+        .send_frame(&picture)
+        .and_then(|()| probe.encoder.send_eof())
+        .map_err(|err| format!("rejects frames: {err}"))?;
+    let mut packet = Packet::empty();
+    loop {
+        match probe.encoder.receive_packet(&mut packet) {
+            Ok(()) => {}
+            Err(ff::Error::Eof) => break,
+            Err(err) => return Err(format!("rejects frames: {err}")),
+        }
+    }
+    drop(probe);
+    open_encoder(codec, candidate, settings, fps, global_header)
+}
+
+/// Open one candidate; the error says why it cannot be used here.
+fn open_encoder(
+    codec: ff::Codec,
+    candidate: encoders::Candidate,
+    settings: &VideoSettings,
+    fps: i32,
+    global_header: bool,
+) -> Result<Opened, String> {
+    let mut context = codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()
+        .map_err(|err| format!("cannot create the encoder: {err}"))?;
+    context.set_width(settings.width);
+    context.set_height(settings.height);
+    context.set_time_base(Rational::new(1, fps));
+    context.set_frame_rate(Some(Rational::new(fps, 1)));
+    // Tag what the conversion produces: swscale's default BGRA to YUV
+    // matrix is BT.601 with limited range. The canvas is sRGB (BT.709
+    // primaries, sRGB transfer; ADR 0003). Untagged HD video would be shown
+    // with the BT.709 matrix, shifting hues.
+    context.set_colorspace(color::Space::SMPTE170M);
+    context.set_color_range(color::Range::MPEG);
+    context.set_color_primaries(color::Primaries::BT709);
+    if global_header {
+        context.set_flags(codec::Flags::GLOBAL_HEADER);
+    }
+    #[cfg(target_os = "linux")]
+    let mut surfaces = None;
+    let picture_format = match candidate.upload {
+        encoders::Upload::Software => {
+            let formats: Vec<Pixel> = codec
+                .video()
+                .ok()
+                .and_then(|video| video.formats())
+                .map(Iterator::collect)
+                .unwrap_or_default();
+            let picture = if formats.is_empty() || formats.contains(&Pixel::YUV420P) {
+                Pixel::YUV420P
+            } else if formats.contains(&Pixel::NV12) {
+                Pixel::NV12
+            } else {
+                return Err("takes neither YUV 4:2:0 nor NV12 frames".to_owned());
+            };
+            context.set_format(picture);
+            picture
+        }
+        #[cfg(target_os = "linux")]
+        encoders::Upload::Vaapi => {
+            let created = vaapi::Surfaces::new(settings.width, settings.height)?;
+            context.set_format(Pixel::VAAPI);
+            created.attach(&mut context)?;
+            surfaces = Some(created);
+            Pixel::NV12
+        }
+        #[cfg(not(target_os = "linux"))]
+        encoders::Upload::Vaapi => return Err("VAAPI exists on Linux only".to_owned()),
+    };
+    let mut options = Dictionary::new();
+    // No typed setter for the transfer in ffmpeg-next; it is a codec
+    // context option.
+    options.set("color_trc", "iec61966-2-1");
+    for (key, value) in encoders::options(codec.name(), settings.rate, settings.fps) {
+        options.set(key, &value);
+    }
+    let encoder = context
+        .open_with(options)
+        .map_err(|err| format!("cannot open: {err}"))?;
+    Ok(Opened {
+        encoder,
+        codec,
+        picture_format,
+        #[cfg(target_os = "linux")]
+        surfaces,
+    })
+}
+
+/// One opened encoder of the candidates.
+struct Opened {
+    encoder: encoder::Video,
+    codec: ff::Codec,
+    picture_format: Pixel,
+    #[cfg(target_os = "linux")]
+    surfaces: Option<vaapi::Surfaces>,
+}
+
 impl VideoTrack {
+    /// Open the first candidate encoder that works and add its stream.
     fn open(
         output: &mut format::context::Output,
         settings: &VideoSettings,
+        choice: &mut EncoderChoice,
         global_header: bool,
     ) -> Result<Self, RecorderError> {
-        let codec = encoder::find_by_name(&settings.encoder)
-            .or_else(|| encoder::find(codec::Id::H264))
-            .ok_or_else(|| {
-                RecorderError::new(
-                    RecorderErrorKind::Unsupported,
-                    "this FFmpeg build has no H.264 encoder",
-                )
-            })?;
-        let name = codec.name().to_owned();
-        let encoder_error = |context: &str, err| error(RecorderErrorKind::Encoder, context, err);
-        let mut context = codec::context::Context::new_with_codec(codec)
-            .encoder()
-            .video()
-            .map_err(|err| encoder_error("cannot create the video encoder", err))?;
         let fps = positive_i32(settings.fps, "frame rate")?;
         let time_base = Rational::new(1, fps);
-        context.set_width(settings.width);
-        context.set_height(settings.height);
-        context.set_format(Pixel::YUV420P);
-        context.set_time_base(time_base);
-        context.set_frame_rate(Some(Rational::new(fps, 1)));
-        // Tag what the conversion below produces: swscale's default BGRA to
-        // YUV matrix is BT.601 with limited range. The canvas is sRGB
-        // (BT.709 primaries, sRGB transfer; ADR 0003). Untagged HD video
-        // would be shown with the BT.709 matrix, shifting hues.
-        context.set_colorspace(color::Space::SMPTE170M);
-        context.set_color_range(color::Range::MPEG);
-        context.set_color_primaries(color::Primaries::BT709);
-        if global_header {
-            context.set_flags(codec::Flags::GLOBAL_HEADER);
+        let mut skipped: Vec<SkippedEncoder> = Vec::new();
+        let mut opened = None;
+        for candidate in &choice.candidates {
+            let Some(codec) = find_codec(*candidate) else {
+                if candidate.name != encoders::ANY_H264 {
+                    skipped.push(SkippedEncoder {
+                        encoder: candidate.name.to_owned(),
+                        reason: "not in this FFmpeg build".to_owned(),
+                    });
+                }
+                continue;
+            };
+            // FFmpeg's default H.264 encoder is usually one tried already.
+            if skipped.iter().any(|skip| skip.encoder == codec.name()) {
+                continue;
+            }
+            let attempt = if candidate.hardware {
+                let _muted = Muted::new();
+                try_encoder(codec, *candidate, settings, fps, global_header)
+            } else {
+                try_encoder(codec, *candidate, settings, fps, global_header)
+            };
+            match attempt {
+                Ok(encoder) => {
+                    opened = Some((*candidate, encoder));
+                    break;
+                }
+                Err(reason) => skipped.push(SkippedEncoder {
+                    encoder: codec.name().to_owned(),
+                    reason,
+                }),
+            }
         }
-        let mut options = Dictionary::new();
-        // No typed setter for the transfer in ffmpeg-next; it is a codec
-        // context option.
-        options.set("color_trc", "iec61966-2-1");
-        for (key, value) in &settings.options {
-            options.set(key, value);
-        }
-        let encoder = context
-            .open_with(options)
-            .map_err(|err| encoder_error(&format!("cannot open video encoder {name}"), err))?;
+        let Some((candidate, opened)) = opened else {
+            let tried: Vec<String> = skipped
+                .iter()
+                .map(|skip| format!("{}: {}", skip.encoder, skip.reason))
+                .collect();
+            let kind = match settings.encoders {
+                EncoderPreference::Hardware => "hardware ",
+                EncoderPreference::Software => "software ",
+                EncoderPreference::Auto => "",
+            };
+            return Err(RecorderError::new(
+                RecorderErrorKind::Unsupported,
+                format!("no {kind}H.264 encoder opened ({})", tried.join("; ")),
+            ));
+        };
+        choice.prefer(candidate);
         let stream = {
-            let mut stream = output.add_stream(codec).map_err(|err| {
+            let mut stream = output.add_stream(opened.codec).map_err(|err| {
                 error(
                     RecorderErrorKind::Output,
                     "cannot add the video stream",
                     err,
                 )
             })?;
-            stream.set_parameters(&encoder);
+            stream.set_parameters(&opened.encoder);
             stream.set_time_base(time_base);
             stream.index()
         };
@@ -278,16 +473,27 @@ impl VideoTrack {
             Pixel::BGRA,
             settings.width,
             settings.height,
-            Pixel::YUV420P,
+            opened.picture_format,
             settings.width,
             settings.height,
             software::scaling::Flags::BILINEAR,
         )
-        .map_err(|err| encoder_error("cannot create the color converter", err))?;
+        .map_err(|err| {
+            error(
+                RecorderErrorKind::Encoder,
+                "cannot create the color converter",
+                err,
+            )
+        })?;
         Ok(Self {
-            encoder,
-            name,
+            name: opened.codec.name().to_owned(),
+            encoder: opened.encoder,
+            hardware: candidate.hardware,
+            skipped,
             settings: settings.clone(),
+            picture_format: opened.picture_format,
+            #[cfg(target_os = "linux")]
+            surfaces: opened.surfaces,
             stream,
             time_base,
             stream_time_base: time_base,
@@ -331,11 +537,20 @@ impl VideoTrack {
         }
         // A fresh frame per picture: the encoder may keep references to it
         // (lookahead), so a reused buffer could be overwritten too early.
-        let mut picture =
-            frame::Video::new(Pixel::YUV420P, self.settings.width, self.settings.height);
+        let mut picture = frame::Video::new(
+            self.picture_format,
+            self.settings.width,
+            self.settings.height,
+        );
         self.scaler
             .run(&self.staging, &mut picture)
             .map_err(|err| error(RecorderErrorKind::Encoder, "color conversion failed", err))?;
+        #[cfg(target_os = "linux")]
+        if let Some(surfaces) = &self.surfaces {
+            picture = surfaces
+                .upload(&picture)
+                .map_err(|reason| RecorderError::new(RecorderErrorKind::Encoder, reason))?;
+        }
         picture.set_pts(Some(pts));
         self.encoder
             .send_frame(&picture)
@@ -354,6 +569,11 @@ impl VideoTrack {
     }
 
     fn flush(&mut self, output: &mut format::context::Output) -> Result<(), RecorderError> {
+        // Nothing to flush; and FFmpeg 8's h264_vaapi crashes when it is
+        // flushed without ever having received a frame.
+        if self.frames_encoded == 0 {
+            return Ok(());
+        }
         self.encoder.send_eof().map_err(|err| {
             error(
                 RecorderErrorKind::Encoder,
@@ -384,9 +604,17 @@ impl VideoTrack {
         self.frames_encoded.saturating_sub(self.packets_written)
     }
 
+    fn info(&self) -> VideoEncoderInfo {
+        VideoEncoderInfo {
+            encoder: self.name.clone(),
+            hardware: self.hardware,
+            skipped: self.skipped.clone(),
+        }
+    }
+
     fn stats(&self, queue_dropped: u64) -> VideoTrackStats {
         VideoTrackStats {
-            encoder: self.name.clone(),
+            encoder: self.info(),
             width: self.settings.width,
             height: self.settings.height,
             fps: self.settings.fps,

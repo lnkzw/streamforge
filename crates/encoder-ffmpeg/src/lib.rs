@@ -26,9 +26,10 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 pub use audio_fifo::{AudioFifo, FifoStats, MAX_GAP_FILL};
 pub use encoder_api::{
-    AudioSettings, AudioTrackStats, ReconnectPolicy, RecorderConfig, RecorderError,
-    RecorderErrorKind, RecordingStats, StreamConfig, StreamKey, StreamState, StreamStats,
-    StreamTarget, VideoSettings, VideoTrackStats,
+    AudioSettings, AudioTrackStats, EncoderPreference, RateControl, ReconnectPolicy,
+    RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, SkippedEncoder, StreamConfig,
+    StreamKey, StreamState, StreamStats, StreamTarget, VideoEncoderInfo, VideoSettings,
+    VideoTrackStats,
 };
 
 /// Largest interleaved audio block accepted by [`OutputInput::send_audio`].
@@ -174,11 +175,13 @@ impl OutputInput {
     }
 }
 
-type Ready = SyncSender<Result<(), RecorderError>>;
+/// The output thread reports its opened video encoder, or why it failed.
+type Ready = SyncSender<Result<VideoEncoderInfo, RecorderError>>;
 
 /// An output thread and the input that feeds it.
 struct Worker<T> {
     input: OutputInput,
+    encoder: VideoEncoderInfo,
     thread: Option<JoinHandle<Result<T, RecorderError>>>,
 }
 
@@ -205,8 +208,9 @@ impl<T: Send + 'static> Worker<T> {
                 )
             })?;
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+            Ok(Ok(encoder)) => Ok(Self {
                 input: OutputInput { tx, shared },
+                encoder,
                 thread: Some(thread),
             }),
             // Setup failed: the thread ends with that error.
@@ -295,6 +299,11 @@ impl Recorder {
         self.worker.input.clone()
     }
 
+    /// The video encoder in use (hardware where available, ADR 0011).
+    pub fn video_encoder(&self) -> &VideoEncoderInfo {
+        &self.worker.encoder
+    }
+
     /// Set the end of the recording: items stamped at or after `end` are not
     /// recorded (counted as `*_after_end`). Producers run on until they are
     /// stopped, so this gives both tracks the same end.
@@ -334,6 +343,11 @@ impl Streamer {
 
     pub fn input(&self) -> OutputInput {
         self.worker.input.clone()
+    }
+
+    /// The video encoder of the first connection; reconnects keep it.
+    pub fn video_encoder(&self) -> &VideoEncoderInfo {
+        &self.worker.encoder
     }
 
     /// Redacted target, safe to show.

@@ -11,7 +11,7 @@ pub use stream::{
     ReconnectPolicy, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,32 +22,85 @@ pub struct RecorderConfig {
     pub audio: AudioSettings,
 }
 
+/// Which H.264 encoders an output tries (ADR 0011).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EncoderPreference {
+    /// A hardware encoder if one opens on this machine, else software.
+    #[default]
+    Auto,
+    /// Software only (libx264).
+    Software,
+    /// Hardware only; the output fails if no hardware encoder opens.
+    Hardware,
+}
+
+impl EncoderPreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Software => "software",
+            Self::Hardware => "hardware",
+        }
+    }
+}
+
+/// What the video encoder aims for; each encoder maps it to its own options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateControl {
+    /// Constant quality for files (libx264 CRF 20 or the hardware
+    /// encoder's comparable constant-quality mode).
+    Quality,
+    /// Constant bit rate with a keyframe every `keyframe_interval_s`
+    /// seconds, as live ingests expect.
+    ConstantBitrate { kbps: u32, keyframe_interval_s: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSettings {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Preferred encoder; any H.264 encoder is used if it is unavailable.
-    pub encoder: String,
-    /// Encoder options, e.g. `("preset", "veryfast")`.
-    pub options: Vec<(String, String)>,
+    pub encoders: EncoderPreference,
+    pub rate: RateControl,
 }
 
 impl VideoSettings {
-    /// libx264, `preset=veryfast`, `crf=20`: real-time at 1080p60 on a
-    /// desktop CPU with good quality.
+    /// H.264 at constant quality for recordings, hardware where available.
     pub fn h264(width: u32, height: u32, fps: u32) -> Self {
         Self {
             width,
             height,
             fps,
-            encoder: "libx264".to_owned(),
-            options: vec![
-                ("preset".to_owned(), "veryfast".to_owned()),
-                ("crf".to_owned(), "20".to_owned()),
-            ],
+            encoders: EncoderPreference::Auto,
+            rate: RateControl::Quality,
         }
     }
+
+    pub fn with_encoders(mut self, encoders: EncoderPreference) -> Self {
+        self.encoders = encoders;
+        self
+    }
+}
+
+/// The video encoder an output opened, known once it has started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VideoEncoderInfo {
+    pub encoder: String,
+    /// The encoder runs on a GPU or media engine.
+    pub hardware: bool,
+    /// Encoders tried before `encoder`, in order (empty when the first one
+    /// worked).
+    pub skipped: Vec<SkippedEncoder>,
+}
+
+/// An encoder that was tried and not used, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedEncoder {
+    pub encoder: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +123,10 @@ impl AudioSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoTrackStats {
-    pub encoder: String,
+    /// The encoder of the (last) session and the candidates tried before
+    /// it; serialized as `encoder`, `hardware` and `skipped`.
+    #[serde(flatten)]
+    pub encoder: VideoEncoderInfo,
     pub width: u32,
     pub height: u32,
     pub fps: u32,

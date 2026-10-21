@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AudioSettings, AudioTrackStats, VideoSettings, VideoTrackStats};
+use crate::{
+    AudioSettings, AudioTrackStats, EncoderPreference, RateControl, VideoSettings, VideoTrackStats,
+};
 
 const MAX_URL_LEN: usize = 2048;
 const MAX_KEY_LEN: usize = 1024;
@@ -255,30 +257,19 @@ pub struct StreamStats {
 }
 
 impl VideoSettings {
-    /// libx264 for live streaming: `preset=veryfast`, constant bit rate
-    /// (`nal-hrd=cbr`, buffer of two seconds' worth) and a keyframe exactly
-    /// every two seconds (scene-cut keyframes off), as common RTMP ingests
-    /// expect.
+    /// H.264 for live streaming: constant bit rate and a keyframe exactly
+    /// every two seconds, as common RTMP ingests expect; hardware where
+    /// available.
     pub fn h264_live(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Self {
-        let rate = format!("{bitrate_kbps}k");
         Self {
             width,
             height,
             fps,
-            encoder: "libx264".to_owned(),
-            options: vec![
-                ("preset".to_owned(), "veryfast".to_owned()),
-                ("b".to_owned(), rate.clone()),
-                ("maxrate".to_owned(), rate),
-                (
-                    "bufsize".to_owned(),
-                    format!("{}k", u64::from(bitrate_kbps) * 2),
-                ),
-                ("nal-hrd".to_owned(), "cbr".to_owned()),
-                ("g".to_owned(), (u64::from(fps) * 2).to_string()),
-                ("keyint_min".to_owned(), (u64::from(fps) * 2).to_string()),
-                ("sc_threshold".to_owned(), "0".to_owned()),
-            ],
+            encoders: EncoderPreference::Auto,
+            rate: RateControl::ConstantBitrate {
+                kbps: bitrate_kbps,
+                keyframe_interval_s: 2,
+            },
         }
     }
 }

@@ -38,6 +38,8 @@ use capture_api::{
     VideoCaptureReport,
 };
 use encoder_api::StreamState;
+/// Output encoder types, for adapters that do not use `encoder-api`.
+pub use encoder_api::{EncoderPreference, SkippedEncoder, VideoEncoderInfo};
 use serde::{Deserialize, Serialize};
 
 /// A typed engine command.

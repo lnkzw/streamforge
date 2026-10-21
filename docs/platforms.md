@@ -11,7 +11,7 @@ What each operating system supports, how it is built, and how it is verified. Ca
 | Compositor, mixer, preview | yes | yes | yes |
 | Recording (H.264 + AAC in Matroska) | FFmpeg (system packages) | FFmpeg (prebuilt shared build) | FFmpeg (Homebrew) |
 | Streaming (RTMP) | FFmpeg | FFmpeg | FFmpeg |
-| Hardware encoders | not yet (M9c) | not yet (M9c) | not yet (M9c) |
+| Hardware encoders (`video_encoder: auto` tries them first, ADR 0011) | VAAPI (Intel, AMD; verified with an AMD RX 6800), NVENC | NVENC, Quick Sync, AMF | VideoToolbox |
 | Desktop UI (egui) | yes | yes | yes |
 | MCP server, JSON-lines engine, CLI | yes | yes | yes |
 
@@ -49,6 +49,7 @@ CI (`.github/workflows/ci.yml`) builds and tests every push and pull request on 
 | Streaming to an in-process RTMP ingest, reconnect, give-up | CI | CI | CI |
 | Engine, desktop-model and MCP acceptance tests | CI | CI | CI |
 | Audio input | manual (dev machine); CI runners have no session | CI: the runner has no input, so the structured `not_found` path; live capture still needs a manual check | CI: the runner's devices if any, else the structured error; microphone permission cannot be granted on runners |
+| Hardware encoding | manual: VAAPI on the development machine (RX 6800, Mesa); NVENC untested. CI: no GPU; NVENC and VAAPI fail to open, and `auto` falls back to libx264 | CI: no GPU; NVENC, Quick Sync and AMF fail to open, fallback to libx264 | CI: VideoToolbox does not open on the VM, fallback to libx264 |
 | Screen capture | manual (needs a human in the picker) | CI: lists sources, captures the runner's monitor (frames of its size), probes it, and records it from a scene through the engine process | CI: lists the runner's display, captures and probes it, and records it from a scene through the engine process (the runner image allows screen recording) |
 
 At the first complete CI run (ADR 0009), every test passed on Windows. On macOS, every test passed except a throughput floor, which on macOS is now only a guard against total failure: the macOS VM skips some compositor ticks at 1080p60, and those skips are counted.

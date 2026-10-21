@@ -2,3 +2,7 @@
 
 # Local agent/editor settings
 .claude/settings.local.json
+
+# Media written by tests or local runs; a crashed test can leave one behind.
+*.mkv
+*.ppm

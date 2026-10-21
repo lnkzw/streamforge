@@ -42,6 +42,9 @@ enum Commands {
         /// Recording length in milliseconds.
         #[arg(long, default_value_t = 10_000)]
         duration_ms: u64,
+        /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
+        #[arg(long)]
+        video_encoder: Option<String>,
         #[command(flatten)]
         sources: SourceArgs,
     },
@@ -64,6 +67,9 @@ enum Commands {
         /// Video bit rate in kbit/s (constant).
         #[arg(long)]
         bitrate_kbps: Option<u32>,
+        /// H.264 encoder for the stream (and the recording): auto, software or hardware.
+        #[arg(long)]
+        video_encoder: Option<String>,
         /// Reconnect attempts after the connection is lost.
         #[arg(long)]
         reconnect_attempts: Option<u32>,
@@ -195,6 +201,7 @@ fn main() -> Result<ExitCode> {
         Commands::Record {
             file,
             duration_ms,
+            video_encoder,
             sources,
         } => {
             let mut params = match sources.params() {
@@ -205,6 +212,9 @@ fn main() -> Result<ExitCode> {
                 }
             };
             params.insert("file_name".into(), file.into());
+            if let Some(encoder) = video_encoder {
+                params.insert("video_encoder".into(), encoder.into());
+            }
             record(&mut engine, params, Duration::from_millis(duration_ms))
         }
         Commands::Stream {
@@ -212,6 +222,7 @@ fn main() -> Result<ExitCode> {
             key_env,
             duration_ms,
             bitrate_kbps,
+            video_encoder,
             reconnect_attempts,
             record,
             sources,
@@ -249,11 +260,17 @@ fn main() -> Result<ExitCode> {
             if let Some(attempts) = reconnect_attempts {
                 stream_params.insert("reconnect_attempts".into(), attempts.into());
             }
+            if let Some(encoder) = &video_encoder {
+                stream_params.insert("video_encoder".into(), encoder.clone().into());
+            }
             // The first output brings the pipeline up with the sources; a
             // stream started alongside a recording joins it.
             let record_params = record.map(|file| {
                 let mut params = source_params.clone();
                 params.insert("file_name".into(), file.into());
+                if let Some(encoder) = &video_encoder {
+                    params.insert("video_encoder".into(), encoder.clone().into());
+                }
                 params
             });
             if record_params.is_none() {

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
-use encoder_api::{ReconnectPolicy, StreamKey, StreamTarget};
+use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
     AddSourceRequest, AudioSetup, Command, CommandError, CompositeRequest, ErrorCode,
@@ -171,11 +171,12 @@ const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
     summary: "Record the media pipeline (the active scene at 1920x1080@60 and the audio mix) to \
               H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
-              output directory, never overwritten); optional sources (screen, source_types, \
-              cursor, inputs, tones, master_gain_db) only while no preview or output runs: they \
-              replace the configured audio (set_audio_sources, which may include microphones) \
-              for this run and add a screen layer. Returns immediately; recording continues \
-              until stop_recording.",
+              output directory, never overwritten); video_encoder (auto: hardware if one works \
+              here, else software; software; hardware); optional sources (screen, source_id, \
+              source_types, cursor, inputs, tones, master_gain_db) only while no preview or \
+              output runs: they replace the configured audio (set_audio_sources, which may \
+              include microphones) for this run and add a screen layer. Returns immediately with \
+              the encoder in use; recording continues until stop_recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -193,10 +194,10 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
     name: "start_streaming",
     summary: "Publish the media pipeline over RTMP (H.264 CBR + AAC in FLV). Params: url \
               (required, rtmp:// or rtmps://, no credentials), stream_key (secret, never echoed), \
-              video_bitrate_kbps (default 6000), reconnect_attempts (default 5), \
-              reconnect_delay_ms (default 1000, doubling up to 30 s), and sources as for \
-              start_recording. Returns once connected; reconnects after errors; independent of \
-              recording.",
+              video_bitrate_kbps (default 6000), video_encoder (as for start_recording), \
+              reconnect_attempts (default 5), reconnect_delay_ms (default 1000, doubling up to \
+              30 s), and sources as for start_recording. Returns once connected, with the encoder \
+              in use; reconnects after errors; independent of recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: true,
@@ -729,6 +730,8 @@ pub fn default_sources() -> MediaSources {
 struct StartRecordingParams {
     /// Plain .mkv file name, created in the engine's output directory; never overwrites.
     file_name: String,
+    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
+    video_encoder: Option<EncoderPreference>,
     /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
     /// Screen source id from list_screen_sources: capture it without a picker.
@@ -752,6 +755,7 @@ fn decode_start_recording(
     let params: StartRecordingParams = decode_params(command, params)?;
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
+        video_encoder: params.video_encoder.unwrap_or_default(),
         sources: output_sources(
             command,
             SourceParams {
@@ -784,6 +788,8 @@ struct StartStreamingParams {
     stream_key: Option<Value>,
     /// Constant video bit rate in kbit/s, 300 to 50000 (default 6000).
     video_bitrate_kbps: Option<u32>,
+    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
+    video_encoder: Option<EncoderPreference>,
     /// Reconnect attempts after a lost connection, 0 to 100 (default 5).
     reconnect_attempts: Option<u32>,
     /// Wait before the first reconnect in ms, doubling up to 30 s (default 1000).
@@ -889,6 +895,7 @@ fn decode_start_streaming(
     Ok(StreamingRequest {
         target,
         video_bitrate_kbps,
+        video_encoder: params.video_encoder.unwrap_or_default(),
         reconnect: ReconnectPolicy {
             max_attempts,
             initial_delay,
@@ -1851,6 +1858,37 @@ mod tests {
             panic!("{request:?}");
         };
         assert_eq!(source_id.as_deref(), Some("monitor:2"));
+    }
+
+    #[test]
+    fn outputs_take_an_encoder_preference() {
+        let recording = Command::decode("start_recording", Some(&json!({"file_name": "a.mkv"})));
+        let Ok(Command::StartRecording(request)) = recording else {
+            panic!("{recording:?}");
+        };
+        assert_eq!(request.video_encoder, EncoderPreference::Auto);
+        let software = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "a.mkv", "video_encoder": "software"})),
+        );
+        let Ok(Command::StartRecording(request)) = software else {
+            panic!("{software:?}");
+        };
+        assert_eq!(request.video_encoder, EncoderPreference::Software);
+        let streaming = Command::decode(
+            "start_streaming",
+            Some(&json!({"url": "rtmp://example.com/app", "video_encoder": "hardware"})),
+        );
+        let Ok(Command::StartStreaming(request)) = streaming else {
+            panic!("{streaming:?}");
+        };
+        assert_eq!(request.video_encoder, EncoderPreference::Hardware);
+        let err = Command::decode(
+            "start_recording",
+            Some(&json!({"file_name": "a.mkv", "video_encoder": "gpu"})),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
     }
 
     #[test]

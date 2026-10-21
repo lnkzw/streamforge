@@ -16,10 +16,10 @@ use ff::Dictionary;
 use ffmpeg_next as ff;
 use media_core::MediaTimestamp;
 
-use super::{AudioTrack, Session, VideoTrack, init};
+use super::{AudioTrack, EncoderChoice, Session, VideoTrack, init};
 use crate::{
     AudioTrackStats, Item, Ready, RecorderError, RecorderErrorKind, Shared, StreamConfig,
-    StreamState, StreamStats, VideoTrackStats,
+    StreamState, StreamStats, VideoEncoderInfo, VideoTrackStats,
 };
 
 const CONTAINER: &str = "flv";
@@ -38,7 +38,7 @@ pub(crate) fn run(
     let first = init(true).and_then(|()| stream.connect());
     let mut session = match first {
         Ok(session) => {
-            let _ = ready.send(Ok(()));
+            let _ = ready.send(Ok(session.video.info()));
             Some(session)
         }
         Err(error) => {
@@ -97,6 +97,8 @@ struct Stream<'a> {
     last_error: Option<String>,
     video: Option<VideoTrackStats>,
     audio: Option<AudioTrackStats>,
+    /// Narrowed to the encoder of the first connection (see `EncoderChoice`).
+    encoders: EncoderChoice,
     frames_offline: u64,
     blocks_offline: u64,
     frames_undelivered: u64,
@@ -119,6 +121,7 @@ impl<'a> Stream<'a> {
             last_error: None,
             video: None,
             audio: None,
+            encoders: EncoderChoice::new(&config.video),
             frames_offline: 0,
             blocks_offline: 0,
             frames_undelivered: 0,
@@ -145,6 +148,7 @@ impl<'a> Stream<'a> {
             &self.display,
             RecorderErrorKind::Network,
             &self.config.video,
+            &mut self.encoders,
             &self.config.audio,
             Arc::clone(&self.shared),
         );
@@ -280,7 +284,12 @@ impl<'a> Stream<'a> {
         self.set_state(StreamState::Stopped);
         let settings = &self.config;
         let mut video = self.video.unwrap_or_else(|| VideoTrackStats {
-            encoder: settings.video.encoder.clone(),
+            // No connection got as far as opening an encoder.
+            encoder: VideoEncoderInfo {
+                encoder: "none".to_owned(),
+                hardware: false,
+                skipped: Vec::new(),
+            },
             width: settings.video.width,
             height: settings.video.height,
             fps: settings.video.fps,

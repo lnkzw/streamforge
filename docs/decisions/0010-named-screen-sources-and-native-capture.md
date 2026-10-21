@@ -1,6 +1,6 @@
-# ADR 0010: Named screen sources and Windows screen capture (M9b)
+# ADR 0010: Named screen sources; Windows and macOS screen capture (M9b)
 
-Status: Accepted (M9b, Windows; macOS ScreenCaptureKit follows)
+Status: Accepted (M9b: Windows and macOS)
 
 ## Context
 
@@ -49,17 +49,48 @@ Until M9a, screen capture existed only on Linux, and only through the XDG Screen
   - Desktop UI: offers the list (or the reason there is none) when a screen source is added.
   - MCP server: picks up the new command from the registry.
 
+### macOS backend
+
+- **Crate:** `capture-macos` builds on `screencapturekit` =11.0.0 (MIT OR Apache-2.0), with the `macos_14_0` feature for the filter's pixel size.
+  - The crate wraps ScreenCaptureKit behind a safe API. Its build compiles a Swift bridge, which needs Xcode 26 or newer: the bundled Metal bindings use the macOS 26 SDK.
+  - Cargo does not pass a dependency's link arguments to the binaries that link it. The workspace's `.cargo/config.toml` therefore adds the rpath of the system Swift runtime (`/usr/lib/swift`) to every macOS binary.
+  - The one `unsafe` call, reading a locked `CVPixelBuffer` as a slice, sits in `pixels.rs` with its invariants: a read-only lock held by the borrowed guard, and the sample buffer held while copying.
+  - Rejected alternative: the `objc2-screen-capture-kit` bindings. They need no Swift toolchain, but would need far more `unsafe` code of our own (a protocol class, completion blocks, CoreMedia/CoreVideo calls). The trade-off is a crate with frequent major releases, pinned exactly and checked against CI on every update.
+- **Ids:** `display:<CGDirectDisplayID>` and `window:<CGWindowID>`. Window numbers are not reused while the window server runs. Listed windows are those on layer 0 (normal app windows) with a title, named "title (application)".
+- **Permission:** every query needs the screen-recording permission of the app that runs StreamForge.
+  - Without it, listing and capturing fail with `permission_denied` and the remedy.
+  - `get_capture_capabilities` does not ask, because asking can show the system prompt.
+  - Listing can be allowed while capturing is not; clients handle both.
+- **Frames:**
+  - The stream is configured in pixels from `SCShareableContentInfo` (points × scale), so Retina displays are captured at full resolution.
+  - BGRA at most 60 FPS (ScreenCaptureKit sends fewer frames while nothing changes), queue depth 5.
+  - Complete frames go through the shared `FrameSink`; idle updates count as empty buffers.
+- **End of capture:** a delegate records when ScreenCaptureKit stops a stream itself (window closed, display gone, permission revoked); the report says why.
+- **Timeouts:** queries, `start_capture` and `stop_capture` run on a helper thread bounded by 5 s. A named source started during a recording therefore delays the engine thread by at most that bound; a picker would wait for a human.
+
+### Shared delivery
+
+`capture_api::FrameSink` holds what both native backends do alike:
+- the pooled copy and publish
+- the statistics and the negotiated format
+- why the system ended the capture, and the first delivery errors
+- the report
+
+The backends only map frames and translate their system's callbacks. It is unit-tested on every OS: stride, pool exhaustion, report contents.
+
 ## Verification
 
 On the `windows-latest` CI runner, Windows.Graphics.Capture is available (the CI step prints the capabilities):
 - `capture-windows/tests/native.rs` lists the sources and captures the first monitor. The test checks that frames arrive at the listed size and that the report counts them. It also probes the monitor and checks structured errors: `invalid_params` without a source, `not_found` for unknown ids, `unsupported` for the metadata cursor where cursor modes exist.
 - `streamforge-engine/tests/screen.rs` names that monitor in a scene and records it through the engine process. The scene capture reports frames, the recording encodes video, and the file exists.
+- On the `macos-15-intel` runner the image allows screen recording. `capture sources` lists the 1920×1080 display. `capture-macos/tests/native.rs` captures and probes it, and the engine acceptance test records it from a scene. The tests also accept `permission_denied`, the outcome on Macs without the permission.
 - On Linux the same engine test checks the structured `unsupported` error of `list_screen_sources`.
 
 ## Consequences
 
 - Windows has native screen capture, and automated tests cover it on real hardware paths, not only by compiling.
-- There is no system picker on Windows yet; clients choose from the list (the desktop UI shows it).
+- There is no system picker on Windows or macOS yet; clients choose from the list (the desktop UI shows it).
+- Building on macOS needs Xcode 26 or newer, and the rpath setting must survive custom `RUSTFLAGS`.
 - Each frame is copied twice on the way to the compositor: GPU to a staging texture inside `windows-capture`, which creates and maps a new staging texture for every frame, then into the pool. A reused staging texture, or GPU-side composition, would avoid that and is future work; at 1080p on the CI runner it keeps up.
 - When a captured window closes, its capture ends. The compositor keeps the last frame, and the report says so only when the output stops (`the captured window was closed`). Live capture state in `get_status` is future work.
 - Listed window sizes come from the window rectangle and are approximate (borders, display scaling); capture reports carry the real frame size.

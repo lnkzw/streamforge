@@ -205,7 +205,7 @@ Delivered in steps (ADR 0009):
   - [x] Screen capture through Windows.Graphics.Capture: monitors and windows named by `list_screen_sources`, verified on the CI runner (M9b, ADR 0010). A system picker is not offered yet.
 - [x] macOS capture/audio backend:
   - [x] Audio through `cpal` (CoreAudio) (M9a).
-  - [x] Screen capture through ScreenCaptureKit: displays and windows named by `list_screen_sources` (M9b, ADR 0010). Needs the screen-recording permission, which CI runners cannot grant, so CI covers the structured `permission_denied` path; capture itself needs a manual check on a Mac.
+  - [x] Screen capture through ScreenCaptureKit: displays and windows named by `list_screen_sources`, verified on the CI runner, whose image allows screen recording (M9b, ADR 0010). Without the permission, capture fails with a structured `permission_denied`.
 - [x] Recording and streaming on Windows and macOS: FFmpeg linked on every OS (M9a).
 - [ ] Hardware encoding paths where beneficial (M9c).
 - [x] Document capability matrix and run platform CI (`docs/platforms.md`): FFmpeg on all three runners; recording, streaming and acceptance tests run natively on each.

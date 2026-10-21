@@ -31,6 +31,7 @@ What runs:
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)
   - a stdio smoke test of `streamforge-engine`
+- A `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures and never fails the workflow (no thresholds: shared runners vary). Both jobs share their setup through the local composite action `.github/actions/build-setup`.
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
@@ -122,6 +123,42 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
 - `crates/streamforge-engine/tests/stdio_protocol.rs`: process integration tests. They spawn the real binary and talk JSON lines over pipes, with a 10 s timeout on every wait, and kill the child on failure.
 
 ## Performance measurements
+
+### Measurement harness (`streamforge-bench`, M10 step 7)
+
+`cargo run --release -p streamforge-bench -- [--seconds 10] [--runs 3] [--video-encoder auto|software|hardware] [--scenario …] [--json]`
+
+- **Scenarios:**
+  - `record`: one recording
+  - `record-stream`: a recording and a stream to an in-process RTMP ingest, from one pipeline
+  - `record-polled` and `record-stream-polled`: the same, polling `get_health` every 100 ms
+- **Method:**
+  - Each run starts a fresh engine on the reference scene with the default tone, through the same commands every client uses. No capture backend is involved.
+  - Runs alternate between scenarios, so drift of the machine spreads over all of them. Summaries are medians with half the spread (`±`).
+  - The CPU time is the whole process (user plus system), measured between the outputs' start and stop: steady state, without encoder probing or finalizing. The stream scenarios include the in-process ingest, which only demuxes.
+  - The render mean is the stable measure of rendering work. p95 follows scheduling jitter and varies more.
+  - `dropped` is media lost while connected. `offline` is what a stream dropped while not connected; this includes the audio before its first video frame, dropped by design so both start together (one or two blocks).
+- **Use:** compare numbers on one machine, before and after a change; record CPU model, OS and encoder with them.
+
+**Baseline** (2026-10-22, development machine: Linux, Intel Core i5-13600KF with 20 threads, AMD Radeon RX 6800 with Mesa VAAPI, release build, 3 runs × 10 s). Run to run, CPU stayed within ±1 %, render mean within ±2 % and render p95 within ±6 %.
+
+| Scenario | Encoder | CPU (% of one core) | Render mean | Render p95 | Skipped / late | Lost |
+|---|---|---|---|---|---|---|
+| record | `h264_vaapi` | 44.7 | 1.53 ms | 1.75 ms | 0 / 0 | 0 |
+| record-polled | `h264_vaapi` | 44.4 | 1.53 ms | 1.65 ms | 0 / 0 | 0 |
+| record-stream | `h264_vaapi` × 2 | 75.7 | 2.11 ms | 2.40 ms | 0 / 0 | 0 |
+| record-stream-polled | `h264_vaapi` × 2 | 75.6 | 2.12 ms | 2.40 ms | 0 / 0 | 0 |
+| record | `libx264` | 78.0 | 1.55 ms | 1.70 ms | 0 / 0 | 0 |
+| record-polled | `libx264` | 77.7 | 1.54 ms | 1.65 ms | 0 / 0 | 0 |
+| record-stream | `libx264` × 2 | 153.0 | 2.14 ms | 2.45 ms | 0 / 0 | 0 |
+| record-stream-polled | `libx264` × 2 | 151.5 | 2.11 ms | 2.40 ms | 0 / 0 | 0 |
+
+What the baseline shows:
+- **Polling `get_health` every 100 ms costs nothing measurable:** the polled and unpolled scenarios differ by less than their run-to-run spread (ADR 0012).
+- **A second output costs about 31 % of a core with VAAPI and 75 % with libx264.** Each output converts BGRA frames on the CPU (and uploads them for VAAPI) on its own.
+- **A second output also raises the render mean from 1.53 to 2.11 ms**, although the scene is the same. The render time includes handing the frame to the outputs, and the engine's frame tap copies each 1920×1080 BGRA frame (8 MB) once per output on the render thread: about 0.6 ms per copy here. This is the copy and conversion work of the assessment (§6.1.1), and the baseline to measure it against.
+
+### Other measurements
 
 - `cargo run --release -p video-compositor --example render_bench [frames]`: per-frame render time of the reference scene with 1 thread and the default thread count.
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.

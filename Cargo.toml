@@ -20,6 +20,7 @@ members = [
     "crates/streamforge-cli",
     "crates/streamforge-desktop",
     "crates/streamforge-mcp",
+    "crates/streamforge-bench",
 ]
 
 [workspace.package]

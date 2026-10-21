@@ -1,0 +1,67 @@
+name: Build setup
+description: >-
+  Rust stable with clippy, and the system libraries StreamForge links on
+  this runner (PipeWire and FFmpeg on Linux, Xcode and FFmpeg on macOS, a
+  checked FFmpeg build on Windows). Shared by the check and bench jobs.
+runs:
+  using: composite
+  steps:
+    - name: Install Rust stable
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy
+        rustup default stable
+    - name: Install Linux capture and encoder build dependencies
+      if: runner.os == 'Linux'
+      # capture-linux links libpipewire-0.3 (>= 0.3.44); encoder-ffmpeg links
+      # libavcodec/libavformat/libswscale (H.264 via libx264, AAC);
+      # bindgen needs libclang.
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libpipewire-0.3-dev libclang-dev pkg-config \
+          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+        pkg-config --modversion libpipewire-0.3 libavcodec libavformat libswscale
+    - name: Select Xcode (macOS)
+      if: runner.os == 'macOS'
+      # capture-macos builds the Swift bridge of `screencapturekit`, whose
+      # Metal bindings need the macOS 26 SDK (Xcode 26 or newer).
+      shell: bash
+      run: |
+        ls -d /Applications/Xcode*.app
+        # Released versions only (betas are named e.g. Xcode_26.1_beta.app).
+        newest=$(ls -d /Applications/Xcode_*.app | grep -E '/Xcode_[0-9.]+\.app$' | sort -V | tail -1)
+        sudo xcode-select -s "$newest"
+        xcodebuild -version
+        xcrun --sdk macosx --show-sdk-version
+    - name: Install FFmpeg (macOS)
+      if: runner.os == 'macOS'
+      # encoder-ffmpeg links the FFmpeg libraries found through pkg-config.
+      shell: bash
+      run: |
+        brew install ffmpeg pkgconf
+        pkg-config --modversion libavcodec libavformat libswscale
+    - name: Install FFmpeg (Windows)
+      if: runner.os == 'Windows'
+      # A prebuilt shared FFmpeg (with libx264) from BtbN/FFmpeg-Builds,
+      # checked against the release's own checksum file. ffmpeg-sys-next
+      # reads it through FFMPEG_DIR; tests load the DLLs from PATH; bindgen
+      # uses the runner's LLVM.
+      env:
+        FFMPEG_BUILD: ffmpeg-n8.1-latest-win64-gpl-shared-8.1
+      shell: bash
+      run: |
+        base=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+        curl -fsSL -o "$RUNNER_TEMP/ffmpeg.zip" "$base/$FFMPEG_BUILD.zip"
+        curl -fsSL -o "$RUNNER_TEMP/checksums.sha256" "$base/checksums.sha256"
+        expected=$(grep " $FFMPEG_BUILD.zip\$" "$RUNNER_TEMP/checksums.sha256" | cut -d' ' -f1)
+        actual=$(sha256sum < "$RUNNER_TEMP/ffmpeg.zip" | cut -d' ' -f1)
+        echo "sha256 expected $expected, got $actual"
+        test -n "$expected" && test "$expected" = "$actual"
+        7z x -y -o"$RUNNER_TEMP" "$RUNNER_TEMP/ffmpeg.zip" > /dev/null
+        dir="$(cygpath -w "$RUNNER_TEMP/$FFMPEG_BUILD")"
+        echo "FFMPEG_DIR=$dir" >> "$GITHUB_ENV"
+        echo "$dir\bin" >> "$GITHUB_PATH"
+        echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+        ls "$RUNNER_TEMP/$FFMPEG_BUILD/lib" | head

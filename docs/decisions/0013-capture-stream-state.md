@@ -57,7 +57,7 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
   - On success, the old capture is stopped, and its outcome joins `scene_captures`.
   - On error, the old capture goes back into the list unchanged and the scene keeps its old `source_id`. The new capture starts before the old one ends, so a failed start leaves the old one (possibly ended) in place. A new capture that started before a later error is stopped and reported.
 - **Pickers:** a picker source would ask the user again. While a recording or stream is open this is refused (`invalid_state`), as for adding one. A named source restarts at any time.
-- **Outputs keep running.** The compositor renders every tick whatever its sources do. Until the new capture's first frame, the source is not drawn, and the compositor counts `missing_ticks`. Output drops, if any, are counted as always. Whether a restart costs output frames has not been measured (assessment step 7).
+- **Outputs keep running.** The compositor renders every tick whatever its sources do. Until the new capture's first frame, the source is not drawn, and the compositor counts `missing_ticks`. Output drops, if any, are counted as always. Whether a restart costs output frames has not been measured: the measurement harness (assessment step 7) runs without a capture backend.
 
 ## Alternatives considered
 

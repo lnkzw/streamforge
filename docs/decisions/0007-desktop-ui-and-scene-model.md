@@ -26,7 +26,7 @@ M7 asks for scenes and sources, a preview, an audio mixer and recording and stre
   - A repaint notifier wakes the UI per response.
 - **`Model`:** UI state plus actions. Every action is a command with the same names and JSON parameters the protocol uses; the responses fill in the state. It holds no widgets and no business logic, so the M7 acceptance test drives it without a display.
 - **`DesktopApp` (egui):** draws the model and calls its actions; this layer is not unit-tested.
-  - Panels: status with a preview toggle; scenes (create, activate, delete with confirmation); sources (add with kind, color and rectangle; opacity; remove); mixer (gain, mute, meters with UI-side decay); outputs (record file, RTMP URL plus a password field for the key, start and stop); activity log.
+  - Panels: status with a preview toggle; scenes (create, activate, delete with confirmation); sources (add with kind, color and rectangle; opacity; remove); mixer (gain, mute, meters with UI-side decay); outputs (record file, RTMP URL plus a password field for the key, start and stop); activity log. Since M10 also a health strip below the outputs, and each screen source's capture state with a restart button (ADR 0013).
 - **Stream key:** typed into a password field and handed to the engine on start only; the model never logs it.
 
 ### Scene model in the engine

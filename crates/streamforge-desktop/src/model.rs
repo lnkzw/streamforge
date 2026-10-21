@@ -9,8 +9,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use command_api::{
-    CommandError, CommandOutput, EngineStatus, MixerState, RecordingStarted, SceneList,
-    ScreenSource, StreamingStarted, VideoEncoderInfo,
+    CaptureKind, CaptureState, CommandError, CommandOutput, EngineStatus, HealthReport, MixerState,
+    OutputHealth, RecordingStarted, SceneList, ScreenSource, StreamState, StreamingStarted,
+    VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -74,6 +75,7 @@ enum Refresh {
     Status,
     Scenes,
     Mixer,
+    Health,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +92,8 @@ pub struct Model {
     pub status: Option<EngineStatus>,
     pub scenes: Option<SceneList>,
     pub mixer: Option<MixerState>,
+    /// Live counters and capture states (`get_health`).
+    pub health: Option<HealthReport>,
     pub preview_enabled: bool,
     pub recording: Option<RecordingStarted>,
     pub streaming: Option<StreamingStarted>,
@@ -107,6 +111,7 @@ impl Model {
             status: None,
             scenes: None,
             mixer: None,
+            health: None,
             preview_enabled: false,
             recording: None,
             streaming: None,
@@ -157,21 +162,33 @@ impl Model {
             Refresh::Status => "get_status",
             Refresh::Scenes => "list_scenes",
             Refresh::Mixer => "get_mixer",
+            Refresh::Health => "get_health",
         };
         self.submit(name, json!({}), Pending::Refresh(what));
     }
 
-    /// Ask for status, scenes and mixer (skips what is already pending).
+    /// Ask for status, scenes, mixer and health (skips what is already
+    /// pending).
     pub fn refresh_all(&mut self) {
-        self.refresh(Refresh::Status);
         self.refresh(Refresh::Scenes);
-        self.refresh(Refresh::Mixer);
+        self.refresh_live();
     }
 
-    /// Status and mixer levels, for frequent polling.
+    /// Status, mixer levels and health, for frequent polling.
     pub fn refresh_live(&mut self) {
         self.refresh(Refresh::Status);
         self.refresh(Refresh::Mixer);
+        self.refresh(Refresh::Health);
+    }
+
+    /// The capture behind screen source `source_id`, from the last health
+    /// reading.
+    pub fn source_health(&self, source_id: u32) -> SourceHealth {
+        self.health
+            .as_ref()
+            .map_or(SourceHealth::NotCapturing, |health| {
+                source_health(health, source_id)
+            })
     }
 
     /// Ask the engine which screen sources can be captured by id.
@@ -238,6 +255,11 @@ impl Model {
 
     pub fn remove_source(&mut self, scene: &str, name: &str) {
         self.act("remove_source", json!({ "scene": scene, "name": name }));
+    }
+
+    /// Start a screen source's capture again; outputs keep running.
+    pub fn restart_source(&mut self, scene: &str, name: &str) {
+        self.act("restart_source", json!({ "scene": scene, "name": name }));
     }
 
     pub fn set_preview(&mut self, enabled: bool) {
@@ -315,6 +337,7 @@ impl Model {
             CommandOutput::Status(status) => self.status = Some(status),
             CommandOutput::SceneList(scenes) => self.scenes = Some(scenes),
             CommandOutput::MixerState(mixer) => self.mixer = Some(mixer),
+            CommandOutput::Health(health) => self.health = Some(*health),
             CommandOutput::PreviewState(preview) => {
                 self.preview_enabled = preview.enabled;
                 if let Some(dropped) = preview.frames_dropped.filter(|dropped| *dropped > 0) {
@@ -397,6 +420,150 @@ impl Model {
     }
 }
 
+/// What the sources list shows next to a screen source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceHealth {
+    /// No capture runs for it: no pipeline, or its scene is not rendered.
+    NotCapturing,
+    /// `last_frame_age_ms`: since the last new frame (or since the start, if
+    /// none came yet). Screens may deliver only on change, so a long age
+    /// alone is not an error.
+    Capturing { last_frame_age_ms: Option<u64> },
+    /// The system ended the capture; `restart_source` starts it again.
+    Ended { reason: String },
+}
+
+fn source_health(health: &HealthReport, source_id: u32) -> SourceHealth {
+    let capture = health
+        .captures
+        .iter()
+        .find(|capture| capture.kind == CaptureKind::Screen && capture.id == Some(source_id));
+    match capture.map(|capture| &capture.state) {
+        None => SourceHealth::NotCapturing,
+        Some(CaptureState::Ended { reason }) => SourceHealth::Ended {
+            reason: reason.clone(),
+        },
+        Some(CaptureState::Running) => SourceHealth::Capturing {
+            last_frame_age_ms: health.render.as_ref().and_then(|render| {
+                render
+                    .sources
+                    .iter()
+                    .find(|source| source.id.0 == source_id)
+                    .and_then(|source| source.last_frame_age_ms)
+            }),
+        },
+    }
+}
+
+/// One entry of the health strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthItem {
+    pub level: Level,
+    pub text: String,
+}
+
+/// The health strip: open outputs, render and mix trouble, ended captures.
+/// Counters are totals since the start; drops are warnings because media
+/// was lost, late frames are not (they were still rendered).
+pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
+    let mut items = Vec::new();
+    let mut push = |level, text| items.push(HealthItem { level, text });
+    if let Some(recording) = &health.recording {
+        let (level, label) = if recording.running {
+            (drop_level(recording), "REC")
+        } else {
+            (Level::Error, "REC failed")
+        };
+        push(level, format!("{label}: {}", output_counters(recording)));
+    }
+    if let Some(streaming) = &health.streaming {
+        let state = streaming.state.map_or("failed", StreamState::as_str);
+        let level = match (streaming.running, streaming.state) {
+            (false, _) => Level::Error,
+            (true, Some(StreamState::Connected)) => drop_level(streaming),
+            (true, _) => Level::Warning,
+        };
+        push(
+            level,
+            format!(
+                "stream {state}: {}, {} reconnect(s)",
+                output_counters(streaming),
+                streaming.counters.reconnect_attempts
+            ),
+        );
+    }
+    if let Some(render) = &health.render {
+        let level = if render.skipped_ticks > 0 {
+            Level::Warning
+        } else {
+            Level::Info
+        };
+        let mut text = format!(
+            "render: {} late, {} skipped",
+            render.late_frames, render.skipped_ticks
+        );
+        if let Some(time) = &render.render_time {
+            text.push_str(&format!(", p95 {:.1} ms", time.p95_ms));
+        }
+        push(level, text);
+    }
+    if let Some(mix) = health
+        .mix
+        .as_ref()
+        .filter(|mix| mix.late_blocks > 0 || mix.skipped_blocks > 0)
+    {
+        let level = if mix.skipped_blocks > 0 {
+            Level::Warning
+        } else {
+            Level::Info
+        };
+        push(
+            level,
+            format!(
+                "mix: {} late, {} skipped blocks",
+                mix.late_blocks, mix.skipped_blocks
+            ),
+        );
+    }
+    for capture in &health.captures {
+        if let CaptureState::Ended { reason } = &capture.state {
+            push(
+                Level::Error,
+                format!(
+                    "{} `{}` ended: {reason}",
+                    capture.kind.as_str(),
+                    capture.name
+                ),
+            );
+        }
+    }
+    items
+}
+
+fn drop_level(output: &OutputHealth) -> Level {
+    if output.counters.frames_dropped > 0 || output.counters.blocks_dropped > 0 {
+        Level::Warning
+    } else {
+        Level::Info
+    }
+}
+
+fn output_counters(output: &OutputHealth) -> String {
+    let counters = &output.counters;
+    let mut text = format!(
+        "{} frames, {} dropped",
+        counters.frames_encoded, counters.frames_dropped
+    );
+    if counters.blocks_dropped > 0 {
+        text.push_str(&format!(
+            ", {} audio blocks dropped",
+            counters.blocks_dropped
+        ));
+    }
+    text.push_str(&format!(", queue {}", counters.queue_depth));
+    text
+}
+
 /// E.g. `h264_vaapi, hardware` or `libx264, software`.
 fn encoder_label(info: &VideoEncoderInfo) -> String {
     let kind = if info.hardware {
@@ -405,4 +572,131 @@ fn encoder_label(info: &VideoEncoderInfo) -> String {
         "software"
     };
     format!("{}, {kind}", info.encoder)
+}
+
+#[cfg(test)]
+mod tests {
+    use command_api::{
+        CaptureHealth, LiveMixStats, LiveOutputStats, LiveRenderStats, LiveSourceStats, SourceId,
+    };
+
+    use super::*;
+
+    fn output(running: bool, state: Option<StreamState>, dropped: u64) -> OutputHealth {
+        OutputHealth {
+            target: "out.mkv".to_owned(),
+            elapsed_ms: 2000,
+            running,
+            state,
+            video_encoder: VideoEncoderInfo {
+                encoder: "libx264".to_owned(),
+                hardware: false,
+                skipped: Vec::new(),
+            },
+            counters: LiveOutputStats {
+                frames_encoded: 120,
+                frames_dropped: dropped,
+                queue_depth: 1,
+                ..LiveOutputStats::default()
+            },
+        }
+    }
+
+    fn screen(id: u32, state: CaptureState) -> CaptureHealth {
+        CaptureHealth {
+            kind: CaptureKind::Screen,
+            id: Some(id),
+            name: format!("screen {id}"),
+            state,
+        }
+    }
+
+    fn report() -> HealthReport {
+        HealthReport {
+            pipeline_running: true,
+            render: Some(LiveRenderStats {
+                sources: vec![LiveSourceStats {
+                    id: SourceId(1),
+                    name: "screen 1".to_owned(),
+                    kind: "live",
+                    frames_consumed: 10,
+                    stale_ticks: 0,
+                    missing_ticks: 0,
+                    last_frame_age_ms: Some(1500),
+                }],
+                ..LiveRenderStats::default()
+            }),
+            mix: Some(LiveMixStats::default()),
+            recording: Some(output(true, None, 0)),
+            streaming: None,
+            captures: vec![
+                screen(1, CaptureState::Running),
+                screen(
+                    2,
+                    CaptureState::Ended {
+                        reason: "the captured window was closed".to_owned(),
+                    },
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn source_health_joins_capture_state_and_frame_age() {
+        let health = report();
+        assert_eq!(
+            source_health(&health, 1),
+            SourceHealth::Capturing {
+                last_frame_age_ms: Some(1500)
+            }
+        );
+        assert_eq!(
+            source_health(&health, 2),
+            SourceHealth::Ended {
+                reason: "the captured window was closed".to_owned()
+            }
+        );
+        assert_eq!(source_health(&health, 3), SourceHealth::NotCapturing);
+    }
+
+    #[test]
+    fn health_items_flag_failures_drops_and_ended_captures() {
+        let mut health = report();
+        let items = health_items(&health);
+        let texts: Vec<_> = items.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "REC: 120 frames, 0 dropped, queue 1",
+                "render: 0 late, 0 skipped",
+                "screen `screen 2` ended: the captured window was closed",
+            ]
+        );
+        assert_eq!(items[0].level, Level::Info);
+        assert_eq!(items[2].level, Level::Error);
+
+        health.recording = Some(output(true, None, 3));
+        health.streaming = Some(output(true, Some(StreamState::Reconnecting), 0));
+        if let Some(render) = &mut health.render {
+            render.skipped_ticks = 2;
+        }
+        let items = health_items(&health);
+        assert_eq!(items[0].level, Level::Warning, "{items:?}");
+        assert_eq!(
+            items[1],
+            HealthItem {
+                level: Level::Warning,
+                text: "stream reconnecting: 120 frames, 0 dropped, queue 1, 0 reconnect(s)"
+                    .to_owned(),
+            }
+        );
+        assert_eq!(items[2].level, Level::Warning);
+
+        health.recording = Some(output(false, None, 0));
+        health.streaming = Some(output(false, Some(StreamState::Failed), 0));
+        let items = health_items(&health);
+        assert_eq!(items[0].level, Level::Error);
+        assert!(items[0].text.starts_with("REC failed"), "{items:?}");
+        assert_eq!(items[1].level, Level::Error);
+    }
 }

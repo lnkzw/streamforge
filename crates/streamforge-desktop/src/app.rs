@@ -1,6 +1,7 @@
 //! The egui front end: draws the [`Model`] and calls its actions. Panels:
 //! status and preview toggle (top), scenes (left), mixer (right), preview
-//! and sources (center), outputs and activity log (bottom).
+//! and sources with their capture state (center), outputs, health and
+//! activity log (bottom).
 
 use std::time::{Duration, Instant};
 
@@ -9,9 +10,9 @@ use egui::{Color32, RichText};
 
 use command_api::{SceneList, SourceKind};
 
-use crate::model::{Level, Model, SourceForm, SourceType};
+use crate::model::{Level, Model, SourceForm, SourceHealth, SourceType, health_items};
 
-/// Status and meters are polled this often.
+/// Status, meters and health are polled this often.
 const LIVE_REFRESH: Duration = Duration::from_millis(100);
 /// Scenes are re-read this often (changes also arrive with each edit).
 const SCENE_REFRESH: Duration = Duration::from_secs(2);
@@ -278,6 +279,10 @@ impl DesktopApp {
                     SourceKind::Screen { .. } => "screen",
                 };
                 ui.label(format!("{} ({kind})", source.name));
+                if let SourceKind::Screen { source_id, .. } = &source.kind {
+                    let picker = source_id.is_none();
+                    self.capture_state(ui, &scene.name, &source.name, source.id, picker);
+                }
                 let mut opacity = source.opacity;
                 if committed(&ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"))) {
                     self.model
@@ -338,6 +343,42 @@ impl DesktopApp {
         });
     }
 
+    /// A screen source's capture state, and a restart button while it has
+    /// a capture (running or ended; also kept captures of other scenes).
+    fn capture_state(&mut self, ui: &mut egui::Ui, scene: &str, name: &str, id: u32, picker: bool) {
+        match self.model.source_health(id) {
+            SourceHealth::NotCapturing => {
+                ui.label(RichText::new("not capturing").weak());
+                return;
+            }
+            SourceHealth::Capturing { last_frame_age_ms } => {
+                let text = match last_frame_age_ms {
+                    // Screens may deliver only on change: an age, not an error.
+                    Some(age) if age >= 1000 => {
+                        format!("capturing, last frame {} s ago", age / 1000)
+                    }
+                    _ => "capturing".to_owned(),
+                };
+                ui.label(RichText::new(text).color(Color32::LIGHT_GREEN));
+            }
+            SourceHealth::Ended { reason } => {
+                ui.label(RichText::new(format!("ended: {reason}")).color(Color32::RED));
+            }
+        }
+        // The engine refuses this too; disabling says why before a click.
+        let outputs_open = self.model.recording.is_some() || self.model.streaming.is_some();
+        let allowed = !(picker && outputs_open);
+        let button = ui
+            .add_enabled(allowed, egui::Button::new("Restart"))
+            .on_hover_text("Start the capture again; outputs keep running")
+            .on_disabled_hover_text(
+                "A picker source asks again: restart it while nothing records or streams",
+            );
+        if button.clicked() {
+            self.model.restart_source(scene, name);
+        }
+    }
+
     fn outputs_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Record to");
@@ -379,18 +420,24 @@ impl DesktopApp {
                 self.model.stop_streaming();
             }
         });
+        if let Some(health) = &self.model.health {
+            let items = health_items(health);
+            if !items.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for item in items {
+                        ui.label(colored(RichText::new(item.text), item.level));
+                        ui.separator();
+                    }
+                });
+            }
+        }
         ui.separator();
         egui::ScrollArea::vertical()
             .max_height(110.0)
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 for entry in &self.model.log {
-                    let text = RichText::new(&entry.text);
-                    ui.label(match entry.level {
-                        Level::Info => text,
-                        Level::Warning => text.color(Color32::ORANGE),
-                        Level::Error => text.color(Color32::RED),
-                    });
+                    ui.label(colored(RichText::new(&entry.text), entry.level));
                 }
             });
     }
@@ -412,6 +459,14 @@ fn selection(previous: Option<&str>, clicked: Option<&str>, scenes: &SceneList) 
 /// are not sent, so a drag is one command, not one per frame.
 fn committed(response: &egui::Response) -> bool {
     response.drag_stopped() || (response.changed() && !response.dragged())
+}
+
+fn colored(text: RichText, level: Level) -> RichText {
+    match level {
+        Level::Info => text,
+        Level::Warning => text.color(Color32::ORANGE),
+        Level::Error => text.color(Color32::RED),
+    }
 }
 
 fn meter_bar(ui: &mut egui::Ui, db: f32) {

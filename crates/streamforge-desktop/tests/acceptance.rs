@@ -101,6 +101,29 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
                 .as_ref()
                 .is_some_and(|status| status.recording_active)
         });
+        // Health counts the recording while it runs (polled, as the UI does).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !model.health.as_ref().is_some_and(|health| {
+            health
+                .recording
+                .as_ref()
+                .is_some_and(|recording| recording.running && recording.counters.frames_encoded > 0)
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "no live recording counters; log: {:?}",
+                model.log
+            );
+            model.refresh_live();
+            model.update();
+            thread::sleep(Duration::from_millis(20));
+        }
+        let items =
+            streamforge_desktop::model::health_items(model.health.as_ref().expect("health"));
+        assert!(
+            items.iter().any(|item| item.text.starts_with("REC: ")),
+            "{items:?}"
+        );
         thread::sleep(Duration::from_millis(500));
         model.stop_recording();
         wait(&mut model, "the recording to finish", |m| {

@@ -64,6 +64,17 @@ jobs:
             libpipewire-0.3-dev libclang-dev pkg-config \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
           pkg-config --modversion libpipewire-0.3 libavcodec libavformat libswscale
+      - name: Select Xcode (macOS)
+        if: runner.os == 'macOS'
+        # capture-macos builds the Swift bridge of `screencapturekit`, whose
+        # Metal bindings need the macOS 26 SDK (Xcode 26 or newer).
+        run: |
+          ls -d /Applications/Xcode*.app
+          # Released versions only (betas are named e.g. Xcode_26.1_beta.app).
+          newest=$(ls -d /Applications/Xcode_*.app | grep -E '/Xcode_[0-9.]+\.app$' | sort -V | tail -1)
+          sudo xcode-select -s "$newest"
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         # encoder-ffmpeg links the FFmpeg libraries found through pkg-config.
@@ -109,6 +120,11 @@ jobs:
         # For the record (docs/platforms.md); runners have no desktop or
         # microphone, so most entries say why they are unavailable.
         run: cargo run --locked -q -p streamforge-cli -- capture caps
+      - name: Screen sources of this runner
+        # For the record: Windows lists its monitor; macOS needs a
+        # screen-recording permission (`permission_denied` without it);
+        # Linux has only the portal picker. Failing here is expected.
+        run: cargo run --locked -q -p streamforge-cli -- capture sources || true
       - name: "M1 smoke: headless engine over a shell pipe"
         run: |
           printf '%s\n' '{"id":1,"command":"get_status"}' \

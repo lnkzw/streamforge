@@ -1,0 +1,7 @@
+# capture-macos links the Swift bridge of `screencapturekit`, which needs the
+# system Swift runtime at /usr/lib/swift. Cargo does not pass a dependency's
+# link arguments on to the binaries that link it, so every macOS binary of
+# this workspace gets that rpath here. (A RUSTFLAGS environment variable
+# replaces this setting; add the flag there too.)
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

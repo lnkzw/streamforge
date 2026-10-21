@@ -1,0 +1,16 @@
+[package]
+name = "capture-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+capture-api = { path = "../capture-api" }
+media-core = { path = "../media-core" }
+
+# Screen capture through ScreenCaptureKit. The crate builds a small Swift
+# bridge with the Xcode toolchain (Xcode 26 or newer: its Metal bindings
+# need the macOS 26 SDK) and offers a safe API. `macos_14_0` provides the
+# filter's pixel size (`SCShareableContentInfo`), so macOS 14 is required.
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }

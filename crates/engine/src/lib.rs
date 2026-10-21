@@ -647,14 +647,23 @@ mod tests {
         assert!(report.pipeline.pipeline_stopped);
         assert_eq!(report.pipeline.audio_captures.len(), 1);
         assert!(report.pipeline.render.is_some() && report.pipeline.mix.is_some());
-        // Both tracks end at the stop time, within a frame or a block, plus
-        // any counted trailing drops on a slow machine.
+        // Both tracks end at the stop time, within a frame or a block. On a
+        // slow machine, counted trailing drops and skipped compositor ticks
+        // end the video earlier; it never outlasts the audio.
         let video_end = recording.video.end_ms.expect("video");
         let audio_end = recording.audio.end_ms.expect("audio");
-        let allowed = 30.0 + recording.video.frames_dropped as f64 * 1000.0 / 60.0;
+        let skipped = report
+            .pipeline
+            .render
+            .as_ref()
+            .map_or(0, |render| render.skipped_ticks);
+        let allowed_short =
+            30.0 + (recording.video.frames_dropped + skipped) as f64 * 1000.0 / 60.0;
         assert!(
-            (video_end - audio_end).abs() < allowed,
-            "{video_end} vs {audio_end}"
+            audio_end - video_end < allowed_short && video_end - audio_end < 30.0,
+            "video ends at {video_end} ms, audio at {audio_end} ms \
+             ({} dropped, {skipped} skipped)",
+            recording.video.frames_dropped
         );
         assert!(!status(&mut engine).recording_active);
 

@@ -6,11 +6,13 @@
 
 mod backend;
 mod error;
+mod sink;
 mod stats;
 mod types;
 
 pub use backend::{AudioStream, CaptureBackend, SplitCapture, UnsupportedCapture, VideoStream};
 pub use error::{CaptureError, CaptureErrorKind};
+pub use sink::{FrameSink, MappedFrame};
 pub use stats::{
     AudioStats, AudioStatsAccumulator, BufferKind, FrameObservation, IntervalStats, StreamPosition,
     VideoStats, VideoStatsAccumulator,

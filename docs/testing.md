@@ -31,7 +31,7 @@ What runs:
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)
   - a stdio smoke test of `streamforge-engine`
-- A `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures and never fails the workflow (no thresholds: shared runners vary). Both jobs share their setup through the local composite action `.github/actions/build-setup`.
+- On pushes to `main` and manual runs (not on pull requests), a `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures; there are no thresholds, because shared runners vary. A failing measurement leaves a warning annotation and does not fail the job; a failing setup or build does. Both jobs share their setup through the local composite action `.github/actions/build-setup`.
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
@@ -134,11 +134,16 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
   - `record-polled` and `record-stream-polled`: the same, polling `get_health` every 100 ms
 - **Method:**
   - Each run starts a fresh engine on the reference scene with the default tone, through the same commands every client uses. No capture backend is involved.
-  - Runs alternate between scenarios, so drift of the machine spreads over all of them. Summaries are medians with half the spread (`±`).
-  - The CPU time is the whole process (user plus system), measured between the outputs' start and stop: steady state, without encoder probing or finalizing. The stream scenarios include the in-process ingest, which only demuxes.
-  - The render mean is the stable measure of rendering work. p95 follows scheduling jitter and varies more.
-  - `dropped` is media lost while connected. `offline` is what a stream dropped while not connected; this includes the audio before its first video frame, dropped by design so both start together (one or two blocks).
-- **Use:** compare numbers on one machine, before and after a change; record CPU model, OS and encoder with them.
+  - One unmeasured warm-up run comes first. Each round runs every scenario, starting with a different one, so neither the machine's drift nor a fixed order favors one. Summaries are medians of the valid runs with half their spread (`±`).
+  - **Measured window:** it starts 0.5 s after the outputs started and ends before they stop.
+    - The process's CPU time (user plus system) covers the window.
+    - Render and mix counters cover it too, from `get_health` readings at both ends. The window's render mean follows from the running means and frame counts.
+    - Render p95, p99 and maximum cover the whole pipeline run, setup and flush included. They follow scheduling jitter and vary more than the mean.
+  - **The ingest runs in a child process** (the same binary), so its receive and demux work is not measured.
+  - **Lost media:** frames and audio blocks dropped or never delivered by any output, plus blocks the mixer skipped. `gaps` counts audio samples filled with silence or never delivered. `start` is what a stream dropped before its first video frame, by design so both start together (one or two audio blocks); it is not lost media.
+  - **Invalid runs:** a stream that did not stay connected, or an ingest error, makes a run invalid. It is listed but left out of the summaries. A run that fails is listed, and the harness exits non-zero after printing what it measured.
+  - The polled scenarios call `get_health` every 100 ms and serialize the result to JSON, as an adapter would.
+- **Use:** compare numbers on one machine, before and after a change; record CPU model, OS and encoder with them. Measure on an idle machine: a game or a build running at the same time changes CPU and GPU (VAAPI) figures by more than the spread.
 
 **Baseline** (2026-10-22, development machine: Linux, Intel Core i5-13600KF with 20 threads, AMD Radeon RX 6800 with Mesa VAAPI, release build, 3 runs × 10 s). Run to run, CPU stayed within ±1 %, render mean within ±2 % and render p95 within ±6 %.
 

@@ -88,11 +88,14 @@ jobs:
           grep -F '"id":1,"ok":true' engine-response.json
 
   bench:
-    # Informational (architecture assessment, step 7): prints render, encoder
-    # and CPU figures for this runner. No thresholds: shared runners vary,
-    # so the step never fails the workflow; compare numbers on one machine
-    # (docs/testing.md).
+    # Informational (architecture assessment, step 7): prints render, mix,
+    # loss and CPU figures for this runner, on pushes to main and manual
+    # runs (not on every pull request: three more runners for numbers
+    # nobody gates on). No thresholds: shared runners vary. A failing
+    # measurement only leaves a warning; setup and build failures still
+    # fail the job. Compare numbers on one machine (docs/testing.md).
     name: bench (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -111,4 +114,8 @@ jobs:
         run: cargo build --release --locked -p streamforge-bench
       - name: Measure
         continue-on-error: true
-        run: target/release/streamforge-bench --seconds 5 --runs 2
+        run: |
+          target/release/streamforge-bench --seconds 5 --runs 2 || {
+            echo "::warning::streamforge-bench failed on ${{ matrix.os }} (informational)"
+            exit 1
+          }

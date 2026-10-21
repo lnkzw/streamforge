@@ -2,14 +2,14 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput, AudioStats,
-    AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
-    CaptureState, StreamPosition,
+    AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureEnd, CaptureError,
+    CaptureErrorKind, CaptureState, StreamPosition,
 };
 use media_core::AudioRing;
 use pipewire as pw;
@@ -71,6 +71,10 @@ pub(crate) fn capture(
     };
     if let Some(target) = target {
         props.insert(*pw::keys::TARGET_OBJECT, target);
+        // A named input that goes away ends the stream; the session manager
+        // must not move it to another source, which would record a
+        // different microphone under this input's name.
+        props.insert("node.dont-reconnect", "true");
     }
     let stream = StreamBox::new(&connection.core, "streamforge-audio", props)
         .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
@@ -294,7 +298,7 @@ pub(crate) fn start_stream(
     };
     let (stop, stop_receiver) = pw::channel::channel();
     let input = request.input.clone();
-    let ended = Arc::new(OnceLock::new());
+    let ended = Arc::new(CaptureEnd::new());
     let thread = thread::Builder::new()
         .name("audio-capture".to_owned())
         .spawn({
@@ -306,7 +310,7 @@ pub(crate) fn start_stream(
                     Some(delivery),
                 );
                 // Before a stop, this is why the capture ended on its own.
-                let _ = ended.set(match &run {
+                ended.end(|| match &run {
                     Ok(_) => "the PipeWire stream ended (the input went away)".to_owned(),
                     Err(error) => error.message.clone(),
                 });
@@ -331,7 +335,7 @@ struct LinuxAudioStream {
     input: Option<String>,
     ring: Arc<AudioRing>,
     /// Set when the capture thread ends.
-    ended: Arc<OnceLock<String>>,
+    ended: Arc<CaptureEnd>,
     running: Option<Running>,
 }
 
@@ -353,12 +357,16 @@ impl AudioStream for LinuxAudioStream {
     }
 
     fn state(&self) -> CaptureState {
-        match self.ended.get() {
-            Some(reason) => CaptureState::Ended {
-                reason: reason.clone(),
-            },
-            None => CaptureState::Running,
+        // A thread that ends normally sets the reason first.
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|(_, thread)| thread.is_finished())
+        {
+            self.ended
+                .end(|| "the audio capture thread panicked".to_owned());
         }
+        self.ended.state()
     }
 
     fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {

@@ -82,13 +82,19 @@ pub(crate) fn start_live_inputs(
         .collect()
 }
 
+/// A live input's name in the mixer, the health report and idle mixer
+/// state: the requested input, or `default`.
+pub(crate) fn input_name(spec: &LiveInputSpec) -> String {
+    spec.input.clone().unwrap_or_else(|| "default".to_owned())
+}
+
 pub(crate) fn mixer_inputs(
     specs: &[LiveInputSpec],
     streams: &[Box<dyn AudioStream>],
     tones: &[ToneSpec],
 ) -> Vec<MixerInput> {
     let live = specs.iter().zip(streams).map(|(spec, stream)| MixerInput {
-        name: spec.input.clone().unwrap_or_else(|| "default".to_owned()),
+        name: input_name(spec),
         source: InputSource::Live(stream.samples()),
         strip: StripConfig {
             gain_db: spec.gain_db,

@@ -17,10 +17,10 @@ pub trait AudioStream: Send {
     /// and counts overruns when the consumer falls behind.
     fn samples(&self) -> Arc<AudioRing>;
 
-    /// Whether the capture still delivers; never blocks.
-    fn state(&self) -> CaptureState {
-        CaptureState::Running
-    }
+    /// Whether the capture still delivers; never blocks. Required, so a
+    /// stream (or a wrapper) cannot report a dead capture as running by
+    /// forgetting it; a backend that cannot tell returns `Running`.
+    fn state(&self) -> CaptureState;
 
     /// Stop capturing and return diagnostics for the whole session.
     fn stop(self: Box<Self>) -> Result<AudioCaptureReport, CaptureError>;
@@ -37,10 +37,9 @@ pub trait VideoStream: Send {
 
     fn source(&self) -> &VideoSourceInfo;
 
-    /// Whether the capture still delivers; never blocks.
-    fn state(&self) -> CaptureState {
-        CaptureState::Running
-    }
+    /// Whether the capture still delivers; never blocks. Required, like
+    /// [`AudioStream::state`].
+    fn state(&self) -> CaptureState;
 
     /// Stop capturing and return diagnostics for the whole session.
     fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError>;

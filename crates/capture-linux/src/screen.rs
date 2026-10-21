@@ -1,13 +1,13 @@
 //! Screen capture sessions: portal selection plus a PipeWire stream, either
 //! as a fixed-length probe or as a continuous stream on its own thread.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use capture_api::{
-    CaptureError, CaptureState, ScreenCaptureCapability, ScreenSelection, VideoCaptureReport,
-    VideoSourceInfo, VideoSourceKind, VideoStream,
+    CaptureEnd, CaptureError, CaptureState, ScreenCaptureCapability, ScreenSelection,
+    VideoCaptureReport, VideoSourceInfo, VideoSourceKind, VideoStream,
 };
 use media_core::{FrameMailbox, FramePool};
 use pipewire as pw;
@@ -164,7 +164,7 @@ pub(crate) fn start_stream(
     };
     let (stop, stop_receiver) = pw::channel::channel();
     let (node_id, size) = (open.cast.node_id, open.cast.size);
-    let ended = Arc::new(OnceLock::new());
+    let ended = Arc::new(CaptureEnd::new());
     let thread = thread::Builder::new()
         .name("screen-capture".to_owned())
         .spawn({
@@ -178,7 +178,7 @@ pub(crate) fn start_stream(
                     Some(delivery),
                 );
                 // Before a stop, this is why the capture ended on its own.
-                let _ = ended.set(match &run {
+                ended.end(|| match &run {
                     Ok(_) => "the PipeWire stream ended (the portal session closed or the \
                               shared source went away)"
                         .to_owned(),
@@ -218,7 +218,7 @@ pub(crate) struct LinuxScreenStream {
     source: VideoSourceInfo,
     mailbox: Arc<FrameMailbox>,
     /// Set when the capture thread ends.
-    ended: Arc<OnceLock<String>>,
+    ended: Arc<CaptureEnd>,
     running: Option<Running>,
 }
 
@@ -251,12 +251,16 @@ impl VideoStream for LinuxScreenStream {
     }
 
     fn state(&self) -> CaptureState {
-        match self.ended.get() {
-            Some(reason) => CaptureState::Ended {
-                reason: reason.clone(),
-            },
-            None => CaptureState::Running,
+        let panicked = self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.thread.is_finished());
+        // A thread that ends normally sets the reason first.
+        if panicked {
+            self.ended
+                .end(|| "the screen capture thread panicked".to_owned());
         }
+        self.ended.state()
     }
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {

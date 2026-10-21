@@ -638,7 +638,8 @@ fn progress_line(health: &command_api::HealthReport, elapsed: Duration) -> Strin
         if let command_api::CaptureState::Ended { reason } = &capture.state {
             parts.push(format!(
                 "{} `{}` ended: {reason}",
-                capture.kind, capture.name
+                capture.kind.as_str(),
+                capture.name
             ));
         }
     }
@@ -724,8 +725,8 @@ mod tests {
             recording: Some(output(None, false)),
             streaming: Some(output(Some(command_api::StreamState::Reconnecting), true)),
             captures: vec![command_api::CaptureHealth {
-                kind: "screen",
-                source_id: Some(3),
+                kind: command_api::CaptureKind::Screen,
+                id: Some(3),
                 name: "desk".into(),
                 state: command_api::CaptureState::Ended {
                     reason: "the captured window was closed".into(),

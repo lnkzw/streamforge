@@ -240,8 +240,19 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
     };
     let sink = Arc::new(FrameSink::new(deliver, "BGRA8"));
     let control = match item {
-        Item::Monitor(monitor) => run(monitor, cursor, Arc::clone(&sink)),
-        Item::Window(window) => run(window, cursor, Arc::clone(&sink)),
+        Item::Monitor(monitor) => run(
+            monitor,
+            cursor,
+            (
+                Arc::clone(&sink),
+                "the captured display went away (disconnected or turned off)",
+            ),
+        ),
+        Item::Window(window) => run(
+            window,
+            cursor,
+            (Arc::clone(&sink), "the captured window was closed"),
+        ),
     }?;
     Ok(WgcStream {
         control: Some(control),
@@ -255,7 +266,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
 fn run<T>(
     item: T,
     cursor: CursorCaptureSettings,
-    sink: Arc<FrameSink>,
+    flags: (Arc<FrameSink>, &'static str),
 ) -> Result<CaptureControl<Handler, String>, CaptureError>
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
@@ -268,7 +279,7 @@ where
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
-        sink,
+        flags,
     );
     Handler::start_free_threaded(settings).map_err(|err| {
         CaptureError::new(
@@ -280,6 +291,8 @@ where
 
 struct Handler {
     sink: Arc<FrameSink>,
+    /// Why the capture ended when the system closes the item.
+    closed: &'static str,
 }
 
 impl Handler {
@@ -303,11 +316,12 @@ impl Handler {
 }
 
 impl GraphicsCaptureApiHandler for Handler {
-    type Flags = Arc<FrameSink>;
+    type Flags = (Arc<FrameSink>, &'static str);
     type Error = String;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { sink: ctx.flags })
+        let (sink, closed) = ctx.flags;
+        Ok(Self { sink, closed })
     }
 
     fn on_frame_arrived(
@@ -333,7 +347,7 @@ impl GraphicsCaptureApiHandler for Handler {
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        self.sink.end("the captured window was closed");
+        self.sink.end(self.closed);
         Ok(())
     }
 }
@@ -363,8 +377,11 @@ impl VideoStream for WgcStream {
                     .as_ref()
                     .is_some_and(CaptureControl::is_finished) =>
             {
+                // Its error comes with the join, in the report of the stop.
                 CaptureState::Ended {
-                    reason: "the Windows.Graphics.Capture thread ended".to_owned(),
+                    reason: "the Windows.Graphics.Capture thread ended; the source's capture \
+                             report says why"
+                        .to_owned(),
                 }
             }
             state => state,

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread, StripConfig};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
-    AudioSetup, CaptureHealth, CommandError, ErrorCode, ErrorSummary, MixerState, PipelineReport,
-    SceneCaptureOutcome, SceneSpec, SourceKind, StripChange, StripState,
+    AudioSetup, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
+    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, StripChange, StripState,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -241,14 +241,14 @@ impl Pipeline {
     /// State of every running capture; never blocks.
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
-            kind: "screen",
-            source_id: Some(screen.id),
+            kind: CaptureKind::Screen,
+            id: Some(screen.id),
             name: screen.name.clone(),
             state: screen.stream.state(),
         });
         let layer = self.extra_screen.iter().map(|stream| CaptureHealth {
-            kind: "screen",
-            source_id: None,
+            kind: CaptureKind::Screen,
+            id: None,
             name: "screen layer".to_owned(),
             state: stream.state(),
         });
@@ -258,9 +258,9 @@ impl Pipeline {
             .iter()
             .zip(&self.audio_streams)
             .map(|(spec, stream)| CaptureHealth {
-                kind: "audio",
-                source_id: None,
-                name: spec.input.clone().unwrap_or_else(|| "default".to_owned()),
+                kind: CaptureKind::Audio,
+                id: None,
+                name: mix::input_name(spec),
                 state: stream.state(),
             });
         screens.chain(layer).chain(audio).collect()
@@ -490,14 +490,10 @@ fn stop_scene_capture(screen: SceneCapture) -> SceneCaptureOutcome {
 
 /// Strip names and kinds in mixer order: live inputs, then tones.
 pub(crate) fn idle_mixer_state(audio: &AudioSetup) -> MixerState {
-    let live = audio.inputs.iter().map(|input| {
-        (
-            input.input.clone().unwrap_or_else(|| "default".to_owned()),
-            "live",
-            input.gain_db,
-            input.muted,
-        )
-    });
+    let live = audio
+        .inputs
+        .iter()
+        .map(|input| (mix::input_name(input), "live", input.gain_db, input.muted));
     let tones = audio.tones.iter().map(|tone| {
         (
             format!("tone {} Hz", tone.frequency_hz),

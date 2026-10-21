@@ -26,12 +26,28 @@ pub struct HealthReport {
     pub captures: Vec<CaptureHealth>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureKind {
+    Screen,
+    Audio,
+}
+
+impl CaptureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Audio => "audio",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CaptureHealth {
-    /// `screen` or `audio`.
-    pub kind: &'static str,
-    /// The scene source's id (screen sources of a scene only).
-    pub source_id: Option<u32>,
+    pub kind: CaptureKind,
+    /// The scene source's `id`, as in `list_scenes` and `render.sources`
+    /// (screen sources of a scene only).
+    pub id: Option<u32>,
     /// Scene source name, `screen layer`, or the audio input's name.
     pub name: String,
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
@@ -63,6 +79,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn capture_kind_names_match_the_wire() {
+        for kind in [CaptureKind::Screen, CaptureKind::Audio] {
+            assert_eq!(json!(kind), json!(kind.as_str()));
+        }
+    }
+
+    #[test]
     fn output_counters_are_flat_fields_of_the_output() {
         let health = HealthReport {
             pipeline_running: true,
@@ -70,8 +93,8 @@ mod tests {
             mix: None,
             recording: None,
             captures: vec![CaptureHealth {
-                kind: "screen",
-                source_id: Some(3),
+                kind: CaptureKind::Screen,
+                id: Some(3),
                 name: "desk".to_owned(),
                 state: CaptureState::Ended {
                     reason: "the captured window was closed".to_owned(),
@@ -108,7 +131,7 @@ mod tests {
         assert!(stream.get("counters").is_none(), "{stream}");
         assert_eq!(
             value["captures"][0],
-            json!({"kind": "screen", "source_id": 3, "name": "desk", "state": "ended",
+            json!({"kind": "screen", "id": 3, "name": "desk", "state": "ended",
                    "reason": "the captured window was closed"})
         );
     }

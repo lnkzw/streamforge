@@ -53,7 +53,7 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
   - `encoder-ffmpeg` tests that live output counters match the reports.
   - The engine's stream-failure test checks `get_health` while the stream has failed and the recording continues.
   - `streamforge-engine/tests/stdio_protocol.rs` checks `get_health` during a preview.
-- Capture state (ADR 0013): the engine's fake screen stream ends during a recording; `get_health` must show it `ended` with the reason while the recording runs on. `FrameSink` and the cpal error classification have unit tests; the native tests are listed below.
+- Capture state (ADR 0013): the engine's fake screen stream ends during a recording; `get_health` must show it `ended` with the reason while the recording runs on. `FrameSink` and the cpal end rule (an error followed by no data) have unit tests, the latter on every OS; the native tests are listed below.
 - `crates/control-protocol/src/*`: unit tests for bounded line reading and envelope encoding.
 - `crates/control-protocol/tests/contract.rs`: wire-contract tests against a fake `CommandHandler`. These cover every error code, ID echoing, ordering and oversized lines.
 - `crates/engine`: unit tests showing that every registered command is handled.

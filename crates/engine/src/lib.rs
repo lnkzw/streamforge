@@ -259,7 +259,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
 
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -280,7 +280,7 @@ mod tests {
         capability_queries: Rc<Cell<usize>>,
         screen_starts: Rc<Cell<usize>>,
         /// One end switch per started screen stream, in start order.
-        screen_ends: Rc<RefCell<Vec<Arc<OnceLock<String>>>>>,
+        screen_ends: Rc<RefCell<Vec<Arc<capture_api::CaptureEnd>>>>,
     }
 
     impl CaptureBackend for FakeCapture {
@@ -398,7 +398,7 @@ mod tests {
                 )
                 .expect("frame"),
             );
-            let ended = Arc::new(OnceLock::new());
+            let ended = Arc::new(capture_api::CaptureEnd::new());
             self.screen_ends.borrow_mut().push(Arc::clone(&ended));
             Ok(Box::new(FakeStream {
                 mailbox,
@@ -415,7 +415,7 @@ mod tests {
     struct FakeStream {
         mailbox: Arc<FrameMailbox>,
         /// Set by a test to simulate the system ending the capture.
-        ended: Arc<OnceLock<String>>,
+        ended: Arc<capture_api::CaptureEnd>,
         source: VideoSourceInfo,
     }
 
@@ -429,6 +429,10 @@ mod tests {
     impl AudioStream for FakeAudioStream {
         fn samples(&self) -> Arc<AudioRing> {
             Arc::clone(&self.ring)
+        }
+
+        fn state(&self) -> capture_api::CaptureState {
+            capture_api::CaptureState::Running
         }
 
         fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {
@@ -456,12 +460,7 @@ mod tests {
         }
 
         fn state(&self) -> capture_api::CaptureState {
-            match self.ended.get() {
-                Some(reason) => capture_api::CaptureState::Ended {
-                    reason: reason.clone(),
-                },
-                None => capture_api::CaptureState::Running,
-            }
+            self.ended.state()
         }
 
         fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {
@@ -498,7 +497,7 @@ mod tests {
     fn engine_with_screen_streams() -> (
         Engine,
         Rc<Cell<usize>>,
-        Rc<RefCell<Vec<Arc<OnceLock<String>>>>>,
+        Rc<RefCell<Vec<Arc<capture_api::CaptureEnd>>>>,
     ) {
         let starts = Rc::new(Cell::new(0));
         let ends = Rc::new(RefCell::new(Vec::new()));
@@ -1171,13 +1170,13 @@ mod tests {
                 .expect("desk capture")
         };
         let running = desk(&health(&mut engine));
-        assert_eq!(running.kind, "screen");
-        assert!(running.source_id.is_some());
+        assert_eq!(running.kind, command_api::CaptureKind::Screen);
+        assert!(running.id.is_some());
         assert_eq!(running.state, capture_api::CaptureState::Running);
 
         // The system ends the capture: health says so, with the reason, and
         // the recording keeps going.
-        let _ = ends.borrow()[0].set("the captured window was closed".to_owned());
+        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
         let ended = health(&mut engine);
         assert_eq!(
             desk(&ended).state,

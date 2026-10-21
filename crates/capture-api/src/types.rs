@@ -258,6 +258,22 @@ pub struct AudioStreamRequest {
     pub channels: u32,
 }
 
+/// Whether a running capture still delivers (see [`crate::VideoStream::state`]).
+///
+/// "Stalled" is deliberately not a state here: some systems deliver frames
+/// only when the content changes, so a quiet source is not a failure.
+/// Consumers see stalls from the frame age instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CaptureState {
+    Running,
+    /// The system ended the capture (a window closed, a device was removed,
+    /// a permission was revoked); it delivers nothing more until restarted.
+    Ended {
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VideoSourceInfo {
     pub kind: Option<VideoSourceKind>,

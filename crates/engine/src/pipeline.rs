@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread, StripConfig};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
-    AudioSetup, CommandError, ErrorCode, ErrorSummary, MixerState, PipelineReport,
+    AudioSetup, CaptureHealth, CommandError, ErrorCode, ErrorSummary, MixerState, PipelineReport,
     SceneCaptureOutcome, SceneSpec, SourceKind, StripChange, StripState,
 };
 use encoder_ffmpeg::OutputInput;
@@ -236,6 +236,34 @@ impl Pipeline {
                 Err(error)
             }
         }
+    }
+
+    /// State of every running capture; never blocks.
+    pub fn captures(&self) -> Vec<CaptureHealth> {
+        let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
+            kind: "screen",
+            source_id: Some(screen.id),
+            name: screen.name.clone(),
+            state: screen.stream.state(),
+        });
+        let layer = self.extra_screen.iter().map(|stream| CaptureHealth {
+            kind: "screen",
+            source_id: None,
+            name: "screen layer".to_owned(),
+            state: stream.state(),
+        });
+        let audio = self
+            .audio
+            .inputs
+            .iter()
+            .zip(&self.audio_streams)
+            .map(|(spec, stream)| CaptureHealth {
+                kind: "audio",
+                source_id: None,
+                name: spec.input.clone().unwrap_or_else(|| "default".to_owned()),
+                state: stream.state(),
+            });
+        screens.chain(layer).chain(audio).collect()
     }
 
     fn retire(&mut self, outcome: SceneCaptureOutcome) {

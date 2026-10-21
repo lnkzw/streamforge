@@ -255,11 +255,11 @@ pub(crate) fn command_error(error: CaptureError) -> CommandError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::time::Duration;
 
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -279,6 +279,8 @@ mod tests {
     struct FakeCapture {
         capability_queries: Rc<Cell<usize>>,
         screen_starts: Rc<Cell<usize>>,
+        /// One end switch per started screen stream, in start order.
+        screen_ends: Rc<RefCell<Vec<Arc<OnceLock<String>>>>>,
     }
 
     impl CaptureBackend for FakeCapture {
@@ -396,8 +398,11 @@ mod tests {
                 )
                 .expect("frame"),
             );
+            let ended = Arc::new(OnceLock::new());
+            self.screen_ends.borrow_mut().push(Arc::clone(&ended));
             Ok(Box::new(FakeStream {
                 mailbox,
+                ended,
                 source: VideoSourceInfo {
                     kind: Some(capture_api::VideoSourceKind::Monitor),
                     width: Some(32),
@@ -409,6 +414,8 @@ mod tests {
 
     struct FakeStream {
         mailbox: Arc<FrameMailbox>,
+        /// Set by a test to simulate the system ending the capture.
+        ended: Arc<OnceLock<String>>,
         source: VideoSourceInfo,
     }
 
@@ -448,6 +455,15 @@ mod tests {
             &self.source
         }
 
+        fn state(&self) -> capture_api::CaptureState {
+            match self.ended.get() {
+                Some(reason) => capture_api::CaptureState::Ended {
+                    reason: reason.clone(),
+                },
+                None => capture_api::CaptureState::Running,
+            }
+        }
+
         fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {
             Ok(VideoCaptureReport {
                 backend: "fake".into(),
@@ -465,18 +481,33 @@ mod tests {
         let engine = Engine::with_capture(Box::new(FakeCapture {
             capability_queries: Rc::clone(&queries),
             screen_starts: Rc::new(Cell::new(0)),
+            screen_ends: Rc::default(),
         }));
         (engine, queries)
     }
 
     /// Engine with the fake backend, counting screen captures started.
     fn engine_with_screen_counter() -> (Engine, Rc<Cell<usize>>) {
+        let (engine, starts, _) = engine_with_screen_streams();
+        (engine, starts)
+    }
+
+    /// Like [`engine_with_screen_counter`], plus a switch per started screen
+    /// stream that makes it report `ended`.
+    #[allow(clippy::type_complexity)]
+    fn engine_with_screen_streams() -> (
+        Engine,
+        Rc<Cell<usize>>,
+        Rc<RefCell<Vec<Arc<OnceLock<String>>>>>,
+    ) {
         let starts = Rc::new(Cell::new(0));
+        let ends = Rc::new(RefCell::new(Vec::new()));
         let engine = Engine::with_capture(Box::new(FakeCapture {
             capability_queries: Rc::new(Cell::new(0)),
             screen_starts: Rc::clone(&starts),
+            screen_ends: Rc::clone(&ends),
         }));
-        (engine, starts)
+        (engine, starts, ends)
     }
 
     fn engine() -> Engine {
@@ -1116,6 +1147,47 @@ mod tests {
         // One capture retired when `Main`'s source went, one at the stop.
         assert_eq!(pipeline.scene_captures.len(), 2, "{pipeline:?}");
         assert!(preview.frames_published.is_some());
+    }
+
+    #[test]
+    fn an_ended_screen_source_shows_in_health() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("capture-state");
+        let (engine, _starts, ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
+                   "source_id": "fake:1"}),
+        );
+        start(&mut engine, json!({"file_name": "ended.mkv"})).expect("start");
+        let desk = |health: &command_api::HealthReport| {
+            health
+                .captures
+                .iter()
+                .find(|capture| capture.name == "desk")
+                .cloned()
+                .expect("desk capture")
+        };
+        let running = desk(&health(&mut engine));
+        assert_eq!(running.kind, "screen");
+        assert!(running.source_id.is_some());
+        assert_eq!(running.state, capture_api::CaptureState::Running);
+
+        // The system ends the capture: health says so, with the reason, and
+        // the recording keeps going.
+        let _ = ends.borrow()[0].set("the captured window was closed".to_owned());
+        let ended = health(&mut engine);
+        assert_eq!(
+            desk(&ended).state,
+            capture_api::CaptureState::Ended {
+                reason: "the captured window was closed".to_owned()
+            }
+        );
+        assert!(ended.recording.expect("recording").running);
+        engine.handle(Command::StopRecording).expect("stop");
+        assert!(health(&mut engine).captures.is_empty());
     }
 
     #[test]

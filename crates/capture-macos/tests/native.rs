@@ -7,8 +7,8 @@
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    CaptureBackend, CaptureErrorKind, CursorMode, ScreenCaptureRequest, ScreenSelection,
-    ScreenSource, VideoSourceKind,
+    CaptureBackend, CaptureErrorKind, CaptureState, CursorMode, ScreenCaptureRequest,
+    ScreenSelection, ScreenSource, VideoSourceKind,
 };
 use capture_macos::SckCapture;
 
@@ -77,9 +77,11 @@ fn a_listed_display_delivers_frames_or_permission_is_denied() {
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    let state = stream.state();
     let report = stream.stop().expect("stop");
     println!("{report:#?}");
     let frame = frame.expect("no frame within 5 s");
+    assert_eq!(state, CaptureState::Running);
     println!("frame {}x{}", frame.width(), frame.height());
     assert!(report.stats.frames >= 1, "{report:#?}");
     let format = report.format.expect("format");

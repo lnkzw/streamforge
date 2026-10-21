@@ -185,6 +185,19 @@ impl FrameSink {
         self.lock().ended.is_some()
     }
 
+    /// Why the system ended the capture, if it did.
+    pub fn end_reason(&self) -> Option<String> {
+        self.lock().ended.clone()
+    }
+
+    /// The capture's state for [`crate::VideoStream::state`].
+    pub fn state(&self) -> crate::CaptureState {
+        match self.end_reason() {
+            Some(reason) => crate::CaptureState::Ended { reason },
+            None => crate::CaptureState::Running,
+        }
+    }
+
     /// The report for a capture of `elapsed`, with the backend's own
     /// `warnings` first.
     pub fn report(
@@ -269,9 +282,16 @@ mod tests {
         sink.observe_frame(20, 1280, 720, Some(33), Some(Err("lost".into())));
         sink.observe_empty(30);
         assert!(!sink.ended());
+        assert_eq!(sink.state(), crate::CaptureState::Running);
         sink.end("the window closed");
         sink.end("a later reason");
         assert!(sink.ended());
+        assert_eq!(
+            sink.state(),
+            crate::CaptureState::Ended {
+                reason: "the window closed".to_owned()
+            }
+        );
         let report = sink.report(
             "test",
             VideoSourceInfo {

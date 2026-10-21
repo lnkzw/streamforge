@@ -14,9 +14,9 @@ use std::time::Instant;
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
     AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
-    CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo, VideoSourceKind,
-    VideoStream,
+    CaptureState, CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability,
+    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
+    VideoSourceKind, VideoStream,
 };
 use media_core::FrameMailbox;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -353,6 +353,22 @@ impl VideoStream for WgcStream {
 
     fn source(&self) -> &VideoSourceInfo {
         &self.source
+    }
+
+    fn state(&self) -> CaptureState {
+        match self.sink.state() {
+            CaptureState::Running
+                if self
+                    .control
+                    .as_ref()
+                    .is_some_and(CaptureControl::is_finished) =>
+            {
+                CaptureState::Ended {
+                    reason: "the Windows.Graphics.Capture thread ended".to_owned(),
+                }
+            }
+            state => state,
+        }
     }
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {

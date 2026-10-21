@@ -4,7 +4,7 @@ Assessment of the StreamForge repository against `ARCHITECTURE_VISION.md`, `FUNC
 
 - **Date:** 2026-10-21
 - **Commit:** `851abfa` (`main`, after M9c, PR #12).
-- **Progress since:** steps 0–2 of the plan (§9) are implemented (ADR 0012, roadmap M10). The findings below describe the state at `851abfa`.
+- **Progress since:** steps 0–2 and 4 of the plan (§9) are implemented (ADR 0012, ADR 0013, roadmap M10). The findings below describe the state at `851abfa`.
 - **Status labels:**
   - **Satisfied:** the principle holds and evidence backs it.
   - **Partial:** some of it holds; the gap is named.

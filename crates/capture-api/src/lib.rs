@@ -19,7 +19,7 @@ pub use stats::{
 };
 pub use types::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
-    AudioStreamRequest, CaptureCapabilities, CursorMode, DEFAULT_PROBE_DURATION,
+    AudioStreamRequest, CaptureCapabilities, CaptureState, CursorMode, DEFAULT_PROBE_DURATION,
     MAX_PROBE_DURATION, MIN_PROBE_DURATION, Rational, ScreenCaptureCapability,
     ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoFormatInfo,
     VideoSourceInfo, VideoSourceKind,

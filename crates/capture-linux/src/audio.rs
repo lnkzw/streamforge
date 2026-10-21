@@ -2,14 +2,14 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput, AudioStats,
     AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
-    StreamPosition,
+    CaptureState, StreamPosition,
 };
 use media_core::AudioRing;
 use pipewire as pw;
@@ -294,19 +294,30 @@ pub(crate) fn start_stream(
     };
     let (stop, stop_receiver) = pw::channel::channel();
     let input = request.input.clone();
+    let ended = Arc::new(OnceLock::new());
     let thread = thread::Builder::new()
         .name("audio-capture".to_owned())
-        .spawn(move || {
-            capture(
-                input.as_deref(),
-                RunUntil::Stopped(stop_receiver),
-                Some(delivery),
-            )
+        .spawn({
+            let ended = Arc::clone(&ended);
+            move || {
+                let run = capture(
+                    input.as_deref(),
+                    RunUntil::Stopped(stop_receiver),
+                    Some(delivery),
+                );
+                // Before a stop, this is why the capture ended on its own.
+                let _ = ended.set(match &run {
+                    Ok(_) => "the PipeWire stream ended (the input went away)".to_owned(),
+                    Err(error) => error.message.clone(),
+                });
+                run
+            }
         })
         .map_err(|err| CaptureError::backend(format!("cannot start the capture thread: {err}")))?;
     Ok(Box::new(LinuxAudioStream {
         input: request.input.clone(),
         ring,
+        ended,
         running: Some((stop, thread)),
     }))
 }
@@ -319,6 +330,8 @@ type Running = (
 struct LinuxAudioStream {
     input: Option<String>,
     ring: Arc<AudioRing>,
+    /// Set when the capture thread ends.
+    ended: Arc<OnceLock<String>>,
     running: Option<Running>,
 }
 
@@ -337,6 +350,15 @@ impl LinuxAudioStream {
 impl AudioStream for LinuxAudioStream {
     fn samples(&self) -> Arc<AudioRing> {
         Arc::clone(&self.ring)
+    }
+
+    fn state(&self) -> CaptureState {
+        match self.ended.get() {
+            Some(reason) => CaptureState::Ended {
+                reason: reason.clone(),
+            },
+            None => CaptureState::Running,
+        }
     }
 
     fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {

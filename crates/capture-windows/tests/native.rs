@@ -4,11 +4,12 @@
 //! say so with a structured error, which the tests print.
 #![cfg(target_os = "windows")]
 
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    CaptureBackend, CaptureErrorKind, CursorMode, ScreenCaptureRequest, ScreenSelection,
-    VideoSourceKind,
+    CaptureBackend, CaptureErrorKind, CaptureState, CursorMode, ScreenCaptureRequest,
+    ScreenSelection, VideoSourceKind,
 };
 use capture_windows::WgcCapture;
 
@@ -67,6 +68,7 @@ fn a_listed_monitor_delivers_frames_of_its_size() {
     if let (Some(width), Some(height)) = (monitor.width, monitor.height) {
         assert_eq!((frame.width(), frame.height()), (width, height));
     }
+    assert_eq!(stream.state(), CaptureState::Running);
     let report = stream.stop().expect("stop");
     println!("{report:#?}");
     assert!(report.stats.frames >= 1, "{report:#?}");
@@ -147,4 +149,71 @@ fn bad_selections_are_structured_errors() {
         let metadata = error(selection(Some("monitor:x"), CursorMode::Metadata));
         assert_eq!(metadata.kind, CaptureErrorKind::Unsupported, "{metadata:?}");
     }
+}
+
+/// Kills the process when the test ends, also when it fails.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Closing the captured window ends the stream with a reason: a PowerShell
+/// form with a unique title is captured, then its process is killed.
+#[test]
+fn a_closed_window_ends_the_stream() {
+    let mut capture = WgcCapture::new();
+    if !capture.capabilities().screen.available {
+        return;
+    }
+    let title = format!("streamforge-test-window-{}", std::process::id());
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $form = New-Object System.Windows.Forms.Form; \
+         $form.Text = '{title}'; \
+         [void]$form.ShowDialog()"
+    );
+    let mut form = KillOnDrop(
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .spawn()
+            .expect("start PowerShell"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let window = loop {
+        let sources = capture.screen_sources().expect("sources");
+        if let Some(window) = sources
+            .into_iter()
+            .find(|source| source.kind == VideoSourceKind::Window && source.name == title)
+        {
+            break window;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the test window did not appear within 30 s"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let stream = capture
+        .start_screen_stream(&selection(Some(&window.id), CursorMode::Hidden))
+        .expect("capture the test window");
+    assert_eq!(stream.state(), CaptureState::Running);
+
+    form.0.kill().expect("close the test window");
+    let _ = form.0.wait();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let state = loop {
+        let state = stream.state();
+        if state != CaptureState::Running || Instant::now() >= deadline {
+            break state;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    println!("{state:?}");
+    // Stopping an ended capture may report an error; it is not the subject.
+    println!("{:#?}", stream.stop());
+    assert!(matches!(state, CaptureState::Ended { .. }), "{state:?}");
 }

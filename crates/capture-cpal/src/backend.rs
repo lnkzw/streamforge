@@ -12,15 +12,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
     AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureBackend, CaptureCapabilities,
-    CaptureError, CaptureErrorKind, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
-    VideoCaptureReport, VideoStream,
+    CaptureError, CaptureErrorKind, CaptureState, ScreenCaptureCapability, ScreenCaptureRequest,
+    ScreenSelection, VideoCaptureReport, VideoStream,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
@@ -155,12 +155,14 @@ impl CaptureBackend for CpalCapture {
         ));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (stop_tx, stop_rx) = mpsc::channel();
+        let ended = Arc::new(OnceLock::new());
         let thread = thread::Builder::new()
             .name("audio-capture".to_owned())
             .spawn({
                 let request = request.clone();
                 let ring = Arc::clone(&ring);
-                move || run(&request, ring, &ready_tx, &stop_rx)
+                let ended = Arc::clone(&ended);
+                move || run(&request, ring, &ended, &ready_tx, &stop_rx)
             })
             .map_err(|err| {
                 CaptureError::backend(format!("cannot start the capture thread: {err}"))
@@ -168,6 +170,7 @@ impl CaptureBackend for CpalCapture {
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Box::new(CpalStream {
                 ring,
+                ended,
                 stop: Some(stop_tx),
                 thread: Some(thread),
             })),
@@ -186,6 +189,8 @@ impl CaptureBackend for CpalCapture {
 
 struct CpalStream {
     ring: Arc<AudioRing>,
+    /// Set by the error callback when the stream cannot continue.
+    ended: Arc<OnceLock<String>>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<Result<AudioCaptureReport, CaptureError>>>,
 }
@@ -193,6 +198,15 @@ struct CpalStream {
 impl AudioStream for CpalStream {
     fn samples(&self) -> Arc<AudioRing> {
         Arc::clone(&self.ring)
+    }
+
+    fn state(&self) -> CaptureState {
+        match self.ended.get() {
+            Some(reason) => CaptureState::Ended {
+                reason: reason.clone(),
+            },
+            None => CaptureState::Running,
+        }
     }
 
     fn stop(mut self: Box<Self>) -> Result<AudioCaptureReport, CaptureError> {
@@ -385,11 +399,25 @@ impl Drop for Sink {
     }
 }
 
+/// Stream errors after which a stream delivers nothing more (a removed
+/// device, a lost host or permission); others (xruns, reroutes) pass.
+fn ends_the_stream(error: &cpal::Error) -> bool {
+    use cpal::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::DeviceNotAvailable
+            | ErrorKind::StreamInvalidated
+            | ErrorKind::HostUnavailable
+            | ErrorKind::PermissionDenied
+    )
+}
+
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut callback: Callback,
     errors: Arc<Mutex<Vec<String>>>,
+    ended: Arc<OnceLock<String>>,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
@@ -400,6 +428,9 @@ where
         move |data: &[T], _info| callback.on_data(data),
         // Rare and not in the data path; keep the first few messages.
         move |err| {
+            if ends_the_stream(&err) {
+                let _ = ended.set(err.to_string());
+            }
             let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
             if errors.len() < 8 {
                 errors.push(err.to_string());
@@ -412,6 +443,7 @@ where
 fn run(
     request: &AudioStreamRequest,
     ring: Arc<AudioRing>,
+    ended: &Arc<OnceLock<String>>,
     ready: &SyncSender<Result<(), CaptureError>>,
     stop: &Receiver<()>,
 ) -> Result<AudioCaptureReport, CaptureError> {
@@ -444,15 +476,15 @@ fn run(
             },
             start: Instant::now(),
         };
-        let errors = Arc::clone(&errors);
+        let (errors, ended) = (Arc::clone(&errors), Arc::clone(ended));
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, &config, callback, errors),
-            SampleFormat::F64 => build::<f64>(&device, &config, callback, errors),
-            SampleFormat::I16 => build::<i16>(&device, &config, callback, errors),
-            SampleFormat::I32 => build::<i32>(&device, &config, callback, errors),
-            SampleFormat::U16 => build::<u16>(&device, &config, callback, errors),
-            SampleFormat::I8 => build::<i8>(&device, &config, callback, errors),
-            SampleFormat::U8 => build::<u8>(&device, &config, callback, errors),
+            SampleFormat::F32 => build::<f32>(&device, &config, callback, errors, ended),
+            SampleFormat::F64 => build::<f64>(&device, &config, callback, errors, ended),
+            SampleFormat::I16 => build::<i16>(&device, &config, callback, errors, ended),
+            SampleFormat::I32 => build::<i32>(&device, &config, callback, errors, ended),
+            SampleFormat::U16 => build::<u16>(&device, &config, callback, errors, ended),
+            SampleFormat::I8 => build::<i8>(&device, &config, callback, errors, ended),
+            SampleFormat::U8 => build::<u8>(&device, &config, callback, errors, ended),
             other => {
                 return Err(CaptureError::unsupported(format!(
                     "sample format {other:?} is not supported"
@@ -550,4 +582,30 @@ fn capture_error(error: &cpal::Error, context: &str) -> CaptureError {
         _ => CaptureErrorKind::Backend,
     };
     CaptureError::new(kind, format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use cpal::ErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn only_errors_that_end_a_stream_end_it() {
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::HostUnavailable,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(ends_the_stream(&cpal::Error::new(kind)), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::DeviceChanged,
+            ErrorKind::DeviceBusy,
+        ] {
+            assert!(!ends_the_stream(&cpal::Error::new(kind)), "{kind:?}");
+        }
+    }
 }

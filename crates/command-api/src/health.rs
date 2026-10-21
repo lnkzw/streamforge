@@ -2,6 +2,7 @@
 //! reports count, while it happens.
 
 use audio_engine::LiveMixStats;
+use capture_api::CaptureState;
 use encoder_api::{LiveOutputStats, StreamState, VideoEncoderInfo};
 use serde::Serialize;
 use video_compositor::LiveRenderStats;
@@ -19,6 +20,23 @@ pub struct HealthReport {
     pub mix: Option<LiveMixStats>,
     pub recording: Option<OutputHealth>,
     pub streaming: Option<OutputHealth>,
+    /// Every running capture: screen sources of the scenes, the legacy
+    /// screen layer and live audio inputs. An `ended` capture delivers
+    /// nothing more.
+    pub captures: Vec<CaptureHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CaptureHealth {
+    /// `screen` or `audio`.
+    pub kind: &'static str,
+    /// The scene source's id (screen sources of a scene only).
+    pub source_id: Option<u32>,
+    /// Scene source name, `screen layer`, or the audio input's name.
+    pub name: String,
+    /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
+    #[serde(flatten)]
+    pub state: CaptureState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -51,6 +69,14 @@ mod tests {
             render: None,
             mix: None,
             recording: None,
+            captures: vec![CaptureHealth {
+                kind: "screen",
+                source_id: Some(3),
+                name: "desk".to_owned(),
+                state: CaptureState::Ended {
+                    reason: "the captured window was closed".to_owned(),
+                },
+            }],
             streaming: Some(OutputHealth {
                 target: "rtmp://example.com/live/<stream key>".to_owned(),
                 elapsed_ms: 1500,
@@ -80,5 +106,10 @@ mod tests {
         assert_eq!(stream["queue_depth"], 2);
         assert_eq!(stream["video_encoder"]["encoder"], "libx264");
         assert!(stream.get("counters").is_none(), "{stream}");
+        assert_eq!(
+            value["captures"][0],
+            json!({"kind": "screen", "source_id": 3, "name": "desk", "state": "ended",
+                   "reason": "the captured window was closed"})
+        );
     }
 }

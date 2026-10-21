@@ -1,13 +1,13 @@
 //! Screen capture sessions: portal selection plus a PipeWire stream, either
 //! as a fixed-length probe or as a continuous stream on its own thread.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use capture_api::{
-    CaptureError, ScreenCaptureCapability, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
-    VideoSourceKind, VideoStream,
+    CaptureError, CaptureState, ScreenCaptureCapability, ScreenSelection, VideoCaptureReport,
+    VideoSourceInfo, VideoSourceKind, VideoStream,
 };
 use media_core::{FrameMailbox, FramePool};
 use pipewire as pw;
@@ -164,16 +164,28 @@ pub(crate) fn start_stream(
     };
     let (stop, stop_receiver) = pw::channel::channel();
     let (node_id, size) = (open.cast.node_id, open.cast.size);
+    let ended = Arc::new(OnceLock::new());
     let thread = thread::Builder::new()
         .name("screen-capture".to_owned())
-        .spawn(move || {
-            video::capture(
-                remote,
-                node_id,
-                size,
-                RunUntil::Stopped(stop_receiver),
-                Some(delivery),
-            )
+        .spawn({
+            let ended = Arc::clone(&ended);
+            move || {
+                let run = video::capture(
+                    remote,
+                    node_id,
+                    size,
+                    RunUntil::Stopped(stop_receiver),
+                    Some(delivery),
+                );
+                // Before a stop, this is why the capture ended on its own.
+                let _ = ended.set(match &run {
+                    Ok(_) => "the PipeWire stream ended (the portal session closed or the \
+                              shared source went away)"
+                        .to_owned(),
+                    Err(error) => error.message.clone(),
+                });
+                run
+            }
         });
     let thread = match thread {
         Ok(thread) => thread,
@@ -185,6 +197,7 @@ pub(crate) fn start_stream(
     Ok(Box::new(LinuxScreenStream {
         source: open.source,
         mailbox,
+        ended,
         running: Some(Running {
             stop,
             thread,
@@ -204,6 +217,8 @@ struct Running {
 pub(crate) struct LinuxScreenStream {
     source: VideoSourceInfo,
     mailbox: Arc<FrameMailbox>,
+    /// Set when the capture thread ends.
+    ended: Arc<OnceLock<String>>,
     running: Option<Running>,
 }
 
@@ -233,6 +248,15 @@ impl VideoStream for LinuxScreenStream {
 
     fn source(&self) -> &VideoSourceInfo {
         &self.source
+    }
+
+    fn state(&self) -> CaptureState {
+        match self.ended.get() {
+            Some(reason) => CaptureState::Ended {
+                reason: reason.clone(),
+            },
+            None => CaptureState::Running,
+        }
     }
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {

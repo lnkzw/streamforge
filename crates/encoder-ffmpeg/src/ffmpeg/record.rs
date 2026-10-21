@@ -12,7 +12,7 @@ use std::sync::mpsc::Receiver;
 use ff::Dictionary;
 use ffmpeg_next as ff;
 
-use super::{EncoderChoice, Session, init};
+use super::{EncoderChoice, Session, counts_of, init};
 use crate::{
     Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
 };
@@ -38,10 +38,13 @@ pub(crate) fn run(
 
     let mut failure = None;
     while let Ok(item) = rx.recv() {
+        shared.received(&item);
         if matches!(item, Item::Stop) {
             break;
         }
-        if let Err(error) = session.write(item, shared.end_ns.load(Ordering::Acquire)) {
+        let written = session.write(item, shared.end_ns.load(Ordering::Acquire));
+        shared.publish(session.counts());
+        if let Err(error) = written {
             shared.failed.store(true, Ordering::Release);
             failure = Some(error);
             break;
@@ -49,15 +52,19 @@ pub(crate) fn run(
     }
 
     let (mut video, mut audio, finished) = session.finish();
+    // Flushing encoded what the encoders still held.
+    shared.publish(counts_of(&video, &audio));
     if failure.is_some() {
         // Producers run until the owner stops them: count what they still
         // queue instead of letting it vanish with the channel.
         for item in &rx {
+            shared.received(&item);
             match item {
                 Item::Video { .. } => video.frames_dropped += 1,
                 Item::Audio { .. } => audio.blocks_dropped += 1,
                 Item::Stop => break,
             }
+            shared.publish(counts_of(&video, &audio));
         }
     }
     drop(rx);

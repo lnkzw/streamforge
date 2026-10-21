@@ -98,7 +98,13 @@ async fn read_only_by_default() {
     );
     let tools = tools(&client).await;
     let listed = names(&tools);
-    for name in ["get_status", "list_commands", "list_scenes", "get_mixer"] {
+    for name in [
+        "get_status",
+        "get_health",
+        "list_commands",
+        "list_scenes",
+        "get_mixer",
+    ] {
         assert!(listed.contains(&name), "{name} missing from {listed:?}");
     }
     for name in [

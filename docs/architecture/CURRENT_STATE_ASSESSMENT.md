@@ -3,7 +3,8 @@
 Assessment of the StreamForge repository against `ARCHITECTURE_VISION.md`, `FUNCTIONAL_REQUIREMENTS.md`, `ENGINEERING_GUIDELINES.md` and `ROADMAP.md` in this directory. This is Phase 0 of `ROADMAP.md`. No production code or project configuration was changed for it.
 
 - **Date:** 2026-10-21
-- **Commit:** `851abfa` (`main`, after M9c, PR #12). `docs/architecture/` itself is not yet committed.
+- **Commit:** `851abfa` (`main`, after M9c, PR #12).
+- **Progress since:** steps 0–2 of the plan (§9) are implemented (ADR 0012, roadmap M10). The findings below describe the state at `851abfa`.
 - **Status labels:**
   - **Satisfied:** the principle holds and evidence backs it.
   - **Partial:** some of it holds; the gap is named.

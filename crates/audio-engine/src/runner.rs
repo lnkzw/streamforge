@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary};
+use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary, duration_millis};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -116,6 +116,39 @@ pub struct MixStats {
 
 /// Peak levels cover the most recent blocks (300 ms).
 pub const LEVEL_WINDOW_BLOCKS: usize = 30;
+/// The mixer thread refreshes [`MixerControl::live`] every this many blocks
+/// (250 ms).
+pub const LIVE_PUBLISH_BLOCKS: u64 = 25;
+
+/// A running mixer's counters so far (see [`MixerControl::live`]); the same
+/// meaning as in [`MixStats`], at most [`LIVE_PUBLISH_BLOCKS`] blocks old.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct LiveMixStats {
+    pub elapsed_ms: u64,
+    pub blocks_mixed: u64,
+    pub late_blocks: u64,
+    pub skipped_blocks: u64,
+    pub clipped_samples: u64,
+    pub invalid_samples: u64,
+    pub mix_time: Option<LatencySummary>,
+    pub inputs: Vec<LiveInputStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiveInputStats {
+    pub name: String,
+    /// `live` or `tone`.
+    pub kind: &'static str,
+    pub warmup_frames: u64,
+    pub underrun_frames: u64,
+    pub trimmed_frames: u64,
+    /// Current buffer fill of a live input; growing underruns with a fill
+    /// near zero mean the device stopped delivering.
+    pub fill_ms: Option<f64>,
+    pub drift_ppm: Option<f64>,
+    /// Frames the input's ring overwrote because the mixer fell behind.
+    pub overrun_frames: Option<u64>,
+}
 
 /// Live control of a running mixer: gain and mute changes, and peak levels
 /// for meters. Cloneable and usable from any thread.
@@ -134,6 +167,8 @@ struct ControlShared {
     pending: Mutex<PendingChanges>,
     input_peaks: Vec<AtomicU32>,
     master_peak: AtomicU32,
+    /// Refreshed in place by the mixer thread after a try-lock.
+    live: Mutex<LiveMixStats>,
 }
 
 struct PendingChanges {
@@ -149,17 +184,42 @@ pub struct LevelReading {
 }
 
 impl MixerControl {
-    fn new(inputs: usize) -> Self {
+    /// `inputs` gives each input's name and kind, so the live snapshot is
+    /// allocated here and the mixer thread only overwrites numbers.
+    fn new(inputs: &[(String, &'static str)]) -> Self {
+        let live = LiveMixStats {
+            inputs: inputs
+                .iter()
+                .map(|(name, kind)| LiveInputStats {
+                    name: name.clone(),
+                    kind,
+                    warmup_frames: 0,
+                    underrun_frames: 0,
+                    trimmed_frames: 0,
+                    fill_ms: None,
+                    drift_ppm: None,
+                    overrun_frames: None,
+                })
+                .collect(),
+            ..LiveMixStats::default()
+        };
         Self {
             shared: Arc::new(ControlShared {
                 pending: Mutex::new(PendingChanges {
-                    strips: vec![None; inputs],
+                    strips: vec![None; inputs.len()],
                     master_gain_db: None,
                 }),
-                input_peaks: (0..inputs).map(|_| AtomicU32::new(0)).collect(),
+                input_peaks: (0..inputs.len()).map(|_| AtomicU32::new(0)).collect(),
                 master_peak: AtomicU32::new(0),
+                live: Mutex::new(live),
             }),
         }
+    }
+
+    /// Counters so far, at most [`LIVE_PUBLISH_BLOCKS`] blocks old. Never
+    /// delays the mixer (it skips a refresh while this copies).
+    pub fn live(&self) -> LiveMixStats {
+        lock(&self.shared.live).clone()
     }
 
     /// Change input `index` from the next block on (ramped). Returns `false`
@@ -274,7 +334,18 @@ impl MixerThread {
             }
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let control = MixerControl::new(config.inputs.len());
+        let names: Vec<(String, &'static str)> = config
+            .inputs
+            .iter()
+            .map(|input| {
+                let kind = match input.source {
+                    InputSource::Live(_) => "live",
+                    InputSource::Tone(_) => "tone",
+                };
+                (input.name.clone(), kind)
+            })
+            .collect();
+        let control = MixerControl::new(&names);
         let thread = thread::Builder::new()
             .name("audio-mixer".to_owned())
             .spawn({
@@ -378,6 +449,42 @@ enum Source {
     Tone(Tone),
 }
 
+/// Refresh the shared snapshot in place; `false` if a reader holds it now
+/// (the caller retries on the next block). Does not allocate: the input
+/// list was created with the control.
+fn publish_live(
+    live: &Mutex<LiveMixStats>,
+    start: Instant,
+    (mixed, late, skipped): (u64, u64, u64),
+    mix_times: &LatencyHistogram,
+    mixer: &Mixer,
+    inputs: &[InputState],
+) -> bool {
+    let mut snapshot = match live.try_lock() {
+        Ok(snapshot) => snapshot,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return false,
+    };
+    snapshot.elapsed_ms = duration_millis(start.elapsed());
+    snapshot.blocks_mixed = mixed;
+    snapshot.late_blocks = late;
+    snapshot.skipped_blocks = skipped;
+    snapshot.clipped_samples = mixer.clipped_samples();
+    snapshot.invalid_samples = mixer.invalid_samples();
+    snapshot.mix_time = mix_times.summary();
+    for (entry, input) in snapshot.inputs.iter_mut().zip(inputs) {
+        entry.warmup_frames = input.warmup;
+        entry.underrun_frames = input.underrun;
+        entry.trimmed_frames = input.trimmed;
+        if let Source::Live(live, _) = &input.source {
+            entry.fill_ms = Some(frames_to_ms(live.fill() as f64));
+            entry.drift_ppm = Some(live.drift_ppm());
+            entry.overrun_frames = Some(live.ring().stats().overrun_frames);
+        }
+    }
+    true
+}
+
 struct InputState {
     name: String,
     source: Source,
@@ -418,6 +525,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
     let due =
         |start: Instant, block: u64| start + Duration::from_nanos(period_ns.saturating_mul(block));
     let (mut block, mut mixed, mut late, mut skipped) = (0u64, 0u64, 0u64, 0u64);
+    let mut publish_due = false;
     let start = Instant::now();
 
     while !stop.load(Ordering::Acquire) {
@@ -469,6 +577,17 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         if finished > due(start, block + 1) {
             late += 1;
         }
+        publish_due |= (mixed - 1) % LIVE_PUBLISH_BLOCKS == 0;
+        if publish_due {
+            publish_due = !publish_live(
+                &control.shared.live,
+                start,
+                (mixed, late, skipped),
+                &mix_times,
+                &mixer,
+                &inputs,
+            );
+        }
         block += 1;
     }
 
@@ -477,7 +596,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         rate: RATE,
         channels: CHANNELS,
         block_frames: BLOCK_FRAMES,
-        elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms: duration_millis(elapsed),
         blocks_mixed: mixed,
         late_blocks: late,
         skipped_blocks: skipped,
@@ -684,5 +803,66 @@ mod tests {
             sink: None,
         });
         assert!(matches!(result, Err(MixerError::ChannelMismatch { .. })));
+    }
+
+    #[test]
+    fn live_stats_show_a_silent_live_input_and_never_hold_up_the_mixer() {
+        let blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ring = Arc::new(AudioRing::new(2, 48_000));
+        let mixer = MixerThread::spawn(MixerConfig {
+            inputs: vec![
+                MixerInput {
+                    name: "tone".into(),
+                    source: InputSource::Tone(Tone::new(440.0, -6.0, RATE)),
+                    strip: unity(),
+                },
+                MixerInput {
+                    name: "mic".into(),
+                    source: InputSource::Live(Arc::clone(&ring)),
+                    strip: unity(),
+                },
+            ],
+            master_gain_db: 0.0,
+            expected_duration: Duration::from_secs(1),
+            sink: Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
+        })
+        .expect("spawn");
+        let control = mixer.control();
+        // The live input never delivers: it stays warming up, with no fill.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let live = loop {
+            let live = control.live();
+            if live.blocks_mixed >= 30 || Instant::now() >= deadline {
+                break live;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            live.blocks_mixed >= 30 && live.mix_time.is_some(),
+            "{live:?}"
+        );
+        assert_eq!(
+            live.inputs
+                .iter()
+                .map(|input| (input.name.as_str(), input.kind))
+                .collect::<Vec<_>>(),
+            [("tone", "tone"), ("mic", "live")]
+        );
+        let mic = &live.inputs[1];
+        assert!(mic.warmup_frames > 0, "{mic:?}");
+        assert_eq!(mic.fill_ms, Some(0.0));
+        assert_eq!(live.inputs[0].fill_ms, None);
+        // Holding the snapshot does not stall the mixer thread.
+        let held = control.shared.live.lock().expect("lock");
+        let before = blocks.lock().expect("lock").len();
+        thread::sleep(Duration::from_millis(200));
+        let during = blocks.lock().expect("lock").len() - before;
+        drop(held);
+        let stats = mixer.stop().expect("stop");
+        assert!(
+            during >= 10,
+            "only {during} blocks while the snapshot was held"
+        );
+        assert!(stats.blocks_mixed >= live.blocks_mixed);
     }
 }

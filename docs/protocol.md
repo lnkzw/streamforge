@@ -75,7 +75,8 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
-| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed", "preview_active"}` |
+| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "pipeline_running", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed", "preview_active"}` |
+| `get_health`               | none   | `read_only` | Live counters of the pipeline and outputs (see below) |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access", "destructive", "open_world"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class"}]}` |
@@ -108,7 +109,31 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`source_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_screen_sources` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
 
-`capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`.
+`capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`. `media_engine_ready` is true in every build: compositor, mixer and encoders are built in (it was a placeholder that always read `false` before ADR 0012). `pipeline_running` is true while a media pipeline runs for outputs or the preview.
+
+### Health
+
+`get_health` returns live counters while things run (ADR 0012): what the final reports count, before the stop. It is cheap and never waits for a media thread, so clients can poll it, e.g. once a second. Counters are totals since the pipeline or the output started; rates come from two readings.
+
+```json
+{"pipeline_running": true,
+ "render": {"elapsed_ms", "frames_rendered", "skipped_ticks", "late_frames", "render_time": {"min_ms", "mean_ms", "p95_ms", "p99_ms", "max_ms"},
+            "sources": [{"id", "name", "kind", "frames_consumed", "stale_ticks", "missing_ticks", "last_frame_age_ms"}]},
+ "mix": {"elapsed_ms", "blocks_mixed", "late_blocks", "skipped_blocks", "clipped_samples", "invalid_samples", "mix_time",
+         "inputs": [{"name", "kind", "warmup_frames", "underrun_frames", "trimmed_frames", "fill_ms", "drift_ppm", "overrun_frames"}]},
+ "recording": {"target", "elapsed_ms", "running", "state": null, "video_encoder": {"encoder", "hardware", "skipped"},
+               "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth", "connects", "reconnect_attempts"},
+ "streaming": {... the same fields; "state" is the stream state}}
+```
+
+- **Without a pipeline:** `render` and `mix` are `null`, and so are `recording` and `streaming` while no output is open.
+- **Freshness:** `render` and `mix` are refreshed every 250 ms; a refresh that finds a reader copying the snapshot is retried on the next frame or block. Output counters are refreshed after every item.
+- **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). A capture that stalled or ended (a closed window, a removed device) keeps growing here while outputs run; `frames_consumed: 0` means it never delivered.
+- **Silent inputs:** a live audio input whose `underrun_frames` grow while `fill_ms` stays near 0 has stopped delivering.
+- **Drops:** `frames_dropped` and `blocks_dropped` cover every cause the stop report counts: producer side (copy pool or queue full), encoder side, and, for streams, media while offline.
+- **Backpressure:** `queue_depth` is the number of items waiting for the output thread. A growing queue means the encoder or the network cannot keep up.
+- **Running:** `running` is false once the output or the pipeline it needs has failed; the stop report says why.
+- **Secrets:** `target` is the file path or the redacted stream target; it never holds the key.
 
 ### Capabilities
 
@@ -344,8 +369,8 @@ Preview:
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","list_commands","get_capture_capabilities","list_audio_inputs","probe_screen_capture","probe_audio_capture"],"command":"nope"}}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.

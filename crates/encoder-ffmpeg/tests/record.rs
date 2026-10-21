@@ -389,3 +389,37 @@ fn auto_falls_back_to_software_and_says_why() {
     let stats = feed(recorder);
     assert_eq!(stats.video.encoder, info);
 }
+
+#[test]
+fn live_counters_track_the_recording() {
+    let file = TempFile::new("live");
+    let recorder = Recorder::start(config(&file)).expect("start");
+    assert_eq!(recorder.live().frames_encoded, 0);
+    let input = recorder.input();
+    let frame_us = 1_000_000 / i64::from(FPS);
+    for n in 0..FPS {
+        assert!(input.send_video_blocking(picture(), micros(i64::from(n) * frame_us)));
+    }
+    let block = [0.1f32; 960];
+    for n in 0..100 {
+        let pts = MediaTimestamp::new(n * 480, 1, RATE).expect("pts");
+        assert!(input.send_audio_blocking(&block, pts));
+    }
+    // The recorder thread works through the queue; the counters follow.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let live = loop {
+        let live = recorder.live();
+        if live.frames_encoded == u64::from(FPS) && live.queue_depth == 0 {
+            break live;
+        }
+        assert!(std::time::Instant::now() < deadline, "{live:?}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    // AAC encodes whole 1024-sample frames; the rest waits for the flush.
+    assert!(100 * 480 - live.samples_encoded < 1024, "{live:?}");
+    assert_eq!((live.frames_dropped, live.blocks_dropped), (0, 0));
+    assert_eq!((live.connects, live.reconnect_attempts), (0, 0));
+    let stats = recorder.stop().expect("stop");
+    assert_eq!(stats.video.frames_encoded, live.frames_encoded);
+    assert!(stats.audio.samples_encoded >= live.samples_encoded);
+}

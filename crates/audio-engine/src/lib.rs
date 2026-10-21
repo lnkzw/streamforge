@@ -27,7 +27,7 @@ pub use mixer::{
 };
 pub use runner::{
     BLOCK_FRAMES, BlockSink, BufferLatency, CHANNELS, InputSource, InputStats, LEVEL_WINDOW_BLOCKS,
-    LevelReading, MAX_INPUTS, MixStats, MixerConfig, MixerControl, MixerError, MixerInput,
-    MixerThread, RATE,
+    LIVE_PUBLISH_BLOCKS, LevelReading, LiveInputStats, LiveMixStats, MAX_INPUTS, MixStats,
+    MixerConfig, MixerControl, MixerError, MixerInput, MixerThread, RATE,
 };
 pub use tone::Tone;

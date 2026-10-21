@@ -204,6 +204,17 @@ pub enum StreamState {
 }
 
 impl StreamState {
+    /// The wire name, e.g. `reconnecting`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+
     pub const fn as_u8(self) -> u8 {
         match self {
             Self::Connecting => 0,
@@ -358,6 +369,11 @@ mod tests {
             StreamState::Stopped,
         ] {
             assert_eq!(StreamState::from_u8(state.as_u8()), state);
+            // `as_str` is the wire name serde produces.
+            assert_eq!(
+                serde_json::to_value(state).expect("serialize"),
+                serde_json::Value::from(state.as_str())
+            );
         }
     }
 }

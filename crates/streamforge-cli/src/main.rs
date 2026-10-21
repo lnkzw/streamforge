@@ -517,7 +517,7 @@ fn stream(
             return Ok(code);
         }
     }
-    std::thread::sleep(duration);
+    run_for(engine, duration);
     let mut output = Map::new();
     let mut failed = false;
     match engine.handle(Command::StopStreaming) {
@@ -572,7 +572,7 @@ fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -
         Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
         Err(err) => return Ok(report_error(&err)),
     }
-    std::thread::sleep(duration);
+    run_for(engine, duration);
     match engine.handle(Command::StopRecording) {
         Ok(output) => {
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -580,6 +580,61 @@ fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -
         }
         Err(err) => Ok(report_error(&err)),
     }
+}
+
+/// Wait `duration`, printing one progress line per second (from
+/// `get_health`) to stderr. Ends early once every open output stopped
+/// running (the stop reports say why); a recording outlives a failed stream.
+fn run_for(engine: &mut Engine, duration: Duration) {
+    let started = std::time::Instant::now();
+    loop {
+        let left = duration.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(Duration::from_secs(1)));
+        if let Ok(CommandOutput::Health(health)) = engine.handle(Command::GetHealth) {
+            eprintln!("{}", progress_line(&health, started.elapsed()));
+            let mut outputs = [&health.recording, &health.streaming]
+                .into_iter()
+                .flatten()
+                .peekable();
+            if outputs.peek().is_some() && outputs.all(|output| !output.running) {
+                eprintln!("every output stopped; ending early");
+                return;
+            }
+        }
+    }
+}
+
+/// E.g. `  2.0 s  recording 120 frames, 0 dropped, queue 1 | render 0 late, 0 skipped`.
+fn progress_line(health: &command_api::HealthReport, elapsed: Duration) -> String {
+    let mut parts = Vec::new();
+    let output = |name: &str, output: &command_api::OutputHealth| {
+        let state = match (output.state, output.running) {
+            (Some(state), _) => format!(" {}", state.as_str()),
+            (None, false) => " failed".to_owned(),
+            (None, true) => String::new(),
+        };
+        let counters = &output.counters;
+        format!(
+            "{name}{state} {} frames, {} dropped, queue {}",
+            counters.frames_encoded, counters.frames_dropped, counters.queue_depth
+        )
+    };
+    if let Some(recording) = &health.recording {
+        parts.push(output("recording", recording));
+    }
+    if let Some(streaming) = &health.streaming {
+        parts.push(output("stream", streaming));
+    }
+    if let Some(render) = &health.render {
+        parts.push(format!(
+            "render {} late, {} skipped",
+            render.late_frames, render.skipped_ticks
+        ));
+    }
+    format!("{:>5.1} s  {}", elapsed.as_secs_f64(), parts.join(" | "))
 }
 
 fn report_error(err: &command_api::CommandError) -> ExitCode {
@@ -631,6 +686,40 @@ mod tests {
         assert_eq!(
             capture_request(CaptureCommand::Sources).0,
             "list_screen_sources"
+        );
+    }
+
+    #[test]
+    fn progress_lines_summarize_health() {
+        use command_api::{HealthReport, OutputHealth, VideoEncoderInfo};
+        let output = |state, running| OutputHealth {
+            target: "x".into(),
+            elapsed_ms: 2000,
+            running,
+            state,
+            video_encoder: VideoEncoderInfo {
+                encoder: "libx264".into(),
+                hardware: false,
+                skipped: Vec::new(),
+            },
+            counters: command_api::LiveOutputStats {
+                frames_encoded: 120,
+                frames_dropped: 2,
+                queue_depth: 1,
+                ..Default::default()
+            },
+        };
+        let health = HealthReport {
+            pipeline_running: true,
+            render: None,
+            mix: None,
+            recording: Some(output(None, false)),
+            streaming: Some(output(Some(command_api::StreamState::Reconnecting), true)),
+        };
+        assert_eq!(
+            progress_line(&health, Duration::from_secs(2)),
+            "  2.0 s  recording failed 120 frames, 2 dropped, queue 1 | \
+             stream reconnecting 120 frames, 2 dropped, queue 1"
         );
     }
 

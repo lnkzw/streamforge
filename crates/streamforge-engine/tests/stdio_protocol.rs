@@ -35,6 +35,44 @@ fn get_status_returns_correlated_response() {
     assert_status_ok(&response, &json!("status-1"));
     assert_eq!(response["result"]["recording_active"], false);
     assert_eq!(response["result"]["streaming_active"], false);
+    assert_eq!(response["result"]["media_engine_ready"], true);
+    assert_eq!(response["result"]["pipeline_running"], false);
+    assert!(engine.finish().success());
+}
+
+#[test]
+fn health_follows_the_preview_pipeline() {
+    let mut engine = EngineProcess::spawn();
+    let idle = engine.request(r#"{"id":1,"command":"get_health"}"#);
+    assert_eq!(idle["ok"], true, "{idle}");
+    assert_eq!(idle["result"]["pipeline_running"], false);
+    assert_eq!(idle["result"]["render"], Value::Null);
+    let preview = engine.request(r#"{"id":2,"command":"set_preview","params":{"enabled":true}}"#);
+    assert_eq!(preview["ok"], true, "{preview}");
+    // Counters appear and grow while the pipeline runs (refreshed every 250 ms).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let running = loop {
+        let health = engine.request(r#"{"id":3,"command":"get_health"}"#);
+        if health["result"]["render"]["frames_rendered"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+        {
+            break health;
+        }
+        assert!(std::time::Instant::now() < deadline, "{health}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(running["result"]["pipeline_running"], true, "{running}");
+    assert!(
+        running["result"]["mix"]["blocks_mixed"].is_u64(),
+        "{running}"
+    );
+    assert_eq!(running["result"]["recording"], Value::Null);
+    let off = engine.request(r#"{"id":4,"command":"set_preview","params":{"enabled":false}}"#);
+    assert_eq!(off["ok"], true, "{off}");
+    let after = engine.request(r#"{"id":5,"command":"get_health"}"#);
+    assert_eq!(after["result"]["pipeline_running"], false, "{after}");
     assert!(engine.finish().success());
 }
 

@@ -1,8 +1,9 @@
 //! Engine controller: owns engine state and executes typed commands.
 //!
-//! Independent of UI and transport. CLI, the JSON-lines server, and future UI
-//! and MCP adapters all drive the engine through [`CommandHandler`]. Platform
-//! capture is injected as a [`CaptureBackend`] by the composition root.
+//! Independent of UI and transport. The CLI, the JSON-lines server, the
+//! desktop UI and the MCP server all drive the engine through
+//! [`CommandHandler`]. Platform capture is injected as a [`CaptureBackend`]
+//! by the composition root.
 
 mod composite;
 mod mix;
@@ -66,8 +67,9 @@ impl Engine {
             status: EngineStatus {
                 application: "StreamForge".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                // No media graph or output exists yet (M3+).
-                media_engine_ready: false,
+                // Compositor, mixer and encoders are part of every build.
+                media_engine_ready: true,
+                pipeline_running: false,
                 capture_available: false,
                 streaming_active: false,
                 streaming_state: None,
@@ -130,6 +132,7 @@ impl CommandHandler for Engine {
                 let streaming = self.streaming_state();
                 self.status.streaming_state = streaming;
                 self.status.preview_active = self.preview_enabled;
+                self.status.pipeline_running = self.pipeline_running();
                 self.status.streaming_active = matches!(
                     streaming,
                     Some(
@@ -140,6 +143,7 @@ impl CommandHandler for Engine {
                 );
                 Ok(CommandOutput::Status(self.status.clone()))
             }
+            Command::GetHealth => Ok(CommandOutput::Health(Box::new(self.health()))),
             Command::ListCommands => Ok(CommandOutput::Commands(CommandList::all())),
             Command::GetCaptureCapabilities => Ok(CommandOutput::CaptureCapabilities(
                 self.refresh_capabilities().clone(),
@@ -487,7 +491,8 @@ mod tests {
         };
         assert_eq!(status.application, "StreamForge");
         assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
-        assert!(!status.media_engine_ready);
+        assert!(status.media_engine_ready);
+        assert!(!status.pipeline_running);
         assert!(!status.capture_available);
         assert!(!status.recording_active);
         assert!(!status.streaming_active);
@@ -592,6 +597,21 @@ mod tests {
             CommandOutput::Status(status) => status,
             other => panic!("unexpected output: {other:?}"),
         }
+    }
+
+    fn health(engine: &mut Engine) -> command_api::HealthReport {
+        match engine.handle(Command::GetHealth).expect("health") {
+            CommandOutput::Health(health) => *health,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_is_empty_while_idle() {
+        let health = health(&mut Engine::new());
+        assert!(!health.pipeline_running);
+        assert!(health.render.is_none() && health.mix.is_none());
+        assert!(health.recording.is_none() && health.streaming.is_none());
     }
 
     fn start(
@@ -783,6 +803,40 @@ mod tests {
         let status_now = status(&mut engine);
         assert!(!status_now.streaming_active);
         assert!(status_now.recording_active, "{status_now:?}");
+        assert!(status_now.pipeline_running);
+
+        // Health tells the two outputs apart while they run: the stream
+        // failed after its attempts, the recording keeps encoding.
+        let first = health(&mut engine);
+        let stream_health = first.streaming.as_ref().expect("stream health");
+        assert_eq!(stream_health.state, Some(StreamState::Failed));
+        assert!(!stream_health.running);
+        assert_eq!(stream_health.counters.connects, 1);
+        assert_eq!(stream_health.counters.reconnect_attempts, 1);
+        assert!(
+            stream_health.target.ends_with("/live"),
+            "{}",
+            stream_health.target
+        );
+        let before = first.recording.as_ref().expect("recording health").counters;
+        std::thread::sleep(Duration::from_millis(400));
+        let later = health(&mut engine);
+        let recording_health = later.recording.as_ref().expect("recording health");
+        assert!(recording_health.running);
+        assert!(recording_health.target.ends_with("keep.mkv"));
+        assert!(
+            recording_health.counters.frames_encoded > before.frames_encoded,
+            "{before:?} -> {:?}",
+            recording_health.counters
+        );
+        let stream_later = later.streaming.as_ref().expect("stream health");
+        assert!(
+            stream_later.counters.frames_dropped > stream_health.counters.frames_dropped,
+            "a failed stream counts what it drops"
+        );
+        let render = later.render.as_ref().expect("render");
+        assert!(render.frames_rendered > 0 && !render.sources.is_empty());
+        assert!(later.mix.as_ref().expect("mix").blocks_mixed > 0);
 
         let stream = match engine.handle(Command::StopStreaming).expect("stop stream") {
             CommandOutput::StreamingReport(report) => *report,

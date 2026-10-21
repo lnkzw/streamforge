@@ -17,7 +17,8 @@ pub use geometry::{Rect, Transform};
 pub use render::{CpuRenderer, RenderError, RenderOutcome};
 pub use runner::{
     Animation, Compositor, CompositorConfig, CompositorError, CompositorRun, FrameSink,
-    RenderStats, SceneUpdate, SourceConfig, SourceInput, SourceStats,
+    LIVE_PUBLISH_MS, LiveRenderStats, LiveSourceStats, RenderStats, SceneUpdate, SourceConfig,
+    SourceInput, SourceStats,
 };
 pub use scale::downscale;
 pub use scene::{Layer, Scene, SceneError, SourceId};

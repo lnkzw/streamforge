@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use media_core::MediaTimestamp;
+use media_core::{MediaTimestamp, duration_millis};
 use serde::Serialize;
 
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
@@ -358,10 +358,6 @@ fn nanos_to_seconds(nanos: u64) -> f64 {
 
 fn nanos_to_millis(nanos: u64) -> f64 {
     nanos as f64 / 1e6
-}
-
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

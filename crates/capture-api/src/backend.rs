@@ -94,10 +94,10 @@ impl UnsupportedCapture {
         }
     }
 
-    /// Reason naming the current OS and the milestone that adds support.
+    /// Reason naming the current OS, for builds without a capture backend.
     pub fn for_current_platform() -> Self {
         Self::new(format!(
-            "capture is not implemented on {} yet; Linux is supported, Windows and macOS backends are planned for M9",
+            "capture is not implemented on {}; Linux, Windows and macOS are supported",
             std::env::consts::OS
         ))
     }

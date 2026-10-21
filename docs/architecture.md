@@ -9,10 +9,10 @@
 
 ## High-level layers
 
-1. **Application clients**: desktop UI, CLI, future JSON-RPC and MCP adapters.
+1. **Application clients**: desktop UI, CLI, the JSON-lines engine process and the MCP server.
 2. **Command layer**: validates commands, checks state and permissions, dispatches to engine services.
 3. **Engine controller**: owns lifecycle and coordinates media graph changes.
-4. **Media graph**: nodes, connections, clocks, timestamps, bounded queues, metrics.
+4. **Media pipeline**: captures, compositor and mixer feeding a fan-out to the outputs, with clocks, timestamps, bounded queues and live metrics (`get_health`, ADR 0012). It is a fixed pipeline, not a general node graph.
 5. **Media services**:
    - Capture backends
    - Video compositor

@@ -3,6 +3,7 @@
 //! and sources with their capture state (center), outputs, health and
 //! activity log (bottom).
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -10,10 +11,15 @@ use egui::{Color32, RichText};
 
 use command_api::{SceneList, SourceKind};
 
-use crate::model::{Level, Model, SourceForm, SourceHealth, SourceType, health_items};
+use crate::model::{Level, Model, SourceForm, SourceHealth, SourceType};
 
-/// Status, meters and health are polled this often.
+/// Status and meters are polled this often.
 const LIVE_REFRESH: Duration = Duration::from_millis(100);
+/// Health is polled this often while a pipeline runs: render and mix
+/// counters refresh every 250 ms.
+const HEALTH_REFRESH: Duration = Duration::from_millis(250);
+/// A health reading older than this is marked as such.
+const HEALTH_STALE: Duration = Duration::from_millis(1500);
 /// Scenes are re-read this often (changes also arrive with each edit).
 const SCENE_REFRESH: Duration = Duration::from_secs(2);
 /// Meter fall-off per second, in dB.
@@ -30,11 +36,16 @@ pub struct DesktopApp {
     /// Typed into a password field; handed to the engine on start only.
     stream_key: String,
     confirm_delete: Option<String>,
+    /// Source whose working capture the user asked to restart.
+    confirm_restart: Option<u32>,
+    /// Chosen source to restart an ended named source on (`None`: same).
+    restart_targets: HashMap<u32, Option<String>>,
     preview: Option<egui::TextureHandle>,
     rgba: Vec<u8>,
     meters: Vec<f32>,
     master_meter: f32,
     last_live: Instant,
+    last_health: Instant,
     last_scenes: Instant,
     last_frame: Instant,
 }
@@ -51,11 +62,14 @@ impl DesktopApp {
             stream_url: String::new(),
             stream_key: String::new(),
             confirm_delete: None,
+            confirm_restart: None,
+            restart_targets: HashMap::new(),
             preview: None,
             rgba: Vec::new(),
             meters: Vec::new(),
             master_meter: METER_FLOOR_DB,
             last_live: now,
+            last_health: now,
             last_scenes: now,
             last_frame: now,
         }
@@ -67,6 +81,10 @@ impl DesktopApp {
         if now - self.last_live >= LIVE_REFRESH {
             self.model.refresh_live();
             self.last_live = now;
+        }
+        if now - self.last_health >= HEALTH_REFRESH {
+            self.model.refresh_health();
+            self.last_health = now;
         }
         if now - self.last_scenes >= SCENE_REFRESH {
             self.model.refresh_all();
@@ -345,38 +363,116 @@ impl DesktopApp {
 
     /// A screen source's capture state, and a restart button while it has
     /// a capture (running or ended; also kept captures of other scenes).
+    /// Restarting ends the running capture, so a working one asks first.
+    /// An ended named source can restart on another listed source: a
+    /// closed window's id does not come back.
     fn capture_state(&mut self, ui: &mut egui::Ui, scene: &str, name: &str, id: u32, picker: bool) {
-        match self.model.source_health(id) {
+        let ended = match self.model.source_health(id) {
             SourceHealth::NotCapturing => {
                 ui.label(RichText::new("not capturing").weak());
                 return;
             }
-            SourceHealth::Capturing { last_frame_age_ms } => {
-                let text = match last_frame_age_ms {
-                    // Screens may deliver only on change: an age, not an error.
-                    Some(age) if age >= 1000 => {
-                        format!("capturing, last frame {} s ago", age / 1000)
-                    }
-                    _ => "capturing".to_owned(),
+            SourceHealth::Capturing {
+                last_frame_age_ms,
+                frames_consumed,
+            } => {
+                // Screens may deliver only on change: an age, not an error.
+                let seconds = last_frame_age_ms.unwrap_or(0) / 1000;
+                let text = match (frames_consumed, seconds) {
+                    (0, 0) => "capturing, no frame yet".to_owned(),
+                    (0, seconds) => format!("capturing, no frame yet ({seconds} s)"),
+                    (_, 0) => "capturing".to_owned(),
+                    (_, seconds) => format!("capturing, last frame {seconds} s ago"),
                 };
                 ui.label(RichText::new(text).color(Color32::LIGHT_GREEN));
+                false
             }
             SourceHealth::Ended { reason } => {
                 ui.label(RichText::new(format!("ended: {reason}")).color(Color32::RED));
+                true
+            }
+        };
+        if self.confirm_restart == Some(id) {
+            ui.label("End the working capture and start it again?");
+            if ui.button("Yes, restart").clicked() {
+                self.confirm_restart = None;
+                self.model.restart_source(scene, name, None);
+            }
+            if ui.button("Cancel").clicked() {
+                self.confirm_restart = None;
+            }
+            return;
+        }
+        let target = if ended && !picker {
+            self.restart_target(ui, id)
+        } else {
+            None
+        };
+        // The engine refuses a picker restart too; disabling says why
+        // before a click. While a command is pending (e.g. a picker is
+        // open), a second restart would end the capture just chosen.
+        let outputs_open = self.model.recording.is_some() || self.model.streaming.is_some();
+        let busy = self.model.busy();
+        let button = ui
+            .add_enabled(
+                !busy && !(picker && outputs_open),
+                egui::Button::new("Restart"),
+            )
+            .on_hover_text("Start the capture again; outputs keep running")
+            .on_disabled_hover_text(if busy {
+                "Waiting for the engine"
+            } else {
+                "A picker source asks again: restart it while nothing records or streams"
+            });
+        if button.clicked() {
+            if ended {
+                self.restart_targets.remove(&id);
+                self.model.restart_source(scene, name, target.as_deref());
+            } else {
+                self.confirm_restart = Some(id);
             }
         }
-        // The engine refuses this too; disabling says why before a click.
-        let outputs_open = self.model.recording.is_some() || self.model.streaming.is_some();
-        let allowed = !(picker && outputs_open);
-        let button = ui
-            .add_enabled(allowed, egui::Button::new("Restart"))
-            .on_hover_text("Start the capture again; outputs keep running")
-            .on_disabled_hover_text(
-                "A picker source asks again: restart it while nothing records or streams",
-            );
-        if button.clicked() {
-            self.model.restart_source(scene, name);
+    }
+
+    /// For an ended named source: restart on the same id, or on another
+    /// listed source.
+    fn restart_target(&mut self, ui: &mut egui::Ui, id: u32) -> Option<String> {
+        const SAME: &str = "same source";
+        let selected = self.restart_targets.entry(id).or_default();
+        match &self.model.screen_sources {
+            Some(Ok(sources)) if !sources.is_empty() => {
+                // An id that is no longer listed is not sent.
+                if selected
+                    .as_ref()
+                    .is_some_and(|chosen| !sources.iter().any(|source| &source.id == chosen))
+                {
+                    *selected = None;
+                }
+                let text = selected
+                    .as_ref()
+                    .and_then(|chosen| sources.iter().find(|source| &source.id == chosen))
+                    .map_or(SAME, |source| source.name.as_str());
+                egui::ComboBox::from_id_salt(("restart target", id))
+                    .selected_text(text)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(selected, None, SAME);
+                        for source in sources {
+                            let label = format!("{} ({})", source.name, source.kind.as_str());
+                            ui.selectable_value(selected, Some(source.id.clone()), label);
+                        }
+                    });
+            }
+            _ => {
+                if ui
+                    .button("Find sources")
+                    .on_hover_text("Choose another source to restart on")
+                    .clicked()
+                {
+                    self.model.find_screen_sources();
+                }
+            }
         }
+        selected.clone()
     }
 
     fn outputs_panel(&mut self, ui: &mut egui::Ui) {
@@ -420,16 +516,24 @@ impl DesktopApp {
                 self.model.stop_streaming();
             }
         });
-        if let Some(health) = &self.model.health {
-            let items = health_items(health);
-            if !items.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    for item in items {
-                        ui.label(colored(RichText::new(item.text), item.level));
-                        ui.separator();
-                    }
-                });
-            }
+        let stale = self.model.health_age().filter(|age| *age >= HEALTH_STALE);
+        if !self.model.health_items.is_empty() || stale.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(age) = stale {
+                    ui.label(
+                        RichText::new(format!(
+                            "health from {} s ago (the engine is busy)",
+                            age.as_secs()
+                        ))
+                        .weak(),
+                    );
+                    ui.separator();
+                }
+                for item in &self.model.health_items {
+                    ui.label(colored(RichText::new(&item.text), item.level));
+                    ui.separator();
+                }
+            });
         }
         ui.separator();
         egui::ScrollArea::vertical()

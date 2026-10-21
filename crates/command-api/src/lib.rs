@@ -34,8 +34,8 @@ pub use scenes::{
     StripState, UpdateSourceRequest,
 };
 
-/// Live snapshot types in [`HealthReport`], for adapters that do not use
-/// the media crates.
+/// Live mix snapshot types in [`HealthReport`], for adapters that do not
+/// use `audio-engine`.
 pub use audio_engine::{LiveInputStats, LiveMixStats};
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
@@ -48,7 +48,9 @@ pub use encoder_api::{
     EncoderPreference, LiveOutputStats, SkippedEncoder, StreamState, VideoEncoderInfo,
 };
 use serde::{Deserialize, Serialize};
-pub use video_compositor::{LiveRenderStats, LiveSourceStats, SourceId};
+/// Live render snapshot types in [`HealthReport`], for adapters that do not
+/// use `video-compositor` (`LatencySummary` is media-core's).
+pub use video_compositor::{LatencySummary, LiveRenderStats, LiveSourceStats, SourceId};
 
 /// A typed engine command.
 ///

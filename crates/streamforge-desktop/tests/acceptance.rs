@@ -47,6 +47,21 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
     panic!("timed out waiting for {what}; log: {:?}", model.log);
 }
 
+/// Like [`wait`], but polling status, mixer and health as the UI does.
+fn wait_polling(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        model.refresh_live();
+        model.refresh_health();
+        model.update();
+        if done(model) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}; log: {:?}", model.log);
+}
+
 fn errors(model: &Model) -> Vec<&str> {
     model
         .log
@@ -101,6 +116,22 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
                 .as_ref()
                 .is_some_and(|status| status.recording_active)
         });
+        // Health counts the recording while it runs.
+        wait_polling(&mut model, "live recording counters", |m| {
+            m.health.as_ref().is_some_and(|health| {
+                health.recording.as_ref().is_some_and(|recording| {
+                    recording.running && recording.counters.frames_encoded > 0
+                })
+            })
+        });
+        assert!(
+            model
+                .health_items
+                .iter()
+                .any(|item| item.text.starts_with("REC: ")),
+            "{:?}",
+            model.health_items
+        );
         thread::sleep(Duration::from_millis(500));
         model.stop_recording();
         wait(&mut model, "the recording to finish", |m| {
@@ -151,22 +182,12 @@ fn preview_frames_reach_the_ui() {
         thread::sleep(Duration::from_millis(10));
     };
     assert_eq!((frame.width(), frame.height()), (480, 270));
-    // Levels flow while the pipeline runs (polled, as the UI does).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !model
-        .mixer
-        .as_ref()
-        .is_some_and(|mixer| mixer.running && mixer.strips[0].peak_dbfs.is_some())
-    {
-        assert!(
-            Instant::now() < deadline,
-            "no live levels; log: {:?}",
-            model.log
-        );
-        model.refresh_live();
-        model.update();
-        thread::sleep(Duration::from_millis(20));
-    }
+    // Levels flow while the pipeline runs.
+    wait_polling(&mut model, "live levels", |m| {
+        m.mixer
+            .as_ref()
+            .is_some_and(|mixer| mixer.running && mixer.strips[0].peak_dbfs.is_some())
+    });
     model.set_preview(false);
     wait(&mut model, "the preview to stop", |m| !m.preview_enabled);
 }

@@ -36,7 +36,7 @@ While running, clients saw a few booleans (`get_status`) and mixer peaks (`get_m
 - **Clients:**
   - The CLI's `record` and `stream` print one progress line per second from `get_health` to stderr.
   - The MCP server exposes the command from the registry.
-  - The desktop UI follows in its own step.
+  - The desktop UI polls it every 250 ms while a pipeline may run and shows a health strip (M10 step 3): a stopped pipeline, output counters, render and mix trouble (including audio lost to overruns), ended captures, and the reading's age when the engine is busy.
 
 ## Alternatives considered
 

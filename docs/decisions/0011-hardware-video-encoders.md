@@ -66,7 +66,10 @@ The same intent maps to each encoder's own options. The table in `encoders.rs` i
   - FFmpeg's `h264_amf` fails to open there (no AMF runtime); it is not a Linux candidate.
 - **CI runners have no GPU:**
   - The tests cover the fallback (`auto` → libx264 with every hardware candidate's reason), the `hardware` error and libx264 itself.
-  - A CI step prints which encoder `auto` picked on each runner.
+  - A CI step prints which encoder `auto` picked on each runner. At the first complete run, every runner fell back to libx264, and the reasons were:
+    - Linux: no VAAPI device; NVENC "operation not permitted"
+    - Windows: NVENC, Quick Sync and AMF fail to open
+    - macOS: VideoToolbox fails to open on the VM
 - **Untested:** NVENC, Quick Sync, AMF and VideoToolbox on real hardware. Their options follow FFmpeg's documentation; an option an encoder does not know is ignored by FFmpeg, and an encoder that fails to open falls back.
 
 ## Dependencies

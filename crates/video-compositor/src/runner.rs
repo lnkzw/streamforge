@@ -888,7 +888,8 @@ mod tests {
             vec![Layer::new("capture", SourceId(7), Transform::IDENTITY)],
         ))
         .expect("spawn");
-        assert_eq!(compositor.live().frames_rendered, 0, "nothing yet");
+        // No check for an empty snapshot here: the first frame renders and
+        // publishes at once, possibly before this thread reads it.
         let mut buffer = pool.acquire(4 * 4 * 4).expect("buffer");
         buffer.fill(9);
         mailbox

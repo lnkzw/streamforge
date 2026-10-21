@@ -287,6 +287,20 @@ const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "restart_source",
+    summary: "Start a screen source's capture again and end the old one, e.g. after get_health \
+              reports it ended; outputs keep running. Params: scene, name, optional source_id \
+              (from list_screen_sources) to capture another source from now on: a closed \
+              window's id does not come back, a display's does when it reconnects. A picker \
+              source asks the user again, so it is refused while recording or streaming. \
+              Returns the scene list.",
+    access: CommandAccess::Sensitive,
+    // It ends the running capture; a picker choice is lost.
+    destructive: true,
+    open_world: false,
+};
+
 const GET_MIXER: CommandDescriptor = CommandDescriptor {
     name: "get_mixer",
     summary: "Mixer strips with gain, mute and the peak level since the previous call.",
@@ -354,6 +368,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     ADD_SOURCE,
     UPDATE_SOURCE,
     REMOVE_SOURCE,
+    RESTART_SOURCE,
     GET_MIXER,
     SET_MIXER_STRIP,
     SET_MASTER_GAIN,
@@ -427,6 +442,7 @@ impl Command {
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
             "remove_source" => decode_remove_source(name, params)
                 .map(|(scene, name)| Self::RemoveSource { scene, name }),
+            "restart_source" => decode_restart_source(name, params),
             "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
             "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
             "set_master_gain" => {
@@ -489,6 +505,7 @@ impl Command {
             Self::AddSource(_) => &ADD_SOURCE,
             Self::UpdateSource(_) => &UPDATE_SOURCE,
             Self::RemoveSource { .. } => &REMOVE_SOURCE,
+            Self::RestartSource { .. } => &RESTART_SOURCE,
             Self::GetMixer => &GET_MIXER,
             Self::SetMixerStrip(_) => &SET_MIXER_STRIP,
             Self::SetMasterGain { .. } => &SET_MASTER_GAIN,
@@ -1204,6 +1221,30 @@ struct RemoveSourceParams {
     name: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RestartSourceParams {
+    /// Scene name.
+    scene: String,
+    /// Source name (a screen source).
+    name: String,
+    /// Capture this source from list_screen_sources from now on (the scene
+    /// keeps it), e.g. instead of a closed window.
+    source_id: Option<String>,
+}
+
+fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Command, CommandError> {
+    let params: RestartSourceParams = decode_params(command, params)?;
+    Ok(Command::RestartSource {
+        scene: valid_name(command, "scene", params.scene)?,
+        name: valid_name(command, "name", params.name)?,
+        source_id: params
+            .source_id
+            .map(|id| valid_source_id(command, id))
+            .transpose()?,
+    })
+}
+
 fn decode_remove_source(
     command: &str,
     params: Option<&Value>,
@@ -1409,18 +1450,9 @@ fn decode_screen_probe(
 }
 
 /// Defaults, deduplication and validation shared by all screen commands.
-fn screen_selection(
-    command: &str,
-    source_id: Option<String>,
-    source_types: Option<Vec<VideoSourceKind>>,
-    cursor: Option<CursorMode>,
-) -> Result<ScreenSelection, CommandError> {
-    let valid_id = |id: &String| {
-        !id.is_empty()
-            && id.chars().count() <= MAX_SOURCE_ID_CHARS
-            && !id.chars().any(char::is_control)
-    };
-    if source_id.as_ref().is_some_and(|id| !valid_id(id)) {
+fn valid_source_id(command: &str, id: String) -> Result<String, CommandError> {
+    if id.is_empty() || id.chars().count() > MAX_SOURCE_ID_CHARS || id.chars().any(char::is_control)
+    {
         return Err(invalid_params(
             command,
             format!(
@@ -1429,6 +1461,18 @@ fn screen_selection(
             ),
         ));
     }
+    Ok(id)
+}
+
+fn screen_selection(
+    command: &str,
+    source_id: Option<String>,
+    source_types: Option<Vec<VideoSourceKind>>,
+    cursor: Option<CursorMode>,
+) -> Result<ScreenSelection, CommandError> {
+    let source_id = source_id
+        .map(|id| valid_source_id(command, id))
+        .transpose()?;
     let mut source_kinds = Vec::new();
     for kind in source_types.unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec()) {
         if !source_kinds.contains(&kind) {
@@ -1516,6 +1560,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "add_source" => of::<AddSourceParams>(),
         "update_source" => of::<UpdateSourceParams>(),
         "remove_source" => of::<RemoveSourceParams>(),
+        "restart_source" => of::<RestartSourceParams>(),
         "set_mixer_strip" => of::<MixerStripParams>(),
         "set_master_gain" => of::<MasterGainParams>(),
         "set_audio_sources" => of::<AudioSourcesParams>(),
@@ -1625,12 +1670,45 @@ mod tests {
             "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
             "add_source" => Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"})),
             "update_source" => Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5})),
-            "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+            "remove_source" | "restart_source" => Some(json!({"scene": "Scene", "name": "bars"})),
             "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
             "set_master_gain" => Some(json!({"gain_db": -3.0})),
             "set_preview" => Some(json!({"enabled": false})),
             _ => None,
         }
+    }
+
+    #[test]
+    fn restart_source_params() {
+        let decode = |params: Value| Command::decode("restart_source", Some(&params));
+        assert!(matches!(
+            decode(json!({"scene": "Scene", "name": "desk"})),
+            Ok(Command::RestartSource {
+                source_id: None,
+                ..
+            })
+        ));
+        let Ok(Command::RestartSource { source_id, .. }) =
+            decode(json!({"scene": "Scene", "name": "desk", "source_id": "window:7:0x2a"}))
+        else {
+            panic!("decode");
+        };
+        assert_eq!(source_id.as_deref(), Some("window:7:0x2a"));
+        for bad in [
+            json!(""),
+            json!("a\nb"),
+            json!("x".repeat(MAX_SOURCE_ID_CHARS + 1)),
+        ] {
+            let err =
+                decode(json!({"scene": "Scene", "name": "desk", "source_id": bad})).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{bad}");
+        }
+        // It ends the running capture.
+        let descriptor = COMMANDS
+            .iter()
+            .find(|command| command.name == "restart_source")
+            .expect("registered");
+        assert!(descriptor.destructive);
     }
 
     #[test]
@@ -2317,6 +2395,8 @@ mod tests {
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
         assert_eq!(access("get_health"), Some(CommandAccess::ReadOnly));
+        // Restarting starts a capture again, like adding a screen source.
+        assert_eq!(access("restart_source"), Some(CommandAccess::Sensitive));
         // Window titles can reveal private content.
         assert_eq!(
             access("list_screen_sources"),

@@ -207,6 +207,13 @@ impl CommandHandler for Engine {
             Command::RemoveSource { scene, name } => self
                 .remove_source(&scene, &name)
                 .map(CommandOutput::SceneList),
+            Command::RestartSource {
+                scene,
+                name,
+                source_id,
+            } => self
+                .restart_source(&scene, &name, source_id.as_deref())
+                .map(CommandOutput::SceneList),
             Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
             Command::SetMixerStrip(change) => {
                 self.set_mixer_strip(change).map(CommandOutput::MixerState)
@@ -381,8 +388,15 @@ mod tests {
 
         fn start_screen_stream(
             &mut self,
-            _selection: &ScreenSelection,
+            selection: &ScreenSelection,
         ) -> Result<Box<dyn VideoStream>, CaptureError> {
+            // A source that went away, e.g. a closed window.
+            if selection.source.as_deref() == Some("fake:gone") {
+                return Err(CaptureError::new(
+                    capture_api::CaptureErrorKind::NotFound,
+                    "no such source",
+                ));
+            }
             self.screen_starts.set(self.screen_starts.get() + 1);
             let mailbox = Arc::new(FrameMailbox::new());
             // One solid red 32x18 frame.
@@ -568,7 +582,9 @@ mod tests {
                     "update_source" => {
                         Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5}))
                     }
-                    "remove_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+                    "remove_source" | "restart_source" => {
+                        Some(json!({"scene": "Scene", "name": "bars"}))
+                    }
                     "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
                     "set_master_gain" => Some(json!({"gain_db": -3.0})),
                     "set_preview" => Some(json!({"enabled": false})),
@@ -648,7 +664,7 @@ mod tests {
         engine: &mut Engine,
         params: serde_json::Value,
     ) -> Result<CommandOutput, CommandError> {
-        engine.handle(Command::decode("start_recording", Some(&params)).expect("decode"))
+        try_run(engine, "start_recording", params)
     }
 
     #[test]
@@ -919,10 +935,15 @@ mod tests {
     }
 
     fn run(engine: &mut Engine, name: &str, params: serde_json::Value) -> CommandOutput {
-        let command = Command::decode(name, Some(&params)).expect("decode");
-        engine
-            .handle(command)
-            .unwrap_or_else(|err| panic!("{name}: {err}"))
+        try_run(engine, name, params).unwrap_or_else(|err| panic!("{name}: {err}"))
+    }
+
+    fn try_run(
+        engine: &mut Engine,
+        name: &str,
+        params: serde_json::Value,
+    ) -> Result<CommandOutput, CommandError> {
+        engine.handle(Command::decode(name, Some(&params)).expect("decode"))
     }
 
     /// Wait for a preview frame whose pixel at (x, y) is `bgra`.
@@ -1187,6 +1208,264 @@ mod tests {
         assert!(ended.recording.expect("recording").running);
         engine.handle(Command::StopRecording).expect("stop");
         assert!(health(&mut engine).captures.is_empty());
+    }
+
+    #[test]
+    fn an_ended_screen_source_restarts_while_recording() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("restart");
+        let (engine, starts, ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        let restart = |engine: &mut Engine, scene: &str, name: &str| {
+            try_run(
+                engine,
+                "restart_source",
+                json!({"scene": scene, "name": name}),
+            )
+        };
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
+                   "source_id": "fake:1"}),
+        );
+        // Nothing captures yet.
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "desk")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidState
+        );
+        start(&mut engine, json!({"file_name": "restart.mkv"})).expect("start");
+        assert_eq!(starts.get(), 1);
+        let desk = |health: &command_api::HealthReport| {
+            health
+                .captures
+                .iter()
+                .find(|capture| capture.name == "desk")
+                .cloned()
+                .expect("desk capture")
+        };
+        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        assert!(matches!(
+            desk(&health(&mut engine)).state,
+            capture_api::CaptureState::Ended { .. }
+        ));
+
+        // Restarting starts a new capture while the recording keeps going.
+        let before = health(&mut engine)
+            .recording
+            .expect("recording")
+            .counters
+            .frames_encoded;
+        restart(&mut engine, "Test pattern", "desk").expect("restart");
+        assert_eq!(starts.get(), 2);
+        assert_eq!(
+            desk(&health(&mut engine)).state,
+            capture_api::CaptureState::Running
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let after = health(&mut engine);
+        let recording = after.recording.expect("recording");
+        assert!(recording.running);
+        assert!(recording.counters.frames_encoded > before, "{recording:?}");
+
+        // Only screen sources of the active scene restart.
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "color_bars")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidParams
+        );
+        run(&mut engine, "create_scene", json!({"name": "Other"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Other", "name": "cam", "kind": "screen", "source_id": "fake:2"}),
+        );
+        assert_eq!(
+            restart(&mut engine, "Other", "cam").unwrap_err().code,
+            ErrorCode::InvalidState
+        );
+        assert_eq!(
+            restart(&mut engine, "Test pattern", "nope")
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        // The replaced capture and the final one are both reported.
+        let desks = report
+            .pipeline
+            .scene_captures
+            .iter()
+            .filter(|outcome| outcome.source == "desk")
+            .count();
+        assert_eq!(desks, 2, "{:?}", report.pipeline.scene_captures);
+        // The compositor took the new capture's frame.
+        let render = report.pipeline.render.expect("render stats");
+        assert_eq!(render.retired_sources, 1, "{render:?}");
+        let desk = render
+            .sources
+            .iter()
+            .find(|source| source.name == "desk")
+            .expect("desk");
+        assert_eq!(desk.frames_consumed, 1, "{desk:?}");
+    }
+
+    #[test]
+    fn a_picker_source_restarts_only_while_no_output_is_open() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("restart-picker");
+        let (engine, starts, _ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        let restart = |engine: &mut Engine| {
+            try_run(
+                engine,
+                "restart_source",
+                json!({"scene": "Test pattern", "name": "desk"}),
+            )
+        };
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen"}),
+        );
+        assert_eq!(starts.get(), 1);
+        start(&mut engine, json!({"file_name": "picker.mkv"})).expect("start");
+        let err = restart(&mut engine).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidState);
+        assert!(err.message.contains("picker"), "{err}");
+        assert_eq!(starts.get(), 1);
+        // The refused restart kept the running capture.
+        let captures = health(&mut engine).captures;
+        assert!(
+            captures.iter().any(|capture| capture.name == "desk"
+                && capture.state == capture_api::CaptureState::Running),
+            "{captures:?}"
+        );
+        engine.handle(Command::StopRecording).expect("stop");
+        // Only the preview runs: the picker may ask again.
+        restart(&mut engine).expect("restart");
+        assert_eq!(starts.get(), 2);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+    }
+
+    /// Screen sources of `scene`: (name, source_id).
+    fn screen_ids(engine: &mut Engine, scene: &str) -> Vec<(String, Option<String>)> {
+        let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
+            panic!("unexpected output");
+        };
+        let scene = list
+            .scenes
+            .into_iter()
+            .find(|candidate| candidate.name == scene)
+            .expect("scene");
+        scene
+            .sources
+            .into_iter()
+            .filter_map(|source| match source.kind {
+                command_api::SourceKind::Screen { source_id, .. } => Some((source.name, source_id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_source_restarts_on_another_source_id_and_a_failed_restart_changes_nothing() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("retarget");
+        let (engine, starts, ends) = engine_with_screen_streams();
+        let mut engine = engine.with_output_dir(&dir.0);
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
+                   "source_id": "fake:1"}),
+        );
+        start(&mut engine, json!({"file_name": "retarget.mkv"})).expect("start");
+        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+
+        // The window's id is gone: restarting on it fails, and nothing
+        // changes (the scene keeps its id, the old capture stays listed).
+        let err = try_run(
+            &mut engine,
+            "restart_source",
+            json!({"scene": "Test pattern", "name": "desk", "source_id": "fake:gone"}),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound, "{err}");
+        assert_eq!(
+            screen_ids(&mut engine, "Test pattern"),
+            [("desk".to_owned(), Some("fake:1".to_owned()))]
+        );
+        assert!(health(&mut engine).captures.iter().any(|capture| {
+            capture.name == "desk"
+                && matches!(capture.state, capture_api::CaptureState::Ended { .. })
+        }));
+
+        // Another window: the scene keeps the new id.
+        run(
+            &mut engine,
+            "restart_source",
+            json!({"scene": "Test pattern", "name": "desk", "source_id": "fake:2"}),
+        );
+        assert_eq!(starts.get(), 2);
+        assert_eq!(
+            screen_ids(&mut engine, "Test pattern"),
+            [("desk".to_owned(), Some("fake:2".to_owned()))]
+        );
+        assert!(health(&mut engine).captures.iter().any(|capture| {
+            capture.name == "desk" && capture.state == capture_api::CaptureState::Running
+        }));
+        engine.handle(Command::StopRecording).expect("stop");
+    }
+
+    #[test]
+    fn a_kept_capture_of_another_scene_restarts() {
+        let _media = media_test_lock();
+        let (mut engine, starts, ends) = engine_with_screen_streams();
+        for (scene, id) in [("Main", "fake:1"), ("BRB", "fake:2")] {
+            run(&mut engine, "create_scene", json!({"name": scene}));
+            run(
+                &mut engine,
+                "add_source",
+                json!({"scene": scene, "name": "cam", "kind": "screen", "source_id": id}),
+            );
+        }
+        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        assert_eq!(starts.get(), 2);
+        // Main's capture keeps running off air, and ends there.
+        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        run(
+            &mut engine,
+            "restart_source",
+            json!({"scene": "Main", "name": "cam"}),
+        );
+        assert_eq!(starts.get(), 3);
+        let captures = health(&mut engine).captures;
+        assert_eq!(captures.len(), 2, "{captures:?}");
+        assert!(
+            captures
+                .iter()
+                .all(|capture| capture.state == capture_api::CaptureState::Running),
+            "{captures:?}"
+        );
+        let CommandOutput::PreviewState(preview) =
+            run(&mut engine, "set_preview", json!({"enabled": false}))
+        else {
+            panic!("unexpected output");
+        };
+        // The replaced capture and the two final ones.
+        let pipeline = preview.pipeline.expect("pipeline report");
+        assert_eq!(pipeline.scene_captures.len(), 3, "{pipeline:?}");
     }
 
     #[test]

@@ -48,7 +48,10 @@ While running, clients saw a few booleans (`get_status`) and mixer peaks (`get_m
 
 - `render` and `mix` can be about 250 ms old, plus one frame or block when a refresh had to be retried. Output counters are current to the last item.
 - The CLI ends a `record` or `stream` run early once every open output has stopped running; a recording keeps going when only the stream failed.
-- The snapshot costs the media threads a few relaxed atomic stores per item and one in-place copy every 250 ms. This has not been measured; the measurement harness (assessment step 7) will quantify it. A 3 s CLI recording on the development machine showed the same 0 drops as before.
+- The snapshot costs the media threads a few relaxed atomic stores per item and one in-place copy every 250 ms. The measurement harness (assessment step 7, `docs/testing.md`) cannot switch the snapshot off, so that cost is not separated.
+  - It does measure a client polling `get_health` every 100 ms and serializing the result as an adapter would.
+  - On the development machine, that changed neither CPU time nor render time beyond their run-to-run spread.
+  - Contention was hardly exercised: the snapshot refreshes every 250 ms and a read takes microseconds, so few refreshes meet a reader.
 
 ## Validation
 

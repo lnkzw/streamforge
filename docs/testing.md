@@ -31,6 +31,7 @@ What runs:
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)
   - a stdio smoke test of `streamforge-engine`
+- On pushes to `main` and manual runs (not on pull requests), a `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures; there are no thresholds, because shared runners vary. A failing measurement leaves a warning annotation and does not fail the job; a failing setup or build does. Both jobs share their setup through the local composite action `.github/actions/build-setup`.
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
@@ -122,6 +123,49 @@ Tests that run the 1080p60 pipeline and x264 encoders take turns within their te
 - `crates/streamforge-engine/tests/stdio_protocol.rs`: process integration tests. They spawn the real binary and talk JSON lines over pipes, with a 10 s timeout on every wait, and kill the child on failure.
 
 ## Performance measurements
+
+### Measurement harness (`streamforge-bench`, M10 step 7)
+
+`cargo run --release -p streamforge-bench -- [--seconds 10] [--runs 3] [--video-encoder auto|software|hardware] [--scenario …] [--json]`
+
+- **Scenarios:**
+  - `record`: one recording
+  - `record-stream`: a recording and a stream to a local RTMP ingest, from one pipeline
+  - `record-polled` and `record-stream-polled`: the same, polling `get_health` every 100 ms
+- **Method:**
+  - Each run starts a fresh engine on the reference scene with the default tone, through the same commands every client uses. No capture backend is involved.
+  - One unmeasured warm-up run comes first. Each round runs every scenario, starting with a different one, so neither the machine's drift nor a fixed order favors one. Summaries are medians of the valid runs with half their spread (`±`).
+  - **Measured window:** it starts 0.5 s after the outputs started and ends before they stop.
+    - The process's CPU time (user plus system) covers the window.
+    - Render and mix counters cover it too, from `get_health` readings at both ends. The window's render mean follows from the running means and frame counts.
+    - Render p95, p99 and maximum cover the whole pipeline run, setup and flush included. They follow scheduling jitter and vary more than the mean.
+  - **The ingest runs in a child process** (the same binary), so its receive and demux work is not measured.
+  - **Lost media:** frames and audio blocks dropped or never delivered by any output, plus blocks the mixer skipped. `gaps` counts audio samples filled with silence or never delivered. `start` is what a stream dropped before its first video frame, by design so both start together (one or two audio blocks); it is not lost media.
+  - **Invalid runs:** a stream that did not stay connected, or an ingest error, makes a run invalid. It is listed but left out of the summaries. A run that fails is listed, and the harness exits non-zero after printing what it measured.
+  - The polled scenarios call `get_health` every 100 ms and serialize the result to JSON, as an adapter would.
+- **Use:** compare numbers on one machine, before and after a change; record CPU model, OS and encoder with them. Measure on an idle machine: a game or a build running at the same time changes CPU and GPU (VAAPI) figures by more than the spread.
+
+**Baseline** (2026-10-22, development machine: Linux, Intel Core i5-13600KF with 20 threads, AMD Radeon RX 6800 with Mesa VAAPI, release build, idle, 3 runs × 10 s). Run to run, CPU stayed within ±2 % and the render mean within ±2 %. Render p95 varied by ±1 to ±12 %: it covers the whole pipeline run, setup and flush included, so a few slow frames move it (one run at 2.0 ms instead of 1.65 ms).
+
+| Scenario | Encoder | CPU (% of one core) | Render mean | Render p95 | Skipped / late | Lost |
+|---|---|---|---|---|---|---|
+| record | `h264_vaapi` | 44.7 | 1.53 ms | 1.70 ms | 0 / 0 | 0 |
+| record-polled | `h264_vaapi` | 45.5 | 1.56 ms | 1.75 ms | 0 / 0 | 0 |
+| record-stream | `h264_vaapi` × 2 | 74.4 | 2.14 ms | 2.30 ms | 0 / 0 | 0 |
+| record-stream-polled | `h264_vaapi` × 2 | 75.9 | 2.15 ms | 2.45 ms | 0 / 0 | 0 |
+| record | `libx264` | 78.2 | 1.54 ms | 1.65 ms | 0 / 0 | 0 |
+| record-polled | `libx264` | 79.1 | 1.56 ms | 1.65 ms | 0 / 0 | 0 |
+| record-stream | `libx264` × 2 | 153.8 | 2.16 ms | 2.45 ms | 0 / 0 | 0 |
+| record-stream-polled | `libx264` × 2 | 152.2 | 2.13 ms | 2.45 ms | 0 / 0 | 0 |
+
+11 of the 12 stream runs dropped one audio block before their first video frame (`start`, by design), the other none. One of the 26 runs, warm-up included, reported a late frame outside the measured window.
+
+What the baseline shows:
+- **Polling `get_health` every 100 ms costs less than the harness can resolve** (ADR 0012). The polled medians differ from the unpolled ones by +0.8, +1.4, +0.8 and −1.6 % of a core. The sign changes, and polling cannot make a run cheaper, so the differences are noise between scenarios, which is larger than the spread within one.
+- **A second output costs about 30 % of a core with VAAPI and 76 % with libx264.** Each output converts BGRA frames on the CPU (and uploads them for VAAPI) on its own.
+- **A second output also raises the render mean from about 1.54 to 2.15 ms**, although the scene is the same. The render time includes handing the frame to the outputs, and the engine's frame tap copies each 1920×1080 BGRA frame (8 MB) once per output on the render thread: about 0.6 ms per copy here. This is the copy and conversion work of the assessment (§6.1.1), and the baseline to measure it against.
+
+### Other measurements
 
 - `cargo run --release -p video-compositor --example render_bench [frames]`: per-frame render time of the reference scene with 1 thread and the default thread count.
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.

@@ -342,7 +342,7 @@ impl SourceState {
     /// Write this source's live counters into `into`, reusing its name's
     /// allocation.
     fn live_into(&self, into: &mut LiveSourceStats, tick: u64, period_ns: u64) {
-        into.id = self.id;
+        into.id.clone_from(&self.id);
         into.name.clone_from(&self.name);
         into.kind = self.kind();
         into.frames_consumed = self.consumed;
@@ -368,7 +368,7 @@ impl SourceState {
             Current::Live { mailbox, .. } => ("live", Some(mailbox.stats())),
         };
         SourceStats {
-            id: self.id,
+            id: self.id.clone(),
             name: self.name.clone(),
             kind,
             frames_consumed: self.consumed,
@@ -403,6 +403,9 @@ fn rebuild(
             Some(index) => {
                 let mut state = current.swap_remove(index);
                 state.name = source.name;
+                // The update's id, which its layers share: `Arc` equality
+                // then compares pointers first.
+                state.id = source.id;
                 next.push(state);
             }
             None => next.push(SourceState::new(source, tick)),
@@ -461,7 +464,7 @@ fn publish(
             None => {
                 // Only when the source list grows.
                 let mut entry = LiveSourceStats {
-                    id: source.id,
+                    id: source.id.clone(),
                     name: String::new(),
                     kind: "static",
                     frames_consumed: 0,
@@ -542,7 +545,7 @@ fn run(
             |id| {
                 sources
                     .iter()
-                    .find(|source| source.id == id)
+                    .find(|source| source.id == *id)
                     .and_then(SourceState::frame)
             },
             &mut target,
@@ -634,7 +637,7 @@ mod tests {
         ));
         let bad = config(
             vec![],
-            vec![Layer::new("l", SourceId(0), Transform::IDENTITY).with_opacity(2.0)],
+            vec![Layer::new("l", SourceId::from("0"), Transform::IDENTITY).with_opacity(2.0)],
         );
         assert!(matches!(
             Compositor::spawn(bad),
@@ -692,12 +695,14 @@ mod tests {
     fn updates_replace_the_scene_while_running_and_keep_unchanged_sources() {
         let red = Arc::new(pattern::solid(64, 48, [0, 0, 255, 255]).expect("red"));
         let blue = Arc::new(pattern::solid(64, 48, [255, 0, 0, 255]).expect("blue"));
-        let source = |id, name: &str, frame: &Arc<VideoFrame>| SourceConfig {
-            id: SourceId(id),
+        let source = |id: u32, name: &str, frame: &Arc<VideoFrame>| SourceConfig {
+            id: SourceId::new(id.to_string()),
             name: name.into(),
             input: SourceInput::Static(Arc::clone(frame)),
         };
-        let layer = |name: &str, id| Layer::new(name, SourceId(id), Transform::IDENTITY);
+        let layer = |name: &str, id: u32| {
+            Layer::new(name, SourceId::new(id.to_string()), Transform::IDENTITY)
+        };
         let seen = Arc::new(std::sync::Mutex::new((0, [0; 4])));
         let mut red_scene = config(vec![source(1, "red", &red)], vec![layer("red", 1)]);
         red_scene.sink = Some(Box::new(PixelSink(Arc::clone(&seen))));
@@ -749,7 +754,7 @@ mod tests {
         let mut retired = Retired::default();
         for index in 0..(MAX_RETIRED_SOURCES as u32 + 10) {
             retired.push(SourceStats {
-                id: SourceId(index),
+                id: SourceId::new(index.to_string()),
                 name: index.to_string(),
                 kind: "static",
                 frames_consumed: 0,
@@ -761,7 +766,7 @@ mod tests {
         assert_eq!(retired.total, MAX_RETIRED_SOURCES as u64 + 10);
         assert_eq!(retired.recent.len(), MAX_RETIRED_SOURCES);
         // The oldest were dropped.
-        assert_eq!(retired.recent[0].id, SourceId(10));
+        assert_eq!(retired.recent[0].id, SourceId::from("10"));
     }
 
     #[test]
@@ -770,11 +775,11 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new((0, [0; 4])));
         let mut live = config(
             vec![SourceConfig {
-                id: SourceId(7),
+                id: SourceId::from("7"),
                 name: "live".into(),
                 input: SourceInput::Live(Arc::clone(&mailbox)),
             }],
-            vec![Layer::new("live", SourceId(7), Transform::IDENTITY)],
+            vec![Layer::new("live", SourceId::from("7"), Transform::IDENTITY)],
         );
         live.sink = Some(Box::new(PixelSink(Arc::clone(&seen))));
         let compositor = Compositor::spawn(live).expect("spawn");
@@ -803,7 +808,7 @@ mod tests {
         let mailbox = Arc::new(FrameMailbox::new());
         let compositor = Compositor::spawn(config(
             vec![SourceConfig {
-                id: SourceId(0),
+                id: SourceId::from("0"),
                 name: "live".into(),
                 input: SourceInput::Live(Arc::clone(&mailbox)),
             }],
@@ -824,19 +829,19 @@ mod tests {
         let compositor = Compositor::spawn(config(
             vec![
                 SourceConfig {
-                    id: SourceId(0),
+                    id: SourceId::from("0"),
                     name: "bars".into(),
                     input: SourceInput::Static(bars),
                 },
                 SourceConfig {
-                    id: SourceId(1),
+                    id: SourceId::from("1"),
                     name: "live".into(),
                     input: SourceInput::Live(Arc::clone(&mailbox)),
                 },
             ],
             vec![
-                Layer::new("bars", SourceId(0), Transform::IDENTITY),
-                Layer::new("live", SourceId(1), Transform::at(8.0, 8.0)),
+                Layer::new("bars", SourceId::from("0"), Transform::IDENTITY),
+                Layer::new("live", SourceId::from("1"), Transform::at(8.0, 8.0)),
             ],
         ))
         .expect("spawn");
@@ -875,17 +880,21 @@ mod tests {
         let compositor = Compositor::spawn(config(
             vec![
                 SourceConfig {
-                    id: SourceId(7),
+                    id: SourceId::from("7"),
                     name: "capture".into(),
                     input: SourceInput::Live(Arc::clone(&mailbox)),
                 },
                 SourceConfig {
-                    id: SourceId(8),
+                    id: SourceId::from("8"),
                     name: "never".into(),
                     input: SourceInput::Live(Arc::new(FrameMailbox::new())),
                 },
             ],
-            vec![Layer::new("capture", SourceId(7), Transform::IDENTITY)],
+            vec![Layer::new(
+                "capture",
+                SourceId::from("7"),
+                Transform::IDENTITY,
+            )],
         ))
         .expect("spawn");
         // No check for an empty snapshot here: the first frame renders and
@@ -908,8 +917,8 @@ mod tests {
         );
         let source = &live.sources[0];
         assert_eq!(
-            (source.id, source.name.as_str(), source.kind),
-            (SourceId(7), "capture", "live")
+            (source.id.as_str(), source.name.as_str(), source.kind),
+            ("7", "capture", "live")
         );
         assert!(source.stale_ticks > 0, "{source:?}");
         // A source that never delivered ages from when it was added.

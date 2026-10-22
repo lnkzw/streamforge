@@ -223,6 +223,8 @@ From the architecture assessment (`docs/architecture/CURRENT_STATE_ASSESSMENT.md
 - [x] Step 4: capture stream state (`running`, or `ended` with a reason) from every backend, shown in `get_health` (`captures`). Stalls show through the frame age, not as a state. Verified on the Windows runner by closing a captured window (ADR 0013).
 - [x] Step 5: `restart_source` without stopping outputs, for screen sources with a running capture, optionally on another `source_id` (a closed window's id does not come back). Picker sources only while no output is open, which on Linux means every screen source (ADR 0013).
 - [ ] Step 6: versioned project file (save, load, validate; atomic write; no secrets).
+  - [x] 6a: stable scene and source ids (`scene_…`, `src_…`); commands take an id or a name (ADR 0014).
+  - [ ] 6b: the project file in a project directory set at start (`--project-dir`).
 - [x] Step 7: measurement harness (`streamforge-bench`): render, drop and CPU figures for one and two outputs, with and without health polling; baseline in `docs/testing.md`, informational CI job on all three runners.
 
 Acceptance:

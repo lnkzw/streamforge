@@ -220,7 +220,7 @@ impl Model {
 
     /// The capture behind screen source `source_id`, from the last health
     /// reading.
-    pub fn source_health(&self, source_id: u32) -> SourceHealth {
+    pub fn source_health(&self, source_id: &str) -> SourceHealth {
         self.health
             .as_ref()
             .map_or(SourceHealth::NotCapturing, |health| {
@@ -244,12 +244,17 @@ impl Model {
     }
 
     /// Deleting is irreversible; the UI asks first and then calls this.
-    pub fn delete_scene_confirmed(&mut self, name: &str) {
-        self.act("delete_scene", json!({ "name": name, "confirm": true }));
+    /// The scene's id and name from the list it showed must still agree,
+    /// so a scene replaced meanwhile is not deleted.
+    pub fn delete_scene_confirmed(&mut self, id: &str, name: &str) {
+        self.act(
+            "delete_scene",
+            json!({ "scene_id": id, "name": name, "confirm": true }),
+        );
     }
 
-    pub fn activate_scene(&mut self, name: &str) {
-        self.act("set_active_scene", json!({ "name": name }));
+    pub fn activate_scene(&mut self, id: &str, name: &str) {
+        self.act("set_active_scene", json!({ "scene_id": id, "name": name }));
     }
 
     pub fn add_source(&mut self, scene: &str, form: &SourceForm) {
@@ -283,24 +288,21 @@ impl Model {
         self.act("add_source", Value::Object(params));
     }
 
-    pub fn set_source_opacity(&mut self, scene: &str, name: &str, opacity: f32) {
-        self.act(
-            "update_source",
-            json!({ "scene": scene, "name": name, "opacity": opacity }),
-        );
+    /// Sources are named by their stable `id` from `list_scenes`.
+    pub fn set_source_opacity(&mut self, id: &str, opacity: f32) {
+        self.act("update_source", json!({ "id": id, "opacity": opacity }));
     }
 
-    pub fn remove_source(&mut self, scene: &str, name: &str) {
-        self.act("remove_source", json!({ "scene": scene, "name": name }));
+    pub fn remove_source(&mut self, id: &str) {
+        self.act("remove_source", json!({ "id": id }));
     }
 
     /// Start a screen source's capture again, optionally on another source
     /// from [`Model::screen_sources`]; outputs keep running. It ends the
     /// running capture, so the UI asks first while that one still works.
-    pub fn restart_source(&mut self, scene: &str, name: &str, source_id: Option<&str>) {
+    pub fn restart_source(&mut self, id: &str, source_id: Option<&str>) {
         let mut params = Map::new();
-        params.insert("scene".into(), scene.into());
-        params.insert("name".into(), name.into());
+        params.insert("id".into(), id.into());
         if let Some(id) = source_id {
             params.insert("source_id".into(), id.into());
         }
@@ -482,15 +484,14 @@ pub enum SourceHealth {
     Ended { reason: String },
 }
 
-fn source_health(health: &HealthReport, source_id: u32) -> SourceHealth {
+fn source_health(health: &HealthReport, source_id: &str) -> SourceHealth {
     // A stopped pipeline renders nothing; its last states are history.
     if !health.pipeline_running {
         return SourceHealth::NotCapturing;
     }
-    let capture = health
-        .captures
-        .iter()
-        .find(|capture| capture.kind == CaptureKind::Screen && capture.id == Some(source_id));
+    let capture = health.captures.iter().find(|capture| {
+        capture.kind == CaptureKind::Screen && capture.id.as_deref() == Some(source_id)
+    });
     match capture.map(|capture| &capture.state) {
         None => SourceHealth::NotCapturing,
         Some(CaptureState::Ended { reason }) => SourceHealth::Ended {
@@ -501,7 +502,7 @@ fn source_health(health: &HealthReport, source_id: u32) -> SourceHealth {
                 render
                     .sources
                     .iter()
-                    .find(|source| source.id.0 == source_id)
+                    .find(|source| source.id.as_str() == source_id)
             });
             SourceHealth::Capturing {
                 last_frame_age_ms: rendered.and_then(|source| source.last_frame_age_ms),
@@ -679,11 +680,11 @@ mod tests {
         }
     }
 
-    fn screen(id: u32, state: CaptureState) -> CaptureHealth {
+    fn screen(id: &str, state: CaptureState) -> CaptureHealth {
         CaptureHealth {
             kind: CaptureKind::Screen,
-            id: Some(id),
-            name: format!("screen {id}"),
+            id: Some(id.to_owned()),
+            name: format!("screen {}", id.trim_start_matches("src_")),
             state,
         }
     }
@@ -693,7 +694,7 @@ mod tests {
             pipeline_running: true,
             render: Some(LiveRenderStats {
                 sources: vec![LiveSourceStats {
-                    id: SourceId(1),
+                    id: SourceId::from("src_1"),
                     name: "screen 1".to_owned(),
                     kind: "live",
                     frames_consumed: 10,
@@ -707,9 +708,9 @@ mod tests {
             recording: Some(output(true, None, 0)),
             streaming: None,
             captures: vec![
-                screen(1, CaptureState::Running),
+                screen("src_1", CaptureState::Running),
                 screen(
-                    2,
+                    "src_2",
                     CaptureState::Ended {
                         reason: "the captured window was closed".to_owned(),
                     },
@@ -722,24 +723,24 @@ mod tests {
     fn source_health_joins_capture_state_and_frame_age() {
         let health = report();
         assert_eq!(
-            source_health(&health, 1),
+            source_health(&health, "src_1"),
             SourceHealth::Capturing {
                 last_frame_age_ms: Some(1500),
                 frames_consumed: 10,
             }
         );
         assert_eq!(
-            source_health(&health, 2),
+            source_health(&health, "src_2"),
             SourceHealth::Ended {
                 reason: "the captured window was closed".to_owned()
             }
         );
-        assert_eq!(source_health(&health, 3), SourceHealth::NotCapturing);
+        assert_eq!(source_health(&health, "src_3"), SourceHealth::NotCapturing);
         // Running, but not rendered here: no frame count to show.
         let mut health = health;
-        health.captures.push(screen(4, CaptureState::Running));
+        health.captures.push(screen("src_4", CaptureState::Running));
         assert_eq!(
-            source_health(&health, 4),
+            source_health(&health, "src_4"),
             SourceHealth::Capturing {
                 last_frame_age_ms: None,
                 frames_consumed: 0,
@@ -747,7 +748,7 @@ mod tests {
         );
         // A stopped pipeline's last states are history.
         health.pipeline_running = false;
-        assert_eq!(source_health(&health, 1), SourceHealth::NotCapturing);
+        assert_eq!(source_health(&health, "src_1"), SourceHealth::NotCapturing);
     }
 
     #[test]

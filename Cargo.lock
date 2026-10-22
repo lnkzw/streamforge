@@ -1386,6 +1386,7 @@ dependencies = [
  "capture-api",
  "command-api",
  "encoder-ffmpeg",
+ "getrandom 0.4.3",
  "media-core",
  "rtmp-test-server",
  "serde",

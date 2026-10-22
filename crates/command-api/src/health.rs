@@ -48,7 +48,7 @@ pub struct CaptureHealth {
     pub kind: CaptureKind,
     /// The scene source's `id`, as in `list_scenes` and `render.sources`
     /// (screen sources of a scene only).
-    pub id: Option<u32>,
+    pub id: Option<String>,
     /// Scene source name, `screen layer`, or the audio input's name.
     pub name: String,
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
@@ -95,7 +95,7 @@ mod tests {
             recording: None,
             captures: vec![CaptureHealth {
                 kind: CaptureKind::Screen,
-                id: Some(3),
+                id: Some("src_desk".to_owned()),
                 name: "desk".to_owned(),
                 state: CaptureState::Ended {
                     reason: "the captured window was closed".to_owned(),
@@ -132,7 +132,7 @@ mod tests {
         assert!(stream.get("counters").is_none(), "{stream}");
         assert_eq!(
             value["captures"][0],
-            json!({"kind": "screen", "id": 3, "name": "desk", "state": "ended",
+            json!({"kind": "screen", "id": "src_desk", "name": "desk", "state": "ended",
                    "reason": "the captured window was closed"})
         );
     }

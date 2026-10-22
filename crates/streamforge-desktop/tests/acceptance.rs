@@ -101,7 +101,41 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
                 .any(|scene| scene.name == "Show" && scene.sources.len() == 1)
         })
     });
-    model.activate_scene("Show");
+    // Source actions name the source by its id from the scene list.
+    let show = |m: &Model| {
+        m.scenes
+            .as_ref()
+            .and_then(|list| list.scenes.iter().find(|scene| scene.name == "Show"))
+            .cloned()
+            .expect("Show")
+    };
+    let red = show(&model).sources[0].id.clone();
+    model.set_source_opacity(&red, 0.5);
+    wait(&mut model, "the new opacity", |m| {
+        show(m).sources[0].opacity == 0.5
+    });
+    model.add_source(
+        "Show",
+        &SourceForm {
+            name: "spare".to_owned(),
+            kind: SourceType::ColorBars,
+            color: [0, 0, 0, 255],
+            rect: None,
+            opacity: 1.0,
+            screen_source: None,
+        },
+    );
+    wait(&mut model, "the spare source", |m| {
+        show(m).sources.len() == 2
+    });
+    let spare = show(&model).sources[1].id.clone();
+    model.remove_source(&spare);
+    wait(&mut model, "the spare source to go", |m| {
+        show(m).sources.iter().all(|source| source.id != spare)
+    });
+    assert!(errors(&model).is_empty(), "{:?}", model.log);
+    let show_id = show(&model).id;
+    model.activate_scene(&show_id, "Show");
     wait(&mut model, "the scene to be active", |m| {
         m.scenes.as_ref().is_some_and(|list| list.active == "Show")
     });
@@ -158,11 +192,17 @@ fn engine_errors_reach_the_log() {
         errors(m).iter().any(|text| text.contains("already exists"))
     });
     // The active scene cannot be deleted, even when confirmed.
-    model.delete_scene_confirmed("Test pattern");
+    model.delete_scene_confirmed("scene_test_pattern", "Test pattern");
     wait(&mut model, "the delete to be refused", |m| {
         errors(m)
             .iter()
             .any(|text| text.starts_with("delete_scene") && text.contains("active"))
+    });
+    // An id and a name that no longer agree (the listed scene was replaced)
+    // delete nothing.
+    model.delete_scene_confirmed("scene_test_pattern", "Twice");
+    wait(&mut model, "the stale delete to be refused", |m| {
+        errors(m).iter().any(|text| text.contains("is named"))
     });
 }
 

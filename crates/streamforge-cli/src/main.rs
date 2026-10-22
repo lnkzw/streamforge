@@ -726,7 +726,7 @@ mod tests {
             streaming: Some(output(Some(command_api::StreamState::Reconnecting), true)),
             captures: vec![command_api::CaptureHealth {
                 kind: command_api::CaptureKind::Screen,
-                id: Some(3),
+                id: Some("src_desk".to_owned()),
                 name: "desk".into(),
                 state: command_api::CaptureState::Ended {
                     reason: "the captured window was closed".into(),

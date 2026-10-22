@@ -2,6 +2,12 @@
 //!
 //! The engine keeps a collection of scenes; the media pipeline renders the
 //! active one. Edits to the active scene apply live while the pipeline runs.
+//!
+//! Scenes and sources have stable ids (ADR 0014): opaque strings with a
+//! type prefix, assigned by the engine and never reused. Commands name a
+//! scene or source by id or by name.
+
+use std::fmt;
 
 use capture_api::{CursorMode, VideoSourceKind};
 use serde::Serialize;
@@ -14,6 +20,74 @@ pub const MAX_SCENES: usize = 16;
 pub const MAX_SCENE_SOURCES: usize = 16;
 /// Longest scene or source name, in characters.
 pub const MAX_NAME_CHARS: usize = 64;
+/// Scene ids start with this; the rest is opaque.
+pub const SCENE_ID_PREFIX: &str = "scene_";
+/// Source ids start with this; the rest is opaque.
+pub const SOURCE_ID_PREFIX: &str = "src_";
+/// Longest scene or source id, in bytes (`a-z`, `0-9` and `_`).
+pub const MAX_ID_LEN: usize = 64;
+
+/// How a command names a scene: by id, by name, or by both, which must then
+/// name the same scene. The id is looked up first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneRef {
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
+impl SceneRef {
+    pub fn id(id: impl Into<String>) -> Self {
+        Self {
+            id: Some(id.into()),
+            name: None,
+        }
+    }
+
+    pub fn name(name: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            name: Some(name.into()),
+        }
+    }
+}
+
+impl fmt::Display for SceneRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.id, &self.name) {
+            (Some(id), _) => write!(f, "`{id}`"),
+            (None, Some(name)) => write!(f, "`{name}`"),
+            (None, None) => f.write_str("(no scene given)"),
+        }
+    }
+}
+
+/// How a command names a source: by id (unique across all scenes), or by
+/// its scene and name. With an id, a scene or name given as well must
+/// match it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceRef {
+    pub id: Option<String>,
+    pub scene: Option<SceneRef>,
+    pub name: Option<String>,
+}
+
+impl SourceRef {
+    pub fn id(id: impl Into<String>) -> Self {
+        Self {
+            id: Some(id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The source `name` in the scene named `scene`.
+    pub fn named(scene: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            scene: Some(SceneRef::name(scene)),
+            name: Some(name.into()),
+        }
+    }
+}
 
 /// What a source shows.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,8 +130,8 @@ pub struct SourceRect {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SourceSpec {
-    /// Stable id assigned by the engine.
-    pub id: u32,
+    /// Stable id assigned by the engine (`src_…`), unique across scenes.
+    pub id: String,
     pub name: String,
     #[serde(flatten)]
     pub kind: SourceKind,
@@ -69,6 +143,8 @@ pub struct SourceSpec {
 /// A scene; sources are drawn in order (later ones on top).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SceneSpec {
+    /// Stable id assigned by the engine (`scene_…`).
+    pub id: String,
     pub name: String,
     pub sources: Vec<SourceSpec>,
 }
@@ -78,13 +154,15 @@ pub struct SceneSpec {
 pub struct SceneList {
     pub canvas_width: u32,
     pub canvas_height: u32,
+    /// Name of the active scene.
     pub active: String,
+    pub active_id: String,
     pub scenes: Vec<SceneSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddSourceRequest {
-    pub scene: String,
+    pub scene: SceneRef,
     pub name: String,
     pub kind: SourceKind,
     /// `None`: the whole canvas.
@@ -94,8 +172,7 @@ pub struct AddSourceRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateSourceRequest {
-    pub scene: String,
-    pub name: String,
+    pub source: SourceRef,
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub width: Option<f32>,

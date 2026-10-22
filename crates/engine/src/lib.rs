@@ -6,6 +6,7 @@
 //! by the composition root.
 
 mod composite;
+mod ids;
 mod mix;
 mod outputs;
 mod pipeline;
@@ -196,23 +197,19 @@ impl CommandHandler for Engine {
                 .map(|report| CommandOutput::StreamingReport(Box::new(report))),
             Command::ListScenes => Ok(CommandOutput::SceneList(self.list_scenes())),
             Command::CreateScene { name } => self.create_scene(&name).map(CommandOutput::SceneList),
-            Command::DeleteScene { name } => self.delete_scene(&name).map(CommandOutput::SceneList),
-            Command::SetActiveScene { name } => {
-                self.set_active_scene(&name).map(CommandOutput::SceneList)
+            Command::DeleteScene(scene) => self.delete_scene(&scene).map(CommandOutput::SceneList),
+            Command::SetActiveScene(scene) => {
+                self.set_active_scene(&scene).map(CommandOutput::SceneList)
             }
             Command::AddSource(request) => self.add_source(&request).map(CommandOutput::SceneList),
             Command::UpdateSource(request) => {
                 self.update_source(&request).map(CommandOutput::SceneList)
             }
-            Command::RemoveSource { scene, name } => self
-                .remove_source(&scene, &name)
-                .map(CommandOutput::SceneList),
-            Command::RestartSource {
-                scene,
-                name,
-                source_id,
-            } => self
-                .restart_source(&scene, &name, source_id.as_deref())
+            Command::RemoveSource(source) => {
+                self.remove_source(&source).map(CommandOutput::SceneList)
+            }
+            Command::RestartSource { source, source_id } => self
+                .restart_source(&source, source_id.as_deref())
                 .map(CommandOutput::SceneList),
             Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
             Command::SetMixerStrip(change) => {
@@ -264,7 +261,7 @@ pub(crate) fn command_error(error: CaptureError) -> CommandError {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use std::sync::Arc;
 
@@ -1149,20 +1146,47 @@ mod tests {
         run(&mut engine, "set_active_scene", json!({"name": "Main"}));
         run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
         assert_eq!(starts.get(), 2);
-        // Removing a source from every scene ends its capture.
+        // Removing a source from every scene ends its capture at once, also
+        // when its scene is not the rendered one.
+        let brb_desk = source_id(&mut engine, "BRB", "desk");
         run(
             &mut engine,
             "remove_source",
             json!({"scene": "Main", "name": "desk"}),
         );
+        let ids = |engine: &mut Engine| -> Vec<Option<String>> {
+            health(engine)
+                .captures
+                .into_iter()
+                .map(|capture| capture.id)
+                .collect()
+        };
+        assert_eq!(ids(&mut engine), [Some(brb_desk.clone())]);
+        // So does deleting a scene whose capture is kept.
+        run(&mut engine, "create_scene", json!({"name": "Spare"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Spare", "name": "cam", "kind": "screen"}),
+        );
+        run(&mut engine, "set_active_scene", json!({"name": "Spare"}));
+        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        assert_eq!(ids(&mut engine).len(), 2);
+        run(
+            &mut engine,
+            "delete_scene",
+            json!({"name": "Spare", "confirm": true}),
+        );
+        assert_eq!(ids(&mut engine), [Some(brb_desk)]);
         let CommandOutput::PreviewState(preview) =
             run(&mut engine, "set_preview", json!({"enabled": false}))
         else {
             panic!("unexpected output");
         };
         let pipeline = preview.pipeline.expect("pipeline report");
-        // One capture retired when `Main`'s source went, one at the stop.
-        assert_eq!(pipeline.scene_captures.len(), 2, "{pipeline:?}");
+        // Main's and Spare's captures retired when their sources went; BRB's
+        // at the stop.
+        assert_eq!(pipeline.scene_captures.len(), 3, "{pipeline:?}");
         assert!(preview.frames_published.is_some());
     }
 
@@ -1172,12 +1196,15 @@ mod tests {
         let dir = TempDir::new("capture-state");
         let (engine, _starts, ends) = engine_with_screen_streams();
         let mut engine = engine.with_output_dir(&dir.0);
-        run(
+        let CommandOutput::SceneList(scenes) = run(
             &mut engine,
             "add_source",
             json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
                    "source_id": "fake:1"}),
-        );
+        ) else {
+            panic!("unexpected output");
+        };
+        let desk_id = scenes.scenes[0].sources[2].id.clone();
         start(&mut engine, json!({"file_name": "ended.mkv"})).expect("start");
         let desk = |health: &command_api::HealthReport| {
             health
@@ -1187,9 +1214,33 @@ mod tests {
                 .cloned()
                 .expect("desk capture")
         };
-        let running = desk(&health(&mut engine));
+        // Render counters are published every 250 ms.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let report = loop {
+            let report = health(&mut engine);
+            let rendered = report.render.as_ref().is_some_and(|render| {
+                render
+                    .sources
+                    .iter()
+                    .any(|source| source.id.as_str() == desk_id)
+            });
+            if rendered || Instant::now() >= deadline {
+                break report;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let running = desk(&report);
         assert_eq!(running.kind, command_api::CaptureKind::Screen);
-        assert!(running.id.is_some());
+        // The same id as in list_scenes, in captures and render sources.
+        assert_eq!(running.id.as_deref(), Some(desk_id.as_str()));
+        let rendered = report.render.expect("render");
+        assert!(
+            rendered
+                .sources
+                .iter()
+                .any(|source| source.id.as_str() == desk_id),
+            "{rendered:?}"
+        );
         assert_eq!(running.state, capture_api::CaptureState::Running);
 
         // The system ends the capture: health says so, with the reason, and
@@ -1353,6 +1404,19 @@ mod tests {
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
+    /// The id `list_scenes` gives source `name` of `scene`.
+    fn source_id(engine: &mut Engine, scene: &str, name: &str) -> String {
+        let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
+            panic!("unexpected output");
+        };
+        list.scenes
+            .into_iter()
+            .find(|candidate| candidate.name == scene)
+            .and_then(|scene| scene.sources.into_iter().find(|source| source.name == name))
+            .map(|source| source.id)
+            .expect("source")
+    }
+
     /// Screen sources of `scene`: (name, source_id).
     fn screen_ids(engine: &mut Engine, scene: &str) -> Vec<(String, Option<String>)> {
         let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
@@ -1441,11 +1505,9 @@ mod tests {
         assert_eq!(starts.get(), 2);
         // Main's capture keeps running off air, and ends there.
         ends.borrow()[0].end(|| "the captured window was closed".to_owned());
-        run(
-            &mut engine,
-            "restart_source",
-            json!({"scene": "Main", "name": "cam"}),
-        );
+        // By id alone: source ids are unique across scenes.
+        let cam = source_id(&mut engine, "Main", "cam");
+        run(&mut engine, "restart_source", json!({"id": cam}));
         assert_eq!(starts.get(), 3);
         let captures = health(&mut engine).captures;
         assert_eq!(captures.len(), 2, "{captures:?}");

@@ -160,7 +160,10 @@ async fn control_lets_an_agent_create_a_test_scene() {
         .find(|tool| tool.name == "add_source")
         .expect("add_source");
     let schema: &JsonObject = &add_tool.input_schema;
-    assert_eq!(schema["required"], json!(["scene", "name", "kind"]));
+    // The scene by `scene_id` or by name: neither is required alone.
+    assert_eq!(schema["required"], json!(["name", "kind"]));
+    let properties = schema["properties"].as_object().expect("properties");
+    assert!(properties.contains_key("scene_id") && properties.contains_key("scene"));
 
     ok(&call(&client, "create_scene", json!({"name": "Agent test"})).await);
     ok(&call(
@@ -178,6 +181,11 @@ async fn control_lets_an_agent_create_a_test_scene() {
         .cloned()
         .expect("created scene");
     assert_eq!(scene["sources"][0]["kind"], "color_bars");
+    // An agent can name the source by its id alone.
+    let id = scene["sources"][0]["id"].as_str().expect("source id");
+    assert!(id.starts_with("src_"), "{id}");
+    let moved = call(&client, "update_source", json!({"id": id, "x": 8})).await;
+    assert_eq!(ok(&moved)["scenes"][1]["sources"][0]["x"], 8.0);
     // Screen capture and deleting need sensitive access.
     let screen = call(
         &client,

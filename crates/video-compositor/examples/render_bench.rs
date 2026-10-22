@@ -23,10 +23,10 @@ fn main() {
     let overlay = pattern::solid(160, 160, [128, 128, 128, 128]).expect("overlay");
     let mut scene = Scene::new(1920, 1080);
     scene.layers = vec![
-        Layer::new("bars", SourceId(0), Transform::IDENTITY),
+        Layer::new("bars", SourceId::from("0"), Transform::IDENTITY),
         Layer::new(
             "screen",
-            SourceId(1),
+            SourceId::from("1"),
             Transform::fit(
                 2560,
                 1440,
@@ -39,12 +39,12 @@ fn main() {
             ),
         )
         .with_opacity(0.9),
-        Layer::new("overlay", SourceId(2), Transform::at(100.5, 200.25)),
+        Layer::new("overlay", SourceId::from("2"), Transform::at(100.5, 200.25)),
     ];
     let sources = [
-        (SourceId(0), &bars),
-        (SourceId(1), &screen),
-        (SourceId(2), &overlay),
+        (SourceId::from("0"), &bars),
+        (SourceId::from("1"), &screen),
+        (SourceId::from("2"), &overlay),
     ];
     let mut target = VideoFrame::zeroed(1920, 1080, PixelFormat::Bgra8).expect("target");
     let max_threads = CpuRenderer::with_available_parallelism().threads();
@@ -56,7 +56,7 @@ fn main() {
             renderer
                 .render(
                     &scene,
-                    |id| sources.iter().find(|(s, _)| *s == id).map(|(_, f)| *f),
+                    |id| sources.iter().find(|(s, _)| s == id).map(|(_, f)| *f),
                     &mut target,
                 )
                 .expect("render");

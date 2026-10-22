@@ -4,7 +4,7 @@ Assessment of the StreamForge repository against `ARCHITECTURE_VISION.md`, `FUNC
 
 - **Date:** 2026-10-21
 - **Commit:** `851abfa` (`main`, after M9c, PR #12).
-- **Progress since:** steps 0–5 and 7 of the plan (§9) are implemented (ADR 0012, ADR 0013, roadmap M10). The findings below describe the state at `851abfa`.
+- **Progress since:** steps 0–5 and 7 of the plan (§9) are implemented, and the ids of step 6 (ADR 0012, ADR 0013, ADR 0014, roadmap M10). The findings below describe the state at `851abfa`.
 - **Status labels:**
   - **Satisfied:** the principle holds and evidence backs it.
   - **Partial:** some of it holds; the gap is named.
@@ -368,6 +368,6 @@ Each item names its evidence and the condition that would justify revisiting it.
 ### 10.2 Open questions for the project owner
 
 1. Is an **extension layer** in scope now that the first end-to-end recording works (AGENTS.md non-goal)? The answer changes whether `CaptureBackend` and the source model should become a public SDK.
-2. **Project file location and identity:** a user-chosen path, or a projects directory next to `--output-dir`? Should commands move from scene names to scene ids when projects exist?
+2. **Project file location and identity:** a user-chosen path, or a projects directory next to `--output-dir`? Should commands move from scene names to scene ids when projects exist? *Decided 2026-10-22:* a project directory set at start; opaque prefixed string ids, with commands taking an id or a name (ADR 0014).
 3. **Output profiles:** is a master recording at a different resolution or bit rate than the stream a near-term goal? It decides whether per-output canvases (and the copy and conversion work in §6.1.1) move from aspirational to planned.
 4. **Audio routing depth:** are buses and sends (vision §6) in scope, or is "one program mix plus per-output track selection" enough for the next phase?

@@ -29,9 +29,10 @@ pub use registry::{
     params_schema, registry,
 };
 pub use scenes::{
-    AddSourceRequest, AudioSetup, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, MixerState,
-    PreviewState, Rgba, SceneList, SceneSpec, SourceKind, SourceRect, SourceSpec, StripChange,
-    StripState, UpdateSourceRequest,
+    AddSourceRequest, AudioSetup, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
+    MixerState, PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef,
+    SceneSpec, SourceKind, SourceRect, SourceRef, SourceSpec, StripChange, StripState,
+    UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
@@ -92,24 +93,16 @@ pub enum Command {
         name: String,
     },
     /// Delete a scene that is not active (requires `confirm: true`).
-    DeleteScene {
-        name: String,
-    },
+    DeleteScene(SceneRef),
     /// Make a scene the one the pipeline renders (live if running).
-    SetActiveScene {
-        name: String,
-    },
+    SetActiveScene(SceneRef),
     AddSource(AddSourceRequest),
     UpdateSource(UpdateSourceRequest),
-    RemoveSource {
-        scene: String,
-        name: String,
-    },
+    RemoveSource(SourceRef),
     /// Restart a screen source's capture while outputs keep running.
     RestartSource {
-        scene: String,
-        name: String,
-        /// Capture this source from now on (the scene keeps it).
+        source: SourceRef,
+        /// Capture this screen source from now on (the scene keeps it).
         source_id: Option<String>,
     },
     /// Mixer strips, gains and peak levels.

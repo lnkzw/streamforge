@@ -93,6 +93,8 @@ pub struct PipelineReport {
 /// How the screen capture of one scene source ended.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SceneCaptureOutcome {
+    /// The scene source's id (as in `list_scenes`) and name.
+    pub id: String,
     pub source: String,
     pub report: Option<VideoCaptureReport>,
     pub error: Option<ErrorSummary>,

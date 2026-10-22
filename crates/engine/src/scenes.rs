@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use command_api::{
-    AddSourceRequest, CommandError, ErrorCode, MAX_SCENE_SOURCES, MAX_SCENES, Rgba, SceneList,
-    SceneSpec, SourceKind, SourceRect, SourceSpec, UpdateSourceRequest,
+    AddSourceRequest, CommandError, ErrorCode, MAX_SCENE_SOURCES, MAX_SCENES, Rgba,
+    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind, SourceRect,
+    SourceRef, SourceSpec, UpdateSourceRequest,
 };
 use media_core::{FrameMailbox, VideoFrame};
 use serde_json::json;
@@ -20,35 +21,39 @@ use video_compositor::{
 };
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, overlay_x};
+use crate::ids::new_id;
 
 /// The built-in scene (the M3 reference scene).
 pub(crate) const DEFAULT_SCENE: &str = "Test pattern";
-/// Ids of the built-in sources. The overlay moves (as in the reference
-/// scene) while it keeps its built-in rectangle; ids are never reused, so
-/// user sources are never animated.
-const BUILTIN_BARS: u32 = 1;
-const BUILTIN_OVERLAY: u32 = 2;
+/// Fixed ids of the built-in scene and sources, so a saved and loaded
+/// collection keeps them. The overlay moves (as in the reference scene)
+/// while it keeps its built-in rectangle; generated ids never look like
+/// these, so user sources are never animated.
+const DEFAULT_SCENE_ID: &str = "scene_test_pattern";
+const BUILTIN_BARS: &str = "src_color_bars";
+const BUILTIN_OVERLAY: &str = "src_overlay";
 const BUILTIN_OVERLAY_RECT: SourceRect = SourceRect {
     x: 64.0,
     y: 120.0,
     width: 160.0,
     height: 160.0,
 };
-/// Compositor id of the legacy `screen: true` output layer.
-const EXTRA_SCREEN: SourceId = SourceId(u32::MAX);
+/// Compositor id of the legacy `screen: true` output layer; not a scene
+/// source id (those start with `src_`).
+const EXTRA_SCREEN: &str = "screen_layer";
 /// Solid colors are tiny frames stretched over their rectangle.
 const SOLID_SIZE: u32 = 8;
 
 pub(crate) struct SceneCollection {
     scenes: Vec<SceneSpec>,
+    /// Id of the active scene.
     active: String,
-    next_id: u32,
 }
 
 impl SceneCollection {
     pub fn new() -> Self {
-        let builtin = |id, name: &str, kind, rect| SourceSpec {
-            id,
+        let builtin = |id: &str, name: &str, kind, rect| SourceSpec {
+            id: id.to_owned(),
             name: name.to_owned(),
             kind,
             rect,
@@ -56,6 +61,7 @@ impl SceneCollection {
         };
         Self {
             scenes: vec![SceneSpec {
+                id: DEFAULT_SCENE_ID.to_owned(),
                 name: DEFAULT_SCENE.to_owned(),
                 sources: vec![
                     builtin(
@@ -75,59 +81,124 @@ impl SceneCollection {
                     ),
                 ],
             }],
-            active: DEFAULT_SCENE.to_owned(),
-            next_id: BUILTIN_OVERLAY + 1,
+            active: DEFAULT_SCENE_ID.to_owned(),
         }
     }
 
-    fn allocate_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        id
-    }
-
     pub fn list(&self) -> SceneList {
+        let active = self.active();
         SceneList {
             canvas_width: CANVAS_WIDTH,
             canvas_height: CANVAS_HEIGHT,
-            active: self.active.clone(),
+            active: active.name.clone(),
+            active_id: active.id.clone(),
             scenes: self.scenes.clone(),
         }
     }
 
     /// Ids of the screen sources in any scene (their captures may keep
     /// running while another scene is shown).
-    pub fn screen_source_ids(&self) -> Vec<u32> {
-        self.scenes
-            .iter()
-            .flat_map(|scene| &scene.sources)
+    pub fn screen_source_ids(&self) -> Vec<String> {
+        self.sources()
             .filter(|source| matches!(source.kind, SourceKind::Screen { .. }))
-            .map(|source| source.id)
+            .map(|source| source.id.clone())
             .collect()
+    }
+
+    fn sources(&self) -> impl Iterator<Item = &SourceSpec> {
+        self.scenes.iter().flat_map(|scene| &scene.sources)
     }
 
     pub fn active(&self) -> &SceneSpec {
         self.scenes
             .iter()
-            .find(|scene| scene.name == self.active)
+            .find(|scene| scene.id == self.active)
             .unwrap_or(&self.scenes[0])
     }
 
-    pub fn get(&self, name: &str) -> Result<&SceneSpec, CommandError> {
-        self.scenes
+    /// The scene `scene` names: by id first; a name given as well must be
+    /// that scene's.
+    fn scene_index(&self, scene: &SceneRef) -> Result<usize, CommandError> {
+        match (&scene.id, &scene.name) {
+            (Some(id), name) => {
+                let index = self
+                    .scenes
+                    .iter()
+                    .position(|scene| scene.id == *id)
+                    .ok_or_else(|| not_found_id("scene", "scene_id", id))?;
+                let found = &self.scenes[index].name;
+                if let Some(name) = name
+                    && name != found
+                {
+                    return Err(mismatch(format!(
+                        "scene `{id}` is named `{found}`, not `{name}`"
+                    )));
+                }
+                Ok(index)
+            }
+            (None, Some(name)) => self
+                .scenes
+                .iter()
+                .position(|scene| scene.name == *name)
+                .ok_or_else(|| not_found("scene", name)),
+            (None, None) => Err(mismatch("no scene given: pass `scene_id` or a name")),
+        }
+    }
+
+    /// Where the source `source` names is: by id first (ids are unique
+    /// across scenes); a scene or name given as well must match.
+    fn source_index(&self, source: &SourceRef) -> Result<(usize, usize), CommandError> {
+        if let Some(id) = &source.id {
+            let (scene, index) = self
+                .scenes
+                .iter()
+                .enumerate()
+                .find_map(|(scene, spec)| {
+                    let index = spec.sources.iter().position(|source| source.id == *id)?;
+                    Some((scene, index))
+                })
+                .ok_or_else(|| not_found_id("source", "id", id))?;
+            // A scene that does not exist does not hold it either: the
+            // reference disagrees (`invalid_params`), the source exists.
+            if let Some(wanted) = &source.scene
+                && self.scene_index(wanted).ok() != Some(scene)
+            {
+                return Err(mismatch(format!(
+                    "source `{id}` is in scene `{}`, not {wanted}",
+                    self.scenes[scene].name
+                )));
+            }
+            let found = &self.scenes[scene].sources[index].name;
+            if let Some(name) = &source.name
+                && name != found
+            {
+                return Err(mismatch(format!(
+                    "source `{id}` is named `{found}`, not `{name}`"
+                )));
+            }
+            return Ok((scene, index));
+        }
+        let (Some(scene), Some(name)) = (&source.scene, &source.name) else {
+            return Err(mismatch(
+                "no source given: pass its `id`, or its scene and name",
+            ));
+        };
+        let scene = self.scene_index(scene)?;
+        let index = self.scenes[scene]
+            .sources
             .iter()
-            .find(|scene| scene.name == name)
-            .ok_or_else(|| not_found("scene", name))
+            .position(|source| source.name == *name)
+            .ok_or_else(|| not_found("source", name))?;
+        Ok((scene, index))
     }
 
-    fn get_mut(&mut self, name: &str) -> Result<&mut SceneSpec, CommandError> {
-        self.scenes
-            .iter_mut()
-            .find(|scene| scene.name == name)
-            .ok_or_else(|| not_found("scene", name))
+    #[cfg(test)]
+    pub fn get(&self, scene: &SceneRef) -> Result<&SceneSpec, CommandError> {
+        Ok(&self.scenes[self.scene_index(scene)?])
     }
 
-    pub fn create(&mut self, name: &str) -> Result<(), CommandError> {
+    /// Create an empty scene; returns its id.
+    pub fn create(&mut self, name: &str) -> Result<String, CommandError> {
         if self.scenes.iter().any(|scene| scene.name == name) {
             return Err(CommandError::new(
                 ErrorCode::InvalidParams,
@@ -140,34 +211,43 @@ impl SceneCollection {
                 format!("at most {MAX_SCENES} scenes; delete one first"),
             ));
         }
+        let id = new_id(SCENE_ID_PREFIX, |id| {
+            self.scenes.iter().any(|scene| scene.id == id)
+        })?;
         self.scenes.push(SceneSpec {
+            id: id.clone(),
             name: name.to_owned(),
             sources: Vec::new(),
         });
-        Ok(())
+        Ok(id)
     }
 
-    pub fn delete(&mut self, name: &str) -> Result<(), CommandError> {
-        self.get(name)?;
-        if name == self.active {
+    pub fn delete(&mut self, scene: &SceneRef) -> Result<(), CommandError> {
+        let index = self.scene_index(scene)?;
+        let scene = &self.scenes[index];
+        if scene.id == self.active {
             return Err(CommandError::new(
                 ErrorCode::InvalidState,
-                format!("`{name}` is the active scene; activate another one first"),
+                format!(
+                    "`{}` is the active scene; activate another one first",
+                    scene.name
+                ),
             ));
         }
-        self.scenes.retain(|scene| scene.name != name);
+        self.scenes.remove(index);
         Ok(())
     }
 
-    pub fn set_active(&mut self, name: &str) -> Result<(), CommandError> {
-        self.get(name)?;
-        name.clone_into(&mut self.active);
+    pub fn set_active(&mut self, scene: &SceneRef) -> Result<(), CommandError> {
+        let index = self.scene_index(scene)?;
+        self.active.clone_from(&self.scenes[index].id);
         Ok(())
     }
 
-    pub fn add_source(&mut self, request: &AddSourceRequest) -> Result<(), CommandError> {
-        let id = self.next_id;
-        let scene = self.get_mut(&request.scene)?;
+    /// Add a source; returns its id.
+    pub fn add_source(&mut self, request: &AddSourceRequest) -> Result<String, CommandError> {
+        let index = self.scene_index(&request.scene)?;
+        let scene = &self.scenes[index];
         if scene
             .sources
             .iter()
@@ -177,7 +257,7 @@ impl SceneCollection {
                 ErrorCode::InvalidParams,
                 format!(
                     "scene `{}` already has a source named `{}`",
-                    request.scene, request.name
+                    scene.name, request.name
                 ),
             ));
         }
@@ -187,24 +267,22 @@ impl SceneCollection {
                 format!("at most {MAX_SCENE_SOURCES} sources per scene"),
             ));
         }
-        scene.sources.push(SourceSpec {
-            id,
+        let id = new_id(SOURCE_ID_PREFIX, |id| {
+            self.sources().any(|source| source.id == id)
+        })?;
+        self.scenes[index].sources.push(SourceSpec {
+            id: id.clone(),
             name: request.name.clone(),
             kind: request.kind.clone(),
             rect: request.rect.unwrap_or_else(full_canvas),
             opacity: request.opacity,
         });
-        self.allocate_id();
-        Ok(())
+        Ok(id)
     }
 
     pub fn update_source(&mut self, request: &UpdateSourceRequest) -> Result<(), CommandError> {
-        let scene = self.get_mut(&request.scene)?;
-        let source = scene
-            .sources
-            .iter_mut()
-            .find(|source| source.name == request.name)
-            .ok_or_else(|| not_found("source", &request.name))?;
+        let (scene, index) = self.source_index(&request.source)?;
+        let source = &mut self.scenes[scene].sources[index];
         let rect = &mut source.rect;
         rect.x = request.x.unwrap_or(rect.x);
         rect.y = request.y.unwrap_or(rect.y);
@@ -214,46 +292,34 @@ impl SceneCollection {
         Ok(())
     }
 
-    pub fn source(&self, scene: &str, name: &str) -> Result<&SourceSpec, CommandError> {
-        self.get(scene)?
-            .sources
-            .iter()
-            .find(|source| source.name == name)
-            .ok_or_else(|| not_found("source", name))
+    pub fn source(&self, source: &SourceRef) -> Result<&SourceSpec, CommandError> {
+        let (scene, index) = self.source_index(source)?;
+        Ok(&self.scenes[scene].sources[index])
     }
 
-    /// Capture screen source `name` from `id` from now on.
+    /// Capture screen source `source` from `screen` from now on.
     pub fn set_screen_source_id(
         &mut self,
-        scene: &str,
-        name: &str,
-        id: &str,
+        source: &SourceRef,
+        screen: &str,
     ) -> Result<(), CommandError> {
-        let source = self
-            .get_mut(scene)?
-            .sources
-            .iter_mut()
-            .find(|source| source.name == name)
-            .ok_or_else(|| not_found("source", name))?;
-        match &mut source.kind {
+        let (scene, index) = self.source_index(source)?;
+        let spec = &mut self.scenes[scene].sources[index];
+        match &mut spec.kind {
             SourceKind::Screen { source_id, .. } => {
-                *source_id = Some(id.to_owned());
+                *source_id = Some(screen.to_owned());
                 Ok(())
             }
             _ => Err(CommandError::new(
                 ErrorCode::InvalidParams,
-                format!("`{name}` is not a screen source"),
+                format!("`{}` is not a screen source", spec.name),
             )),
         }
     }
 
-    pub fn remove_source(&mut self, scene: &str, name: &str) -> Result<(), CommandError> {
-        let scene = self.get_mut(scene)?;
-        let before = scene.sources.len();
-        scene.sources.retain(|source| source.name != name);
-        if scene.sources.len() == before {
-            return Err(not_found("source", name));
-        }
+    pub fn remove_source(&mut self, source: &SourceRef) -> Result<(), CommandError> {
+        let (scene, index) = self.source_index(source)?;
+        self.scenes[scene].sources.remove(index);
         Ok(())
     }
 
@@ -280,6 +346,16 @@ fn full_canvas() -> SourceRect {
 fn not_found(what: &str, name: &str) -> CommandError {
     CommandError::new(ErrorCode::NotFound, format!("no {what} named `{name}`"))
         .with_details(json!({ what: name }))
+}
+
+fn not_found_id(what: &str, field: &str, id: &str) -> CommandError {
+    CommandError::new(ErrorCode::NotFound, format!("no {what} with id `{id}`"))
+        .with_details(json!({ field: id }))
+}
+
+/// An id and a name that do not name the same scene or source.
+fn mismatch(message: impl Into<String>) -> CommandError {
+    CommandError::new(ErrorCode::InvalidParams, message)
 }
 
 /// Static frames by content, so rebuilding a scene reuses the same frames
@@ -322,7 +398,7 @@ impl FrameCache {
 /// Live inputs the build can use: screen captures by source id, and the
 /// legacy output screen layer.
 pub(crate) struct LiveFrames<'a> {
-    pub screens: &'a [(u32, Arc<FrameMailbox>)],
+    pub screens: &'a [(String, Arc<FrameMailbox>)],
     pub extra_screen: Option<&'a Arc<FrameMailbox>>,
 }
 
@@ -336,15 +412,15 @@ pub(crate) fn build(
     let mut canvas = Scene::new(CANVAS_WIDTH, CANVAS_HEIGHT);
     let mut sources = Vec::with_capacity(scene.sources.len() + 1);
     for spec in &scene.sources {
-        let id = SourceId(spec.id);
+        let id = SourceId::from(spec.id.as_str());
         let rect = spec.rect;
         let (layer, input) = match &spec.kind {
             SourceKind::ColorBars => (
-                stretched(spec, CANVAS_WIDTH, CANVAS_HEIGHT),
+                stretched(spec, id.clone(), CANVAS_WIDTH, CANVAS_HEIGHT),
                 SourceInput::Static(cache.bars()?),
             ),
             SourceKind::Solid { color } => (
-                stretched(spec, SOLID_SIZE, SOLID_SIZE),
+                stretched(spec, id.clone(), SOLID_SIZE, SOLID_SIZE),
                 SourceInput::Static(cache.solid(*color)?),
             ),
             SourceKind::Screen { .. } => {
@@ -359,7 +435,7 @@ pub(crate) fn build(
                     height: rect.height,
                 };
                 (
-                    Layer::fitted(spec.name.clone(), id, area),
+                    Layer::fitted(spec.name.clone(), id.clone(), area),
                     SourceInput::Live(Arc::clone(mailbox)),
                 )
             }
@@ -375,12 +451,13 @@ pub(crate) fn build(
         // Above the bottom source, as in the reference scene (bars, screen,
         // overlay).
         let at = canvas.layers.len().min(1);
+        let id = SourceId::from(EXTRA_SCREEN);
         canvas.layers.insert(
             at,
-            Layer::fitted("screen", EXTRA_SCREEN, SCREEN_BOX).with_opacity(0.9),
+            Layer::fitted("screen", id.clone(), SCREEN_BOX).with_opacity(0.9),
         );
         sources.push(SourceConfig {
-            id: EXTRA_SCREEN,
+            id,
             name: "screen".to_owned(),
             input: SourceInput::Live(Arc::clone(mailbox)),
         });
@@ -402,16 +479,16 @@ fn move_builtin_overlay(scene: &mut Scene, tick: u64) {
     if let Some(layer) = scene
         .layers
         .iter_mut()
-        .find(|layer| layer.source == SourceId(BUILTIN_OVERLAY))
+        .find(|layer| layer.source.as_str() == BUILTIN_OVERLAY)
     {
         layer.transform.x = overlay_x(tick);
     }
 }
 
-fn stretched(spec: &SourceSpec, width: u32, height: u32) -> Layer {
+fn stretched(spec: &SourceSpec, id: SourceId, width: u32, height: u32) -> Layer {
     Layer::new(
         spec.name.clone(),
-        SourceId(spec.id),
+        id,
         Transform {
             x: spec.rect.x,
             y: spec.rect.y,
@@ -431,7 +508,7 @@ mod tests {
 
     fn source(scene: &str, name: &str, kind: SourceKind) -> AddSourceRequest {
         AddSourceRequest {
-            scene: scene.to_owned(),
+            scene: SceneRef::name(scene),
             name: name.to_owned(),
             kind,
             rect: None,
@@ -470,8 +547,7 @@ mod tests {
         let mut cache = FrameCache::default();
         collection
             .update_source(&UpdateSourceRequest {
-                scene: DEFAULT_SCENE.to_owned(),
-                name: "overlay".to_owned(),
+                source: SourceRef::named(DEFAULT_SCENE, "overlay"),
                 x: Some(500.0),
                 y: None,
                 width: None,
@@ -486,15 +562,19 @@ mod tests {
         collection.create("Other").expect("create");
         collection
             .add_source(&AddSourceRequest {
-                scene: "Other".to_owned(),
+                scene: SceneRef::name("Other"),
                 name: "overlay".to_owned(),
                 kind: SourceKind::ColorBars,
                 rect: Some(BUILTIN_OVERLAY_RECT),
                 opacity: 1.0,
             })
             .expect("add");
-        let other =
-            build(collection.get("Other").expect("scene"), &none, &mut cache).expect("build");
+        let other = build(
+            collection.get(&SceneRef::name("Other")).expect("scene"),
+            &none,
+            &mut cache,
+        )
+        .expect("build");
         assert!(other.animation.is_none());
     }
 
@@ -548,14 +628,108 @@ mod tests {
                 .code,
             ErrorCode::NotFound
         );
-        collection.set_active("Show").expect("activate");
+        collection
+            .set_active(&SceneRef::name("Show"))
+            .expect("activate");
         assert_eq!(
-            collection.delete("Show").unwrap_err().code,
+            collection.delete(&SceneRef::name("Show")).unwrap_err().code,
             ErrorCode::InvalidState
         );
-        collection.set_active(DEFAULT_SCENE).expect("activate");
-        collection.delete("Show").expect("delete");
-        assert!(collection.get("Show").is_err());
+        collection
+            .set_active(&SceneRef::name(DEFAULT_SCENE))
+            .expect("activate");
+        collection.delete(&SceneRef::name("Show")).expect("delete");
+        assert!(collection.get(&SceneRef::name("Show")).is_err());
+    }
+
+    #[test]
+    fn scenes_and_sources_have_stable_ids_and_are_found_by_id_or_name() {
+        let mut collection = SceneCollection::new();
+        let list = collection.list();
+        assert_eq!(list.active_id, DEFAULT_SCENE_ID);
+        let builtin: Vec<_> = list.scenes[0].sources.iter().map(|s| &s.id).collect();
+        assert_eq!(builtin, [BUILTIN_BARS, BUILTIN_OVERLAY]);
+
+        let show = collection.create("Show").expect("create");
+        assert!(show.starts_with(SCENE_ID_PREFIX), "{show}");
+        let red = collection
+            .add_source(&AddSourceRequest {
+                scene: SceneRef::id(&show),
+                ..source("ignored", "red", SourceKind::ColorBars)
+            })
+            .expect("add");
+        assert!(red.starts_with(SOURCE_ID_PREFIX), "{red}");
+        // Source names repeat across scenes; ids do not.
+        let other = collection
+            .add_source(&source(DEFAULT_SCENE, "red", SourceKind::ColorBars))
+            .expect("add");
+        assert_ne!(red, other);
+
+        // By id alone, by scene and name, or by both when they agree.
+        let by_id = collection.source(&SourceRef::id(&red)).expect("by id");
+        assert_eq!(by_id.name, "red");
+        assert_eq!(
+            collection
+                .source(&SourceRef::named("Show", "red"))
+                .expect("by name")
+                .id,
+            red
+        );
+        let both = SourceRef {
+            id: Some(red.clone()),
+            scene: Some(SceneRef::name("Show")),
+            name: Some("red".to_owned()),
+        };
+        assert_eq!(collection.source(&both).expect("both").id, red);
+        collection
+            .set_active(&SceneRef {
+                id: Some(show.clone()),
+                name: Some("Show".to_owned()),
+            })
+            .expect("activate by both");
+        assert_eq!(collection.list().active, "Show");
+
+        // An id and a name that disagree are refused, not resolved by id.
+        for wrong in [
+            SourceRef {
+                name: Some("blue".to_owned()),
+                ..SourceRef::id(&red)
+            },
+            SourceRef {
+                scene: Some(SceneRef::name(DEFAULT_SCENE)),
+                ..SourceRef::id(&red)
+            },
+            // A scene that does not exist does not hold it either.
+            SourceRef {
+                scene: Some(SceneRef::name("Typo")),
+                ..SourceRef::id(&red)
+            },
+        ] {
+            let error = collection.source(&wrong).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{wrong:?}");
+        }
+        let wrong_scene = SceneRef {
+            id: Some(show.clone()),
+            name: Some(DEFAULT_SCENE.to_owned()),
+        };
+        assert_eq!(
+            collection.set_active(&wrong_scene).unwrap_err().code,
+            ErrorCode::InvalidParams
+        );
+        let unknown = collection.source(&SourceRef::id("src_gone")).unwrap_err();
+        assert_eq!(unknown.code, ErrorCode::NotFound);
+        assert_eq!(unknown.details, Some(json!({"id": "src_gone"})));
+
+        // Ids are random, not derived from names: adding a removed source's
+        // name again gives a new id.
+        collection
+            .remove_source(&SourceRef::id(&red))
+            .expect("remove");
+        let again = collection
+            .add_source(&source("Show", "red", SourceKind::ColorBars))
+            .expect("add again");
+        assert_ne!(again, red);
+        assert!(collection.source(&SourceRef::id(&red)).is_err());
     }
 
     #[test]
@@ -577,7 +751,10 @@ mod tests {
                 .add_source(&source("Show", name, kind))
                 .expect("add");
         }
-        let scene = collection.get("Show").expect("scene").clone();
+        let scene = collection
+            .get(&SceneRef::name("Show"))
+            .expect("scene")
+            .clone();
         let mut cache = FrameCache::default();
         let none = LiveFrames {
             screens: &[],
@@ -593,7 +770,7 @@ mod tests {
             panic!("static bars");
         };
         assert!(Arc::ptr_eq(a, b));
-        let screen_id = scene.sources[1].id;
+        let screen_id = scene.sources[1].id.clone();
         let mailbox = Arc::new(FrameMailbox::new());
         let with_capture = build(
             &scene,

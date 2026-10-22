@@ -125,7 +125,7 @@ Both probes are `sensitive` because they capture private content. Screen capture
  "recording": {"target", "elapsed_ms", "running", "state": null, "video_encoder": {"encoder", "hardware", "skipped"},
                "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth", "connects", "reconnect_attempts"},
  "streaming": {... the same fields; "state" is the stream state},
- "captures": [{"kind": "screen", "id": 3, "name": "desk", "state": "running"},
+ "captures": [{"kind": "screen", "id": "src_k3j9x2m4q8w1", "name": "desk", "state": "running"},
               {"kind": "audio", "id": null, "name": "default", "state": "ended", "reason": "..."}]}
 ```
 
@@ -216,7 +216,7 @@ Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_captur
   - `skipped_ticks`: ticks not rendered because rendering fell at least one frame behind.
   - `late_frames`: frames that finished after the next tick was due.
 - **Timing:** `render_time` (`{"min_ms", "mean_ms", "p95_ms", "p99_ms", "max_ms"}`).
-- **Sources:** a `sources` array. Each entry has `name`, `kind` (`static`/`live`), `frames_consumed`, `stale_ticks` and `missing_ticks`. Live sources also carry `mailbox` (`{"published", "replaced", "taken"}`), where `replaced` counts frames that were never composited.
+- **Sources:** a `sources` array. Each entry has `id` (in this reference scene `bars`, `screen` or `overlay`; in pipeline reports the scene source's id), `name`, `kind` (`static`/`live`), `frames_consumed`, `stale_ticks` and `missing_ticks`. Live sources also carry `mailbox` (`{"published", "replaced", "taken"}`), where `replaced` counts frames that were never composited.
 
 ### Audio mix probe
 
@@ -333,16 +333,25 @@ Errors:
 
 The engine keeps a collection of scenes on a 1920×1080 canvas and renders the **active** one. Changes to the active scene, or switching scenes, apply live while preview or outputs run. A live change that fails (e.g. the picker of a new screen source is cancelled) is undone and returns the error. Scenes live in memory only.
 
-At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active", "scenes": [{"name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`.
+At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active", "active_id", "scenes": [{"id", "name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`. `active` is the active scene's name, `active_id` its id.
 
+- **Ids (ADR 0014):** every scene and source has a stable id that the engine assigns: `scene_` or `src_` and 12 random characters (`a-z`, `0-9`). Clients treat ids as opaque strings and take them from `list_scenes`.
+  - An id never changes while its scene or source exists. Ids are random, so a removed source's id does not come back, and source ids are unique across all scenes.
+  - The built-in scene and its sources have fixed ids: `scene_test_pattern`, `src_color_bars` and `src_overlay`.
+  - `render.sources[].id` (in `get_health` and the stop reports) and `captures[].id` are these source ids. The screen layer renders as `screen_layer`.
+- **Naming a scene or source:** commands take an id or a name.
+  - A scene: `scene_id`, or its name (`name` in the scene commands, `scene` in the source commands).
+  - A source: its `id` alone, or its scene and `name`.
+  - The id is looked up first. Given both, they must name the same scene or source, otherwise the command is `invalid_params`. An id that names nothing is `not_found` with `details` `{"scene_id": ...}` or `{"id": ...}`; an unknown name gives `{"scene": ...}` or `{"source": ...}`.
+  - `source_id` is not a source id: it names what a screen source captures (from `list_screen_sources`).
 - **Scene commands:**
-  - `create_scene {name}` creates an empty scene (black).
-  - `set_active_scene {name}` switches the rendered scene.
-  - `delete_scene {name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
+  - `create_scene {name}` creates an empty scene (black); the scene list holds its id.
+  - `set_active_scene {scene_id | name}` switches the rendered scene.
+  - `delete_scene {scene_id | name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
 - **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
-- **`add_source`:** params `scene`, `name`, `kind`, optional rectangle and `opacity`.
+- **`add_source`:** params `scene_id` or `scene`, `name`, `kind`, optional rectangle and `opacity`. The scene list holds the new source's id.
   - Kinds:
     - `color_bars`: stretched to the rectangle.
     - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
@@ -353,10 +362,10 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - A screen source starts its capture when it becomes part of the rendered scene: the named source directly, otherwise through the system picker.
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
   - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`source_id`) start without waiting and are allowed.
-  - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
-- **`update_source`:** params `scene`, `name`, and any of `x`, `y`, `width`, `height`, `opacity`.
-- **`remove_source`:** params `scene`, `name`.
-- **`restart_source`:** params `scene`, `name`, optional `source_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
+  - Capture reports are in the output reports' `scene_captures` (`{"id", "source", "report", "error"}`, with the source's id and name): the most recent 64, with `scene_captures_omitted` counting older ones.
+- **`update_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and any of `x`, `y`, `width`, `height`, `opacity`.
+- **`remove_source`:** the source (`id`, or `scene` or `scene_id` and `name`).
+- **`restart_source`:** the source (`id`, or `scene` or `scene_id` and `name`), optional `source_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
   - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
   - **`source_id`:** capture this source from `list_screen_sources` from now on; the scene keeps it. A closed window's id never comes back, so restarting a window source needs the id of a window that exists. A display's id returns when the display reconnects, so the same id works then.
   - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `source_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
@@ -389,6 +398,8 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 
 ## Versioning policy
 
+- **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
+  - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
 - Adding a command, adding optional fields to a result, or adding an error code is backward compatible within v1. Clients must ignore unknown result fields and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` together with this document.

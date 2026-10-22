@@ -35,11 +35,12 @@ pub struct DesktopApp {
     stream_url: String,
     /// Typed into a password field; handed to the engine on start only.
     stream_key: String,
-    confirm_delete: Option<String>,
+    /// Id and name of the scene a deletion asks about.
+    confirm_delete: Option<(String, String)>,
     /// Source whose working capture the user asked to restart.
-    confirm_restart: Option<u32>,
+    confirm_restart: Option<String>,
     /// Chosen source to restart an ended named source on (`None`: same).
-    restart_targets: HashMap<u32, Option<String>>,
+    restart_targets: HashMap<String, Option<String>>,
     preview: Option<egui::TextureHandle>,
     rgba: Vec<u8>,
     meters: Vec<f32>,
@@ -185,25 +186,33 @@ impl DesktopApp {
         }
         let selected = selection(self.selected_scene.as_deref(), clicked.as_deref(), &scenes);
         self.selected_scene = Some(selected.clone());
+        // Scene actions send the listed id with the name: if the scene was
+        // replaced meanwhile, the engine refuses instead of acting on the
+        // new one.
+        let selected_id = scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.name == selected)
+            .map_or_else(String::new, |scene| scene.id.clone());
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(selected != scenes.active, egui::Button::new("Activate"))
                 .clicked()
             {
-                self.model.activate_scene(&selected);
+                self.model.activate_scene(&selected_id, &selected);
             }
             if ui
                 .add_enabled(selected != scenes.active, egui::Button::new("Delete…"))
                 .clicked()
             {
-                self.confirm_delete = Some(selected.clone());
+                self.confirm_delete = Some((selected_id.clone(), selected.clone()));
             }
         });
-        if let Some(name) = self.confirm_delete.clone() {
+        if let Some((id, name)) = self.confirm_delete.clone() {
             ui.label(RichText::new(format!("Delete scene `{name}`?")).color(Color32::ORANGE));
             ui.horizontal(|ui| {
                 if ui.button("Yes, delete").clicked() {
-                    self.model.delete_scene_confirmed(&name);
+                    self.model.delete_scene_confirmed(&id, &name);
                     self.confirm_delete = None;
                 }
                 if ui.button("Cancel").clicked() {
@@ -299,15 +308,14 @@ impl DesktopApp {
                 ui.label(format!("{} ({kind})", source.name));
                 if let SourceKind::Screen { source_id, .. } = &source.kind {
                     let picker = source_id.is_none();
-                    self.capture_state(ui, &scene.name, &source.name, source.id, picker);
+                    self.capture_state(ui, &source.id, picker);
                 }
                 let mut opacity = source.opacity;
                 if committed(&ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"))) {
-                    self.model
-                        .set_source_opacity(&scene.name, &source.name, opacity);
+                    self.model.set_source_opacity(&source.id, opacity);
                 }
                 if ui.button("Remove").clicked() {
-                    self.model.remove_source(&scene.name, &source.name);
+                    self.model.remove_source(&source.id);
                 }
             });
         }
@@ -366,7 +374,7 @@ impl DesktopApp {
     /// Restarting ends the running capture, so a working one asks first.
     /// An ended named source can restart on another listed source: a
     /// closed window's id does not come back.
-    fn capture_state(&mut self, ui: &mut egui::Ui, scene: &str, name: &str, id: u32, picker: bool) {
+    fn capture_state(&mut self, ui: &mut egui::Ui, id: &str, picker: bool) {
         let ended = match self.model.source_health(id) {
             SourceHealth::NotCapturing => {
                 ui.label(RichText::new("not capturing").weak());
@@ -392,11 +400,11 @@ impl DesktopApp {
                 true
             }
         };
-        if self.confirm_restart == Some(id) {
+        if self.confirm_restart.as_deref() == Some(id) {
             ui.label("End the working capture and start it again?");
             if ui.button("Yes, restart").clicked() {
                 self.confirm_restart = None;
-                self.model.restart_source(scene, name, None);
+                self.model.restart_source(id, None);
             }
             if ui.button("Cancel").clicked() {
                 self.confirm_restart = None;
@@ -426,19 +434,19 @@ impl DesktopApp {
             });
         if button.clicked() {
             if ended {
-                self.restart_targets.remove(&id);
-                self.model.restart_source(scene, name, target.as_deref());
+                self.restart_targets.remove(id);
+                self.model.restart_source(id, target.as_deref());
             } else {
-                self.confirm_restart = Some(id);
+                self.confirm_restart = Some(id.to_owned());
             }
         }
     }
 
     /// For an ended named source: restart on the same id, or on another
     /// listed source.
-    fn restart_target(&mut self, ui: &mut egui::Ui, id: u32) -> Option<String> {
+    fn restart_target(&mut self, ui: &mut egui::Ui, id: &str) -> Option<String> {
         const SAME: &str = "same source";
-        let selected = self.restart_targets.entry(id).or_default();
+        let selected = self.restart_targets.entry(id.to_owned()).or_default();
         match &self.model.screen_sources {
             Some(Ok(sources)) if !sources.is_empty() => {
                 // An id that is no longer listed is not sent.
@@ -674,14 +682,20 @@ mod tests {
 
     use super::*;
 
+    fn fixture_id(name: &str) -> String {
+        format!("scene_{}", name.to_lowercase().replace(' ', "_"))
+    }
+
     fn scenes(names: &[&str], active: &str) -> SceneList {
         SceneList {
             canvas_width: 1920,
             canvas_height: 1080,
             active: active.to_owned(),
+            active_id: fixture_id(active),
             scenes: names
                 .iter()
                 .map(|name| SceneSpec {
+                    id: fixture_id(name),
                     name: (*name).to_owned(),
                     sources: Vec::new(),
                 })

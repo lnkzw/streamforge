@@ -92,7 +92,7 @@ impl CpuRenderer {
         target: &mut VideoFrame,
     ) -> Result<RenderOutcome, RenderError>
     where
-        F: Fn(SourceId) -> Option<&'f VideoFrame>,
+        F: Fn(&SourceId) -> Option<&'f VideoFrame>,
     {
         if target.width() != scene.width
             || target.height() != scene.height
@@ -109,7 +109,7 @@ impl CpuRenderer {
         fill_background(target, scene.background);
         let mut outcome = RenderOutcome::default();
         for layer in scene.layers.iter().filter(|layer| layer.visible) {
-            match lookup(layer.source) {
+            match lookup(&layer.source) {
                 Some(source) => {
                     if self.draw_layer(layer, source, target) {
                         outcome.layers_drawn += 1;
@@ -345,10 +345,10 @@ mod tests {
     fn render(scene: &Scene, sources: &[(SourceId, &VideoFrame)], threads: usize) -> VideoFrame {
         let mut target =
             VideoFrame::zeroed(scene.width, scene.height, PixelFormat::Bgra8).expect("target");
-        let lookup = |id| {
+        let lookup = |id: &SourceId| {
             sources
                 .iter()
-                .find(|(source, _)| *source == id)
+                .find(|(source, _)| source == id)
                 .map(|(_, f)| *f)
         };
         CpuRenderer::new(threads)
@@ -394,9 +394,13 @@ mod tests {
         let s = scene(
             4,
             2,
-            vec![Layer::new("l", SourceId(1), Transform::at(1.0, 1.0))],
+            vec![Layer::new(
+                "l",
+                SourceId::from("1"),
+                Transform::at(1.0, 1.0),
+            )],
         );
-        let out = render(&s, &[(SourceId(1), &src)], 1);
+        let out = render(&s, &[(SourceId::from("1"), &src)], 1);
         assert_eq!(out.pixel(0, 1), [10, 20, 30, 255]);
         // Bgrx alpha byte is ignored: the layer is opaque.
         assert_eq!(out.pixel(1, 1), [1, 2, 3, 255]);
@@ -411,10 +415,10 @@ mod tests {
         let mut s = scene(
             1,
             1,
-            vec![Layer::new("l", SourceId(0), Transform::IDENTITY).with_opacity(0.5)],
+            vec![Layer::new("l", SourceId::from("0"), Transform::IDENTITY).with_opacity(0.5)],
         );
         s.background = [0, 0, 0, 255];
-        let out = render(&s, &[(SourceId(0), &src)], 1);
+        let out = render(&s, &[(SourceId::from("0"), &src)], 1);
         // src * 0.5 + black * (1 - 0.5)
         assert_eq!(out.pixel(0, 0), [100, 50, 0, 255]);
     }
@@ -426,10 +430,10 @@ mod tests {
         let mut s = scene(
             1,
             1,
-            vec![Layer::new("l", SourceId(0), Transform::IDENTITY)],
+            vec![Layer::new("l", SourceId::from("0"), Transform::IDENTITY)],
         );
         s.background = [200, 0, 0, 255];
-        let out = render(&s, &[(SourceId(0), &src)], 1);
+        let out = render(&s, &[(SourceId::from("0"), &src)], 1);
         // 200 * (255 - 128) / 255 = 99.6 -> 100
         assert_eq!(out.pixel(0, 0), [100, 0, 128, 255]);
     }
@@ -440,10 +444,10 @@ mod tests {
         let s = scene(
             1,
             1,
-            vec![Layer::new("l", SourceId(0), Transform::IDENTITY).with_opacity(0.0)],
+            vec![Layer::new("l", SourceId::from("0"), Transform::IDENTITY).with_opacity(0.0)],
         );
         assert_eq!(
-            render(&s, &[(SourceId(0), &src)], 1).pixel(0, 0),
+            render(&s, &[(SourceId::from("0"), &src)], 1).pixel(0, 0),
             [10, 20, 30, 255]
         );
     }
@@ -456,11 +460,15 @@ mod tests {
             2,
             1,
             vec![
-                Layer::new("red", SourceId(0), Transform::IDENTITY),
-                Layer::new("blue", SourceId(1), Transform::at(1.0, 0.0)),
+                Layer::new("red", SourceId::from("0"), Transform::IDENTITY),
+                Layer::new("blue", SourceId::from("1"), Transform::at(1.0, 0.0)),
             ],
         );
-        let out = render(&s, &[(SourceId(0), &red), (SourceId(1), &blue)], 1);
+        let out = render(
+            &s,
+            &[(SourceId::from("0"), &red), (SourceId::from("1"), &blue)],
+            1,
+        );
         assert_eq!(out.pixel(0, 0), RED);
         assert_eq!(out.pixel(1, 0), BLUE);
     }
@@ -479,8 +487,8 @@ mod tests {
             scale_x: 2.0,
             ..Transform::IDENTITY
         };
-        let s = scene(4, 1, vec![Layer::new("l", SourceId(0), transform)]);
-        let out = render(&s, &[(SourceId(0), &src)], 1);
+        let s = scene(4, 1, vec![Layer::new("l", SourceId::from("0"), transform)]);
+        let out = render(&s, &[(SourceId::from("0"), &src)], 1);
         let values: Vec<u8> = (0..4).map(|x| out.pixel(x, 0)[0]).collect();
         assert_eq!(values, vec![0, 64, 191, 255]);
     }
@@ -493,8 +501,8 @@ mod tests {
             scale_y: 0.5,
             ..Transform::IDENTITY
         };
-        let s = scene(2, 2, vec![Layer::new("l", SourceId(0), transform)]);
-        let out = render(&s, &[(SourceId(0), &src)], 1);
+        let s = scene(2, 2, vec![Layer::new("l", SourceId::from("0"), transform)]);
+        let out = render(&s, &[(SourceId::from("0"), &src)], 1);
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
             assert_eq!(out.pixel(x, y), [7, 8, 9, 255]);
         }
@@ -503,19 +511,23 @@ mod tests {
     #[test]
     fn missing_and_hidden_layers_are_skipped() {
         let src = frame(1, 1, PixelFormat::Bgrx8, &[RED]);
-        let mut hidden = Layer::new("hidden", SourceId(0), Transform::IDENTITY);
+        let mut hidden = Layer::new("hidden", SourceId::from("0"), Transform::IDENTITY);
         hidden.visible = false;
         let s = scene(
             1,
             1,
             vec![
                 hidden,
-                Layer::new("missing", SourceId(9), Transform::IDENTITY),
+                Layer::new("missing", SourceId::from("9"), Transform::IDENTITY),
             ],
         );
         let mut target = VideoFrame::zeroed(1, 1, PixelFormat::Bgra8).expect("target");
         let outcome = CpuRenderer::new(1)
-            .render(&s, |id| (id == SourceId(0)).then_some(&src), &mut target)
+            .render(
+                &s,
+                |id| (*id == SourceId::from("0")).then_some(&src),
+                &mut target,
+            )
             .expect("render");
         assert_eq!(
             outcome,
@@ -545,10 +557,10 @@ mod tests {
         let s = scene(
             400,
             300,
-            vec![Layer::new("l", SourceId(0), transform).with_opacity(0.8)],
+            vec![Layer::new("l", SourceId::from("0"), transform).with_opacity(0.8)],
         );
-        let single = render(&s, &[(SourceId(0), &src)], 1);
-        let parallel = render(&s, &[(SourceId(0), &src)], 7);
+        let single = render(&s, &[(SourceId::from("0"), &src)], 1);
+        let parallel = render(&s, &[(SourceId::from("0"), &src)], 7);
         assert_eq!(single.data(), parallel.data());
     }
 
@@ -562,8 +574,8 @@ mod tests {
         };
         for (w, h) in [(2, 1), (4, 2), (16, 8)] {
             let src = frame(w, h, PixelFormat::Bgrx8, &vec![RED; (w * h) as usize]);
-            let s = scene(8, 8, vec![Layer::fitted("fit", SourceId(0), area)]);
-            let out = render(&s, &[(SourceId(0), &src)], 1);
+            let s = scene(8, 8, vec![Layer::fitted("fit", SourceId::from("0"), area)]);
+            let out = render(&s, &[(SourceId::from("0"), &src)], 1);
             assert_eq!(out.pixel(0, 2), RED, "{w}x{h}");
             assert_eq!(out.pixel(7, 5), RED, "{w}x{h}");
             assert_eq!(out.pixel(0, 1), [10, 20, 30, 255], "{w}x{h}");

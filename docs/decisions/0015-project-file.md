@@ -12,8 +12,8 @@ The user decided where files live: a project directory set when the engine start
 ## Decision
 
 - **Location:** `--project-dir DIR` for `streamforge-engine` and `streamforge-mcp` (`Engine::with_project_dir`).
-  - Commands take a plain `.json` file name, checked like recording names: no directories, no `..`, no absolute paths.
-  - Without the flag, the project commands are `invalid_state`. There is no default directory, so an engine never writes project files unless whoever starts it chose a place.
+  - Commands take a plain `.json` file name, checked like recording names: no directories, no `..`, no absolute paths. Windows device names (`CON`, `NUL`, `COM1`, … with any extension) are refused for every file name, recordings included: opening one would wait on a device.
+  - Without the flag, the project commands are `invalid_state`, and the MCP server does not offer them (as `start_streaming` without a target). There is no default directory, so an engine never writes project files unless whoever starts it chose a place. A directory that does not exist stops the binaries at start.
 - **Commands** (`command-api`):
 
   | Command | Access | What it does |
@@ -26,15 +26,18 @@ The user decided where files live: a project directory set when the engine start
   - Saving is `sensitive` because it can replace a file, loading because it brings in audio inputs and screen sources (as `set_audio_sources` and `add_source` do) and discards unsaved scenes.
   - `set_screen_source` exists because a loaded screen source has no target, and Windows and macOS have no picker yet. `update_source` is `control`, and choosing what is captured is `sensitive`, so it is a command of its own.
 - **Format, schema version 1** (crate `project-file`): `schema_version`, `canvas`, `active_scene`, `scenes` and `audio`, pretty-printed JSON.
-  - A source is its `list_scenes` object without `source_id`, and the `add_source` decoder checks it. The audio is `set_audio_sources` parameters, checked by that decoder. The file therefore has no rules of its own for colors, rectangles, kinds, gains or tones; a change to a command's rules applies to files too.
+  - A source is its `list_scenes` object without `source_id`, and the `add_source` decoder checks it. The audio is `set_audio_sources` parameters (`AudioSetup` serializes as them), and that decoder checks the file's own JSON: a typed copy would round a gain of `1e39` to infinity and then, written back as `null`, to the default. The file therefore has no rules of its own for colors, rectangles, kinds, gains or tones; a change to a command's rules applies to files too.
   - The crate checks what no single command sees: id form and uniqueness (source ids across scenes), unique names, limits, `active_scene`, and the canvas.
   - Every problem has a JSON path. Structure errors (a wrong type, an unknown field, a missing field) get theirs from `serde_path_to_error`, a new dependency for that alone; the checks above collect every problem, not only the first.
-  - Strict: unknown fields are problems, and only `schema_version` 1 is read. A newer file says to update StreamForge. A migration goes where the version is read, when version 2 exists.
+  - Strict: unknown fields and duplicate keys are problems (a small reader of its own, since `serde_json` keeps the last of two keys silently), and only `schema_version` 1 is read. A newer file says to update StreamForge. A migration goes where the version is read, when version 2 exists. `null` for an optional field means its default, as in commands.
+  - At most 100 problems are reported, plus one that counts the rest, so a crafted file cannot produce a response of megabytes.
 - **Not stored:** stream keys, file paths, and what a screen source captures. That is machine-specific, and window titles can be private (ADR 0010); a hand-written `source_id` is refused. Audio input names are stored, since without them the audio setup would be lost.
-- **Writing:** a temporary file next to the target, `sync_all`, then a rename over the target. On Unix the directory is synced too.
+- **Writing:** a temporary file next to the target, `sync_all`, then a rename over the target. On Unix the directory is synced too, as far as the file system allows; the save counts once the rename is done.
+  - Only a regular file is replaced. A link would become a plain file and its target would never be updated, so saving over a link is refused; a replaced file keeps its permissions. Windows refuses to rename over a read-only file, so such a save fails there.
   - A failure or crash before the rename leaves the previous file whole. Windows cannot sync the directory; after a power failure right after a save, the old file may still be there, but never half a file.
   - Without `overwrite`, an existing file is refused. The check happens before writing, so a file another program creates in that moment would be replaced.
-- **Reading:** at most 1 MiB, far more than 16 × 16 sources need.
+- **Reading:** at most 1 MiB, far more than 16 × 16 sources need, and only a regular file (a link to one is followed): opening a FIFO would block the engine.
+- **The built-in overlay:** a file can give any source any id, the built-in ones included. Only a solid source with `src_overlay` in the built-in rectangle moves, so another kind with that id stays still.
 - **CLI:** `streamforge project validate FILE` runs `validate_project` with the file's directory as the project directory, prints the result as JSON and exits 1 if the file is not valid.
 
 ## Alternatives considered
@@ -53,14 +56,16 @@ The user decided where files live: a project directory set when the engine start
   - the file reads like command results (`list_scenes` objects, `set_audio_sources` fields); a hand-written source may omit its rectangle and opacity
   - refusals with their paths: invalid JSON, not an object, no `schema_version`, versions 0 and 2, an unknown field, a wrong type, a missing field, another canvas, 0 or 18 scenes, bad and duplicate scene ids and names, an unknown `active_scene`, source problems (opacity, kind, color, width, unknown field, duplicate name, `scene`, `source_id`), bad, missing and duplicate source ids, 17 sources, audio gains, frequencies and input names
   - all problems at once
-  - store: create, refuse to overwrite, replace, no temporary file left; a failure after the temporary file is complete keeps the old file; missing and oversized files
+  - duplicate keys, a gain beyond the f32 range, more than 100 problems, unknown-field messages without the command's field list
+  - store: create, refuse to overwrite, replace, no temporary file left; a failure after the temporary file is complete keeps the old file; permissions kept (Unix); a directory is neither read nor replaced; a link is read but not replaced (Unix); missing and oversized files
 - **command-api:** decoding of the four commands, file names refused (`..`, absolute, directories, other extensions), access classes.
 - **engine:**
   - save, then load into a fresh engine: the same scene list (ids included, screen target cleared), the same mixer, a warning about the screen source, and `set_screen_source` by id afterwards
   - no project directory, existing file without `overwrite`, `overwrite`, missing file, save while the preview runs, load refused while it runs
   - an invalid file changes nothing; `details.problems` has both problems with their paths; `validate_project` reports them
   - `set_screen_source`: refused for color bars, sets the target, refused while the capture runs
-- **stdio:** save in one engine process and load in another with `--project-dir`; a path is refused; without the flag the commands are `invalid_state`.
+- **stdio:** save in one engine process and load in another with `--project-dir`; a path is refused; a missing directory stops the engine at start; without the flag the commands are `invalid_state`.
+- **MCP:** without `--project-dir` the project tools are not offered and a call is refused; with it, an agent saves and validates.
 - **CLI:** `project validate` on a valid file (exit 0), an invalid one (exit 1, the path), a newer version, a missing file.
 - The example file in `docs/protocol.md` passes `streamforge project validate`.
 

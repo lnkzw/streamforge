@@ -48,6 +48,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(dir) = &args.project_dir
+        && !dir.is_dir()
+    {
+        eprintln!(
+            "streamforge-mcp: --project-dir {} is not a directory",
+            dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
     let policy = AccessPolicy::allowing(args.allow);
     eprintln!(
         "streamforge-mcp: allowing {} commands{}",
@@ -57,6 +66,7 @@ fn main() -> ExitCode {
             .map(|target| format!("; streaming target {}", target.redacted()))
             .unwrap_or_default()
     );
+    let projects = args.project_dir.is_some();
     let (output_dir, project_dir) = (args.output_dir, args.project_dir);
     let engine = match EngineThread::spawn(move || {
         let engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
@@ -71,7 +81,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let server = StreamforgeMcp::new(engine.handle(), Config { policy, stream });
+    let server = StreamforgeMcp::new(
+        engine.handle(),
+        Config {
+            policy,
+            stream,
+            projects,
+        },
+    );
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

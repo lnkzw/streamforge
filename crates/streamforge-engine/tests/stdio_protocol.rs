@@ -290,6 +290,17 @@ fn projects_save_and_load_in_the_project_directory() {
     );
     assert!(fresh.finish().success());
 
+    // A project directory that does not exist stops the engine at start.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_streamforge-engine"))
+        .arg("--project-dir")
+        .arg(dir.0.join("absent"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run");
+    assert!(!status.success());
+
     // Without --project-dir the commands are unavailable.
     let mut plain = EngineProcess::spawn();
     let refused = plain

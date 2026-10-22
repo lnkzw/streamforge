@@ -322,6 +322,11 @@ impl Pipeline {
         }
     }
 
+    /// Whether scene source `id` has a capture (running or ended).
+    pub fn has_scene_capture(&self, id: &str) -> bool {
+        self.scene_screens.iter().any(|screen| screen.id == id)
+    }
+
     /// State of every running capture; never blocks.
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {

@@ -12,6 +12,7 @@
 //! (machine-specific, and window titles can be private, ADR 0010).
 
 mod store;
+mod strict;
 
 use std::collections::HashSet;
 
@@ -27,6 +28,9 @@ pub use store::{MAX_FILE_BYTES, Saved, read, write};
 
 /// The schema version this build writes and reads.
 pub const SCHEMA_VERSION: u64 = 1;
+/// Most problems reported for one file; a last one says how many more
+/// there were.
+pub const MAX_PROBLEMS: usize = 100;
 
 /// What a project file holds, in the engine's command types.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +64,7 @@ struct FileOut<'a> {
     canvas: Canvas,
     active_scene: &'a str,
     scenes: Vec<SceneSpec>,
-    audio: FileAudio,
+    audio: &'a AudioSetup,
 }
 
 /// The file as read: sources stay JSON objects for the `add_source` decoder.
@@ -72,6 +76,7 @@ struct FileIn {
     canvas: Canvas,
     active_scene: String,
     scenes: Vec<FileScene>,
+    #[allow(dead_code)] // checked for its structure; decoded from the JSON
     audio: FileAudio,
 }
 
@@ -83,17 +88,21 @@ struct FileScene {
     sources: Vec<Map<String, Value>>,
 }
 
-/// `set_audio_sources` parameters, every field explicit.
-#[derive(Serialize, Deserialize)]
+/// `set_audio_sources` parameters, every field explicit. Read for the
+/// paths of structure errors only; the decoder gets the file's own JSON, so
+/// no number is rounded on the way (a gain of 1e39 is an error, not 0 dB).
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
 struct FileAudio {
     inputs: Vec<FileInput>,
     tones: Vec<FileTone>,
     master_gain_db: f32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct FileInput {
     /// `null`: the system default input.
     input: Option<String>,
@@ -101,8 +110,9 @@ struct FileInput {
     mute: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)]
 struct FileTone {
     frequency_hz: f64,
     level_dbfs: f64,
@@ -121,34 +131,12 @@ pub fn to_json(project: &Project, canvas: Canvas) -> Vec<u8> {
             ..scene.clone()
         })
         .collect();
-    let audio = &project.audio;
     let file = FileOut {
         schema_version: SCHEMA_VERSION,
         canvas,
         active_scene: &project.active,
         scenes,
-        audio: FileAudio {
-            inputs: audio
-                .inputs
-                .iter()
-                .map(|input| FileInput {
-                    input: input.input.clone(),
-                    gain_db: input.gain_db,
-                    mute: input.muted,
-                })
-                .collect(),
-            tones: audio
-                .tones
-                .iter()
-                .map(|tone| FileTone {
-                    frequency_hz: tone.frequency_hz,
-                    level_dbfs: tone.level_dbfs,
-                    gain_db: tone.gain_db,
-                    mute: tone.muted,
-                })
-                .collect(),
-            master_gain_db: audio.master_gain_db,
-        },
+        audio: &project.audio,
     };
     let mut bytes = serde_json::to_vec_pretty(&file).expect("project JSON");
     bytes.push(b'\n');
@@ -169,8 +157,8 @@ pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Project, Invalid> {
         schema_version,
         problems: vec![problem(path, message)],
     };
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| invalid(None, "", format!("not valid JSON: {error}")))?;
+    let value = strict::parse(bytes)
+        .map_err(|(path, message)| invalid(None, &path, format!("not valid JSON: {message}")))?;
     let version = match value.get("schema_version") {
         Some(Value::Number(number)) => number.as_u64(),
         _ => None,
@@ -194,19 +182,27 @@ pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Project, Invalid> {
         };
         return Err(invalid(Some(version), "schema_version", message));
     }
+    let audio = value.get("audio").cloned().unwrap_or(Value::Null);
     let file: FileIn = serde_path_to_error::deserialize(value).map_err(|error| {
         let path = error.path().to_string();
         let path = if path == "." { String::new() } else { path };
         invalid(Some(version), &path, error.into_inner().to_string())
     })?;
-    check(file, canvas).map_err(|problems| Invalid {
-        schema_version: Some(version),
-        problems,
+    check(file, &audio, canvas).map_err(|mut problems| {
+        if problems.len() > MAX_PROBLEMS {
+            let more = problems.len() - MAX_PROBLEMS;
+            problems.truncate(MAX_PROBLEMS);
+            problems.push(problem("", format!("and {more} more problem(s)")));
+        }
+        Invalid {
+            schema_version: Some(version),
+            problems,
+        }
     })
 }
 
 /// The checks across the whole file, collecting every problem.
-fn check(file: FileIn, canvas: Canvas) -> Result<Project, Vec<ProjectProblem>> {
+fn check(file: FileIn, audio: &Value, canvas: Canvas) -> Result<Project, Vec<ProjectProblem>> {
     let mut problems = Vec::new();
     if file.canvas != canvas {
         problems.push(problem(
@@ -286,7 +282,7 @@ fn check(file: FileIn, canvas: Canvas) -> Result<Project, Vec<ProjectProblem>> {
             format!("no scene has the id `{}`", file.active_scene),
         ));
     }
-    let audio = audio(&file.audio).map_err(|message| problem("audio", message));
+    let audio = self::audio(audio).map_err(|message| problem("audio", message));
     let audio = match audio {
         Ok(audio) => Some(audio),
         Err(found) => {
@@ -350,7 +346,7 @@ fn source(
     let request = match Command::decode("add_source", Some(&Value::Object(object))) {
         Ok(Command::AddSource(request)) => request,
         Ok(_) => unreachable!("add_source decodes to AddSource"),
-        Err(error) => return Err(vec![problem(at, error.message)]),
+        Err(error) => return Err(vec![problem(at, without_expected(error.message))]),
     };
     Ok(SourceSpec {
         id,
@@ -366,12 +362,20 @@ fn source(
     })
 }
 
-fn audio(audio: &FileAudio) -> Result<AudioSetup, String> {
-    let params = serde_json::to_value(audio).expect("audio JSON");
-    match Command::decode("set_audio_sources", Some(&params)) {
+fn audio(params: &Value) -> Result<AudioSetup, String> {
+    match Command::decode("set_audio_sources", Some(params)) {
         Ok(Command::SetAudioSources(setup)) => Ok(setup),
         Ok(_) => unreachable!("set_audio_sources decodes to SetAudioSources"),
         Err(error) => Err(error.message),
+    }
+}
+
+/// serde's unknown-field message lists the command's fields, among them
+/// `scene` and `source_id`, which a file must not use; keep the first part.
+fn without_expected(message: String) -> String {
+    match message.find(", expected one of") {
+        Some(end) if message.contains("unknown field") => message[..end].to_owned(),
+        _ => message,
     }
 }
 

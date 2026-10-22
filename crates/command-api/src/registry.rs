@@ -1689,6 +1689,18 @@ fn plain_file(
     let has_extension = path
         .extension()
         .is_some_and(|found| found.eq_ignore_ascii_case(extension));
+    // Windows opens a device for these names, whatever the extension (e.g.
+    // `CON.json`); refused everywhere, so a name works on every system.
+    let device = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(is_windows_device_name);
+    if device {
+        return Err(invalid_params(
+            command,
+            format!("`{field}` names a Windows device (CON, PRN, AUX, NUL, COM1-9, LPT1-9)"),
+        ));
+    }
     if !plain_name || !has_extension || path.file_stem().is_none() {
         return Err(invalid_params(
             command,
@@ -1699,6 +1711,16 @@ fn plain_file(
         ));
     }
     Ok(path)
+}
+
+fn is_windows_device_name(stem: &str) -> bool {
+    let stem = stem.to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|digit| {
+            digit.len() == 1 && ('1'..='9').contains(&digit.chars().next().unwrap_or('0'))
+        })
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
 }
 
 fn decode_screen_probe(
@@ -2046,6 +2068,8 @@ mod tests {
         );
         // Plain .json names only: the project directory is the engine's.
         for bad in [
+            "CON.json",
+            "com3.json",
             "../show.json",
             "/tmp/show.json",
             "projects/show.json",

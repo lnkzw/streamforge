@@ -1552,6 +1552,23 @@ mod tests {
         let missing =
             try_run(&mut engine, "load_project", json!({"file_name": "b.json"})).unwrap_err();
         assert_eq!(missing.code, ErrorCode::NotFound);
+        let mut nowhere = self::engine().with_project_dir(dir.0.join("absent"));
+        let no_dir =
+            try_run(&mut nowhere, "save_project", json!({"file_name": "a.json"})).unwrap_err();
+        assert_eq!(no_dir.code, ErrorCode::NotFound);
+        assert!(
+            no_dir.message.contains("does not exist"),
+            "{}",
+            no_dir.message
+        );
+        std::fs::create_dir(dir.0.join("folder.json")).expect("dir");
+        let folder = try_run(
+            &mut engine,
+            "load_project",
+            json!({"file_name": "folder.json"}),
+        )
+        .unwrap_err();
+        assert_eq!(folder.code, ErrorCode::InvalidParams);
 
         // Saving works while the pipeline runs; loading does not.
         run(&mut engine, "set_preview", json!({"enabled": true}));

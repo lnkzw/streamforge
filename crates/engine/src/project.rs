@@ -45,7 +45,7 @@ impl Engine {
         };
         let bytes = project_file::to_json(&project, CANVAS);
         let saved = project_file::write(dir, &request.file_name, &bytes, request.overwrite)
-            .map_err(|error| io_error(&request.file_name, error))?;
+            .map_err(|error| io_error(&request.file_name, Access::Write, error))?;
         Ok(ProjectSaved {
             file_name: request.file_name.display().to_string(),
             path: saved.path.display().to_string(),
@@ -67,8 +67,8 @@ impl Engine {
                  outputs first",
             ));
         }
-        let bytes =
-            project_file::read(dir, file_name).map_err(|error| io_error(file_name, error))?;
+        let bytes = project_file::read(dir, file_name)
+            .map_err(|error| io_error(file_name, Access::Read, error))?;
         let project = project_file::parse(&bytes, CANVAS).map_err(|invalid| {
             let first = match invalid.problems.first() {
                 Some(first) if first.path.is_empty() => first.message.clone(),
@@ -100,7 +100,8 @@ impl Engine {
         if screens > 0 {
             warnings.push(format!(
                 "{screens} screen source(s) have no capture target (it is not saved): choose one \
-                 with set_screen_source, or the system picker asks when the scene is rendered"
+                 with set_screen_source; only where a system picker exists (Linux) can it ask \
+                 instead when the scene is rendered"
             ));
         }
         Ok(ProjectLoaded {
@@ -116,8 +117,8 @@ impl Engine {
         file_name: &Path,
     ) -> Result<ProjectValidation, CommandError> {
         let dir = self.project_dir()?;
-        let bytes =
-            project_file::read(dir, file_name).map_err(|error| io_error(file_name, error))?;
+        let bytes = project_file::read(dir, file_name)
+            .map_err(|error| io_error(file_name, Access::Read, error))?;
         let (schema_version, problems) = match project_file::parse(&bytes, CANVAS) {
             Ok(_) => (Some(project_file::SCHEMA_VERSION), Vec::new()),
             Err(invalid) => (invalid.schema_version, invalid.problems),
@@ -131,24 +132,40 @@ impl Engine {
     }
 }
 
-fn io_error(file_name: &Path, error: io::Error) -> CommandError {
+#[derive(Clone, Copy)]
+enum Access {
+    Read,
+    Write,
+}
+
+fn io_error(file_name: &Path, access: Access, error: io::Error) -> CommandError {
     let name = file_name.display();
-    let (code, message) = match error.kind() {
-        io::ErrorKind::NotFound => (
+    let (code, message) = match (error.kind(), access) {
+        (io::ErrorKind::NotFound, Access::Read) => (
             ErrorCode::NotFound,
             format!(
                 "no project file `{name}` in the project directory (or the directory is missing)"
             ),
         ),
-        io::ErrorKind::AlreadyExists => (
+        (io::ErrorKind::NotFound, Access::Write) => (
+            ErrorCode::NotFound,
+            format!("cannot save `{name}`: the project directory does not exist"),
+        ),
+        (io::ErrorKind::InvalidInput, _) => (
+            ErrorCode::InvalidParams,
+            format!(
+                "`{name}` is not a regular file (e.g. a directory, a link or a device): {error}"
+            ),
+        ),
+        (io::ErrorKind::AlreadyExists, _) => (
             ErrorCode::InvalidParams,
             format!("`{name}` exists; pass `overwrite: true` to replace it"),
         ),
-        io::ErrorKind::PermissionDenied => (
+        (io::ErrorKind::PermissionDenied, _) => (
             ErrorCode::PermissionDenied,
             format!("cannot access `{name}` in the project directory: {error}"),
         ),
-        io::ErrorKind::InvalidData => (
+        (io::ErrorKind::InvalidData, _) => (
             ErrorCode::InvalidParams,
             format!("`{name}` cannot be read as a project: {error}"),
         ),

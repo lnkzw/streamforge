@@ -267,6 +267,8 @@ fn source_problems_name_the_source() {
     let mut value = file();
     value["scenes"][0]["sources"][1]["blur"] = json!(3);
     assert_eq!(only(&value, "unknown field `blur`"), at);
+    // Without the command's field list, which names fields a file refuses.
+    assert!(!problems(&value)[0].1.contains("source_id"));
     let mut value = file();
     value["scenes"][0]["sources"][1]["name"] = json!("color_bars");
     assert_eq!(
@@ -310,12 +312,50 @@ fn audio_problems_come_from_the_set_audio_sources_rules() {
     let mut value = file();
     value["audio"]["master_gain_db"] = json!(99);
     assert_eq!(only(&value, "`master_gain_db` must be between"), "audio");
+    // Beyond f32: refused, not rounded to infinity and then to a default.
+    let mut value = file();
+    value["audio"]["tones"][0]["gain_db"] = json!(1e39);
+    assert_eq!(only(&value, "`gain_db` must be between"), "audio");
     let mut value = file();
     value["audio"]["tones"][0]["frequency_hz"] = json!(30_000);
     assert_eq!(only(&value, "`frequency_hz`"), "audio");
     let mut value = file();
     value["audio"]["inputs"][0]["input"] = json!("");
     assert_eq!(only(&value, "`input` must not be empty"), "audio");
+}
+
+#[test]
+fn duplicate_keys_are_refused() {
+    let text = serde_json::to_string(&file()).expect("text");
+    let doubled = text.replacen("\"opacity\":0.6", "\"opacity\":5,\"opacity\":0.6", 1);
+    assert_ne!(doubled, text);
+    let invalid = parse(doubled.as_bytes(), CANVAS).unwrap_err();
+    assert_eq!(invalid.problems.len(), 1);
+    assert_eq!(invalid.problems[0].path, "scenes[0].sources[1]");
+    assert!(
+        invalid.problems[0]
+            .message
+            .contains("duplicate field `opacity`")
+    );
+}
+
+#[test]
+fn many_problems_are_capped() {
+    let mut value = file();
+    let scenes: Vec<_> = (0..MAX_SCENES)
+        .map(|index| {
+            let source = json!({"id": "bad", "name": format!("s{index}"), "kind": "color_bars"});
+            json!({"id": format!("scene_{index}"), "name": format!("S{index}"),
+                   "sources": vec![source; MAX_SCENE_SOURCES]})
+        })
+        .collect();
+    value["scenes"] = json!(scenes);
+    let found = problems(&value);
+    assert_eq!(found.len(), MAX_PROBLEMS + 1);
+    assert!(
+        found[MAX_PROBLEMS].1.contains("more problem(s)"),
+        "{found:?}"
+    );
 }
 
 #[test]

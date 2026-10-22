@@ -33,7 +33,12 @@ pub struct Config {
     pub policy: AccessPolicy,
     /// The only streaming target agents may use (with its secret key).
     pub stream: Option<StreamTarget>,
+    /// A project directory is configured; without one, the project
+    /// commands are not offered.
+    pub projects: bool,
 }
+
+const PROJECT_COMMANDS: [&str; 3] = ["save_project", "load_project", "validate_project"];
 
 pub struct StreamforgeMcp {
     engine: EngineHandle,
@@ -60,6 +65,15 @@ impl StreamforgeMcp {
     /// call needs (e.g. control for an `add_source` of color bars).
     fn prepare(&self, name: &str, arguments: JsonObject) -> Result<Command, CommandError> {
         let arguments = Value::Object(arguments);
+        if !self.config.projects && PROJECT_COMMANDS.contains(&name) {
+            return Err(CommandError::new(
+                ErrorCode::PermissionDenied,
+                format!(
+                    "`{name}` is not available: no project directory is configured for this server"
+                ),
+            )
+            .with_details(json!({ "command": name })));
+        }
         let command = if name == "start_streaming" {
             let target = self.config.stream.clone().ok_or_else(|| {
                 CommandError::new(
@@ -79,10 +93,11 @@ impl StreamforgeMcp {
 }
 
 /// Whether to offer a command as a tool under `config`: if some call of it
-/// is allowed, and (for streaming) a target is configured.
+/// is allowed, and (for streaming and projects) it is configured.
 fn offered(config: &Config, descriptor: &CommandDescriptor) -> bool {
     config.policy.allows(descriptor.least_access())
         && (descriptor.name != "start_streaming" || config.stream.is_some())
+        && (!PROJECT_COMMANDS.contains(&descriptor.name) || config.projects)
 }
 
 fn tool(descriptor: &CommandDescriptor) -> Tool {

@@ -210,7 +210,7 @@ It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_pat
 | `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
 | `screen`        | boolean | `false` | Add the live screen layer: the `source_id` source, else the one picked in the system dialog. |
 | `source_id`, `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
-| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. Directories, `..` and absolute paths are rejected with `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
+| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. Directories, `..`, absolute paths and Windows device names are rejected with `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
 
 Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
 
@@ -275,7 +275,7 @@ Source parameters (all optional; any of them makes the output bring its own sour
 
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|
-| `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
+| `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories and Windows device names (`CON`, `NUL`, `COM1`, …) are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
 | `video_encoder`  | `"auto"`, `"software"`, `"hardware"` | `"auto"` | H.264 encoder (ADR 0011). `auto` tries this platform's hardware encoders first and falls back to libx264. `software` uses libx264 only. `hardware` fails with `unsupported` (listing each candidate and why it did not open) when no hardware encoder opens. |
 
 The result's `video_encoder` is `{"encoder", "hardware", "skipped": [{"encoder", "reason"}]}`: the encoder in use and the candidates tried before it.
@@ -376,25 +376,41 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `source_id`, and the error is returned (e.g. `not_found` for a gone source).
   - Both captures' reports are in the output reports' `scene_captures`.
   - Live audio inputs and the screen layer cannot be restarted: the mixer's inputs are fixed while it runs.
+  - It is destructive: it ends a running capture, and a picker choice is gone.
 - **`set_screen_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and `source_id` from `list_screen_sources`. Chooses what a screen source captures from now on, e.g. after `load_project`, which does not store it.
-  - Only while the source has no running capture; with one, it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
+  - Only while the source has no capture; with one (running or ended), it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
   - It is `sensitive`, like `add_source`: it decides what is captured. If the source is in the rendered scene, its capture starts now, and a failure (e.g. `not_found` for a gone source) changes nothing.
+
+Mixer:
+- **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
+- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level of the last 300 ms (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
+- **`set_mixer_strip {index, gain_db?, mute?}` and `set_master_gain {gain_db}`:** change gains live (ramped over one block) and keep the change in the configuration.
+- **`set_audio_sources {inputs, tones, master_gain_db}`:** parameters as for `probe_audio_mix`. Without inputs and without `tones`, one −20 dBFS tone is used. It configures what the pipeline mixes, but only while the pipeline is idle (`invalid_state` otherwise). It is `sensitive` because the inputs are microphones. An output that brings its own source parameters overrides this configuration for its run.
+
+Preview:
+- **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
+- **Access:** `sensitive`, because it renders (and can capture) private content.
+- **Lifecycle:** the pipeline stops when the preview and all outputs are off.
+- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames). If that stopped the pipeline, `pipeline` (as in output reports) and `warnings` carry its report.
 
 ### Projects
 
-A project file holds the scenes with their ids, the active scene and the audio setup (ADR 0015). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`). Without it, the project commands are `invalid_state`. Commands name a file by a plain `.json` name; directories, `..` and absolute paths are `invalid_params`.
+A project file holds the scenes with their ids, the active scene and the audio setup (ADR 0015). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`; a directory that does not exist stops them at start).
+- Without it, the project commands are `invalid_state`, and the MCP server does not offer them.
+- Commands name a file by a plain `.json` name. Directories, `..`, absolute paths and Windows device names (`CON`, `NUL`, `COM1`, …) are `invalid_params`.
+- Only regular files are read or replaced. A link is followed when reading, but saving does not replace it with a file; a directory or device is `invalid_params`.
 
 - **`save_project {file_name, overwrite}`:** writes the current scenes and audio setup, also while the pipeline runs.
-  - An existing file is `invalid_params` unless `overwrite` is `true`.
+  - An existing file is `invalid_params` unless `overwrite` is `true`. A replaced file keeps its permissions (Windows refuses to replace a read-only file).
   - Writing is atomic: a temporary file next to the target, flushed to disk and renamed over it. A save that fails or is cut off leaves the previous file whole.
   - Result: `{"file_name", "path", "replaced", "scenes", "bytes"}`.
 - **`load_project {file_name}`:** replaces the scenes, the active scene and the audio setup with the file's, all or nothing.
   - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
-  - Screen sources load without a capture target; a warning says so. Choose one with `set_screen_source`, or the system picker asks when the scene is rendered.
-  - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`).
+  - Screen sources load without a capture target; a warning says so. Choose one with `set_screen_source`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
+  - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`, at most 100 plus one that counts the rest).
   - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.
 - **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "problems"}`; an invalid file is a result, not an error. `read_only`.
-- **Errors:** a missing file is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
+- **Errors:** a missing file (or, for a save, a missing directory) is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
 - **Not stored:** stream keys, file paths, and what screen sources capture (`source_id`: machine-specific, and window titles can be private).
 
 The file (`schema_version` 1):
@@ -412,21 +428,8 @@ The file (`schema_version` 1):
 
 - **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1). **`audio`** is `set_audio_sources` parameters with every field given.
 - **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's.
-- **Strict:** unknown fields are problems, and a `schema_version` other than 1 is refused (a newer one with a hint to update).
+- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
-  - It is destructive: it ends a running capture, and a picker choice is gone.
-
-Mixer:
-- **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
-- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level of the last 300 ms (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
-- **`set_mixer_strip {index, gain_db?, mute?}` and `set_master_gain {gain_db}`:** change gains live (ramped over one block) and keep the change in the configuration.
-- **`set_audio_sources {inputs, tones, master_gain_db}`:** parameters as for `probe_audio_mix`. Without inputs and without `tones`, one −20 dBFS tone is used. It configures what the pipeline mixes, but only while the pipeline is idle (`invalid_state` otherwise). It is `sensitive` because the inputs are microphones. An output that brings its own source parameters overrides this configuration for its run.
-
-Preview:
-- **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
-- **Access:** `sensitive`, because it renders (and can capture) private content.
-- **Lifecycle:** the pipeline stops when the preview and all outputs are off.
-- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames). If that stopped the pipeline, `pipeline` (as in output reports) and `warnings` carry its report.
 
 ## Example session
 

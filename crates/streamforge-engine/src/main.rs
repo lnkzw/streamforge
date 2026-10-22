@@ -42,6 +42,15 @@ fn main() -> ExitCode {
         project_dir,
         allow,
     } = Args::parse();
+    if let Some(dir) = &project_dir
+        && !dir.is_dir()
+    {
+        eprintln!(
+            "streamforge-engine: --project-dir {} is not a directory",
+            dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
     let mut engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
     if let Some(dir) = project_dir {
         engine = engine.with_project_dir(dir);

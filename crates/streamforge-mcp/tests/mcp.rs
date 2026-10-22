@@ -224,6 +224,33 @@ async fn streaming_needs_a_configured_target() {
     client.cancel().await.expect("close");
 }
 
+#[tokio::test]
+async fn project_tools_need_a_project_directory() {
+    let dir = TempDir::new("projects");
+    let client = connect(&dir, &["--allow", "sensitive"], &[]).await;
+    let listed = names(&tools(&client).await).join(",");
+    assert!(!listed.contains("save_project") && !listed.contains("validate_project"));
+    let refused = call(&client, "save_project", json!({"file_name": "a.json"})).await;
+    assert_eq!(error_code(&refused), "permission_denied");
+    client.cancel().await.expect("close");
+
+    let projects = dir.0.join("projects");
+    std::fs::create_dir(&projects).expect("project dir");
+    let projects = projects.to_str().expect("utf-8 path");
+    let client = connect(
+        &dir,
+        &["--allow", "sensitive", "--project-dir", projects],
+        &[],
+    )
+    .await;
+    let listed = names(&tools(&client).await).join(",");
+    assert!(listed.contains("save_project") && listed.contains("load_project"));
+    ok(&call(&client, "save_project", json!({"file_name": "a.json"})).await);
+    let checked = call(&client, "validate_project", json!({"file_name": "a.json"})).await;
+    assert_eq!(ok(&checked)["valid"], true);
+    client.cancel().await.expect("close");
+}
+
 #[test]
 fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
     let dir = TempDir::new("startup");

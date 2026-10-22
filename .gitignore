@@ -6,3 +6,6 @@
 # Media written by tests or local runs; a crashed test can leave one behind.
 *.mkv
 *.ppm
+
+# Release packages from packaging/linux/package.sh.
+/dist/

@@ -32,6 +32,7 @@ What runs:
   - the M0 acceptance command (`streamforge-cli status --json`)
   - a stdio smoke test of `streamforge-engine`
 - On pushes to `main` and manual runs (not on pull requests), a `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures; there are no thresholds, because shared runners vary. A failing measurement leaves a warning annotation and does not fail the job; a failing setup or build does. Both jobs share their setup through the local composite action `.github/actions/build-setup`.
+- `release.yml` builds the Linux release packages (Ubuntu 24.04 on the runner, Arch Linux in a container) with `packaging/linux/package.sh`. The script checks that every linked library resolves and smoke-tests the command-line binaries (`--version`, `status`, a `get_status` request to the engine) before packing. Pull requests that change the packaging and manual runs build the packages as artifacts; a `v*` tag matching the workspace version creates a draft release.
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 

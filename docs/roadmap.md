@@ -230,3 +230,28 @@ From the architecture assessment (`docs/architecture/CURRENT_STATE_ASSESSMENT.md
 Acceptance:
 - Failures of sources and outputs are visible while they run, through the same command surface for every client.
 - Every step keeps the existing tests and adds tests for its behavior.
+
+## M11 — Desktop UI, second pass
+
+The UI changes before the first release. The requirements come from the project owner in a separate, detailed brief; they are not designed ahead of it. The brief should say which changes the first release needs and which can come later.
+
+Known to be part of it:
+- [ ] Saving and loading projects in the desktop (`--project-dir`, a way to pick a file), and the commands the UI needs for it (e.g. `list_projects`).
+
+Acceptance:
+- The desktop covers what the brief marks as needed for the first release.
+- New or changed commands go through `command-api`, so CLI, protocol and MCP get them too.
+
+## M12 — Stable Linux release (0.1.0)
+
+Linux first; Windows and macOS follow with tests on real machines.
+
+- [ ] Protocol review before the freeze: the breaking changes still wanted (e.g. `media_engine_ready`, the legacy `screen: true` output layer, the name `source_id` for capture targets). From 0.1.0 on, the versioning policy in `docs/protocol.md` applies.
+- [ ] Soak test on the development machine: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end.
+- [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.
+- [ ] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries.
+- [ ] Version 0.1.0: changelog, tag, published release.
+
+Acceptance:
+- The soak test passes, and CI on `main` stays green over several runs.
+- The release installs from its tarball on the development machine and works there.

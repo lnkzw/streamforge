@@ -1,0 +1,16 @@
+[package]
+name = "project-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+command-api = { path = "../command-api" }
+serde.workspace = true
+serde_json.workspace = true
+# JSON paths for errors in the file's structure (a wrong type, an unknown
+# field), so every problem says where it is.
+serde_path_to_error = "0.1"
+
+[dev-dependencies]
+capture-api = { path = "../capture-api" }

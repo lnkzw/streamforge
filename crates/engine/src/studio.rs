@@ -141,6 +141,33 @@ impl Engine {
         Ok(self.scenes.list())
     }
 
+    /// Choose what screen source `source` captures, while nothing captures
+    /// it: a running (or ended) capture keeps its target until
+    /// `restart_source`. If the source is rendered, its capture starts now.
+    pub(crate) fn set_screen_source(
+        &mut self,
+        source: &SourceRef,
+        screen: &str,
+    ) -> Result<SceneList, CommandError> {
+        let spec = self.scenes.source(source)?;
+        let (id, name) = (spec.id.clone(), spec.name.clone());
+        if self
+            .pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.has_scene_capture(&id))
+        {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "`{name}` is capturing; switch a running capture with restart_source and a \
+                     `source_id`"
+                ),
+            ));
+        }
+        let source = SourceRef::id(id);
+        self.edit_scenes(|scenes| scenes.set_screen_source_id(&source, screen))
+    }
+
     /// Whether new captures may start (open outputs must not wait for a
     /// picker; the preview alone means someone is at the UI), and the
     /// screen sources whose captures keep running.

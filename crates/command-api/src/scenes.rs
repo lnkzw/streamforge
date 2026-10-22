@@ -181,7 +181,9 @@ pub struct UpdateSourceRequest {
 }
 
 /// Audio of the pipeline: live inputs, test tones and the master gain.
-#[derive(Debug, Clone, PartialEq)]
+/// Serialized as `set_audio_sources` parameters (a project file stores it
+/// so).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioSetup {
     pub inputs: Vec<LiveInputSpec>,
     pub tones: Vec<ToneSpec>,

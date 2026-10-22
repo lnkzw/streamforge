@@ -19,8 +19,9 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 use crate::{
     AddSourceRequest, AudioSetup, Command, CommandError, CompositeRequest, ErrorCode,
     LiveInputSpec, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest,
-    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneRef, SourceKind, SourceRect,
-    SourceRef, StreamingRequest, StripChange, ToneSpec, UpdateSourceRequest,
+    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
+    SourceKind, SourceRect, SourceRef, StreamingRequest, StripChange, ToneSpec,
+    UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -352,6 +353,49 @@ const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const SET_SCREEN_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "set_screen_source",
+    summary: "Choose what a screen source captures from now on, while it has no running capture \
+              (e.g. after load_project, which does not store it; for a running capture use \
+              restart_source). Params: the source's id, or scene (or scene_id) and name; \
+              source_id from list_screen_sources. Returns the scene list.",
+    access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
+};
+
+const SAVE_PROJECT: CommandDescriptor = CommandDescriptor {
+    name: "save_project",
+    summary: "Write the scenes (with their ids), the active scene and the audio setup to a \
+              project file. Params: file_name (plain .json name in the engine's project \
+              directory, --project-dir), overwrite (replace an existing file atomically; \
+              default false). Screen source ids and stream keys are not saved.",
+    access: CommandAccess::Sensitive,
+    // With `overwrite`, it replaces the previous file.
+    destructive: true,
+    open_world: false,
+};
+
+const LOAD_PROJECT: CommandDescriptor = CommandDescriptor {
+    name: "load_project",
+    summary: "Replace the scenes and the audio setup with a project file's, while no preview or \
+              output runs. Params: file_name (plain .json name in the project directory). \
+              Unsaved scenes are lost. Screen sources load without a capture target (choose one \
+              with set_screen_source, or the picker asks). Returns the scenes and the mixer.",
+    access: CommandAccess::Sensitive,
+    destructive: true,
+    open_world: false,
+};
+
+const VALIDATE_PROJECT: CommandDescriptor = CommandDescriptor {
+    name: "validate_project",
+    summary: "Check a project file without loading it. Params: file_name (plain .json name in the \
+              project directory). Returns valid and every problem with its JSON path.",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
 const COMMANDS: &[CommandDescriptor] = &[
     GET_STATUS,
     GET_HEALTH,
@@ -375,11 +419,15 @@ const COMMANDS: &[CommandDescriptor] = &[
     UPDATE_SOURCE,
     REMOVE_SOURCE,
     RESTART_SOURCE,
+    SET_SCREEN_SOURCE,
     GET_MIXER,
     SET_MIXER_STRIP,
     SET_MASTER_GAIN,
     SET_AUDIO_SOURCES,
     SET_PREVIEW,
+    SAVE_PROJECT,
+    LOAD_PROJECT,
+    VALIDATE_PROJECT,
 ];
 
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
@@ -444,6 +492,13 @@ impl Command {
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
             "remove_source" => decode_remove_source(name, params).map(Self::RemoveSource),
             "restart_source" => decode_restart_source(name, params),
+            "set_screen_source" => decode_set_screen_source(name, params),
+            "save_project" => decode_save_project(name, params).map(Self::SaveProject),
+            "load_project" => {
+                decode_project_file(name, params).map(|file_name| Self::LoadProject { file_name })
+            }
+            "validate_project" => decode_project_file(name, params)
+                .map(|file_name| Self::ValidateProject { file_name }),
             "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
             "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
             "set_master_gain" => {
@@ -507,11 +562,15 @@ impl Command {
             Self::UpdateSource(_) => &UPDATE_SOURCE,
             Self::RemoveSource { .. } => &REMOVE_SOURCE,
             Self::RestartSource { .. } => &RESTART_SOURCE,
+            Self::SetScreenSource { .. } => &SET_SCREEN_SOURCE,
             Self::GetMixer => &GET_MIXER,
             Self::SetMixerStrip(_) => &SET_MIXER_STRIP,
             Self::SetMasterGain { .. } => &SET_MASTER_GAIN,
             Self::SetAudioSources(_) => &SET_AUDIO_SOURCES,
             Self::SetPreview { .. } => &SET_PREVIEW,
+            Self::SaveProject(_) => &SAVE_PROJECT,
+            Self::LoadProject { .. } => &LOAD_PROJECT,
+            Self::ValidateProject { .. } => &VALIDATE_PROJECT,
         }
     }
 
@@ -948,22 +1007,23 @@ fn decode_start_streaming(
     })
 }
 
+/// The rule for scene and source names, for error messages.
+pub const NAME_RULE: &str =
+    "must be 1-64 characters without control characters or surrounding whitespace";
+
 /// Scene and source names: 1-64 characters, no control characters, no
 /// surrounding whitespace.
-fn valid_name(command: &str, field: &str, name: String) -> Result<String, CommandError> {
+pub fn is_valid_name(name: &str) -> bool {
     let length = name.chars().count();
-    if length == 0
-        || length > MAX_NAME_CHARS
-        || name.trim() != name
-        || name.chars().any(char::is_control)
-    {
-        return Err(invalid_params(
-            command,
-            format!(
-                "`{field}` must be 1-{MAX_NAME_CHARS} characters without control characters or \
-                 surrounding whitespace"
-            ),
-        ));
+    length > 0
+        && length <= MAX_NAME_CHARS
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
+}
+
+fn valid_name(command: &str, field: &str, name: String) -> Result<String, CommandError> {
+    if !is_valid_name(&name) {
+        return Err(invalid_params(command, format!("`{field}` {NAME_RULE}")));
     }
     Ok(name)
 }
@@ -980,16 +1040,19 @@ fn decode_scene_name(command: &str, params: Option<&Value>) -> Result<String, Co
     valid_name(command, "name", params.name)
 }
 
-/// Scene and source ids from `list_scenes`: the type's prefix, then
-/// `a-z`, `0-9` or `_`.
-fn valid_id(command: &str, field: &str, prefix: &str, id: String) -> Result<String, CommandError> {
-    let valid = id.len() > prefix.len()
+/// Scene and source ids: `prefix` (e.g. [`SCENE_ID_PREFIX`]), then
+/// `a-z`, `0-9` or `_`, at most [`MAX_ID_LEN`] bytes in all.
+pub fn is_valid_id(prefix: &str, id: &str) -> bool {
+    id.len() > prefix.len()
         && id.len() <= MAX_ID_LEN
         && id.starts_with(prefix)
         && id
             .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-    if !valid {
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_id(command: &str, field: &str, prefix: &str, id: String) -> Result<String, CommandError> {
+    if !is_valid_id(prefix, &id) {
         return Err(invalid_params(
             command,
             format!("`{field}` must be an id from list_scenes (`{prefix}…`)"),
@@ -1358,6 +1421,80 @@ fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Comman
     })
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetScreenSourceParams {
+    /// Source id from list_scenes (or give scene and name).
+    id: Option<String>,
+    /// Scene id from list_scenes (or give scene).
+    scene_id: Option<String>,
+    /// Scene name.
+    scene: Option<String>,
+    /// Source name.
+    name: Option<String>,
+    /// Screen source id from list_screen_sources.
+    source_id: String,
+}
+
+fn decode_set_screen_source(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<Command, CommandError> {
+    let params: SetScreenSourceParams = decode_params(command, params)?;
+    Ok(Command::SetScreenSource {
+        source: source_ref(
+            command,
+            params.id,
+            params.scene_id,
+            params.scene,
+            params.name,
+        )?,
+        source_id: valid_source_id(command, params.source_id)?,
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SaveProjectParams {
+    /// Plain .json file name in the engine's project directory.
+    file_name: String,
+    /// Replace an existing file (atomically); default false.
+    overwrite: Option<bool>,
+}
+
+fn decode_save_project(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<SaveProjectRequest, CommandError> {
+    let params: SaveProjectParams = decode_params(command, params)?;
+    Ok(SaveProjectRequest {
+        file_name: project_file(command, params.file_name)?,
+        overwrite: params.overwrite.unwrap_or(false),
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectFileParams {
+    /// Plain .json file name in the engine's project directory.
+    file_name: String,
+}
+
+fn decode_project_file(command: &str, params: Option<&Value>) -> Result<PathBuf, CommandError> {
+    let params: ProjectFileParams = decode_params(command, params)?;
+    project_file(command, params.file_name)
+}
+
+fn project_file(command: &str, file_name: String) -> Result<PathBuf, CommandError> {
+    plain_file(
+        command,
+        "file_name",
+        file_name,
+        "json",
+        "it lives in the engine's project directory",
+    )
+}
+
 fn decode_remove_source(command: &str, params: Option<&Value>) -> Result<SourceRef, CommandError> {
     let params: RemoveSourceParams = decode_params(command, params)?;
     source_ref(
@@ -1525,6 +1662,24 @@ fn output_file(
     path: String,
     extension: &str,
 ) -> Result<PathBuf, CommandError> {
+    plain_file(
+        command,
+        field,
+        path,
+        extension,
+        "it is written to the engine's output directory",
+    )
+}
+
+/// A plain file name (no directories) with `extension`; `place` says where
+/// the file lives, for the error message.
+fn plain_file(
+    command: &str,
+    field: &str,
+    path: String,
+    extension: &str,
+    place: &str,
+) -> Result<PathBuf, CommandError> {
     let path = PathBuf::from(path);
     let mut components = path.components();
     let plain_name = matches!(
@@ -1534,16 +1689,38 @@ fn output_file(
     let has_extension = path
         .extension()
         .is_some_and(|found| found.eq_ignore_ascii_case(extension));
+    // Windows opens a device for these names, whatever the extension (e.g.
+    // `CON.json`); refused everywhere, so a name works on every system.
+    let device = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(is_windows_device_name);
+    if device {
+        return Err(invalid_params(
+            command,
+            format!("`{field}` names a Windows device (CON, PRN, AUX, NUL, COM1-9, LPT1-9)"),
+        ));
+    }
     if !plain_name || !has_extension || path.file_stem().is_none() {
         return Err(invalid_params(
             command,
             format!(
                 "`{field}` must be a plain file name ending in .{extension} \
-                 (no directories); it is written to the engine's output directory"
+                 (no directories); {place}"
             ),
         ));
     }
     Ok(path)
+}
+
+fn is_windows_device_name(stem: &str) -> bool {
+    let stem = stem.to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix).is_some_and(|digit| {
+            digit.len() == 1 && ('1'..='9').contains(&digit.chars().next().unwrap_or('0'))
+        })
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
 }
 
 fn decode_screen_probe(
@@ -1675,6 +1852,9 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "update_source" => of::<UpdateSourceParams>(),
         "remove_source" => of::<RemoveSourceParams>(),
         "restart_source" => of::<RestartSourceParams>(),
+        "set_screen_source" => of::<SetScreenSourceParams>(),
+        "save_project" => of::<SaveProjectParams>(),
+        "load_project" | "validate_project" => of::<ProjectFileParams>(),
         "set_mixer_strip" => of::<MixerStripParams>(),
         "set_master_gain" => of::<MasterGainParams>(),
         "set_audio_sources" => of::<AudioSourcesParams>(),
@@ -1788,6 +1968,10 @@ mod tests {
             "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
             "set_master_gain" => Some(json!({"gain_db": -3.0})),
             "set_preview" => Some(json!({"enabled": false})),
+            "set_screen_source" => Some(json!({"id": "src_a1", "source_id": "monitor:1"})),
+            "save_project" | "load_project" | "validate_project" => {
+                Some(json!({"file_name": "show.json"}))
+            }
             _ => None,
         }
     }
@@ -1854,6 +2038,91 @@ mod tests {
             panic!("restart_source");
         };
         assert_eq!(source, SourceRef::id("src_a1"));
+    }
+
+    #[test]
+    fn project_and_screen_source_params() {
+        let decode = |command: &str, params: Value| Command::decode(command, Some(&params));
+        assert_eq!(
+            decode(
+                "save_project",
+                json!({"file_name": "show.json", "overwrite": true})
+            ),
+            Ok(Command::SaveProject(SaveProjectRequest {
+                file_name: PathBuf::from("show.json"),
+                overwrite: true,
+            }))
+        );
+        assert_eq!(
+            decode("save_project", json!({"file_name": "show.JSON"})),
+            Ok(Command::SaveProject(SaveProjectRequest {
+                file_name: PathBuf::from("show.JSON"),
+                overwrite: false,
+            }))
+        );
+        assert_eq!(
+            decode("load_project", json!({"file_name": "show.json"})),
+            Ok(Command::LoadProject {
+                file_name: PathBuf::from("show.json")
+            })
+        );
+        // Plain .json names only: the project directory is the engine's.
+        for bad in [
+            "CON.json",
+            "com3.json",
+            "../show.json",
+            "/tmp/show.json",
+            "projects/show.json",
+            "show.mkv",
+            ".json",
+            "",
+        ] {
+            for command in ["save_project", "load_project", "validate_project"] {
+                let error = decode(command, json!({"file_name": bad})).unwrap_err();
+                assert_eq!(error.code, ErrorCode::InvalidParams, "{command} {bad}");
+            }
+        }
+        assert_eq!(
+            decode(
+                "set_screen_source",
+                json!({"id": "src_a1", "source_id": "window:7:0x2a"})
+            ),
+            Ok(Command::SetScreenSource {
+                source: SourceRef::id("src_a1"),
+                source_id: "window:7:0x2a".to_owned(),
+            })
+        );
+        for bad in [
+            json!({"id": "src_a1"}),
+            json!({"id": "src_a1", "source_id": ""}),
+            json!({"source_id": "monitor:1"}),
+        ] {
+            let error = decode("set_screen_source", bad.clone()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{bad}");
+        }
+        let access = |name: &str| {
+            COMMANDS
+                .iter()
+                .find(|command| command.name == name)
+                .map(|command| (command.access, command.destructive))
+        };
+        assert_eq!(
+            access("save_project"),
+            Some((CommandAccess::Sensitive, true))
+        );
+        assert_eq!(
+            access("load_project"),
+            Some((CommandAccess::Sensitive, true))
+        );
+        assert_eq!(
+            access("validate_project"),
+            Some((CommandAccess::ReadOnly, false))
+        );
+        assert_eq!(
+            access("set_screen_source"),
+            Some((CommandAccess::Sensitive, false))
+        );
+        assert!(NAME_RULE.contains(&MAX_NAME_CHARS.to_string()));
     }
 
     #[test]

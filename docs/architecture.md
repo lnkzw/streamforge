@@ -46,7 +46,8 @@
 | `encoder-ffmpeg` | lib | Outputs on their own threads, each fed through a non-blocking bounded `OutputInput`: `Recorder` (H.264 + AAC → Matroska, ADR 0005) and `Streamer` (H.264 CBR + AAC → FLV over RTMP with reconnects, ADR 0006); hardware H.264 encoders where one opens, else libx264 (ADR 0011); on Linux, Windows and macOS | `encoder-api`, `media-core`, `ffmpeg-next` |
 | `rtmp-test-server` | lib (test-only) | In-process RTMP ingest for tests (FFmpeg listen mode); never shipped | `ffmpeg-next` |
 | `command-api` | lib | Typed commands, command registry, results, structured errors, `CommandHandler` trait | `capture-api`, `video-compositor`, `audio-engine`, `encoder-api` (report types) |
-| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` and the media pipeline (compositor, mixer, fan-out) with its outputs | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg` |
+| `project-file` | lib | Project file v1 (ADR 0015): JSON format, checks with JSON paths (sources and audio through the command decoders), atomic writes | `command-api` (`serde_path_to_error`) |
+| `engine` | lib | Engine controller; owns engine state, implements `CommandHandler`, drives an injected `CaptureBackend` and the media pipeline (compositor, mixer, fan-out) with its outputs; saves and loads projects | `command-api`, `capture-api`, `video-compositor`, `audio-engine`, `encoder-ffmpeg`, `project-file` |
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |

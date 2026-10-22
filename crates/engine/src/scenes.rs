@@ -462,10 +462,13 @@ pub(crate) fn build(
             input: SourceInput::Live(Arc::clone(mailbox)),
         });
     }
-    let animated = scene
-        .sources
-        .iter()
-        .any(|source| source.id == BUILTIN_OVERLAY && source.rect == BUILTIN_OVERLAY_RECT);
+    // A project file can give any source the built-in id; only a solid one
+    // in the built-in place moves.
+    let animated = scene.sources.iter().any(|source| {
+        source.id == BUILTIN_OVERLAY
+            && source.rect == BUILTIN_OVERLAY_RECT
+            && matches!(source.kind, SourceKind::Solid { .. })
+    });
     let animation: Option<Animation> = animated.then_some(move_builtin_overlay);
     Ok(SceneUpdate {
         scene: canvas,
@@ -576,6 +579,14 @@ mod tests {
         )
         .expect("build");
         assert!(other.animation.is_none());
+        // A loaded file may give another kind of source the built-in id: it
+        // does not move.
+        let (mut scenes, active) = collection.snapshot();
+        scenes[0].sources[1].kind = SourceKind::ColorBars;
+        scenes[0].sources[1].rect = BUILTIN_OVERLAY_RECT;
+        collection.restore((scenes, active));
+        let loaded = build(collection.active(), &none, &mut cache).expect("build");
+        assert!(loaded.animation.is_none());
     }
 
     #[test]

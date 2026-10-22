@@ -99,10 +99,12 @@ The StreamForge source code is licensed as stated in `Cargo.toml` and `LICENSE`.
 - `crates/streamforge-desktop`: desktop UI (egui/eframe) over the command API
 - `crates/streamforge-mcp`: MCP server for agents, with access levels
 - `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
+- `crates/project-file`: project file format (scenes, ids, audio setup), its checks and atomic writes
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)
 - `crates/streamforge-engine`: headless engine process serving the protocol on stdio
 - `crates/streamforge-cli`: CLI entry point (calls the same command handlers)
+- `crates/streamforge-bench`: measurement harness for render, drop and CPU figures
 - `.github/workflows/ci.yml`: CI (fmt, clippy, tests on Linux/Windows/macOS)
 - `docs/`: architecture, media model, control protocol, Linux capture, roadmap, testing strategy, decisions (ADRs)
 - `AGENTS.md`: instructions for coding agents

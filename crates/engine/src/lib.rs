@@ -10,6 +10,7 @@ mod ids;
 mod mix;
 mod outputs;
 mod pipeline;
+mod project;
 mod scenes;
 mod studio;
 mod thread;
@@ -51,6 +52,9 @@ pub struct Engine {
     capture: Box<dyn CaptureBackend>,
     /// Where commands may create files (snapshots); clients only name files.
     output_dir: PathBuf,
+    /// Where project files live (`--project-dir`); without one, the project
+    /// commands are unavailable.
+    project_dir: Option<PathBuf>,
     /// Last capability query; `get_status` derives `capture_available` from it.
     capture_capabilities: Option<CaptureCapabilities>,
 }
@@ -80,6 +84,7 @@ impl Engine {
             },
             capture,
             output_dir: PathBuf::from("."),
+            project_dir: None,
             capture_capabilities: None,
             scenes: SceneCollection::new(),
             audio: default_audio(),
@@ -94,6 +99,14 @@ impl Engine {
     /// Directory for files created by commands; defaults to the working directory.
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
+        self
+    }
+
+    /// Directory for project files; clients only name files in it. Without
+    /// one, `save_project`, `load_project` and `validate_project` are
+    /// `invalid_state`.
+    pub fn with_project_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.project_dir = Some(dir.into());
         self
     }
 
@@ -224,6 +237,18 @@ impl CommandHandler for Engine {
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
+            Command::SetScreenSource { source, source_id } => self
+                .set_screen_source(&source, &source_id)
+                .map(CommandOutput::SceneList),
+            Command::SaveProject(request) => {
+                self.save_project(&request).map(CommandOutput::ProjectSaved)
+            }
+            Command::LoadProject { file_name } => self
+                .load_project(&file_name)
+                .map(|loaded| CommandOutput::ProjectLoaded(Box::new(loaded))),
+            Command::ValidateProject { file_name } => self
+                .validate_project(&file_name)
+                .map(CommandOutput::ProjectValidation),
         }
     }
 }
@@ -565,7 +590,7 @@ mod tests {
     fn every_registered_command_is_handled_without_panicking() {
         let dir = TempDir::new("all-commands");
         for (index, engine) in [Engine::new(), engine()].into_iter().enumerate() {
-            let mut engine = engine.with_output_dir(&dir.0);
+            let mut engine = engine.with_output_dir(&dir.0).with_project_dir(&dir.0);
             for descriptor in registry() {
                 let params = match descriptor.name {
                     // Keep probes short; their defaults run for seconds.
@@ -585,6 +610,13 @@ mod tests {
                     "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
                     "set_master_gain" => Some(json!({"gain_db": -3.0})),
                     "set_preview" => Some(json!({"enabled": false})),
+                    "set_screen_source" => {
+                        Some(json!({"scene": "Scene", "name": "bars", "source_id": "fake:1"}))
+                    }
+                    "save_project" => Some(json!({"file_name": format!("all-{index}.json")})),
+                    "load_project" | "validate_project" => {
+                        Some(json!({"file_name": format!("all-{index}.json")}))
+                    }
                     // Nothing listens there: a structured `unavailable` error.
                     "start_streaming" => Some(json!({
                         "url": format!("rtmp://127.0.0.1:{}/live", rtmp_test_server::free_port())
@@ -1401,6 +1433,243 @@ mod tests {
         // Only the preview runs: the picker may ask again.
         restart(&mut engine).expect("restart");
         assert_eq!(starts.get(), 2);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+    }
+
+    fn scene_list(engine: &mut Engine) -> command_api::SceneList {
+        match run(engine, "list_scenes", json!({})) {
+            CommandOutput::SceneList(list) => list,
+            other => panic!("unexpected output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_project_saves_and_loads_back_with_its_ids() {
+        let dir = TempDir::new("project");
+        let mut engine = engine().with_project_dir(&dir.0);
+        run(&mut engine, "create_scene", json!({"name": "Show"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Show", "name": "red", "kind": "solid", "color": "#ff000080",
+                   "x": 10, "y": 20, "width": 300, "height": 200, "opacity": 0.5}),
+        );
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Show", "name": "desk", "kind": "screen", "source_id": "fake:1",
+                   "cursor": "hidden"}),
+        );
+        run(&mut engine, "set_active_scene", json!({"name": "Show"}));
+        run(
+            &mut engine,
+            "set_audio_sources",
+            json!({"tones": [{"frequency_hz": 440, "level_dbfs": -18, "gain_db": -2, "mute": true}],
+                   "master_gain_db": -4}),
+        );
+        let before = scene_list(&mut engine);
+        let mixer_before = mixer(run(&mut engine, "get_mixer", json!({})));
+        let CommandOutput::ProjectSaved(saved) = run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "show.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert_eq!((saved.scenes, saved.replaced), (2, false));
+        assert!(dir.0.join("show.json").is_file());
+
+        // A fresh engine with the same directory gets everything back but
+        // the screen source's target.
+        let mut fresh = self::engine().with_project_dir(&dir.0);
+        let CommandOutput::ProjectLoaded(loaded) = run(
+            &mut fresh,
+            "load_project",
+            json!({"file_name": "show.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        let mut expected = before.clone();
+        let command_api::SourceKind::Screen { source_id, .. } =
+            &mut expected.scenes[1].sources[1].kind
+        else {
+            panic!("screen source");
+        };
+        *source_id = None;
+        assert_eq!(loaded.scenes, expected);
+        assert_eq!(scene_list(&mut fresh), expected);
+        assert_eq!(loaded.mixer, mixer_before);
+        assert!(
+            loaded.warnings[0].contains("set_screen_source"),
+            "{:?}",
+            loaded.warnings
+        );
+        // Ids survive, so commands by id work across the save.
+        let desk = before.scenes[1].sources[1].id.clone();
+        run(
+            &mut fresh,
+            "set_screen_source",
+            json!({"id": desk, "source_id": "fake:2"}),
+        );
+        let CommandOutput::ProjectValidation(validation) = run(
+            &mut fresh,
+            "validate_project",
+            json!({"file_name": "show.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(validation.valid && validation.problems.is_empty());
+        assert_eq!(validation.schema_version, Some(1));
+    }
+
+    #[test]
+    fn project_commands_need_a_directory_an_idle_pipeline_and_explicit_overwrite() {
+        let _media = media_test_lock();
+        let unconfigured = try_run(
+            &mut engine(),
+            "save_project",
+            json!({"file_name": "a.json"}),
+        )
+        .unwrap_err();
+        assert_eq!(unconfigured.code, ErrorCode::InvalidState);
+        assert!(unconfigured.message.contains("--project-dir"));
+
+        let dir = TempDir::new("project-rules");
+        let mut engine = engine().with_project_dir(&dir.0);
+        run(&mut engine, "save_project", json!({"file_name": "a.json"}));
+        let exists =
+            try_run(&mut engine, "save_project", json!({"file_name": "a.json"})).unwrap_err();
+        assert_eq!(exists.code, ErrorCode::InvalidParams);
+        assert!(exists.message.contains("overwrite"));
+        let CommandOutput::ProjectSaved(replaced) = run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "a.json", "overwrite": true}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(replaced.replaced);
+        let missing =
+            try_run(&mut engine, "load_project", json!({"file_name": "b.json"})).unwrap_err();
+        assert_eq!(missing.code, ErrorCode::NotFound);
+        let mut nowhere = self::engine().with_project_dir(dir.0.join("absent"));
+        let no_dir =
+            try_run(&mut nowhere, "save_project", json!({"file_name": "a.json"})).unwrap_err();
+        assert_eq!(no_dir.code, ErrorCode::NotFound);
+        assert!(
+            no_dir.message.contains("does not exist"),
+            "{}",
+            no_dir.message
+        );
+        std::fs::create_dir(dir.0.join("folder.json")).expect("dir");
+        let folder = try_run(
+            &mut engine,
+            "load_project",
+            json!({"file_name": "folder.json"}),
+        )
+        .unwrap_err();
+        assert_eq!(folder.code, ErrorCode::InvalidParams);
+
+        // Saving works while the pipeline runs; loading does not.
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "a.json", "overwrite": true}),
+        );
+        let busy =
+            try_run(&mut engine, "load_project", json!({"file_name": "a.json"})).unwrap_err();
+        assert_eq!(busy.code, ErrorCode::InvalidState);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+        run(&mut engine, "load_project", json!({"file_name": "a.json"}));
+    }
+
+    #[test]
+    fn an_invalid_project_changes_nothing_and_says_where() {
+        let dir = TempDir::new("project-invalid");
+        let mut engine = engine().with_project_dir(&dir.0);
+        run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "good.json"}),
+        );
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join("good.json")).expect("read"))
+                .expect("json");
+        file["scenes"][0]["sources"][1]["opacity"] = json!(3);
+        file["active_scene"] = json!("scene_gone");
+        std::fs::write(dir.0.join("bad.json"), file.to_string()).expect("write");
+        run(&mut engine, "create_scene", json!({"name": "Unsaved"}));
+        let before = scene_list(&mut engine);
+
+        let error = try_run(
+            &mut engine,
+            "load_project",
+            json!({"file_name": "bad.json"}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.message.contains("2 problem(s)"), "{}", error.message);
+        let details = error.details.expect("details");
+        assert_eq!(details["problems"][0]["path"], "scenes[0].sources[1]");
+        assert_eq!(details["problems"][1]["path"], "active_scene");
+        assert_eq!(scene_list(&mut engine), before);
+
+        let CommandOutput::ProjectValidation(validation) = run(
+            &mut engine,
+            "validate_project",
+            json!({"file_name": "bad.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(!validation.valid);
+        assert_eq!(validation.problems.len(), 2);
+    }
+
+    #[test]
+    fn set_screen_source_chooses_a_target_only_while_nothing_captures() {
+        let _media = media_test_lock();
+        let (engine, starts, _ends) = engine_with_screen_streams();
+        let mut engine = engine;
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
+                   "source_id": "fake:1"}),
+        );
+        let desk = source_id(&mut engine, "Test pattern", "desk");
+        let bars = source_id(&mut engine, "Test pattern", "color_bars");
+        let not_screen = try_run(
+            &mut engine,
+            "set_screen_source",
+            json!({"id": bars, "source_id": "fake:2"}),
+        )
+        .unwrap_err();
+        assert_eq!(not_screen.code, ErrorCode::InvalidParams);
+        run(
+            &mut engine,
+            "set_screen_source",
+            json!({"id": desk, "source_id": "fake:2"}),
+        );
+        assert_eq!(
+            screen_ids(&mut engine, "Test pattern"),
+            [("desk".to_owned(), Some("fake:2".to_owned()))]
+        );
+        // A running capture keeps its target; restart_source switches it.
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        assert_eq!(starts.get(), 1);
+        let capturing = try_run(
+            &mut engine,
+            "set_screen_source",
+            json!({"id": desk, "source_id": "fake:3"}),
+        )
+        .unwrap_err();
+        assert_eq!(capturing.code, ErrorCode::InvalidState);
+        assert!(capturing.message.contains("restart_source"));
+        assert_eq!(
+            screen_ids(&mut engine, "Test pattern"),
+            [("desk".to_owned(), Some("fake:2".to_owned()))]
+        );
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 

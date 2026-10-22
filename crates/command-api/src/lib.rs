@@ -12,6 +12,7 @@ mod error;
 mod health;
 mod mix;
 mod outputs;
+mod project;
 mod registry;
 mod scenes;
 
@@ -24,9 +25,12 @@ pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
     SceneCaptureOutcome, StreamingReport, StreamingRequest, StreamingStarted,
 };
+pub use project::{
+    ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
+};
 pub use registry::{
-    CommandAccess, CommandDescriptor, CommandList, decode_streaming_to, default_sources,
-    params_schema, registry,
+    CommandAccess, CommandDescriptor, CommandList, NAME_RULE, decode_streaming_to, default_sources,
+    is_valid_id, is_valid_name, params_schema, registry,
 };
 pub use scenes::{
     AddSourceRequest, AudioSetup, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
@@ -38,6 +42,8 @@ pub use scenes::{
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
 /// use `audio-engine`.
 pub use audio_engine::{LiveInputStats, LiveMixStats};
+use std::path::PathBuf;
+
 use capture_api::{
     AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
     VideoCaptureReport,
@@ -105,6 +111,23 @@ pub enum Command {
         /// Capture this screen source from now on (the scene keeps it).
         source_id: Option<String>,
     },
+    /// Choose what a screen source captures while it has no running
+    /// capture (e.g. after loading a project, which does not store it).
+    SetScreenSource {
+        source: SourceRef,
+        source_id: String,
+    },
+    /// Write the scenes and audio setup to a project file.
+    SaveProject(SaveProjectRequest),
+    /// Replace the scenes and audio setup with a project file's (only while
+    /// the pipeline is idle).
+    LoadProject {
+        file_name: PathBuf,
+    },
+    /// Check a project file without loading it.
+    ValidateProject {
+        file_name: PathBuf,
+    },
     /// Mixer strips, gains and peak levels.
     GetMixer,
     SetMixerStrip(StripChange),
@@ -144,6 +167,9 @@ pub enum CommandOutput {
     SceneList(SceneList),
     MixerState(MixerState),
     PreviewState(Box<PreviewState>),
+    ProjectSaved(ProjectSaved),
+    ProjectLoaded(Box<ProjectLoaded>),
+    ProjectValidation(ProjectValidation),
 }
 
 /// Result of `list_audio_inputs`.

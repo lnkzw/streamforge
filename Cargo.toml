@@ -14,6 +14,7 @@ members = [
     "crates/encoder-api",
     "crates/encoder-ffmpeg",
     "crates/rtmp-test-server",
+    "crates/project-file",
     "crates/engine",
     "crates/control-protocol",
     "crates/streamforge-engine",

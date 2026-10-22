@@ -23,19 +23,23 @@ pub struct MixRequest {
     pub master_gain_db: f32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Serialized as the `inputs` entries of the mixing commands' parameters.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveInputSpec {
     /// Input name; `None` uses the system default input.
     pub input: Option<String>,
     pub gain_db: f32,
+    #[serde(rename = "mute")]
     pub muted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Serialized as the `tones` entries of the mixing commands' parameters.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToneSpec {
     pub frequency_hz: f64,
     pub level_dbfs: f64,
     pub gain_db: f32,
+    #[serde(rename = "mute")]
     pub muted: bool,
 }
 

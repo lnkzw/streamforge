@@ -19,7 +19,7 @@ The user decided:
   - Clients treat ids as opaque. The prefix says what kind of object an id names, so a scene id cannot pass for a source id.
   - Parameters accept the prefix, then `a-z`, `0-9` or `_`, at most 64 bytes, so a project file (step 6) can bring ids of the same shape back.
 - **Uniqueness:** source ids are unique across all scenes, not only within one. A source can therefore be named by its id alone, and captures stay keyed by it while their source is in a scene that is not rendered.
-- **Built-in scene:** `Test pattern` and its sources have fixed ids (`scene_test_pattern`, `src_color_bars`, `src_overlay`). The moving overlay is recognized by its id, and a fixed id survives saving and loading. Generated ids never look like these, so a user source is never animated.
+- **Built-in scene:** `Test pattern` and its sources have fixed ids (`scene_test_pattern`, `src_color_bars`, `src_overlay`). The moving overlay is recognized by its id, and a fixed id survives saving and loading. Generated ids never look like these. A project file can set any id (ADR 0015), so the overlay moves only if it is also a solid source in the built-in rectangle.
 - **Naming in commands:**
   - A scene by `scene_id`, or by its name (`name` in the scene commands, `scene` in the source commands).
   - A source by `id` alone, or by its scene and `name`.

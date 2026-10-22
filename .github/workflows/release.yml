@@ -1,0 +1,120 @@
+name: Release
+
+# Linux packages, one per distribution family: FFmpeg and PipeWire are
+# linked dynamically, and their library versions differ between
+# distributions (packaging/linux/package.sh). Each package is built and
+# smoke-tested on its own system.
+#
+# A pushed `v*` tag creates a *draft* release with the packages; a person
+# publishes it after checking. Manual runs and pull requests that change
+# the packaging are dry runs: they build and upload the packages as
+# workflow artifacts and publish nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ubuntu:
+    name: linux (ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-setup
+      - name: Build, check and pack
+        run: packaging/linux/package.sh ubuntu24.04
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-ubuntu24.04
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+  arch:
+    name: linux (arch linux)
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        # The same libraries as on the development machine: the current
+        # FFmpeg and PipeWire; bindgen needs clang.
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rustup clang pkgconf ffmpeg pipewire
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build, check and pack
+        run: |
+          # The checkout belongs to the runner's user, not the container's.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/linux/package.sh archlinux
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-archlinux
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ubuntu, arch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Creating the draft release; nothing else is written.
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the tag against the version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "tag $GITHUB_REF_NAME, workspace version $version"
+          test "$GITHUB_REF_NAME" = "v$version"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          (cd dist && sha256sum -c ./*.sha256)
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag \
+            --title "StreamForge ${GITHUB_REF_NAME#v}" \
+            --notes "Linux packages for Ubuntu 24.04 and Arch Linux; see INSTALL.md in each. Windows and macOS packages follow later. Draft: check the packages before publishing."

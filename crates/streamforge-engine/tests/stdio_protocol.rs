@@ -7,7 +7,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use common::EngineProcess;
+use common::{EngineProcess, TempDir};
 use control_protocol::MAX_REQUEST_BYTES;
 use serde_json::{Value, json};
 
@@ -260,6 +260,42 @@ fn composite_probe_runs_headless() {
     assert_eq!(ids, [json!("bars"), json!("overlay")], "{render}");
     assert!(response["result"]["screen_capture"].is_null());
     assert!(engine.finish().success());
+}
+
+#[test]
+fn projects_save_and_load_in_the_project_directory() {
+    let dir = TempDir::new("projects");
+    let args = [std::ffi::OsStr::new("--project-dir"), dir.0.as_os_str()];
+    let mut engine = EngineProcess::spawn_with(&args);
+    let created = engine.request(r#"{"id":1,"command":"create_scene","params":{"name":"Show"}}"#);
+    assert_eq!(created["ok"], true, "{created}");
+    let saved =
+        engine.request(r#"{"id":2,"command":"save_project","params":{"file_name":"show.json"}}"#);
+    assert_eq!(saved["ok"], true, "{saved}");
+    assert!(dir.0.join("show.json").is_file());
+    // A path is refused: clients only name files in the directory.
+    let escaped = engine
+        .request(r#"{"id":3,"command":"save_project","params":{"file_name":"../show.json"}}"#);
+    assert_eq!(escaped["error"]["code"], "invalid_params", "{escaped}");
+    assert!(engine.finish().success());
+
+    let mut fresh = EngineProcess::spawn_with(&args);
+    let loaded =
+        fresh.request(r#"{"id":4,"command":"load_project","params":{"file_name":"show.json"}}"#);
+    assert_eq!(loaded["ok"], true, "{loaded}");
+    assert_eq!(loaded["result"]["scenes"][1]["name"], "Show", "{loaded}");
+    assert_eq!(
+        loaded["result"]["scenes"][1]["id"],
+        created["result"]["scenes"][1]["id"]
+    );
+    assert!(fresh.finish().success());
+
+    // Without --project-dir the commands are unavailable.
+    let mut plain = EngineProcess::spawn();
+    let refused = plain
+        .request(r#"{"id":5,"command":"validate_project","params":{"file_name":"show.json"}}"#);
+    assert_eq!(refused["error"]["code"], "invalid_state", "{refused}");
+    assert!(plain.finish().success());
 }
 
 #[test]

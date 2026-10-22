@@ -97,11 +97,15 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `update_source`            | see below | `control` | Scene list |
 | `remove_source`            | see below | `control` | Scene list |
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
+| `set_screen_source`        | see below | `sensitive` | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `set_mixer_strip`          | see below | `control` | Mixer state |
 | `set_master_gain`          | see below | `control` | Mixer state |
 | `set_audio_sources`        | see below | `sensitive` | Mixer state |
 | `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
+| `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
+| `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
+| `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "problems": [{"path", "message"}]}` |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
 - **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
@@ -331,7 +335,7 @@ Errors:
 
 ### Scenes, mixer and preview
 
-The engine keeps a collection of scenes on a 1920×1080 canvas and renders the **active** one. Changes to the active scene, or switching scenes, apply live while preview or outputs run. A live change that fails (e.g. the picker of a new screen source is cancelled) is undone and returns the error. Scenes live in memory only.
+The engine keeps a collection of scenes on a 1920×1080 canvas and renders the **active** one. Changes to the active scene, or switching scenes, apply live while preview or outputs run. A live change that fails (e.g. the picker of a new screen source is cancelled) is undone and returns the error. Scenes live in memory; `save_project` and `load_project` keep them in a file (see Projects).
 
 At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active", "active_id", "scenes": [{"id", "name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`. `active` is the active scene's name, `active_id` its id.
 
@@ -372,6 +376,44 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `source_id`, and the error is returned (e.g. `not_found` for a gone source).
   - Both captures' reports are in the output reports' `scene_captures`.
   - Live audio inputs and the screen layer cannot be restarted: the mixer's inputs are fixed while it runs.
+- **`set_screen_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and `source_id` from `list_screen_sources`. Chooses what a screen source captures from now on, e.g. after `load_project`, which does not store it.
+  - Only while the source has no running capture; with one, it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
+  - It is `sensitive`, like `add_source`: it decides what is captured. If the source is in the rendered scene, its capture starts now, and a failure (e.g. `not_found` for a gone source) changes nothing.
+
+### Projects
+
+A project file holds the scenes with their ids, the active scene and the audio setup (ADR 0015). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`). Without it, the project commands are `invalid_state`. Commands name a file by a plain `.json` name; directories, `..` and absolute paths are `invalid_params`.
+
+- **`save_project {file_name, overwrite}`:** writes the current scenes and audio setup, also while the pipeline runs.
+  - An existing file is `invalid_params` unless `overwrite` is `true`.
+  - Writing is atomic: a temporary file next to the target, flushed to disk and renamed over it. A save that fails or is cut off leaves the previous file whole.
+  - Result: `{"file_name", "path", "replaced", "scenes", "bytes"}`.
+- **`load_project {file_name}`:** replaces the scenes, the active scene and the audio setup with the file's, all or nothing.
+  - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
+  - Screen sources load without a capture target; a warning says so. Choose one with `set_screen_source`, or the system picker asks when the scene is rendered.
+  - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`).
+  - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.
+- **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "problems"}`; an invalid file is a result, not an error. `read_only`.
+- **Errors:** a missing file is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
+- **Not stored:** stream keys, file paths, and what screen sources capture (`source_id`: machine-specific, and window titles can be private).
+
+The file (`schema_version` 1):
+
+```json
+{"schema_version": 1,
+ "canvas": {"width": 1920, "height": 1080},
+ "active_scene": "scene_k3j9x2m4q8w1",
+ "scenes": [{"id": "scene_k3j9x2m4q8w1", "name": "Show", "sources": [
+   {"id": "src_a1b2c3d4e5f6", "name": "red", "kind": "solid", "color": "#ff000080",
+    "x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0, "opacity": 0.5}]}],
+ "audio": {"inputs": [{"input": null, "gain_db": 0.0, "mute": false}],
+           "tones": [], "master_gain_db": 0.0}}
+```
+
+- **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1). **`audio`** is `set_audio_sources` parameters with every field given.
+- **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's.
+- **Strict:** unknown fields are problems, and a `schema_version` other than 1 is refused (a newer one with a hint to update).
+- `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
   - It is destructive: it ends a running capture, and a picker choice is gone.
 
 Mixer:
@@ -391,7 +433,7 @@ Preview:
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.

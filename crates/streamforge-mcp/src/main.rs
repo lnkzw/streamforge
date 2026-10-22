@@ -24,6 +24,11 @@ struct Args {
     /// Directory for files the engine creates (recordings, snapshots).
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
+    /// Directory for project files (save_project and load_project need
+    /// --allow sensitive; validate_project is read-only). Without it, the
+    /// project commands are unavailable.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// The only RTMP target agents may stream to (needs --allow sensitive);
     /// without it, start_streaming is not offered.
     #[arg(long)]
@@ -52,9 +57,13 @@ fn main() -> ExitCode {
             .map(|target| format!("; streaming target {}", target.redacted()))
             .unwrap_or_default()
     );
-    let output_dir = args.output_dir;
+    let (output_dir, project_dir) = (args.output_dir, args.project_dir);
     let engine = match EngineThread::spawn(move || {
-        Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir)
+        let engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+        match project_dir {
+            Some(dir) => engine.with_project_dir(dir),
+            None => engine,
+        }
     }) {
         Ok(engine) => engine,
         Err(err) => {

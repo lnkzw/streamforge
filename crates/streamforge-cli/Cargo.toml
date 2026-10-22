@@ -15,3 +15,6 @@ serde_json.workspace = true
 capture-platform = { path = "../capture-platform" }
 command-api = { path = "../command-api" }
 engine = { path = "../engine" }
+
+[dev-dependencies]
+serde_json.workspace = true

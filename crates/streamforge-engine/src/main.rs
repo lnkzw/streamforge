@@ -24,6 +24,11 @@ struct Args {
     /// Clients only choose file names inside it.
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
+    /// Directory for project files (save_project, load_project,
+    /// validate_project); clients only choose file names inside it.
+    /// Without it, the project commands are unavailable.
+    #[arg(long)]
+    project_dir: Option<PathBuf>,
     /// Highest class of commands the client may run: read-only, control or
     /// sensitive (the client is whoever controls stdin; restrict it when
     /// that is not you).
@@ -32,8 +37,15 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    let Args { output_dir, allow } = Args::parse();
-    let engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+    let Args {
+        output_dir,
+        project_dir,
+        allow,
+    } = Args::parse();
+    let mut engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+    if let Some(dir) = project_dir {
+        engine = engine.with_project_dir(dir);
+    }
     let mut handler = Gated::new(engine, AccessPolicy::allowing(allow));
     match control_protocol::serve(io::stdin().lock(), io::stdout().lock(), &mut handler) {
         Ok(()) => ExitCode::SUCCESS,

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -33,6 +33,9 @@ enum Commands {
     /// Inspect and test screen/audio capture. Output is JSON.
     #[command(subcommand)]
     Capture(CaptureCommand),
+    /// Work with project files (saved scenes and audio setup).
+    #[command(subcommand)]
+    Project(ProjectCommand),
     /// Record the 1920x1080@60 reference scene and the audio mix to a new Matroska file
     /// (H.264 + AAC), then print the report. Output is JSON.
     Record {
@@ -116,6 +119,17 @@ enum Commands {
         /// name (no directories), created in --output-dir; never overwritten.
         #[arg(long)]
         snapshot: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Check a project file (schema version, every scene and source, the
+    /// audio setup) without loading it. Prints the problems with their JSON
+    /// paths as JSON; exits 1 if the file is not valid.
+    Validate {
+        /// Path to a .json project file.
+        file: PathBuf,
     },
 }
 
@@ -312,6 +326,40 @@ fn main() -> Result<ExitCode> {
             }
             run_command(&mut engine, "probe_composite", params)
         }
+        Commands::Project(ProjectCommand::Validate { file }) => validate_project(&file),
+    }
+}
+
+/// The engine's `validate_project`, with the file's directory as the
+/// project directory: the same checks as for `load_project`.
+fn validate_project(file: &Path) -> Result<ExitCode> {
+    let (Some(name), dir) = (file.file_name(), file.parent()) else {
+        eprintln!("error: {} is not a file", file.display());
+        return Ok(ExitCode::FAILURE);
+    };
+    let dir = match dir {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut engine = Engine::new().with_project_dir(dir);
+    let mut params = Map::new();
+    params.insert(
+        "file_name".into(),
+        name.to_string_lossy().into_owned().into(),
+    );
+    let result = Command::decode("validate_project", Some(&Value::Object(params)))
+        .and_then(|command| engine.handle(command));
+    match result {
+        Ok(CommandOutput::ProjectValidation(validation)) => {
+            println!("{}", serde_json::to_string_pretty(&validation)?);
+            Ok(if validation.valid {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Ok(other) => bail!("engine returned unexpected output for validate_project: {other:?}"),
+        Err(err) => Ok(report_error(&err)),
     }
 }
 

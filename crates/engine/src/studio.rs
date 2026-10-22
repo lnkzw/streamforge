@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use command_api::{
     AddSourceRequest, AudioSetup, CommandError, ErrorCode, MixerState, PreviewState, SceneList,
-    SourceKind, StripChange, UpdateSourceRequest,
+    SceneRef, SourceKind, SourceRef, StripChange, UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
@@ -54,22 +54,22 @@ impl Engine {
     }
 
     pub(crate) fn create_scene(&mut self, name: &str) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.create(name))
+        self.edit_scenes(|scenes| scenes.create(name).map(drop))
     }
 
-    pub(crate) fn delete_scene(&mut self, name: &str) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.delete(name))
+    pub(crate) fn delete_scene(&mut self, scene: &SceneRef) -> Result<SceneList, CommandError> {
+        self.edit_scenes(|scenes| scenes.delete(scene))
     }
 
-    pub(crate) fn set_active_scene(&mut self, name: &str) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.set_active(name))
+    pub(crate) fn set_active_scene(&mut self, scene: &SceneRef) -> Result<SceneList, CommandError> {
+        self.edit_scenes(|scenes| scenes.set_active(scene))
     }
 
     pub(crate) fn add_source(
         &mut self,
         request: &AddSourceRequest,
     ) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.add_source(request))
+        self.edit_scenes(|scenes| scenes.add_source(request).map(drop))
     }
 
     pub(crate) fn update_source(
@@ -79,12 +79,8 @@ impl Engine {
         self.edit_scenes(|scenes| scenes.update_source(request))
     }
 
-    pub(crate) fn remove_source(
-        &mut self,
-        scene: &str,
-        name: &str,
-    ) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.remove_source(scene, name))
+    pub(crate) fn remove_source(&mut self, source: &SourceRef) -> Result<SceneList, CommandError> {
+        self.edit_scenes(|scenes| scenes.remove_source(source))
     }
 
     /// Restart a screen source's capture (e.g. after it ended), optionally
@@ -92,12 +88,14 @@ impl Engine {
     /// pipeline and its outputs keep running. On error nothing changes.
     pub(crate) fn restart_source(
         &mut self,
-        scene: &str,
-        name: &str,
+        source: &SourceRef,
         source_id: Option<&str>,
     ) -> Result<SceneList, CommandError> {
-        let source = self.scenes.source(scene, name)?;
-        if !matches!(source.kind, SourceKind::Screen { .. }) {
+        let spec = self.scenes.source(source)?;
+        let name = &spec.name.clone();
+        // Found once; from here on by its id.
+        let source = &SourceRef::id(spec.id.clone());
+        if !matches!(spec.kind, SourceKind::Screen { .. }) {
             return Err(CommandError::new(
                 ErrorCode::InvalidParams,
                 format!("`{name}` does not capture; only screen sources can be restarted"),
@@ -117,9 +115,9 @@ impl Engine {
         }
         let before = self.scenes.snapshot();
         if let Some(id) = source_id {
-            self.scenes.set_screen_source_id(scene, name, id)?;
+            self.scenes.set_screen_source_id(source, id)?;
         }
-        let source = self.scenes.source(scene, name)?.clone();
+        let source = self.scenes.source(source)?.clone();
         let (allow_new_captures, keep) = self.capture_policy();
         let restarted = match &mut self.pipeline {
             Some(pipeline) => pipeline.restart_screen(
@@ -141,7 +139,7 @@ impl Engine {
     /// Whether new captures may start (open outputs must not wait for a
     /// picker; the preview alone means someone is at the UI), and the
     /// screen sources whose captures keep running.
-    fn capture_policy(&self) -> (bool, Vec<u32>) {
+    fn capture_policy(&self) -> (bool, Vec<String>) {
         (
             self.recording.is_none() && self.streaming.is_none(),
             self.scenes.screen_source_ids(),

@@ -28,9 +28,10 @@ pub const CANVAS_WIDTH: u32 = 1920;
 pub const CANVAS_HEIGHT: u32 = 1080;
 pub const FPS: u32 = 60;
 
-const BARS: SourceId = SourceId(0);
-const SCREEN: SourceId = SourceId(1);
-const OVERLAY: SourceId = SourceId(2);
+/// Source ids of the reference scene (`probe_composite`).
+const BARS: &str = "bars";
+const SCREEN: &str = "screen";
+const OVERLAY: &str = "overlay";
 const OVERLAY_SIZE: u32 = 160;
 pub(crate) const SCREEN_BOX: Rect = Rect {
     x: 704.0,
@@ -126,34 +127,38 @@ pub(crate) fn reference_scene(
     let mut scene = Scene::new(CANVAS_WIDTH, CANVAS_HEIGHT);
     let mut sources = vec![
         SourceConfig {
-            id: BARS,
+            id: SourceId::from(BARS),
             name: "color_bars".to_owned(),
             input: SourceInput::Static(Arc::new(bars)),
         },
         SourceConfig {
-            id: OVERLAY,
+            id: SourceId::from(OVERLAY),
             name: "overlay".to_owned(),
             input: SourceInput::Static(Arc::new(overlay)),
         },
     ];
-    scene
-        .layers
-        .push(Layer::new("color_bars", BARS, Transform::IDENTITY));
+    scene.layers.push(Layer::new(
+        "color_bars",
+        SourceId::from(BARS),
+        Transform::IDENTITY,
+    ));
     if let Some(stream) = stream {
         // Fitted per frame: the delivered size may differ from what the
         // portal reported (HiDPI scaling, window resizes).
         scene
             .layers
-            .push(Layer::fitted("screen", SCREEN, SCREEN_BOX).with_opacity(0.9));
+            .push(Layer::fitted("screen", SourceId::from(SCREEN), SCREEN_BOX).with_opacity(0.9));
         sources.push(SourceConfig {
-            id: SCREEN,
+            id: SourceId::from(SCREEN),
             name: "screen".to_owned(),
             input: SourceInput::Live(stream.frames()),
         });
     }
-    scene
-        .layers
-        .push(Layer::new("overlay", OVERLAY, Transform::at(64.0, 120.0)));
+    scene.layers.push(Layer::new(
+        "overlay",
+        SourceId::from(OVERLAY),
+        Transform::at(64.0, 120.0),
+    ));
     Ok(CompositorConfig {
         scene,
         fps: FPS,

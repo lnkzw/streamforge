@@ -18,8 +18,9 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
     AddSourceRequest, AudioSetup, Command, CommandError, CompositeRequest, ErrorCode,
-    LiveInputSpec, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest,
-    Rgba, SourceKind, SourceRect, StreamingRequest, StripChange, ToneSpec, UpdateSourceRequest,
+    LiveInputSpec, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest,
+    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneRef, SourceKind, SourceRect,
+    SourceRef, StreamingRequest, StripChange, ToneSpec, UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -224,7 +225,9 @@ const STOP_STREAMING: CommandDescriptor = CommandDescriptor {
 
 const LIST_SCENES: CommandDescriptor = CommandDescriptor {
     name: "list_scenes",
-    summary: "List the scenes with their sources, the active scene and the canvas size.",
+    summary: "List the scenes with their sources (each with a stable id), the active scene and \
+              the canvas size. Commands that take a scene or source name also take its id; \
+              given both, they must name the same one.",
     access: CommandAccess::ReadOnly,
     destructive: false,
     open_world: false,
@@ -232,7 +235,8 @@ const LIST_SCENES: CommandDescriptor = CommandDescriptor {
 
 const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "create_scene",
-    summary: "Create an empty scene. Params: name (1-64 characters, unique). Returns the scene list.",
+    summary: "Create an empty scene. Params: name (1-64 characters, unique). Returns the scene \
+              list, with the new scene's id.",
     access: CommandAccess::Control,
     destructive: false,
     open_world: false,
@@ -240,8 +244,8 @@ const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
 
 const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "delete_scene",
-    summary: "Delete a scene that is not active; irreversible. Params: name, confirm (must be \
-              true). Returns the scene list.",
+    summary: "Delete a scene that is not active; irreversible. Params: scene_id or name, confirm \
+              (must be true). Returns the scene list.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -250,8 +254,8 @@ const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
 const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "set_active_scene",
     summary: "Render this scene from now on (applies live while preview or outputs run; its \
-              screen sources start capturing, which opens the system picker). Params: name. \
-              Returns the scene list.",
+              screen sources start capturing, which opens the system picker). Params: scene_id \
+              or name. Returns the scene list.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -259,7 +263,7 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
 
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "add_source",
-    summary: "Add a source on top of a scene. Params: scene, name, kind (color_bars, solid, \
+    summary: "Add a source on top of a scene. Params: scene_id or scene, name, kind (color_bars, solid, \
               screen), color (#rrggbb[aa], solid), source_id, source_types and cursor (screen), x, \
               y, width, height (canvas pixels; all or none, default the whole canvas), opacity \
               (0-1). Screen sources start capturing when the scene is rendered: the source_id from \
@@ -272,8 +276,8 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "update_source",
-    summary: "Move, resize or fade a source. Params: scene, name, and any of x, y, width, height, \
-              opacity. Returns the scene list.",
+    summary: "Move, resize or fade a source. Params: the source's id, or scene (or scene_id) and \
+              name; any of x, y, width, height, opacity. Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -281,7 +285,8 @@ const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "remove_source",
-    summary: "Remove a source from a scene. Params: scene, name. Returns the scene list.",
+    summary: "Remove a source from a scene. Params: the source's id, or scene (or scene_id) and \
+              name. Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -290,7 +295,8 @@ const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
 const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "restart_source",
     summary: "Start a screen source's capture again and end the old one, e.g. after get_health \
-              reports it ended; outputs keep running. Params: scene, name, optional source_id \
+              reports it ended; outputs keep running. Params: the source's id, or scene (or \
+              scene_id) and name; optional source_id \
               (from list_screen_sources) to capture another source from now on: a closed \
               window's id does not come back, a display's does when it reconnects. A picker \
               source asks the user again, so it is refused while recording or streaming. \
@@ -432,16 +438,11 @@ impl Command {
             "create_scene" => {
                 decode_scene_name(name, params).map(|name| Self::CreateScene { name })
             }
-            "delete_scene" => {
-                decode_delete_scene(name, params).map(|name| Self::DeleteScene { name })
-            }
-            "set_active_scene" => {
-                decode_scene_name(name, params).map(|name| Self::SetActiveScene { name })
-            }
+            "delete_scene" => decode_delete_scene(name, params).map(Self::DeleteScene),
+            "set_active_scene" => decode_set_active_scene(name, params).map(Self::SetActiveScene),
             "add_source" => decode_add_source(name, params).map(Self::AddSource),
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
-            "remove_source" => decode_remove_source(name, params)
-                .map(|(scene, name)| Self::RemoveSource { scene, name }),
+            "remove_source" => decode_remove_source(name, params).map(Self::RemoveSource),
             "restart_source" => decode_restart_source(name, params),
             "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
             "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
@@ -979,16 +980,104 @@ fn decode_scene_name(command: &str, params: Option<&Value>) -> Result<String, Co
     valid_name(command, "name", params.name)
 }
 
+/// Scene and source ids from `list_scenes`: the type's prefix, then
+/// `a-z`, `0-9` or `_`.
+fn valid_id(command: &str, field: &str, prefix: &str, id: String) -> Result<String, CommandError> {
+    let valid = id.len() > prefix.len()
+        && id.len() <= MAX_ID_LEN
+        && id.starts_with(prefix)
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    if !valid {
+        return Err(invalid_params(
+            command,
+            format!("`{field}` must be an id from list_scenes (`{prefix}…`)"),
+        ));
+    }
+    Ok(id)
+}
+
+/// A scene named by `scene_id`, by `name_field`, or by both; `None` if
+/// neither is given.
+fn scene_ref(
+    command: &str,
+    id: Option<String>,
+    name_field: &str,
+    name: Option<String>,
+) -> Result<Option<SceneRef>, CommandError> {
+    let id = id
+        .map(|id| valid_id(command, "scene_id", SCENE_ID_PREFIX, id))
+        .transpose()?;
+    let name = name
+        .map(|name| valid_name(command, name_field, name))
+        .transpose()?;
+    Ok((id.is_some() || name.is_some()).then_some(SceneRef { id, name }))
+}
+
+fn required_scene(
+    command: &str,
+    id: Option<String>,
+    name_field: &str,
+    name: Option<String>,
+) -> Result<SceneRef, CommandError> {
+    scene_ref(command, id, name_field, name)?
+        .ok_or_else(|| invalid_params(command, format!("give `scene_id` or `{name_field}`")))
+}
+
+/// A source named by its `id`, or by its scene and `name`.
+fn source_ref(
+    command: &str,
+    id: Option<String>,
+    scene_id: Option<String>,
+    scene: Option<String>,
+    name: Option<String>,
+) -> Result<SourceRef, CommandError> {
+    let id = id
+        .map(|id| valid_id(command, "id", SOURCE_ID_PREFIX, id))
+        .transpose()?;
+    let scene = scene_ref(command, scene_id, "scene", scene)?;
+    let name = name
+        .map(|name| valid_name(command, "name", name))
+        .transpose()?;
+    if id.is_none() && (scene.is_none() || name.is_none()) {
+        return Err(invalid_params(
+            command,
+            "give the source's `id`, or `scene` (or `scene_id`) and `name`",
+        ));
+    }
+    Ok(SourceRef { id, scene, name })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetActiveSceneParams {
+    /// Scene id from list_scenes (or give the name).
+    scene_id: Option<String>,
+    /// Scene name (or give scene_id).
+    name: Option<String>,
+}
+
+fn decode_set_active_scene(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<SceneRef, CommandError> {
+    let params: SetActiveSceneParams = decode_params(command, params)?;
+    required_scene(command, params.scene_id, "name", params.name)
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DeleteSceneParams {
-    /// Scene name.
-    name: String,
+    /// Scene id from list_scenes (or give the name).
+    scene_id: Option<String>,
+    /// Scene name (or give scene_id).
+    name: Option<String>,
     /// Must be true: deleting a scene cannot be undone.
     confirm: Option<bool>,
 }
 
-fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<String, CommandError> {
+fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<SceneRef, CommandError> {
     let params: DeleteSceneParams = decode_params(command, params)?;
     if params.confirm != Some(true) {
         return Err(invalid_params(
@@ -996,7 +1085,7 @@ fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<String, 
             "deleting a scene cannot be undone; pass `confirm: true`",
         ));
     }
-    valid_name(command, "name", params.name)
+    required_scene(command, params.scene_id, "name", params.name)
 }
 
 /// Positions and sizes in canvas pixels stay within this magnitude.
@@ -1045,8 +1134,10 @@ fn parse_color(command: &str, text: &str) -> Result<Rgba, CommandError> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddSourceParams {
-    /// Scene name.
-    scene: String,
+    /// Scene id from list_scenes (or give scene).
+    scene_id: Option<String>,
+    /// Scene name (or give scene_id).
+    scene: Option<String>,
     /// Source name, unique within the scene.
     name: String,
     /// Source kind: color_bars, solid or screen.
@@ -1149,7 +1240,7 @@ fn decode_add_source(
         }
     };
     Ok(AddSourceRequest {
-        scene: valid_name(command, "scene", params.scene)?,
+        scene: required_scene(command, params.scene_id, "scene", params.scene)?,
         name: valid_name(command, "name", params.name)?,
         kind,
         rect,
@@ -1160,10 +1251,14 @@ fn decode_add_source(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateSourceParams {
+    /// Source id from list_scenes (or give scene and name).
+    id: Option<String>,
+    /// Scene id from list_scenes (or give scene).
+    scene_id: Option<String>,
     /// Scene name.
-    scene: String,
+    scene: Option<String>,
     /// Source name.
-    name: String,
+    name: Option<String>,
     /// Left edge in canvas pixels.
     x: Option<f32>,
     /// Top edge in canvas pixels.
@@ -1202,8 +1297,13 @@ fn decode_update_source(
             .transpose()
     };
     Ok(UpdateSourceRequest {
-        scene: valid_name(command, "scene", params.scene)?,
-        name: valid_name(command, "name", params.name)?,
+        source: source_ref(
+            command,
+            params.id,
+            params.scene_id,
+            params.scene,
+            params.name,
+        )?,
         x: check("x", params.x, false)?,
         y: check("y", params.y, false)?,
         width: check("width", params.width, true)?,
@@ -1215,19 +1315,27 @@ fn decode_update_source(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RemoveSourceParams {
+    /// Source id from list_scenes (or give scene and name).
+    id: Option<String>,
+    /// Scene id from list_scenes (or give scene).
+    scene_id: Option<String>,
     /// Scene name.
-    scene: String,
+    scene: Option<String>,
     /// Source name.
-    name: String,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RestartSourceParams {
+    /// Source id from list_scenes (or give scene and name).
+    id: Option<String>,
+    /// Scene id from list_scenes (or give scene).
+    scene_id: Option<String>,
     /// Scene name.
-    scene: String,
-    /// Source name (a screen source).
-    name: String,
+    scene: Option<String>,
+    /// Source name.
+    name: Option<String>,
     /// Capture this source from list_screen_sources from now on (the scene
     /// keeps it), e.g. instead of a closed window.
     source_id: Option<String>,
@@ -1236,8 +1344,13 @@ struct RestartSourceParams {
 fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Command, CommandError> {
     let params: RestartSourceParams = decode_params(command, params)?;
     Ok(Command::RestartSource {
-        scene: valid_name(command, "scene", params.scene)?,
-        name: valid_name(command, "name", params.name)?,
+        source: source_ref(
+            command,
+            params.id,
+            params.scene_id,
+            params.scene,
+            params.name,
+        )?,
         source_id: params
             .source_id
             .map(|id| valid_source_id(command, id))
@@ -1245,15 +1358,15 @@ fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Comman
     })
 }
 
-fn decode_remove_source(
-    command: &str,
-    params: Option<&Value>,
-) -> Result<(String, String), CommandError> {
+fn decode_remove_source(command: &str, params: Option<&Value>) -> Result<SourceRef, CommandError> {
     let params: RemoveSourceParams = decode_params(command, params)?;
-    Ok((
-        valid_name(command, "scene", params.scene)?,
-        valid_name(command, "name", params.name)?,
-    ))
+    source_ref(
+        command,
+        params.id,
+        params.scene_id,
+        params.scene,
+        params.name,
+    )
 }
 
 fn gain_db(command: &str, field: &str, value: f32) -> Result<f32, CommandError> {
@@ -1555,7 +1668,8 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "probe_audio_mix" => of::<MixProbeParams>(),
         "start_recording" => of::<StartRecordingParams>(),
         "start_streaming" => of::<StartStreamingParams>(),
-        "create_scene" | "set_active_scene" => of::<SceneNameParams>(),
+        "create_scene" => of::<SceneNameParams>(),
+        "set_active_scene" => of::<SetActiveSceneParams>(),
         "delete_scene" => of::<DeleteSceneParams>(),
         "add_source" => of::<AddSourceParams>(),
         "update_source" => of::<UpdateSourceParams>(),
@@ -1679,6 +1793,70 @@ mod tests {
     }
 
     #[test]
+    fn scenes_and_sources_are_named_by_id_or_name() {
+        let decode = |command: &str, params: Value| {
+            Command::decode(command, Some(&params)).unwrap_or_else(|err| panic!("{err}"))
+        };
+        assert_eq!(
+            decode("set_active_scene", json!({"scene_id": "scene_k3j9x2"})),
+            Command::SetActiveScene(SceneRef::id("scene_k3j9x2"))
+        );
+        assert_eq!(
+            decode("delete_scene", json!({"name": "Main", "confirm": true})),
+            Command::DeleteScene(SceneRef::name("Main"))
+        );
+        // Both may be given; the engine checks that they agree.
+        assert_eq!(
+            decode(
+                "set_active_scene",
+                json!({"scene_id": "scene_k3j9x2", "name": "Main"})
+            ),
+            Command::SetActiveScene(SceneRef {
+                id: Some("scene_k3j9x2".to_owned()),
+                name: Some("Main".to_owned()),
+            })
+        );
+        assert_eq!(
+            decode("remove_source", json!({"id": "src_a1"})),
+            Command::RemoveSource(SourceRef::id("src_a1"))
+        );
+        assert_eq!(
+            decode("remove_source", json!({"scene": "Main", "name": "bars"})),
+            Command::RemoveSource(SourceRef::named("Main", "bars"))
+        );
+        assert_eq!(
+            decode(
+                "remove_source",
+                json!({"scene_id": "scene_main", "name": "bars"})
+            ),
+            Command::RemoveSource(SourceRef {
+                id: None,
+                scene: Some(SceneRef::id("scene_main")),
+                name: Some("bars".to_owned()),
+            })
+        );
+        let Command::UpdateSource(update) =
+            decode("update_source", json!({"id": "src_a1", "x": 4}))
+        else {
+            panic!("update_source");
+        };
+        assert_eq!(update.source, SourceRef::id("src_a1"));
+        let Command::AddSource(add) = decode(
+            "add_source",
+            json!({"scene_id": "scene_main", "name": "a", "kind": "color_bars"}),
+        ) else {
+            panic!("add_source");
+        };
+        assert_eq!(add.scene, SceneRef::id("scene_main"));
+        let Command::RestartSource { source, .. } =
+            decode("restart_source", json!({"id": "src_a1"}))
+        else {
+            panic!("restart_source");
+        };
+        assert_eq!(source, SourceRef::id("src_a1"));
+    }
+
+    #[test]
     fn restart_source_params() {
         let decode = |params: Value| Command::decode("restart_source", Some(&params));
         assert!(matches!(
@@ -1790,6 +1968,23 @@ mod tests {
                 json!({"scene": "Main", "name": "a", "kind": "color_bars", "opacity": 2}),
             ),
             ("update_source", json!({"scene": "Main", "name": "a"})),
+            // A source needs its id, or its scene and name.
+            ("update_source", json!({"name": "a", "x": 1})),
+            ("remove_source", json!({"scene": "Main"})),
+            ("remove_source", json!({"scene_id": "scene_main"})),
+            ("restart_source", json!({})),
+            ("add_source", json!({"name": "a", "kind": "color_bars"})),
+            ("set_active_scene", json!({})),
+            // Ids come from list_scenes: the right prefix, a-z, 0-9 or _.
+            ("remove_source", json!({"id": "scene_main"})),
+            ("remove_source", json!({"id": "src_"})),
+            ("remove_source", json!({"id": "src_ABC"})),
+            (
+                "remove_source",
+                json!({"id": format!("src_{}", "a".repeat(61))}),
+            ),
+            ("set_active_scene", json!({"scene_id": "src_abc"})),
+            ("set_active_scene", json!({"scene_id": 7})),
             ("set_mixer_strip", json!({"index": 0})),
             ("set_mixer_strip", json!({"index": 0, "gain_db": 99})),
             ("set_master_gain", json!({"gain_db": -200})),
@@ -2296,7 +2491,7 @@ mod tests {
             add["properties"]["kind"]["enum"],
             json!(["color_bars", "solid", "screen"])
         );
-        assert_eq!(add["required"], json!(["scene", "name", "kind"]));
+        assert_eq!(add["required"], json!(["name", "kind"]));
         // The advertised kinds are exactly the ones the decoder accepts.
         for kind in add["properties"]["kind"]["enum"].as_array().expect("kinds") {
             let mut params = json!({"scene": "Main", "name": "s", "kind": kind});

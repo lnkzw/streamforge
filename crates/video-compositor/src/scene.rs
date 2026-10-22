@@ -1,13 +1,46 @@
 //! Scene graph: an ordered list of layers on a fixed-size canvas.
 
-use serde::Serialize;
+use std::fmt;
+use std::sync::Arc;
+
+use serde::{Serialize, Serializer};
 use thiserror::Error;
 
 use crate::geometry::{Rect, Transform};
 
-/// Identifies the frame source a layer draws.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct SourceId(pub u32);
+/// Identifies the frame source a layer draws; serialized as a string.
+/// Cloning only counts a reference, so the render thread copies ids into
+/// its live counters without allocating.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceId(Arc<str>);
+
+impl SourceId {
+    pub fn new(id: impl Into<Arc<str>>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SourceId {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl fmt::Display for SourceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for SourceId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Layer {
@@ -146,13 +179,13 @@ mod tests {
         let mut scene = Scene::new(1920, 1080);
         scene
             .layers
-            .push(Layer::new("a", SourceId(0), Transform::IDENTITY).with_opacity(0.5));
+            .push(Layer::new("a", SourceId::from("0"), Transform::IDENTITY).with_opacity(0.5));
         assert_eq!(scene.validate(), Ok(()));
     }
 
     #[test]
     fn invalid_layers_are_rejected_by_name() {
-        let base = Layer::new("bad", SourceId(0), Transform::IDENTITY);
+        let base = Layer::new("bad", SourceId::from("0"), Transform::IDENTITY);
         let cases = [
             Layer {
                 transform: Transform {
@@ -175,7 +208,7 @@ mod tests {
             base.clone().with_opacity(1.5),
             Layer::fitted(
                 "bad",
-                SourceId(0),
+                SourceId::from("0"),
                 Rect {
                     x: 0.0,
                     y: 0.0,

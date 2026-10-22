@@ -62,7 +62,8 @@ pub(crate) enum OutputId {
 }
 
 struct SceneCapture {
-    id: u32,
+    /// The scene source's id.
+    id: String,
     name: String,
     stream: Box<dyn VideoStream>,
 }
@@ -176,7 +177,7 @@ impl Pipeline {
         &mut self,
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
-        keep: &[u32],
+        keep: &[String],
         allow_new_captures: bool,
     ) -> Result<(), CommandError> {
         if !allow_new_captures
@@ -249,7 +250,7 @@ impl Pipeline {
         capture: &mut dyn CaptureBackend,
         rendered: &SceneSpec,
         source: &SourceSpec,
-        keep: &[u32],
+        keep: &[String],
         allow_new_captures: bool,
     ) -> Result<(), CommandError> {
         let index = self
@@ -289,6 +290,7 @@ impl Pipeline {
             self.apply_scene(capture, rendered, keep, allow_new_captures)
         } else {
             let alone = SceneSpec {
+                id: String::new(),
                 name: String::new(),
                 sources: vec![source.clone()],
             };
@@ -310,7 +312,7 @@ impl Pipeline {
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
             kind: CaptureKind::Screen,
-            id: Some(screen.id),
+            id: Some(screen.id.clone()),
             name: screen.name.clone(),
             state: screen.stream.state(),
         });
@@ -526,7 +528,7 @@ fn start_screens(
             command_error(error).with_details(serde_json::json!({ "source": source.name }))
         })?;
         started.push(SceneCapture {
-            id: source.id,
+            id: source.id.clone(),
             name: source.name.clone(),
             stream,
         });
@@ -534,10 +536,10 @@ fn start_screens(
     Ok(started)
 }
 
-fn mailboxes(screens: &[SceneCapture]) -> Vec<(u32, Arc<FrameMailbox>)> {
+fn mailboxes(screens: &[SceneCapture]) -> Vec<(String, Arc<FrameMailbox>)> {
     screens
         .iter()
-        .map(|screen| (screen.id, screen.stream.frames()))
+        .map(|screen| (screen.id.clone(), screen.stream.frames()))
         .collect()
 }
 

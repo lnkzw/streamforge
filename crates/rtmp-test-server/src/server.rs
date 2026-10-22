@@ -1,4 +1,7 @@
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -71,6 +74,12 @@ impl TestServer {
         self.port
     }
 
+    /// The server already ended: it got no publisher (see
+    /// [`ServerReport::error`]) or read one to the end.
+    pub fn has_ended(&self) -> bool {
+        self.thread.is_finished()
+    }
+
     /// Server URL without a stream key: `rtmp://127.0.0.1:<port>/<app>`.
     pub fn url(&self) -> String {
         format!("rtmp://127.0.0.1:{}/{}", self.port, self.app)
@@ -82,12 +91,34 @@ impl TestServer {
     }
 }
 
-/// A local port that is free right now.
+/// A local port that is free right now, below the ranges that outgoing
+/// connections draw their ports from (Linux 32768-60999, Windows and macOS
+/// 49152-65535). FFmpeg binds the port only later, from the server thread;
+/// a port from the OS's ephemeral range could meanwhile go to any outgoing
+/// connection on the machine, and the server would never listen.
 pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .expect("free port")
-        .port()
+    const FIRST: u16 = 20_000;
+    const COUNT: u16 = 12_000;
+    // Start at a random offset (std's hasher keys are random per process)
+    // and step on, so parallel tests and processes rarely try the same port.
+    static NEXT: AtomicU16 = AtomicU16::new(u16::MAX);
+    let _ = NEXT.compare_exchange(
+        u16::MAX,
+        (RandomState::new().hash_one(std::process::id()) % u64::from(COUNT)) as u16,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+    for _ in 0..COUNT {
+        let offset = NEXT.fetch_add(1, Ordering::Relaxed) % COUNT;
+        let port = FIRST + offset;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!(
+        "no free local port between {FIRST} and {}",
+        FIRST + COUNT - 1
+    );
 }
 
 fn serve(port: u16, options: &ServerOptions) -> ServerReport {
@@ -174,5 +205,20 @@ fn failed(error: String) -> ServerReport {
     ServerReport {
         error: Some(error),
         ..ServerReport::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_ports_are_outside_the_ephemeral_ranges_and_differ() {
+        let ports: Vec<_> = (0..4).map(|_| free_port()).collect();
+        assert!(
+            ports.iter().all(|port| (20_000..32_000).contains(port)),
+            "{ports:?}"
+        );
+        assert!(ports.windows(2).all(|pair| pair[0] != pair[1]), "{ports:?}");
     }
 }

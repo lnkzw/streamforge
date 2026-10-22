@@ -811,7 +811,19 @@ mod tests {
         let video = arrived.video.expect("video");
         assert_eq!(video.codec, "h264");
         assert_eq!(arrived.audio.expect("audio").codec, "aac");
-        assert!(video.end_s - video.first_s > 1.0, "{video:?}");
+        // The stream ran for the 1.5 s sleep at least. On a slow runner the
+        // encoder drops frames it cannot keep up with, which can end the
+        // video early, and the compositor skips ticks; both are counted.
+        let dropped = report.streaming.video.frames_dropped;
+        let skipped = report
+            .pipeline
+            .render
+            .as_ref()
+            .map_or(0, |render| render.skipped_ticks);
+        assert!(
+            video.end_s - video.first_s + (dropped + skipped) as f64 / 60.0 > 1.0,
+            "{video:?}: {dropped} frames dropped, {skipped} ticks skipped"
+        );
     }
 
     #[test]

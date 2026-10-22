@@ -43,6 +43,7 @@ fn streams_to_a_local_server() {
     let dir = TempDir::new("stream");
     let server = TestServer::start(ServerOptions::default());
     let mut engine = spawn(&dir);
+    let begun = Instant::now();
     let started = start_streaming(
         &mut engine,
         json!({"url": server.url(), "stream_key": "acceptance-SECRET", "video_bitrate_kbps": 2500,
@@ -55,6 +56,7 @@ fn streams_to_a_local_server() {
     assert_eq!(status["streaming_active"], true, "{status}");
     assert_eq!(status["streaming_state"], "connected", "{status}");
     let stopped = request(&mut engine, 2, "stop_streaming", json!({}));
+    let wall = begun.elapsed().as_secs_f64();
     assert_eq!(stopped["ok"], true, "{stopped}");
     assert!(!stopped.to_string().contains("SECRET"));
     let report = &stopped["result"];
@@ -79,11 +81,15 @@ fn streams_to_a_local_server() {
     // Frames the encoder did not keep up with are dropped and counted
     // (`frames_dropped`); trailing ones end the video early, never late.
     let dropped = sent["frames_dropped"].as_u64().unwrap_or(0);
+    let skipped = report["render"]["skipped_ticks"].as_u64().unwrap_or(0);
     let allowed_short = 0.15 + dropped as f64 / 60.0;
     let video_short = audio.end_s - video.end_s;
+    // The video covers the 2 s sleep, less what was dropped or skipped
+    // (counted), and no more than the time from start to stop: a loaded
+    // runner can take seconds to answer `get_status` and stop.
     assert!(
-        (span - 2.0).abs() < 0.5 || dropped > 0,
-        "video span {span} s: {sent}"
+        span + (dropped + skipped) as f64 / 60.0 > 1.5 && span < wall + 0.1,
+        "video span {span} s in {wall:.3} s, {skipped} ticks skipped: {sent}"
     );
     assert!(
         video_short < allowed_short && -video_short < 0.15,

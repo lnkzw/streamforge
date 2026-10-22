@@ -44,7 +44,11 @@ The runners have no desktop session and no microphone. Capture tests there exerc
 
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
-Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. The drops are counted, but these tests assert that nothing is lost. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+
+Even one at a time, shared runners do not always sustain 1080p60 with libx264: the CI bench shows skipped ticks and dropped frames on all three with two outputs, and the macOS VM at times encodes a third of the frames with one. Pipeline tests therefore accept counted video drops and skips wherever they check timing; audio, which is cheap, must not drop at all. They bound video length by the time measured from start to stop, not by a fixed duration. The recording acceptance test keeps a throughput floor of three quarters of the ticks on Linux and Windows, and only a tenth on macOS; throughput itself is the bench's job.
+
+Ports for the RTMP test ingest come from 20000–31999, below the ranges the OS hands to outgoing connections. FFmpeg binds the port only after the test picked it, and a port from the ephemeral range could meanwhile go to any outgoing connection.
 
 ## Where tests live
 

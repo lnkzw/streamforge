@@ -182,18 +182,27 @@ fn a_closed_window_ends_the_stream() {
             .spawn()
             .expect("start PowerShell"),
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // PowerShell and Windows Forms can take tens of seconds to start on a
+    // loaded runner.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let window = loop {
         let sources = capture.screen_sources().expect("sources");
+        let windows = sources
+            .iter()
+            .filter(|source| source.kind == VideoSourceKind::Window)
+            .count();
         if let Some(window) = sources
             .into_iter()
             .find(|source| source.kind == VideoSourceKind::Window && source.name == title)
         {
             break window;
         }
+        if let Some(status) = form.0.try_wait().expect("PowerShell status") {
+            panic!("PowerShell exited with {status} before its window was listed");
+        }
         assert!(
             Instant::now() < deadline,
-            "the test window did not appear within 30 s"
+            "the test window was not listed within 60 s ({windows} other windows were)"
         );
         std::thread::sleep(Duration::from_millis(200));
     };

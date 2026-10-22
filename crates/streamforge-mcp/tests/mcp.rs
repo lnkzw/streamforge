@@ -345,12 +345,16 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    // Every attempt, not just the last, if starting never succeeded.
-    assert_eq!(
-        started.is_error,
-        Some(false),
-        "start_streaming kept failing: {seen}"
-    );
+    // Every attempt, not just the last, if starting never succeeded, and
+    // why the ingest stopped listening if it did.
+    if started.is_error != Some(false) {
+        let state = if ingest.has_ended() {
+            format!("the ingest ended: {:?}", ingest.join().error)
+        } else {
+            "the ingest is still waiting".to_owned()
+        };
+        panic!("start_streaming kept failing ({state}): {seen}");
+    }
     assert!(
         ok(&started)["target"]
             .as_str()

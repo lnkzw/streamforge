@@ -1,7 +1,5 @@
-use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
+use std::io::ErrorKind;
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -54,30 +52,69 @@ pub struct TestServer {
     thread: JoinHandle<ServerReport>,
 }
 
+/// How long [`TestServer::start_on`] waits for FFmpeg to listen.
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl TestServer {
-    /// Listen on a free local port.
+    /// Listen on a free local port; returns once the server listens. A free
+    /// port can be taken before FFmpeg binds it, so another is tried then.
     pub fn start(options: ServerOptions) -> Self {
-        Self::start_on(free_port(), options)
+        let mut last = String::new();
+        for _ in 0..5 {
+            let server = Self::start_on(free_port(), options.clone());
+            if !server.has_ended() {
+                return server;
+            }
+            last = format!("{:?}", server.join().error);
+        }
+        panic!("the test server could not listen on five free ports: {last}");
     }
 
-    /// Listen on `port` (e.g. again after a previous server on it ended).
+    /// Listen on `port` (e.g. again after a previous server on it ended);
+    /// returns once the server listens there or has ended (see
+    /// [`ServerReport::error`]).
     pub fn start_on(port: u16, options: ServerOptions) -> Self {
         let app = options.app.clone();
         let thread = thread::Builder::new()
             .name("rtmp-test-server".to_owned())
             .spawn(move || serve(port, &options))
             .expect("spawn test server");
-        Self { port, app, thread }
+        let server = Self { port, app, thread };
+        server.wait_listening();
+        server
+    }
+
+    /// Wait until the port is bound: our own bind fails then. Probing does
+    /// not connect, so the server's single accept stays for the publisher.
+    /// A probe holds the port for a moment; should FFmpeg bind in exactly
+    /// that moment, it fails and the server ends ([`TestServer::start`]
+    /// then tries another port).
+    fn wait_listening(&self) {
+        let deadline = Instant::now() + LISTEN_TIMEOUT;
+        while !self.has_ended() && Instant::now() < deadline {
+            // Bound, then closed at once: never held while sleeping.
+            let probe = TcpListener::bind(("127.0.0.1", self.port)).map(drop);
+            // Windows answers an exclusively bound port with `WSAEACCES`.
+            if let Err(error) = probe
+                && matches!(
+                    error.kind(),
+                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+                )
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The server already ended: it could not listen or got no publisher
+    /// (see [`ServerReport::error`]), or it read one to the end.
+    pub fn has_ended(&self) -> bool {
+        self.thread.is_finished()
     }
 
     pub fn port(&self) -> u16 {
         self.port
-    }
-
-    /// The server already ended: it got no publisher (see
-    /// [`ServerReport::error`]) or read one to the end.
-    pub fn has_ended(&self) -> bool {
-        self.thread.is_finished()
     }
 
     /// Server URL without a stream key: `rtmp://127.0.0.1:<port>/<app>`.
@@ -91,34 +128,12 @@ impl TestServer {
     }
 }
 
-/// A local port that is free right now, below the ranges that outgoing
-/// connections draw their ports from (Linux 32768-60999, Windows and macOS
-/// 49152-65535). FFmpeg binds the port only later, from the server thread;
-/// a port from the OS's ephemeral range could meanwhile go to any outgoing
-/// connection on the machine, and the server would never listen.
+/// A local port that is free right now.
 pub fn free_port() -> u16 {
-    const FIRST: u16 = 20_000;
-    const COUNT: u16 = 12_000;
-    // Start at a random offset (std's hasher keys are random per process)
-    // and step on, so parallel tests and processes rarely try the same port.
-    static NEXT: AtomicU16 = AtomicU16::new(u16::MAX);
-    let _ = NEXT.compare_exchange(
-        u16::MAX,
-        (RandomState::new().hash_one(std::process::id()) % u64::from(COUNT)) as u16,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
-    for _ in 0..COUNT {
-        let offset = NEXT.fetch_add(1, Ordering::Relaxed) % COUNT;
-        let port = FIRST + offset;
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    panic!(
-        "no free local port between {FIRST} and {}",
-        FIRST + COUNT - 1
-    );
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("free port")
+        .port()
 }
 
 fn serve(port: u16, options: &ServerOptions) -> ServerReport {
@@ -213,12 +228,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn free_ports_are_outside_the_ephemeral_ranges_and_differ() {
-        let ports: Vec<_> = (0..4).map(|_| free_port()).collect();
-        assert!(
-            ports.iter().all(|port| (20_000..32_000).contains(port)),
-            "{ports:?}"
-        );
-        assert!(ports.windows(2).all(|pair| pair[0] != pair[1]), "{ports:?}");
+    fn start_returns_once_the_server_listens() {
+        let server = TestServer::start(ServerOptions {
+            accept_timeout: Duration::from_secs(1),
+            ..ServerOptions::default()
+        });
+        assert!(TcpListener::bind(("127.0.0.1", server.port())).is_err());
+        assert!(server.join().error.is_some(), "no publisher came");
+    }
+
+    #[test]
+    fn a_taken_port_is_reported() {
+        let taken = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = taken.local_addr().expect("address").port();
+        let server = TestServer::start_on(port, ServerOptions::default());
+        let error = server.join().error.expect("FFmpeg cannot listen there");
+        assert!(error.starts_with("no publisher"), "{error}");
     }
 }

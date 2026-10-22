@@ -42,6 +42,7 @@ fn get_status_returns_correlated_response() {
 
 #[test]
 fn health_follows_the_preview_pipeline() {
+    let _media = common::media_lock();
     let mut engine = EngineProcess::spawn();
     let idle = engine.request(r#"{"id":1,"command":"get_health"}"#);
     assert_eq!(idle["ok"], true, "{idle}");
@@ -233,6 +234,7 @@ fn invalid_capture_params_are_rejected_before_any_device_access() {
 
 #[test]
 fn composite_probe_runs_headless() {
+    let _media = common::media_lock();
     // Test pattern only: needs no desktop session, so it runs on every CI OS.
     let mut engine = EngineProcess::spawn();
     let response =

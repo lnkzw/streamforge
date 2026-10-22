@@ -20,14 +20,16 @@ fn request(engine: &mut EngineProcess, id: u64, command: &str, params: Value) ->
     engine.request(&line)
 }
 
-/// `start_streaming`, retrying while the test server is not listening yet.
-fn start_streaming(engine: &mut EngineProcess, params: Value) -> Value {
+/// `start_streaming`, retrying while the test server is not listening yet;
+/// also returns when the last attempt was sent.
+fn start_streaming(engine: &mut EngineProcess, params: Value) -> (Value, Instant) {
     let deadline = Instant::now() + Duration::from_secs(10);
     for id in 100.. {
+        let sent = Instant::now();
         let response = request(engine, id, "start_streaming", params.clone());
         let unavailable = response["error"]["code"] == "unavailable";
         if !unavailable || Instant::now() >= deadline {
-            return response;
+            return (response, sent);
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -40,11 +42,11 @@ fn get_status(engine: &mut EngineProcess) -> Value {
 
 #[test]
 fn streams_to_a_local_server() {
+    let _media = common::media_lock();
     let dir = TempDir::new("stream");
     let server = TestServer::start(ServerOptions::default());
     let mut engine = spawn(&dir);
-    let begun = Instant::now();
-    let started = start_streaming(
+    let (started, begun) = start_streaming(
         &mut engine,
         json!({"url": server.url(), "stream_key": "acceptance-SECRET", "video_bitrate_kbps": 2500,
                "tones": [{"frequency_hz": 1000, "level_dbfs": -12}]}),
@@ -79,17 +81,23 @@ fn streams_to_a_local_server() {
     let sent = &report["streaming"]["video"];
     println!("{sent}");
     // Frames the encoder did not keep up with are dropped and counted
-    // (`frames_dropped`); trailing ones end the video early, never late.
-    let dropped = sent["frames_dropped"].as_u64().unwrap_or(0);
-    let skipped = report["render"]["skipped_ticks"].as_u64().unwrap_or(0);
-    let allowed_short = 0.15 + dropped as f64 / 60.0;
+    // (`frames_dropped`), and frames still in the encoder when the stop
+    // flush runs out of time are never delivered (`frames_undelivered`);
+    // trailing ones of either end the video early, never late. (Skipped
+    // compositor ticks leave gaps; they do not shorten the video.)
+    let fps = sent["fps"].as_f64().expect("fps");
+    let short_frames = sent["frames_dropped"].as_u64().unwrap_or(0)
+        + report["streaming"]["frames_undelivered"]
+            .as_u64()
+            .unwrap_or(0);
+    let allowed_short = 0.15 + short_frames as f64 / fps;
     let video_short = audio.end_s - video.end_s;
-    // The video covers the 2 s sleep, less what was dropped or skipped
-    // (counted), and no more than the time from start to stop: a loaded
+    // The video covers the 2 s sleep, less what was dropped, and no more
+    // than the time from the successful start to the stop reply: a loaded
     // runner can take seconds to answer `get_status` and stop.
     assert!(
-        span + (dropped + skipped) as f64 / 60.0 > 1.5 && span < wall + 0.1,
-        "video span {span} s in {wall:.3} s, {skipped} ticks skipped: {sent}"
+        span + short_frames as f64 / fps > 1.5 && span < wall + 0.1,
+        "video span {span} s in {wall:.3} s: {sent}"
     );
     assert!(
         video_short < allowed_short && -video_short < 0.15,
@@ -99,6 +107,7 @@ fn streams_to_a_local_server() {
 
 #[test]
 fn recording_continues_when_the_stream_fails() {
+    let _media = common::media_lock();
     let dir = TempDir::new("survive");
     let server = TestServer::start(ServerOptions {
         close_after: Some(Duration::from_millis(800)),
@@ -113,7 +122,7 @@ fn recording_continues_when_the_stream_fails() {
     );
     assert_eq!(recording["ok"], true, "{recording}");
     let recording_started = Instant::now();
-    let streaming = start_streaming(
+    let (streaming, _) = start_streaming(
         &mut engine,
         json!({"url": server.url(), "reconnect_attempts": 1, "reconnect_delay_ms": 100,
                "video_bitrate_kbps": 2000}),

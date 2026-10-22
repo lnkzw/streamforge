@@ -589,9 +589,9 @@ mod tests {
                     "set_master_gain" => Some(json!({"gain_db": -3.0})),
                     "set_preview" => Some(json!({"enabled": false})),
                     // Nothing listens there: a structured `unavailable` error.
-                    "start_streaming" => {
-                        Some(json!({"url": format!("rtmp://127.0.0.1:{}/live", free_port())}))
-                    }
+                    "start_streaming" => Some(json!({
+                        "url": format!("rtmp://127.0.0.1:{}/live", rtmp_test_server::free_port())
+                    })),
                     _ => None,
                 };
                 let command = Command::decode(descriptor.name, params.as_ref()).expect("decode");
@@ -601,17 +601,9 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|listener| listener.local_addr())
-            .expect("free port")
-            .port()
-    }
-
     /// Tests that run the media pipeline (1080p60 compositor, x264
     /// encoders) take turns: in parallel they overload small CI runners
-    /// until encoders fall seconds behind and drop media (counted, but the
-    /// tests assert none is lost).
+    /// until encoders fall seconds behind and drop frames.
     fn media_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static MEDIA: std::sync::Mutex<()> = std::sync::Mutex::new(());
         MEDIA
@@ -812,17 +804,15 @@ mod tests {
         assert_eq!(video.codec, "h264");
         assert_eq!(arrived.audio.expect("audio").codec, "aac");
         // The stream ran for the 1.5 s sleep at least. On a slow runner the
-        // encoder drops frames it cannot keep up with, which can end the
-        // video early, and the compositor skips ticks; both are counted.
-        let dropped = report.streaming.video.frames_dropped;
-        let skipped = report
-            .pipeline
-            .render
-            .as_ref()
-            .map_or(0, |render| render.skipped_ticks);
+        // encoder drops frames it cannot keep up with, and frames still in
+        // the encoder when the stop flush runs out of time are never
+        // delivered; trailing ones of either end the video early, and both
+        // are counted. (Skipped compositor ticks leave gaps instead.)
+        let short = report.streaming.video.frames_dropped + report.streaming.frames_undelivered;
+        let fps = f64::from(report.streaming.video.fps);
         assert!(
-            video.end_s - video.first_s + (dropped + skipped) as f64 / 60.0 > 1.0,
-            "{video:?}: {dropped} frames dropped, {skipped} ticks skipped"
+            video.end_s - video.first_s + short as f64 / fps > 1.0,
+            "{video:?}: {short} frames dropped or undelivered"
         );
     }
 

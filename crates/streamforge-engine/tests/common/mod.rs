@@ -9,12 +9,24 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Tests that run the media pipeline (1080p60 compositor, x264 encoders)
+/// take turns within a test binary: in parallel they overload small CI
+/// runners until encoders fall seconds behind and drop frames.
+pub fn media_lock() -> MutexGuard<'static, ()> {
+    static MEDIA: Mutex<()> = Mutex::new(());
+    // A failed test only poisons the lock; the next one still runs.
+    MEDIA
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// An empty directory for one test, removed on drop.
 pub struct TempDir(pub PathBuf);

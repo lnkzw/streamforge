@@ -20,20 +20,11 @@ fn request(engine: &mut EngineProcess, id: u64, command: &str, params: Value) ->
     engine.request(&line)
 }
 
-/// `start_streaming`, retrying while the test server is not listening yet;
-/// also returns when the last attempt was sent.
+/// `start_streaming`, and when it was sent. The test server listens once
+/// `TestServer::start` returns, so one attempt is enough.
 fn start_streaming(engine: &mut EngineProcess, params: Value) -> (Value, Instant) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for id in 100.. {
-        let sent = Instant::now();
-        let response = request(engine, id, "start_streaming", params.clone());
-        let unavailable = response["error"]["code"] == "unavailable";
-        if !unavailable || Instant::now() >= deadline {
-            return (response, sent);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    unreachable!()
+    let sent = Instant::now();
+    (request(engine, 100, "start_streaming", params), sent)
 }
 
 fn get_status(engine: &mut EngineProcess) -> Value {
@@ -84,7 +75,9 @@ fn streams_to_a_local_server() {
     // (`frames_dropped`), and frames still in the encoder when the stop
     // flush runs out of time are never delivered (`frames_undelivered`);
     // trailing ones of either end the video early, never late. (Skipped
-    // compositor ticks leave gaps; they do not shorten the video.)
+    // compositor ticks in the middle leave gaps instead. A render stall
+    // right before the stop does end the video early, uncounted; the
+    // 0.15 s below allows for a short one.)
     let fps = sent["fps"].as_f64().expect("fps");
     let short_frames = sent["frames_dropped"].as_u64().unwrap_or(0)
         + report["streaming"]["frames_undelivered"]
@@ -95,8 +88,11 @@ fn streams_to_a_local_server() {
     // The video covers the 2 s sleep, less what was dropped, and no more
     // than the time from the successful start to the stop reply: a loaded
     // runner can take seconds to answer `get_status` and stop.
+    // Half a second of it must arrive, whatever was dropped.
     assert!(
-        span + short_frames as f64 / fps > 1.5 && span < wall + 0.1,
+        span + short_frames as f64 / fps > 1.5
+            && span < wall + 0.1
+            && video.packets as f64 >= fps / 2.0,
         "video span {span} s in {wall:.3} s: {sent}"
     );
     assert!(

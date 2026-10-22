@@ -1,5 +1,5 @@
-use std::io::ErrorKind;
 use std::net::TcpListener;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -56,55 +56,48 @@ pub struct TestServer {
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl TestServer {
-    /// Listen on a free local port; returns once the server listens. A free
-    /// port can be taken before FFmpeg binds it, so another is tried then.
+    /// Listen on a free local port; returns once the server listens. A port
+    /// that was free when picked can be taken before FFmpeg binds it; then
+    /// another one is tried.
     pub fn start(options: ServerOptions) -> Self {
-        let mut last = String::new();
+        let mut last = None;
         for _ in 0..5 {
-            let server = Self::start_on(free_port(), options.clone());
-            if !server.has_ended() {
+            let (server, listening) = Self::spawn(free_port(), options.clone());
+            if listening {
                 return server;
             }
-            last = format!("{:?}", server.join().error);
+            last = server.join().error;
         }
-        panic!("the test server could not listen on five free ports: {last}");
+        panic!("the test server could not listen on five free ports: {last:?}");
     }
 
     /// Listen on `port` (e.g. again after a previous server on it ended);
-    /// returns once the server listens there or has ended (see
-    /// [`ServerReport::error`]).
+    /// returns once the server listens there, or has ended because it could
+    /// not (see [`ServerReport::error`]).
     pub fn start_on(port: u16, options: ServerOptions) -> Self {
-        let app = options.app.clone();
-        let thread = thread::Builder::new()
-            .name("rtmp-test-server".to_owned())
-            .spawn(move || serve(port, &options))
-            .expect("spawn test server");
-        let server = Self { port, app, thread };
-        server.wait_listening();
-        server
+        Self::spawn(port, options).0
     }
 
-    /// Wait until the port is bound: our own bind fails then. Probing does
-    /// not connect, so the server's single accept stays for the publisher.
-    /// A probe holds the port for a moment; should FFmpeg bind in exactly
-    /// that moment, it fails and the server ends ([`TestServer::start`]
-    /// then tries another port).
-    fn wait_listening(&self) {
-        let deadline = Instant::now() + LISTEN_TIMEOUT;
-        while !self.has_ended() && Instant::now() < deadline {
-            // Bound, then closed at once: never held while sleeping.
-            let probe = TcpListener::bind(("127.0.0.1", self.port)).map(drop);
-            // Windows answers an exclusively bound port with `WSAEACCES`.
-            if let Err(error) = probe
-                && matches!(
-                    error.kind(),
-                    ErrorKind::AddrInUse | ErrorKind::PermissionDenied
-                )
-            {
-                return;
+    /// Start the server thread and wait until FFmpeg listens (`true`) or the
+    /// thread ended (`false`). FFmpeg first calls the input's interrupt
+    /// callback while it waits for the connection, after binding and
+    /// listening; the callback reports that.
+    fn spawn(port: u16, options: ServerOptions) -> (Self, bool) {
+        let app = options.app.clone();
+        let (ready, listening) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("rtmp-test-server".to_owned())
+            .spawn(move || serve(port, &options, ready))
+            .expect("spawn test server");
+        let listening = match listening.recv_timeout(LISTEN_TIMEOUT) {
+            Ok(()) => true,
+            // The thread ended (and dropped the sender) without listening.
+            Err(RecvTimeoutError::Disconnected) => false,
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("the test server did not listen on port {port} within {LISTEN_TIMEOUT:?}")
             }
-            thread::sleep(Duration::from_millis(20));
-        }
+        };
+        (Self { port, app, thread }, listening)
     }
 
     /// The server already ended: it could not listen or got no publisher
@@ -136,7 +129,7 @@ pub fn free_port() -> u16 {
         .port()
 }
 
-fn serve(port: u16, options: &ServerOptions) -> ServerReport {
+fn serve(port: u16, options: &ServerOptions, ready: Sender<()>) -> ServerReport {
     if let Err(err) = ff::init() {
         return failed(format!("init: {err}"));
     }
@@ -150,10 +143,19 @@ fn serve(port: u16, options: &ServerOptions) -> ServerReport {
         &options.accept_timeout.as_secs().max(1).to_string(),
     );
     let url = format!("rtmp://127.0.0.1:{port}/{}/stream", options.app);
-    let mut input = match ff::format::input_with_dictionary(&url, dictionary) {
-        Ok(input) => input,
-        Err(err) => return failed(format!("no publisher: {err}")),
+    // Never interrupts; its first call tells `spawn` that FFmpeg listens.
+    let mut ready = Some(ready);
+    let listening = move || {
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
+        false
     };
+    let mut input =
+        match ff::format::input_with_interrupt_and_dictionary(&url, listening, dictionary) {
+            Ok(input) => input,
+            Err(err) => return failed(format!("no publisher: {err}")),
+        };
 
     let mut report = ServerReport::default();
     let mut tracks = Vec::new();
@@ -237,11 +239,15 @@ mod tests {
         assert!(server.join().error.is_some(), "no publisher came");
     }
 
+    // Unix only: on Windows, FFmpeg's `SO_REUSEADDR` lets it bind next to a
+    // socket without that option, so the port is not taken for it.
+    #[cfg(unix)]
     #[test]
     fn a_taken_port_is_reported() {
         let taken = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = taken.local_addr().expect("address").port();
-        let server = TestServer::start_on(port, ServerOptions::default());
+        let (server, listening) = TestServer::spawn(port, ServerOptions::default());
+        assert!(!listening);
         let error = server.join().error.expect("FFmpeg cannot listen there");
         assert!(error.starts_with("no publisher"), "{error}");
     }

@@ -745,21 +745,13 @@ mod tests {
 
     /// Start streaming to `url`, retrying while the test server is not
     /// listening yet.
+    /// The test server listens once `TestServer::start` returns, so one
+    /// attempt is enough, and its error is the one that matters.
     fn start_streaming(engine: &mut Engine, params: serde_json::Value) -> CommandOutput {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let command = Command::decode("start_streaming", Some(&params)).expect("decode");
-            match engine.handle(command) {
-                Ok(output) => return output,
-                Err(err)
-                    if err.code == ErrorCode::Unavailable
-                        && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(err) => panic!("start_streaming: {err}"),
-            }
-        }
+        let command = Command::decode("start_streaming", Some(&params)).expect("decode");
+        engine
+            .handle(command)
+            .unwrap_or_else(|err| panic!("start_streaming: {err}"))
     }
 
     #[test]
@@ -807,11 +799,14 @@ mod tests {
         // encoder drops frames it cannot keep up with, and frames still in
         // the encoder when the stop flush runs out of time are never
         // delivered; trailing ones of either end the video early, and both
-        // are counted. (Skipped compositor ticks leave gaps instead.)
+        // are counted. (Skipped compositor ticks in the middle leave gaps
+        // instead.)
+        // Half a second of video must arrive, whatever was dropped.
         let short = report.streaming.video.frames_dropped + report.streaming.frames_undelivered;
         let fps = f64::from(report.streaming.video.fps);
         assert!(
-            video.end_s - video.first_s + short as f64 / fps > 1.0,
+            video.end_s - video.first_s + short as f64 / fps > 1.0
+                && video.packets as f64 >= fps / 2.0,
             "{video:?}: {short} frames dropped or undelivered"
         );
     }

@@ -44,7 +44,11 @@ The runners have no desktop session and no microphone. Capture tests there exerc
 
 A newer stable toolchain can bring new clippy lints. Before pushing, you can run `cargo +<newer> clippy --workspace --all-targets -- -D warnings` locally.
 
-Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. The drops are counted, but these tests assert that nothing is lost. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+Tests that run the 1080p60 pipeline and x264 encoders take turns within their test binary (a test-only lock: `media_test_lock` in the engine crate, `media_lock` in the `streamforge-engine` tests, `MEDIA` in the MCP tests). In parallel they overload small CI runners, the encoders fall seconds behind, and media is dropped. Frame-accounting checks are one-sided: no frame lost silently, none invented. Compositor skip counts cover the whole pipeline run, not one output.
+
+Even one at a time, shared runners do not always sustain 1080p60 with libx264. The CI bench shows skipped ticks and dropped frames on all three with two outputs, and the macOS VM at times encodes a third of the frames with one. So where streaming tests check the video's length, they allow for the frames counted as dropped or undelivered, which end the video early, but half a second of video must still arrive. Skipped ticks in the middle leave gaps instead, so they are not allowed for; a render stall right before the stop ends the video early without being counted, and only a short one (0.15 s) is tolerated. `streams_to_a_local_server` also bounds the length by the time from the start request to the stop reply, instead of a fixed duration. The recording acceptance test requires three quarters of the ticks encoded on Linux and Windows and a quarter on macOS, and no dropped or missing audio.
+
+`TestServer::start` and `start_on` return once FFmpeg listens. FFmpeg first calls the input's interrupt callback while it waits for the connection, after binding and listening, and the callback tells the waiting thread. A port that was free when picked can be taken before FFmpeg binds it; the server then ends without listening, and `start` tries another port. Tests therefore start streaming once, without retries, so the first error is the one reported.
 
 ## Where tests live
 

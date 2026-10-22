@@ -282,7 +282,6 @@ fn a_streaming_target_needs_sensitive_access_and_a_set_key() {
 async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
     let _media = MEDIA.lock().await;
     use rtmp_test_server::{ServerOptions, TestServer};
-    use std::time::Instant;
 
     let dir = TempDir::new("stream");
     // The ingest waits for one publisher; starting the MCP server first can
@@ -330,27 +329,25 @@ async fn agents_stream_only_to_the_configured_target_and_never_see_the_key() {
     )
     .await;
     assert_eq!(error_code(&redirect), "permission_denied");
-    // Start, retrying while the test ingest is not listening yet.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let started = loop {
-        let result = call(
-            &client,
-            "start_streaming",
-            json!({"video_bitrate_kbps": 2000}),
-        )
-        .await;
-        seen.push_str(&format!("{result:?}"));
-        if result.is_error != Some(true) || Instant::now() >= deadline {
-            break result;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    // Every attempt, not just the last, if starting never succeeded.
-    assert_eq!(
-        started.is_error,
-        Some(false),
-        "start_streaming kept failing: {seen}"
-    );
+    // The ingest listens once `TestServer::start` returns: one attempt.
+    let started = call(
+        &client,
+        "start_streaming",
+        json!({"video_bitrate_kbps": 2000}),
+    )
+    .await;
+    seen.push_str(&format!("{started:?}"));
+    // If it failed: the error, and whether the ingest ended (printed first:
+    // joining a panicked ingest panics too).
+    if started.is_error != Some(false) {
+        eprintln!("start_streaming failed: {seen}");
+        let state = if ingest.has_ended() {
+            format!("the ingest ended: {:?}", ingest.join().error)
+        } else {
+            "the ingest is still waiting".to_owned()
+        };
+        panic!("start_streaming failed ({state})");
+    }
     assert!(
         ok(&started)["target"]
             .as_str()

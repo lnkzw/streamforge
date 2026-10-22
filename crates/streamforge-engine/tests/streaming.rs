@@ -20,18 +20,11 @@ fn request(engine: &mut EngineProcess, id: u64, command: &str, params: Value) ->
     engine.request(&line)
 }
 
-/// `start_streaming`, retrying while the test server is not listening yet.
-fn start_streaming(engine: &mut EngineProcess, params: Value) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for id in 100.. {
-        let response = request(engine, id, "start_streaming", params.clone());
-        let unavailable = response["error"]["code"] == "unavailable";
-        if !unavailable || Instant::now() >= deadline {
-            return response;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    unreachable!()
+/// `start_streaming`, and when it was sent. The test server listens once
+/// `TestServer::start` returns, so one attempt is enough.
+fn start_streaming(engine: &mut EngineProcess, params: Value) -> (Value, Instant) {
+    let sent = Instant::now();
+    (request(engine, 100, "start_streaming", params), sent)
 }
 
 fn get_status(engine: &mut EngineProcess) -> Value {
@@ -40,10 +33,11 @@ fn get_status(engine: &mut EngineProcess) -> Value {
 
 #[test]
 fn streams_to_a_local_server() {
+    let _media = common::media_lock();
     let dir = TempDir::new("stream");
     let server = TestServer::start(ServerOptions::default());
     let mut engine = spawn(&dir);
-    let started = start_streaming(
+    let (started, begun) = start_streaming(
         &mut engine,
         json!({"url": server.url(), "stream_key": "acceptance-SECRET", "video_bitrate_kbps": 2500,
                "tones": [{"frequency_hz": 1000, "level_dbfs": -12}]}),
@@ -55,6 +49,7 @@ fn streams_to_a_local_server() {
     assert_eq!(status["streaming_active"], true, "{status}");
     assert_eq!(status["streaming_state"], "connected", "{status}");
     let stopped = request(&mut engine, 2, "stop_streaming", json!({}));
+    let wall = begun.elapsed().as_secs_f64();
     assert_eq!(stopped["ok"], true, "{stopped}");
     assert!(!stopped.to_string().contains("SECRET"));
     let report = &stopped["result"];
@@ -77,13 +72,28 @@ fn streams_to_a_local_server() {
     let sent = &report["streaming"]["video"];
     println!("{sent}");
     // Frames the encoder did not keep up with are dropped and counted
-    // (`frames_dropped`); trailing ones end the video early, never late.
-    let dropped = sent["frames_dropped"].as_u64().unwrap_or(0);
-    let allowed_short = 0.15 + dropped as f64 / 60.0;
+    // (`frames_dropped`), and frames still in the encoder when the stop
+    // flush runs out of time are never delivered (`frames_undelivered`);
+    // trailing ones of either end the video early, never late. (Skipped
+    // compositor ticks in the middle leave gaps instead. A render stall
+    // right before the stop does end the video early, uncounted; the
+    // 0.15 s below allows for a short one.)
+    let fps = sent["fps"].as_f64().expect("fps");
+    let short_frames = sent["frames_dropped"].as_u64().unwrap_or(0)
+        + report["streaming"]["frames_undelivered"]
+            .as_u64()
+            .unwrap_or(0);
+    let allowed_short = 0.15 + short_frames as f64 / fps;
     let video_short = audio.end_s - video.end_s;
+    // The video covers the 2 s sleep, less what was dropped, and no more
+    // than the time from the successful start to the stop reply: a loaded
+    // runner can take seconds to answer `get_status` and stop.
+    // Half a second of it must arrive, whatever was dropped.
     assert!(
-        (span - 2.0).abs() < 0.5 || dropped > 0,
-        "video span {span} s: {sent}"
+        span + short_frames as f64 / fps > 1.5
+            && span < wall + 0.1
+            && video.packets as f64 >= fps / 2.0,
+        "video span {span} s in {wall:.3} s: {sent}"
     );
     assert!(
         video_short < allowed_short && -video_short < 0.15,
@@ -93,6 +103,7 @@ fn streams_to_a_local_server() {
 
 #[test]
 fn recording_continues_when_the_stream_fails() {
+    let _media = common::media_lock();
     let dir = TempDir::new("survive");
     let server = TestServer::start(ServerOptions {
         close_after: Some(Duration::from_millis(800)),
@@ -107,7 +118,7 @@ fn recording_continues_when_the_stream_fails() {
     );
     assert_eq!(recording["ok"], true, "{recording}");
     let recording_started = Instant::now();
-    let streaming = start_streaming(
+    let (streaming, _) = start_streaming(
         &mut engine,
         json!({"url": server.url(), "reconnect_attempts": 1, "reconnect_delay_ms": 100,
                "video_bitrate_kbps": 2000}),

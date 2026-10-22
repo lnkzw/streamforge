@@ -55,6 +55,11 @@ impl Ingest {
             .context("cannot read from the ingest")?;
         match line.trim().strip_prefix("url ") {
             Some(url) => ingest.url = url.to_owned(),
+            // A panic (e.g. no port to listen on) ends the child first; its
+            // message is on stderr.
+            None if line.is_empty() => {
+                bail!("the ingest process ended before it listened (see its stderr)")
+            }
             None => bail!("the ingest did not start: {line:?}"),
         }
         Ok(ingest)

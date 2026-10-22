@@ -158,8 +158,10 @@ impl SceneCollection {
                     Some((scene, index))
                 })
                 .ok_or_else(|| not_found_id("source", "id", id))?;
+            // A scene that does not exist does not hold it either: the
+            // reference disagrees (`invalid_params`), the source exists.
             if let Some(wanted) = &source.scene
-                && self.scene_index(wanted)? != scene
+                && self.scene_index(wanted).ok() != Some(scene)
             {
                 return Err(mismatch(format!(
                     "source `{id}` is in scene `{}`, not {wanted}",
@@ -449,12 +451,13 @@ pub(crate) fn build(
         // Above the bottom source, as in the reference scene (bars, screen,
         // overlay).
         let at = canvas.layers.len().min(1);
+        let id = SourceId::from(EXTRA_SCREEN);
         canvas.layers.insert(
             at,
-            Layer::fitted("screen", SourceId::from(EXTRA_SCREEN), SCREEN_BOX).with_opacity(0.9),
+            Layer::fitted("screen", id.clone(), SCREEN_BOX).with_opacity(0.9),
         );
         sources.push(SourceConfig {
-            id: SourceId::from(EXTRA_SCREEN),
+            id,
             name: "screen".to_owned(),
             input: SourceInput::Live(Arc::clone(mailbox)),
         });
@@ -694,6 +697,11 @@ mod tests {
             },
             SourceRef {
                 scene: Some(SceneRef::name(DEFAULT_SCENE)),
+                ..SourceRef::id(&red)
+            },
+            // A scene that does not exist does not hold it either.
+            SourceRef {
+                scene: Some(SceneRef::name("Typo")),
                 ..SourceRef::id(&red)
             },
         ] {

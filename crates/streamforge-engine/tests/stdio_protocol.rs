@@ -250,6 +250,14 @@ fn composite_probe_runs_headless() {
         "{render}"
     );
     assert!(render["render_time"]["p99_ms"].is_number(), "{render}");
+    // Source ids are strings on the wire (ADR 0014).
+    let ids: Vec<_> = render["sources"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .map(|source| source["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("bars"), json!("overlay")], "{render}");
     assert!(response["result"]["screen_capture"].is_null());
     assert!(engine.finish().success());
 }

@@ -38,17 +38,22 @@ impl Engine {
         let rendered = self.scenes.active().clone();
         change(&mut self.scenes)?;
         let (allow_new_captures, keep) = self.capture_policy();
-        if let Some(pipeline) = &mut self.pipeline
-            && *self.scenes.active() != rendered
-            && let Err(error) = pipeline.apply_scene(
-                self.capture.as_mut(),
-                self.scenes.active(),
-                &keep,
-                allow_new_captures,
-            )
-        {
-            self.scenes.restore(before);
-            return Err(error);
+        if let Some(pipeline) = &mut self.pipeline {
+            if *self.scenes.active() != rendered {
+                if let Err(error) = pipeline.apply_scene(
+                    self.capture.as_mut(),
+                    self.scenes.active(),
+                    &keep,
+                    allow_new_captures,
+                ) {
+                    self.scenes.restore(before);
+                    return Err(error);
+                }
+            } else {
+                // A source removed from a scene that is not rendered (or
+                // its whole scene deleted) ends its kept capture too.
+                pipeline.retire_unkept(&keep);
+            }
         }
         Ok(self.scenes.list())
     }

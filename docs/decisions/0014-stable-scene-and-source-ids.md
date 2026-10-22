@@ -26,7 +26,7 @@ The user decided:
   - The id is looked up first. If a name is given as well, it must name the same object; if it does not, the command fails with `invalid_params` rather than quietly following the id. An unknown id is `not_found`, with the id in `details`.
   - `source_id` stays what a screen source captures (`list_screen_sources`); the new parameters are named so they do not collide with it.
 - **Compositor:** `SourceId` holds a shared string (`Arc<str>`) instead of a `u32`, so `render.sources[].id` in `get_health` and the stop reports is the scene source's id with no translation table. Cloning one counts a reference and does not allocate; the render thread copies ids into its live counters each publish, as before. The reference scene of `probe_composite` uses `bars`, `screen` and `overlay`, and the legacy screen layer is `screen_layer`.
-- **Protocol:** `id` changes type from number to string in `list_scenes`, `get_health` and the reports. The versioning policy would require v2 for that. Nobody uses the protocol yet, though, and its clients live in this repository, so the user decided the policy applies from the first release on. Until then, breaking changes are listed in `docs/protocol.md`, and every client changes with them. The desktop now names sources by id.
+- **Protocol:** `id` changes type from number to string in `list_scenes`, `get_health` and the reports. The versioning policy would require v2 for that. Nobody uses the protocol yet, though, and its clients live in this repository, so the user decided the policy applies from the first release on. Until then, breaking changes are listed in `docs/protocol.md`, and every client changes with them. The desktop now names sources by id, and sends a scene's id with its name when it activates or deletes it, so a scene replaced meanwhile is not deleted.
 
 ## Alternatives considered
 
@@ -49,7 +49,9 @@ The user decided:
   - `get_health`: `captures[].id` and `render.sources[].id` equal the source's id from `list_scenes`
   - `restart_source` by id alone restarts a kept capture of another scene
 - **MCP:** an agent moves a source by its id from `list_scenes`.
-- **Desktop:** the model joins health to sources by string id; the acceptance test changes a source's opacity and removes a source by id against the real engine. Restart by id is not covered there (it needs a screen capture).
+- **Desktop:** the model joins health to sources by string id. The acceptance test, against the real engine, changes a source's opacity and removes a source by id, and a deletion whose id and name no longer agree is refused. Restart by id is not covered there (it needs a screen capture).
+- **Wire:** `probe_composite` over stdio reports the source ids `bars` and `overlay` as JSON strings.
+- **Found on the way:** removing a source from a scene that is not rendered, or deleting that scene, left its kept capture running until the pipeline stopped. Such edits now end it at once, and the engine test checks `get_health.captures` right after them.
 
 ## Consequences
 

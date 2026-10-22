@@ -89,16 +89,6 @@ impl SourceRef {
     }
 }
 
-impl fmt::Display for SourceRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.id, &self.name) {
-            (Some(id), _) => write!(f, "`{id}`"),
-            (None, Some(name)) => write!(f, "`{name}`"),
-            (None, None) => f.write_str("(no source given)"),
-        }
-    }
-}
-
 /// What a source shows.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

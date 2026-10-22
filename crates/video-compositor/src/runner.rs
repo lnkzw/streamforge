@@ -403,6 +403,9 @@ fn rebuild(
             Some(index) => {
                 let mut state = current.swap_remove(index);
                 state.name = source.name;
+                // The update's id, which its layers share: `Arc` equality
+                // then compares pointers first.
+                state.id = source.id;
                 next.push(state);
             }
             None => next.push(SourceState::new(source, tick)),

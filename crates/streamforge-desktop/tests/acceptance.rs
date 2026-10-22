@@ -134,7 +134,8 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
         show(m).sources.iter().all(|source| source.id != spare)
     });
     assert!(errors(&model).is_empty(), "{:?}", model.log);
-    model.activate_scene("Show");
+    let show_id = show(&model).id;
+    model.activate_scene(&show_id, "Show");
     wait(&mut model, "the scene to be active", |m| {
         m.scenes.as_ref().is_some_and(|list| list.active == "Show")
     });
@@ -191,11 +192,17 @@ fn engine_errors_reach_the_log() {
         errors(m).iter().any(|text| text.contains("already exists"))
     });
     // The active scene cannot be deleted, even when confirmed.
-    model.delete_scene_confirmed("Test pattern");
+    model.delete_scene_confirmed("scene_test_pattern", "Test pattern");
     wait(&mut model, "the delete to be refused", |m| {
         errors(m)
             .iter()
             .any(|text| text.starts_with("delete_scene") && text.contains("active"))
+    });
+    // An id and a name that no longer agree (the listed scene was replaced)
+    // delete nothing.
+    model.delete_scene_confirmed("scene_test_pattern", "Twice");
+    wait(&mut model, "the stale delete to be refused", |m| {
+        errors(m).iter().any(|text| text.contains("is named"))
     });
 }
 

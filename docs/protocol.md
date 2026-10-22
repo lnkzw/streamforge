@@ -362,7 +362,7 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - A screen source starts its capture when it becomes part of the rendered scene: the named source directly, otherwise through the system picker.
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
   - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`source_id`) start without waiting and are allowed.
-  - Capture reports are in the output reports' `scene_captures`: the most recent 64, with `scene_captures_omitted` counting older ones.
+  - Capture reports are in the output reports' `scene_captures` (`{"id", "source", "report", "error"}`, with the source's id and name): the most recent 64, with `scene_captures_omitted` counting older ones.
 - **`update_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and any of `x`, `y`, `width`, `height`, `opacity`.
 - **`remove_source`:** the source (`id`, or `scene` or `scene_id` and `name`).
 - **`restart_source`:** the source (`id`, or `scene` or `scene_id` and `name`), optional `source_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
@@ -399,7 +399,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 ## Versioning policy
 
 - **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
-  - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`.
+  - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
 - Adding a command, adding optional fields to a result, or adding an error code is backward compatible within v1. Clients must ignore unknown result fields and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` together with this document.

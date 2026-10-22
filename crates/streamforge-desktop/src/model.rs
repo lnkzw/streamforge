@@ -244,12 +244,17 @@ impl Model {
     }
 
     /// Deleting is irreversible; the UI asks first and then calls this.
-    pub fn delete_scene_confirmed(&mut self, name: &str) {
-        self.act("delete_scene", json!({ "name": name, "confirm": true }));
+    /// The scene's id and name from the list it showed must still agree,
+    /// so a scene replaced meanwhile is not deleted.
+    pub fn delete_scene_confirmed(&mut self, id: &str, name: &str) {
+        self.act(
+            "delete_scene",
+            json!({ "scene_id": id, "name": name, "confirm": true }),
+        );
     }
 
-    pub fn activate_scene(&mut self, name: &str) {
-        self.act("set_active_scene", json!({ "name": name }));
+    pub fn activate_scene(&mut self, id: &str, name: &str) {
+        self.act("set_active_scene", json!({ "scene_id": id, "name": name }));
     }
 
     pub fn add_source(&mut self, scene: &str, form: &SourceForm) {

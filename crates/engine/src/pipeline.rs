@@ -308,6 +308,20 @@ impl Pipeline {
         }
     }
 
+    /// End the captures of sources that no scene has any more (`keep` lists
+    /// the screen sources of every scene). A scene change does this as
+    /// part of [`Pipeline::apply_scene`]; this is for edits that leave the
+    /// rendered scene as it is, e.g. removing a kept source elsewhere.
+    pub fn retire_unkept(&mut self, keep: &[String]) {
+        let (running, retire): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scene_screens)
+            .into_iter()
+            .partition(|screen| keep.contains(&screen.id));
+        self.scene_screens = running;
+        for screen in retire {
+            self.retire(stop_scene_capture(screen));
+        }
+    }
+
     /// State of every running capture; never blocks.
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
@@ -546,11 +560,13 @@ fn mailboxes(screens: &[SceneCapture]) -> Vec<(String, Arc<FrameMailbox>)> {
 fn stop_scene_capture(screen: SceneCapture) -> SceneCaptureOutcome {
     match screen.stream.stop() {
         Ok(report) => SceneCaptureOutcome {
+            id: screen.id,
             source: screen.name,
             report: Some(report),
             error: None,
         },
         Err(error) => SceneCaptureOutcome {
+            id: screen.id,
             source: screen.name,
             report: None,
             error: Some(ErrorSummary::from(error)),

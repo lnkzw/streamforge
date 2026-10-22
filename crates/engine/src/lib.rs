@@ -1146,20 +1146,47 @@ mod tests {
         run(&mut engine, "set_active_scene", json!({"name": "Main"}));
         run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
         assert_eq!(starts.get(), 2);
-        // Removing a source from every scene ends its capture.
+        // Removing a source from every scene ends its capture at once, also
+        // when its scene is not the rendered one.
+        let brb_desk = source_id(&mut engine, "BRB", "desk");
         run(
             &mut engine,
             "remove_source",
             json!({"scene": "Main", "name": "desk"}),
         );
+        let ids = |engine: &mut Engine| -> Vec<Option<String>> {
+            health(engine)
+                .captures
+                .into_iter()
+                .map(|capture| capture.id)
+                .collect()
+        };
+        assert_eq!(ids(&mut engine), [Some(brb_desk.clone())]);
+        // So does deleting a scene whose capture is kept.
+        run(&mut engine, "create_scene", json!({"name": "Spare"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene": "Spare", "name": "cam", "kind": "screen"}),
+        );
+        run(&mut engine, "set_active_scene", json!({"name": "Spare"}));
+        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        assert_eq!(ids(&mut engine).len(), 2);
+        run(
+            &mut engine,
+            "delete_scene",
+            json!({"name": "Spare", "confirm": true}),
+        );
+        assert_eq!(ids(&mut engine), [Some(brb_desk)]);
         let CommandOutput::PreviewState(preview) =
             run(&mut engine, "set_preview", json!({"enabled": false}))
         else {
             panic!("unexpected output");
         };
         let pipeline = preview.pipeline.expect("pipeline report");
-        // One capture retired when `Main`'s source went, one at the stop.
-        assert_eq!(pipeline.scene_captures.len(), 2, "{pipeline:?}");
+        // Main's and Spare's captures retired when their sources went; BRB's
+        // at the stop.
+        assert_eq!(pipeline.scene_captures.len(), 3, "{pipeline:?}");
         assert!(preview.frames_published.is_some());
     }
 
@@ -1377,7 +1404,6 @@ mod tests {
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
-    /// Screen sources of `scene`: (name, source_id).
     /// The id `list_scenes` gives source `name` of `scene`.
     fn source_id(engine: &mut Engine, scene: &str, name: &str) -> String {
         let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
@@ -1391,6 +1417,7 @@ mod tests {
             .expect("source")
     }
 
+    /// Screen sources of `scene`: (name, source_id).
     fn screen_ids(engine: &mut Engine, scene: &str) -> Vec<(String, Option<String>)> {
         let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
             panic!("unexpected output");

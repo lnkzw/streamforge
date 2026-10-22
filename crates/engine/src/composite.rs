@@ -125,38 +125,42 @@ pub(crate) fn reference_scene(
     // 60 % gray at 60 % alpha, premultiplied.
     let overlay = pattern::solid(OVERLAY_SIZE, OVERLAY_SIZE, [92, 92, 92, 153])?;
     let mut scene = Scene::new(CANVAS_WIDTH, CANVAS_HEIGHT);
+    // One `Arc` per id, shared by layer and source.
+    let (bars_id, screen_id, overlay_id) = (
+        SourceId::from(BARS),
+        SourceId::from(SCREEN),
+        SourceId::from(OVERLAY),
+    );
     let mut sources = vec![
         SourceConfig {
-            id: SourceId::from(BARS),
+            id: bars_id.clone(),
             name: "color_bars".to_owned(),
             input: SourceInput::Static(Arc::new(bars)),
         },
         SourceConfig {
-            id: SourceId::from(OVERLAY),
+            id: overlay_id.clone(),
             name: "overlay".to_owned(),
             input: SourceInput::Static(Arc::new(overlay)),
         },
     ];
-    scene.layers.push(Layer::new(
-        "color_bars",
-        SourceId::from(BARS),
-        Transform::IDENTITY,
-    ));
+    scene
+        .layers
+        .push(Layer::new("color_bars", bars_id, Transform::IDENTITY));
     if let Some(stream) = stream {
         // Fitted per frame: the delivered size may differ from what the
         // portal reported (HiDPI scaling, window resizes).
         scene
             .layers
-            .push(Layer::fitted("screen", SourceId::from(SCREEN), SCREEN_BOX).with_opacity(0.9));
+            .push(Layer::fitted("screen", screen_id.clone(), SCREEN_BOX).with_opacity(0.9));
         sources.push(SourceConfig {
-            id: SourceId::from(SCREEN),
+            id: screen_id,
             name: "screen".to_owned(),
             input: SourceInput::Live(stream.frames()),
         });
     }
     scene.layers.push(Layer::new(
         "overlay",
-        SourceId::from(OVERLAY),
+        overlay_id,
         Transform::at(64.0, 120.0),
     ));
     Ok(CompositorConfig {

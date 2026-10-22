@@ -35,7 +35,8 @@ pub struct DesktopApp {
     stream_url: String,
     /// Typed into a password field; handed to the engine on start only.
     stream_key: String,
-    confirm_delete: Option<String>,
+    /// Id and name of the scene a deletion asks about.
+    confirm_delete: Option<(String, String)>,
     /// Source whose working capture the user asked to restart.
     confirm_restart: Option<String>,
     /// Chosen source to restart an ended named source on (`None`: same).
@@ -185,25 +186,33 @@ impl DesktopApp {
         }
         let selected = selection(self.selected_scene.as_deref(), clicked.as_deref(), &scenes);
         self.selected_scene = Some(selected.clone());
+        // Scene actions send the listed id with the name: if the scene was
+        // replaced meanwhile, the engine refuses instead of acting on the
+        // new one.
+        let selected_id = scenes
+            .scenes
+            .iter()
+            .find(|scene| scene.name == selected)
+            .map_or_else(String::new, |scene| scene.id.clone());
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(selected != scenes.active, egui::Button::new("Activate"))
                 .clicked()
             {
-                self.model.activate_scene(&selected);
+                self.model.activate_scene(&selected_id, &selected);
             }
             if ui
                 .add_enabled(selected != scenes.active, egui::Button::new("Delete…"))
                 .clicked()
             {
-                self.confirm_delete = Some(selected.clone());
+                self.confirm_delete = Some((selected_id.clone(), selected.clone()));
             }
         });
-        if let Some(name) = self.confirm_delete.clone() {
+        if let Some((id, name)) = self.confirm_delete.clone() {
             ui.label(RichText::new(format!("Delete scene `{name}`?")).color(Color32::ORANGE));
             ui.horizontal(|ui| {
                 if ui.button("Yes, delete").clicked() {
-                    self.model.delete_scene_confirmed(&name);
+                    self.model.delete_scene_confirmed(&id, &name);
                     self.confirm_delete = None;
                 }
                 if ui.button("Cancel").clicked() {
@@ -673,16 +682,20 @@ mod tests {
 
     use super::*;
 
+    fn fixture_id(name: &str) -> String {
+        format!("scene_{}", name.to_lowercase().replace(' ', "_"))
+    }
+
     fn scenes(names: &[&str], active: &str) -> SceneList {
         SceneList {
             canvas_width: 1920,
             canvas_height: 1080,
             active: active.to_owned(),
-            active_id: format!("scene_{}", active.len()),
+            active_id: fixture_id(active),
             scenes: names
                 .iter()
                 .map(|name| SceneSpec {
-                    id: format!("scene_{}", name.len()),
+                    id: fixture_id(name),
                     name: (*name).to_owned(),
                     sources: Vec::new(),
                 })

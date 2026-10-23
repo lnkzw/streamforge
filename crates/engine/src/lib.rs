@@ -2285,6 +2285,63 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_whose_device_does_not_open_is_silent_and_reported() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("silent-device");
+        let mut engine = engine().with_output_dir(&dir.0);
+        let added = mixer(run(
+            &mut engine,
+            "add_channel",
+            json!({"name": "Mic", "input": {"kind": "device", "device": "missing"}}),
+        ));
+        let mic = added.channels[1].spec.id.clone();
+        // The recording starts; its outcome says the channel is silent.
+        let CommandOutput::RecordingStarted(started) =
+            start(&mut engine, json!({"file_name": "silent.mkv"})).expect("start")
+        else {
+            panic!("unexpected output");
+        };
+        assert_eq!(started.warnings.len(), 1, "{:?}", started.warnings);
+        assert!(
+            started.warnings[0].contains("`Mic` is silent")
+                && started.warnings[0].contains("`missing`"),
+            "{:?}",
+            started.warnings
+        );
+        let state = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert!(state.running);
+        assert_eq!(state.warnings, started.warnings);
+        let capture = health(&mut engine)
+            .captures
+            .into_iter()
+            .find(|capture| capture.id.as_deref() == Some(mic.as_str()))
+            .expect("the channel's capture");
+        let capture_api::CaptureState::Ended { reason } = capture.state else {
+            panic!("{capture:?}");
+        };
+        assert!(reason.starts_with("could not start"), "{reason}");
+        std::thread::sleep(Duration::from_millis(200));
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        let captures = &report.pipeline.audio_captures;
+        assert_eq!(captures.len(), 1, "{captures:?}");
+        assert_eq!(captures[0].input.as_deref(), Some("missing"));
+        assert!(captures[0].error.is_some() && captures[0].report.is_none());
+        // The tone still reached the file: only the missing channel is silent.
+        assert!(report.recording.audio.samples_encoded > 0, "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no such input")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
     fn mix_probe_with_unknown_input_fails_before_mixing() {
         let command = Command::decode(
             "probe_audio_mix",

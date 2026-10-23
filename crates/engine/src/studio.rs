@@ -308,6 +308,7 @@ impl Engine {
             self.preview_enabled = true;
             if let Some(pipeline) = &self.pipeline {
                 pipeline.set_preview(Some(Arc::clone(&self.preview_frames)));
+                state.warnings.extend(pipeline.audio_warnings());
             }
         } else if !enabled && self.preview_enabled {
             if let Some((published, dropped)) = self

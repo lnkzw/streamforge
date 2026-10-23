@@ -239,6 +239,7 @@ impl Engine {
             sample_rate: RATE,
             channels: CHANNELS,
             video_encoder: recorder.video_encoder().clone(),
+            warnings: pipeline.audio_warnings(),
         };
         self.recording = Some(RecordingOutput {
             recorder,
@@ -336,6 +337,7 @@ impl Engine {
             sample_rate: RATE,
             channels: CHANNELS,
             video_encoder: streamer.video_encoder().clone(),
+            warnings: pipeline.audio_warnings(),
         };
         self.streaming = Some(StreamingOutput { streamer, t0 });
         Ok(started)

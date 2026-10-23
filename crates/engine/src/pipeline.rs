@@ -17,11 +17,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread};
-use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
+use capture_api::{AudioStream, CaptureBackend, CaptureState, ScreenSelection, VideoStream};
 use command_api::{
-    AudioGraphSpec, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
-    PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec,
-    UpdateBusRequest, UpdateChannelRequest,
+    AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
+    ErrorSummary, MixerState, PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest,
+    SourceKind, SourceSpec, UpdateBusRequest, UpdateChannelRequest,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -68,6 +68,13 @@ struct SceneCapture {
     stream: Box<dyn VideoStream>,
 }
 
+/// A device channel's capture for one run.
+enum DeviceCapture {
+    Running(Box<dyn AudioStream>),
+    /// It did not start; the channel is silent.
+    Failed(ErrorSummary),
+}
+
 /// Field order is drop order: producers stop before the captures end.
 pub(crate) struct Pipeline {
     compositor: Compositor,
@@ -77,9 +84,9 @@ pub(crate) struct Pipeline {
     retired_screens: Vec<SceneCaptureOutcome>,
     retired_omitted: u64,
     extra_screen: Option<Box<dyn VideoStream>>,
-    audio_streams: Vec<Box<dyn AudioStream>>,
+    audio_streams: Vec<DeviceCapture>,
     /// What this run mixes; fader, mute and balance follow live changes.
-    /// `audio_streams` are its device channels' streams, in order.
+    /// `audio_streams` are its device channels' captures, in order.
     audio: AudioGraphSpec,
     /// Whether `audio` is the engine's configured setup (rather than an
     /// output's own sources), so live gain changes apply to both.
@@ -105,8 +112,15 @@ impl Pipeline {
             None => None,
         };
         let scene_screens = start_screens(capture, scene, &[])?;
-        let audio_streams =
-            mix::start_live_inputs(capture, audio::devices(&audio).map(|(_, device)| device))?;
+        // A device that does not open leaves its channel silent instead of
+        // failing the start (ADR 0017); the start, get_mixer and get_health
+        // report it.
+        let audio_streams: Vec<DeviceCapture> = audio::devices(&audio)
+            .map(|(_, device)| match mix::start_device(capture, device) {
+                Ok(stream) => DeviceCapture::Running(stream),
+                Err(error) => DeviceCapture::Failed(ErrorSummary::from(error)),
+            })
+            .collect();
         let fanout = Arc::new(Fanout::default());
         let mut cache = FrameCache::default();
         let update = scenes::build(
@@ -131,7 +145,13 @@ impl Pipeline {
         .map_err(internal)?;
         let (aux_buses, sends) = audio::mixer_routing(&audio);
         let mixer = MixerThread::spawn(MixerConfig {
-            inputs: mix::graph_inputs(&audio, &audio_streams),
+            inputs: mix::graph_inputs(
+                &audio,
+                audio_streams.iter().map(|capture| match capture {
+                    DeviceCapture::Running(stream) => Some(stream.samples()),
+                    DeviceCapture::Failed(_) => None,
+                }),
+            ),
             aux_buses,
             program: audio::program_config(&audio.program),
             sends,
@@ -349,11 +369,16 @@ impl Pipeline {
         let audio =
             audio::devices(&self.audio)
                 .zip(&self.audio_streams)
-                .map(|((channel, _), stream)| CaptureHealth {
+                .map(|((channel, _), capture)| CaptureHealth {
                     kind: CaptureKind::Audio,
                     id: Some(channel.id.clone()),
                     name: channel.name.clone(),
-                    state: stream.state(),
+                    state: match capture {
+                        DeviceCapture::Running(stream) => stream.state(),
+                        DeviceCapture::Failed(error) => CaptureState::Ended {
+                            reason: format!("could not start: {}", error.message),
+                        },
+                    },
                 });
         screens.chain(layer).chain(audio).collect()
     }
@@ -425,9 +450,34 @@ impl Pipeline {
         previous.map(|out| (out.published, out.dropped))
     }
 
-    /// The run's channels and buses with their levels.
+    /// The run's channels and buses with their levels, and its silent
+    /// channels among the warnings.
     pub fn mixer_state(&self) -> MixerState {
-        audio::mixer_state(&self.audio, Some(&self.control.levels()))
+        let mut state = audio::mixer_state(&self.audio, Some(&self.control.levels()));
+        state.warnings.extend(self.audio_warnings());
+        state
+    }
+
+    /// One warning per device channel that is silent because its device
+    /// did not open.
+    pub fn audio_warnings(&self) -> Vec<String> {
+        audio::devices(&self.audio)
+            .zip(&self.audio_streams)
+            .filter_map(|((channel, device), capture)| match capture {
+                DeviceCapture::Running(_) => None,
+                DeviceCapture::Failed(error) => Some(format!(
+                    "channel `{}` is silent: {} could not be opened ({}); stop the outputs and \
+                     preview, then choose another input with set_channel_input or connect the \
+                     device",
+                    channel.name,
+                    device.as_deref().map_or_else(
+                        || "the default input".to_owned(),
+                        |name| format!("`{name}`")
+                    ),
+                    error.message
+                )),
+            })
+            .collect()
     }
 
     /// Apply a fader, mute or balance change live.
@@ -487,10 +537,17 @@ impl Pipeline {
             None => (None, None),
         };
         retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
-        let audio_captures = mix::stop_captures(
-            audio::devices(&audio).map(|(_, device)| device),
-            audio_streams,
-        );
+        let audio_captures = audio::devices(&audio)
+            .zip(audio_streams)
+            .map(|((_, device), capture)| match capture {
+                DeviceCapture::Running(stream) => mix::stop_capture(device, stream),
+                DeviceCapture::Failed(error) => CaptureOutcome {
+                    input: device.clone(),
+                    report: None,
+                    error: Some(error),
+                },
+            })
+            .collect::<Vec<_>>();
 
         if let Some(render) = &render
             && (render.late_frames > 0 || render.skipped_ticks > 0)

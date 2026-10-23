@@ -4,7 +4,8 @@
 //! A channel is one input's strip: what it plays (a capture device or a
 //! test tone), its fader, mute and balance, and one send to every bus. A
 //! bus sums its sends; an aux bus is a submix that can be assigned to the
-//! program bus, or a separate mix. The program bus is what the outputs take.
+//! program bus, or a separate mix. The program bus is the main mix and each
+//! output's default; an output can take any bus (its profile's mix).
 //! Adding or removing a channel or bus, and choosing what a channel plays,
 //! need an idle pipeline; levels, mutes, balance, sends and assignments
 //! change live.
@@ -17,7 +18,7 @@ use std::collections::HashSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{MAX_ID_LEN, is_valid_id};
+use crate::{MAX_ID_LEN, OutputKind, is_valid_id};
 
 /// Most channels; the mixer's fixed capacity.
 pub const MAX_CHANNELS: usize = audio_engine::MAX_CHANNELS;
@@ -390,7 +391,19 @@ pub struct MixerState {
     pub channels: Vec<ChannelState>,
     /// The program bus first, then the aux buses.
     pub buses: Vec<BusState>,
+    /// The bus each output takes as its mix: while it runs, the one it
+    /// takes now; otherwise its profile's.
+    pub outputs: Vec<OutputMix>,
     /// Routing that is allowed but likely unintended, e.g. a channel that
     /// reaches the program bus twice.
     pub warnings: Vec<String>,
+}
+
+/// An output's mix in `get_mixer`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OutputMix {
+    pub output: OutputKind,
+    /// The bus's id.
+    pub bus: String,
+    pub running: bool,
 }

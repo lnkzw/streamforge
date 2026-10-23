@@ -57,7 +57,24 @@ pub struct MixerBus {
 /// Receives every mixed block on the mixer thread, with the block's nominal
 /// start time on the mixer clock. Must not block or allocate.
 pub trait BlockSink: Send {
-    fn block(&mut self, samples: &[f32], at: Instant);
+    fn block(&mut self, buses: &BusBlocks<'_>, at: Instant);
+}
+
+/// One mixed block of every bus, each limited to [-1, 1] where it leaves
+/// the graph: the program bus, then the aux buses ([`BusRef::column`]).
+pub struct BusBlocks<'a> {
+    blocks: &'a [Vec<f32>],
+}
+
+impl BusBlocks<'_> {
+    pub fn program(&self) -> &[f32] {
+        &self.blocks[0]
+    }
+
+    /// The block of the bus in `column`; `None` past the last bus.
+    pub fn column(&self, column: usize) -> Option<&[f32]> {
+        self.blocks.get(column).map(Vec::as_slice)
+    }
 }
 
 pub struct MixerConfig {
@@ -69,8 +86,8 @@ pub struct MixerConfig {
     pub sends: SendMatrix,
     /// Sizes the latency trend buffer up front so the loop never allocates.
     pub expected_duration: Duration,
-    /// Optional consumer of the program output, limited to [-1, 1], e.g. a
-    /// recorder.
+    /// Optional consumer of the bus outputs, each limited to [-1, 1]: the
+    /// engine's fan-out to the recording and the stream.
     pub sink: Option<Box<dyn BlockSink>>,
 }
 
@@ -156,9 +173,22 @@ pub struct MixStats {
     pub skipped_blocks: u64,
     pub mix_time: Option<LatencySummary>,
     pub master: MeterReading,
+    /// The program bus's samples limited, and non-finite input and output
+    /// samples replaced by silence.
     pub clipped_samples: u64,
     pub invalid_samples: u64,
     pub inputs: Vec<InputStats>,
+    pub aux_buses: Vec<BusStats>,
+}
+
+/// An aux bus where it leaves the graph.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BusStats {
+    pub name: String,
+    /// Before the limit.
+    pub meter: MeterReading,
+    pub clipped_samples: u64,
+    pub invalid_samples: u64,
 }
 
 /// Peak levels cover the most recent blocks (300 ms).
@@ -179,6 +209,15 @@ pub struct LiveMixStats {
     pub invalid_samples: u64,
     pub mix_time: Option<LatencySummary>,
     pub inputs: Vec<LiveInputStats>,
+    pub aux_buses: Vec<LiveBusStats>,
+}
+
+/// An aux bus's limit counters so far.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiveBusStats {
+    pub name: String,
+    pub clipped_samples: u64,
+    pub invalid_samples: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -241,8 +280,17 @@ pub struct LevelReading {
 impl MixerControl {
     /// `inputs` gives each input's name and kind, so the live snapshot is
     /// allocated here and the mixer thread only overwrites numbers.
-    fn new(inputs: &[(String, &'static str)], aux_buses: usize) -> Self {
+    fn new(inputs: &[(String, &'static str)], bus_names: &[String]) -> Self {
+        let aux_buses = bus_names.len();
         let live = LiveMixStats {
+            aux_buses: bus_names
+                .iter()
+                .map(|name| LiveBusStats {
+                    name: name.clone(),
+                    clipped_samples: 0,
+                    invalid_samples: 0,
+                })
+                .collect(),
             inputs: inputs
                 .iter()
                 .map(|(name, kind)| LiveInputStats {
@@ -448,7 +496,12 @@ impl MixerThread {
                 (input.name.clone(), kind)
             })
             .collect();
-        let control = MixerControl::new(&names, config.aux_buses.len());
+        let bus_names: Vec<String> = config
+            .aux_buses
+            .iter()
+            .map(|bus| bus.name.clone())
+            .collect();
+        let control = MixerControl::new(&names, &bus_names);
         let thread = thread::Builder::new()
             .name("audio-mixer".to_owned())
             .spawn({
@@ -562,7 +615,7 @@ fn publish_live(
     start: Instant,
     (mixed, late, skipped): (u64, u64, u64),
     mix_times: &LatencyHistogram,
-    (graph, limited): (&AudioGraph, Limited),
+    (graph, limited): (&AudioGraph, &[Limited]),
     inputs: &[InputState],
 ) -> bool {
     let mut snapshot = match live.try_lock() {
@@ -574,8 +627,12 @@ fn publish_live(
     snapshot.blocks_mixed = mixed;
     snapshot.late_blocks = late;
     snapshot.skipped_blocks = skipped;
-    snapshot.clipped_samples = limited.clipped;
-    snapshot.invalid_samples = graph.invalid_samples() + limited.invalid;
+    snapshot.clipped_samples = limited[0].clipped;
+    snapshot.invalid_samples = graph.invalid_samples() + limited[0].invalid;
+    for (entry, limited) in snapshot.aux_buses.iter_mut().zip(&limited[1..]) {
+        entry.clipped_samples = limited.clipped;
+        entry.invalid_samples = limited.invalid;
+    }
     snapshot.mix_time = mix_times.summary();
     for (entry, input) in snapshot.inputs.iter_mut().zip(inputs) {
         entry.warmup_frames = input.warmup;
@@ -613,8 +670,9 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             sends: config.sends,
         },
     );
-    // The program output is limited where it leaves the graph; counted.
-    let mut limited = Limited::default();
+    // Every bus is limited where it leaves the graph, and counted: the
+    // program bus, then the aux buses.
+    let mut limited = vec![Limited::default(); graph.aux_bus_count() + 1];
     let mut inputs: Vec<InputState> = config
         .inputs
         .into_iter()
@@ -633,7 +691,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             trimmed: 0,
         })
         .collect();
-    let mut out = vec![0.0f32; BLOCK_FRAMES * channels];
+    let mut outs = vec![vec![0.0f32; BLOCK_FRAMES * channels]; graph.aux_bus_count() + 1];
     let mut mix_times = LatencyHistogram::new();
     let mut peaks = PeakWindow::new(inputs.len() + graph.aux_bus_count() + 1);
 
@@ -684,12 +742,18 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             }
             graph.process(&views[..inputs.len().min(MAX_INPUTS)]);
         }
-        let block_limited = limit_into(graph.program(), &mut out);
-        limited.clipped += block_limited.clipped;
-        limited.invalid += block_limited.invalid;
+        for (column, (out, total)) in outs.iter_mut().zip(&mut limited).enumerate() {
+            let block = match column {
+                0 => graph.program(),
+                column => graph.aux(column - 1).unwrap_or_default(),
+            };
+            let block_limited = limit_into(block, out);
+            total.clipped += block_limited.clipped;
+            total.invalid += block_limited.invalid;
+        }
         control.publish(&graph, &mut peaks);
         if let Some(sink) = &mut sink {
-            sink.block(&out, due(start, block));
+            sink.block(&BusBlocks { blocks: &outs }, due(start, block));
         }
         let finished = Instant::now();
         mix_times.record(finished - mix_start);
@@ -704,7 +768,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                 start,
                 (mixed, late, skipped),
                 &mix_times,
-                (&graph, limited),
+                (&graph, &limited),
                 &inputs,
             );
         }
@@ -725,8 +789,24 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             peak_dbfs: None,
             rms_dbfs: None,
         }),
-        clipped_samples: limited.clipped,
-        invalid_samples: graph.invalid_samples() + limited.invalid,
+        clipped_samples: limited[0].clipped,
+        invalid_samples: graph.invalid_samples() + limited[0].invalid,
+        aux_buses: config
+            .aux_buses
+            .into_iter()
+            .map(|bus| bus.name)
+            .zip(&limited[1..])
+            .enumerate()
+            .map(|(index, (name, limited))| BusStats {
+                name,
+                meter: graph.bus_meter(BusRef::Aux(index)).unwrap_or(MeterReading {
+                    peak_dbfs: None,
+                    rms_dbfs: None,
+                }),
+                clipped_samples: limited.clipped,
+                invalid_samples: limited.invalid,
+            })
+            .collect(),
         inputs: inputs
             .iter()
             .enumerate()
@@ -822,8 +902,11 @@ mod tests {
     struct RecordingSink(Arc<std::sync::Mutex<Vec<(usize, Instant)>>>);
 
     impl BlockSink for RecordingSink {
-        fn block(&mut self, samples: &[f32], at: Instant) {
-            self.0.lock().expect("lock").push((samples.len(), at));
+        fn block(&mut self, buses: &BusBlocks<'_>, at: Instant) {
+            self.0
+                .lock()
+                .expect("lock")
+                .push((buses.program().len(), at));
         }
     }
 
@@ -902,6 +985,73 @@ mod tests {
         for pair in blocks.windows(2) {
             assert_eq!(pair[1].1 - pair[0].1, Duration::from_millis(10));
         }
+    }
+
+    /// Keeps each block's largest sample per bus.
+    struct PeakSink(Arc<std::sync::Mutex<Vec<Vec<f32>>>>);
+
+    impl BlockSink for PeakSink {
+        fn block(&mut self, buses: &BusBlocks<'_>, _at: Instant) {
+            let peaks = (0..)
+                .map_while(|column| buses.column(column))
+                .map(|block| {
+                    block
+                        .iter()
+                        .fold(0f32, |peak, sample| peak.max(sample.abs()))
+                })
+                .collect();
+            self.0.lock().expect("lock").push(peaks);
+        }
+    }
+
+    #[test]
+    fn the_sink_gets_every_bus_limited_and_counted_on_its_own() {
+        let peaks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut sends = SendMatrix::program_only(1, 1);
+        // +12 dB into the aux bus: a -6 dBFS tone overloads it.
+        sends.set(
+            0,
+            BusRef::Aux(0),
+            SendConfig {
+                enabled: true,
+                level_db: 12.0,
+                tap: crate::graph::Tap::PostFader,
+            },
+        );
+        let mixer = MixerThread::spawn(MixerConfig {
+            inputs: vec![MixerInput {
+                name: "tone".into(),
+                source: InputSource::Tone(Tone::new(1000.0, -6.0, RATE)),
+                channel: unity(),
+            }],
+            aux_buses: vec![MixerBus {
+                name: "hot".into(),
+                config: BusConfig::UNITY,
+            }],
+            program: BusConfig::UNITY,
+            sends,
+            expected_duration: Duration::from_secs(1),
+            sink: Some(Box::new(PeakSink(Arc::clone(&peaks)))),
+        })
+        .expect("spawn");
+        thread::sleep(Duration::from_millis(100));
+        let stats = mixer.stop().expect("stop");
+        let peaks = peaks.lock().expect("lock");
+        assert!(peaks.len() >= 5);
+        for block in peaks.iter() {
+            assert_eq!(block.len(), 2, "program and one aux bus");
+            assert!(block[0] < 0.51, "program untouched: {block:?}");
+            assert!(block[1] <= 1.0, "aux limited: {block:?}");
+        }
+        assert!(peaks.iter().any(|block| block[1] == 1.0));
+        assert_eq!(stats.clipped_samples, 0);
+        let hot = &stats.aux_buses[0];
+        assert_eq!(hot.name, "hot");
+        assert!(hot.clipped_samples > 0, "{hot:?}");
+        assert!(
+            hot.meter.peak_dbfs.is_some_and(|peak| peak > 5.0),
+            "{hot:?}"
+        );
     }
 
     #[test]

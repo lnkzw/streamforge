@@ -3,15 +3,17 @@
 
 use std::sync::Arc;
 
+use audio_engine::BusRef as GraphBus;
 use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
-    ErrorCode, MixerState, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
-    SetSendRequest, SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest,
-    UpdateSourceRequest,
+    ErrorCode, MixerState, OutputKind, OutputMix, OutputProfileSet, PROGRAM_BUS_ID, PreviewState,
+    SceneList, SceneRef, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest,
+    SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
 use crate::composite::FPS;
+use crate::outputs::output_id;
 use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH};
 use crate::scenes::SceneCollection;
 use crate::{Engine, audio};
@@ -179,10 +181,100 @@ impl Engine {
     }
 
     pub(crate) fn mixer_state(&self) -> MixerState {
-        match &self.pipeline {
+        let mut state = match &self.pipeline {
             Some(pipeline) => pipeline.mixer_state(),
             None => audio::mixer_state(&self.audio, None),
+        };
+        state.outputs = OutputKind::ALL
+            .into_iter()
+            .map(|output| {
+                let running = self.output_open(output);
+                let profile = self.profiles.mix(output);
+                let bus = match &self.pipeline {
+                    Some(pipeline) if running => pipeline.output_mix(output_id(output)),
+                    // Started now, it would join this run: a run with an
+                    // output's own sources has the program bus only.
+                    Some(pipeline) if pipeline.mix_column(profile).is_none() => {
+                        Some(PROGRAM_BUS_ID.to_owned())
+                    }
+                    _ => None,
+                };
+                OutputMix {
+                    output,
+                    bus: bus.unwrap_or_else(|| profile.to_owned()),
+                    running,
+                }
+            })
+            .collect();
+        state
+    }
+
+    fn output_open(&self, output: OutputKind) -> bool {
+        match output {
+            OutputKind::Recording => self.recording.is_some(),
+            OutputKind::Stream => self.streaming.is_some(),
         }
+    }
+
+    /// Change an output's profile. A running output fades to a new mix now
+    /// (if its run has that bus); encoder settings wait for its next start.
+    pub(crate) fn set_output_profile(
+        &mut self,
+        request: SetOutputProfileRequest,
+    ) -> Result<OutputProfileSet, CommandError> {
+        let output = request.output;
+        if output != OutputKind::Stream && request.video_bitrate_kbps.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                "`video_bitrate_kbps` is for the stream; a recording's quality is not a bitrate",
+            ));
+        }
+        let running = self.output_open(output);
+        let mut applied_now = Vec::new();
+        let mut next_start = Vec::new();
+        let mix = match &request.mix {
+            Some(bus) => Some(
+                match audio::bus_position(&self.audio, bus, ("mix_bus_id", "mix_bus"))? {
+                    GraphBus::Program => PROGRAM_BUS_ID.to_owned(),
+                    GraphBus::Aux(index) => self.audio.buses[index].id.clone(),
+                },
+            ),
+            None => None,
+        };
+        if let Some(mix) = mix {
+            if running {
+                match self
+                    .pipeline
+                    .as_ref()
+                    .and_then(|pipeline| Some((pipeline, pipeline.mix_column(&mix)?)))
+                {
+                    Some((pipeline, column)) => {
+                        pipeline.set_output_mix(output_id(output), column);
+                        applied_now.push("mix");
+                    }
+                    // A run with an output's own sources has no aux buses.
+                    None => next_start.push("mix"),
+                }
+            }
+            *self.profiles.mix_mut(output) = mix;
+        }
+        if let Some(encoder) = request.video_encoder {
+            *self.profiles.video_encoder_mut(output) = encoder;
+            if running {
+                next_start.push("video_encoder");
+            }
+        }
+        if let Some(kbps) = request.video_bitrate_kbps {
+            self.profiles.stream.video_bitrate_kbps = kbps;
+            if running {
+                next_start.push("video_bitrate_kbps");
+            }
+        }
+        Ok(OutputProfileSet {
+            profiles: self.profiles.clone(),
+            applied_now,
+            next_start,
+        })
     }
 
     /// Structure changes need an idle pipeline: its mixer is built for a
@@ -252,8 +344,30 @@ impl Engine {
         Ok(self.mixer_state())
     }
 
+    /// Refused while an output profile takes the bus as its mix, so a
+    /// profile never names a missing bus.
     pub(crate) fn remove_bus(&mut self, bus: &BusRef) -> Result<MixerState, CommandError> {
         self.audio_structure_idle()?;
+        if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus, ("id", "name"))? {
+            let id = &self.audio.buses[index].id;
+            let users: Vec<&str> = OutputKind::ALL
+                .into_iter()
+                .filter(|output| self.profiles.mix(*output) == id)
+                .map(OutputKind::as_str)
+                .collect();
+            if !users.is_empty() {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidState,
+                    format!(
+                        "bus `{}` is the {} profile's mix; give it another with \
+                         set_output_profile first",
+                        self.audio.buses[index].name,
+                        users.join(" and ")
+                    ),
+                )
+                .with_details(serde_json::json!({ "outputs": users })));
+            }
+        }
         audio::remove_bus(&mut self.audio, bus)?;
         Ok(self.mixer_state())
     }

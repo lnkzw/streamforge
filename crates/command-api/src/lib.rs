@@ -21,8 +21,8 @@ pub use access::{AccessPolicy, Gated, label as access_label};
 pub use audio::{
     AddBusRequest, AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusSpec, BusState,
     CHANNEL_ID_PREFIX, ChannelInput, ChannelRef, ChannelSpec, ChannelState, GraphProblem,
-    MAX_AUX_BUSES, MAX_CHANNELS, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec,
-    SendSpec, SendTap, SetChannelInputRequest, SetSendRequest, UpdateBusRequest,
+    MAX_AUX_BUSES, MAX_CHANNELS, MixerState, OutputMix, PROGRAM_BUS_ID, PROGRAM_BUS_NAME,
+    ProgramBusSpec, SendSpec, SendTap, SetChannelInputRequest, SetSendRequest, UpdateBusRequest,
     UpdateChannelRequest, id_rule,
 };
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
@@ -30,8 +30,10 @@ pub use error::{CommandError, ErrorCode};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
-    MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
-    SceneCaptureOutcome, StreamingReport, StreamingRequest, StreamingStarted,
+    DEFAULT_VIDEO_BITRATE_KBPS, MediaSources, OutputKind, OutputProfileSet, OutputProfiles,
+    PipelineReport, RecordingProfile, RecordingReport, RecordingRequest, RecordingStarted,
+    SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport, StreamingRequest,
+    StreamingStarted,
 };
 pub use project::{
     ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
@@ -154,6 +156,11 @@ pub enum Command {
     UpdateBus(UpdateBusRequest),
     /// Change a channel's send to a bus (live if running).
     SetSend(SetSendRequest),
+    /// Every output's profile: its mix bus and encoder settings.
+    GetOutputProfiles,
+    /// Change an output's profile; a running output fades to a new mix now
+    /// and takes encoder settings at its next start.
+    SetOutputProfile(SetOutputProfileRequest),
     /// Run the pipeline for a preview (frames go to the in-process
     /// preview mailbox) or stop doing so.
     SetPreview {
@@ -184,6 +191,8 @@ pub enum CommandOutput {
     StreamingReport(Box<StreamingReport>),
     SceneList(SceneList),
     MixerState(MixerState),
+    OutputProfiles(OutputProfiles),
+    OutputProfileSet(OutputProfileSet),
     PreviewState(Box<PreviewState>),
     ProjectSaved(ProjectSaved),
     ProjectLoaded(Box<ProjectLoaded>),

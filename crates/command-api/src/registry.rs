@@ -19,10 +19,11 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
     ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
-    MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest, Rgba,
-    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef, SendTap,
-    SetChannelInputRequest, SetSendRequest, SourceKind, SourceRect, SourceRef, StreamingRequest,
-    ToneSpec, UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
+    MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, OutputKind,
+    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
+    SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
+    SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
+    UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -208,7 +209,8 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
     name: "start_streaming",
     summary: "Publish the media pipeline over RTMP (H.264 CBR + AAC in FLV). Params: url \
               (required, rtmp:// or rtmps://, no credentials), stream_key (secret, never echoed), \
-              video_bitrate_kbps (default 6000), video_encoder (as for start_recording), \
+              video_bitrate_kbps (300..50000) and video_encoder (auto, software, hardware), both by \
+              default the stream profile's, \
               reconnect_attempts (default 5), reconnect_delay_ms (default 1000, doubling up to \
               30 s), and sources as for start_recording. Returns once connected, with the encoder \
               in use; reconnects after errors; independent of recording.",
@@ -397,6 +399,27 @@ const SET_SEND: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const GET_OUTPUT_PROFILES: CommandDescriptor = CommandDescriptor {
+    name: "get_output_profiles",
+    summary: "Every output's profile: the bus it takes as its mix and its encoder settings, which \
+              start_recording and start_streaming use unless their parameters say otherwise.",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
+const SET_OUTPUT_PROFILE: CommandDescriptor = CommandDescriptor {
+    name: "set_output_profile",
+    summary: "Change an output's profile. Params: output (recording or stream); mix_bus_id or \
+              mix_bus (name): the bus it takes as its mix; video_encoder (auto, software, \
+              hardware); video_bitrate_kbps (stream only). A running output fades to a new mix \
+              now; encoder settings apply at its next start. Returns the profiles and which \
+              fields applied now or wait for the next start.",
+    access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
+};
+
 const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     name: "set_preview",
     summary: "Run the pipeline for an in-process preview (quarter resolution, 30 FPS) or stop. \
@@ -482,6 +505,8 @@ const COMMANDS: &[CommandDescriptor] = &[
     REMOVE_BUS,
     UPDATE_BUS,
     SET_SEND,
+    GET_OUTPUT_PROFILES,
+    SET_OUTPUT_PROFILE,
     SET_PREVIEW,
     SAVE_PROJECT,
     LOAD_PROJECT,
@@ -568,6 +593,12 @@ impl Command {
             "remove_bus" => decode_remove_bus(name, params).map(Self::RemoveBus),
             "update_bus" => decode_update_bus(name, params).map(Self::UpdateBus),
             "set_send" => decode_set_send(name, params).map(Self::SetSend),
+            "get_output_profiles" => {
+                expect_no_params(name, params).map(|()| Self::GetOutputProfiles)
+            }
+            "set_output_profile" => {
+                decode_set_output_profile(name, params).map(Self::SetOutputProfile)
+            }
             "set_preview" => {
                 decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
             }
@@ -635,6 +666,8 @@ impl Command {
             Self::RemoveBus(_) => &REMOVE_BUS,
             Self::UpdateBus(_) => &UPDATE_BUS,
             Self::SetSend(_) => &SET_SEND,
+            Self::GetOutputProfiles => &GET_OUTPUT_PROFILES,
+            Self::SetOutputProfile(_) => &SET_OUTPUT_PROFILE,
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
@@ -907,7 +940,7 @@ fn decode_start_recording(
     let params: StartRecordingParams = decode_params(command, params)?;
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
-        video_encoder: params.video_encoder.unwrap_or_default(),
+        video_encoder: params.video_encoder,
         sources: output_sources(
             command,
             SourceParams {
@@ -923,7 +956,6 @@ fn decode_start_recording(
     })
 }
 
-const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
 const VIDEO_BITRATE_KBPS: std::ops::RangeInclusive<u32> = 300..=50_000;
 const MAX_RECONNECT_ATTEMPTS: u32 = 100;
 const RECONNECT_DELAY_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
@@ -938,9 +970,9 @@ struct StartStreamingParams {
     /// Secret stream key, appended to the URL when connecting; never echoed.
     #[schemars(with = "Option<String>")]
     stream_key: Option<Value>,
-    /// Constant video bit rate in kbit/s, 300 to 50000 (default 6000).
+    /// Constant video bit rate in kbit/s, 300 to 50000 (default: the stream profile's).
     video_bitrate_kbps: Option<u32>,
-    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
+    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware (default: the stream profile's).
     video_encoder: Option<EncoderPreference>,
     /// Reconnect attempts after a lost connection, 0 to 100 (default 5).
     reconnect_attempts: Option<u32>,
@@ -1011,17 +1043,8 @@ fn decode_start_streaming(
         StreamTarget::new(&params.url, key).map_err(|message| invalid_params(command, message))?;
     let video_bitrate_kbps = params
         .video_bitrate_kbps
-        .unwrap_or(DEFAULT_VIDEO_BITRATE_KBPS);
-    if !VIDEO_BITRATE_KBPS.contains(&video_bitrate_kbps) {
-        return Err(invalid_params(
-            command,
-            format!(
-                "`video_bitrate_kbps` must be between {} and {}",
-                VIDEO_BITRATE_KBPS.start(),
-                VIDEO_BITRATE_KBPS.end()
-            ),
-        ));
-    }
+        .map(|kbps| video_bitrate(command, kbps))
+        .transpose()?;
     let defaults = ReconnectPolicy::default();
     let max_attempts = params.reconnect_attempts.unwrap_or(defaults.max_attempts);
     if max_attempts > MAX_RECONNECT_ATTEMPTS {
@@ -1047,7 +1070,7 @@ fn decode_start_streaming(
     Ok(StreamingRequest {
         target,
         video_bitrate_kbps,
-        video_encoder: params.video_encoder.unwrap_or_default(),
+        video_encoder: params.video_encoder,
         reconnect: ReconnectPolicy {
             max_attempts,
             initial_delay,
@@ -1923,6 +1946,73 @@ fn decode_set_send(command: &str, params: Option<&Value>) -> Result<SetSendReque
     })
 }
 
+fn video_bitrate(command: &str, kbps: u32) -> Result<u32, CommandError> {
+    if VIDEO_BITRATE_KBPS.contains(&kbps) {
+        Ok(kbps)
+    } else {
+        Err(invalid_params(
+            command,
+            format!(
+                "`video_bitrate_kbps` must be between {} and {}",
+                VIDEO_BITRATE_KBPS.start(),
+                VIDEO_BITRATE_KBPS.end()
+            ),
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetOutputProfileParams {
+    /// The output: recording or stream.
+    output: OutputKind,
+    /// Id of the bus it takes as its mix (or give mix_bus).
+    mix_bus_id: Option<String>,
+    /// Name of the bus it takes as its mix.
+    mix_bus: Option<String>,
+    /// H.264 encoder: auto, software or hardware.
+    video_encoder: Option<EncoderPreference>,
+    /// Stream only: video bitrate in kbit/s.
+    video_bitrate_kbps: Option<u32>,
+}
+
+fn decode_set_output_profile(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<SetOutputProfileRequest, CommandError> {
+    let params: SetOutputProfileParams = decode_params(command, params)?;
+    let mix = (params.mix_bus_id.is_some() || params.mix_bus.is_some())
+        .then(|| {
+            bus_ref(
+                command,
+                ("mix_bus_id", params.mix_bus_id),
+                ("mix_bus", params.mix_bus),
+            )
+        })
+        .transpose()?;
+    if mix.is_none() && params.video_encoder.is_none() && params.video_bitrate_kbps.is_none() {
+        return Err(invalid_params(
+            command,
+            "give `mix_bus_id` or `mix_bus`, `video_encoder` or `video_bitrate_kbps`",
+        ));
+    }
+    if params.output == OutputKind::Recording && params.video_bitrate_kbps.is_some() {
+        return Err(invalid_params(
+            command,
+            "`video_bitrate_kbps` is for the stream; a recording's quality is not a bitrate",
+        ));
+    }
+    Ok(SetOutputProfileRequest {
+        output: params.output,
+        mix,
+        video_encoder: params.video_encoder,
+        video_bitrate_kbps: params
+            .video_bitrate_kbps
+            .map(|kbps| video_bitrate(command, kbps))
+            .transpose()?,
+    })
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PreviewParams {
@@ -2204,6 +2294,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "remove_bus" => of::<BusParams>(),
         "update_bus" => of::<UpdateBusParams>(),
         "set_send" => of::<SetSendParams>(),
+        "set_output_profile" => of::<SetOutputProfileParams>(),
         "set_preview" => of::<PreviewParams>(),
         // Listed explicitly so a new command without a mapping has no schema
         // (and fails the registry test) instead of an empty one.
@@ -2216,7 +2307,8 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "stop_recording"
         | "stop_streaming"
         | "list_scenes"
-        | "get_mixer" => {
+        | "get_mixer"
+        | "get_output_profiles" => {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
         _ => return None,
@@ -2320,6 +2412,7 @@ mod tests {
             "remove_bus" => Some(json!({"name": "Voice"})),
             "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
             "set_send" => Some(json!({"channel": "Mic", "bus": "Voice", "enabled": true})),
+            "set_output_profile" => Some(json!({"output": "stream", "mix_bus": "Voice"})),
             "set_preview" => Some(json!({"enabled": false})),
             "set_screen_source" => Some(json!({"id": "src_a1", "source_id": "monitor:1"})),
             "save_project" | "load_project" | "validate_project" => {
@@ -2767,6 +2860,36 @@ mod tests {
     }
 
     #[test]
+    fn output_profiles_decode_with_their_rules() {
+        let Command::SetOutputProfile(request) = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "stream", "mix_bus_id": "bus_voice",
+                         "video_bitrate_kbps": 4000})),
+        )
+        .expect("decode") else {
+            panic!("set_output_profile");
+        };
+        assert_eq!(request.output, OutputKind::Stream);
+        assert_eq!(
+            request.mix.and_then(|bus| bus.id).as_deref(),
+            Some("bus_voice")
+        );
+        assert_eq!(request.video_bitrate_kbps, Some(4000));
+        for params in [
+            json!({"output": "stream"}),
+            json!({"mix_bus": "Voice"}),
+            json!({"output": "monitor", "mix_bus": "Voice"}),
+            json!({"output": "recording", "video_bitrate_kbps": 4000}),
+            json!({"output": "stream", "video_bitrate_kbps": 1}),
+            json!({"output": "stream", "mix_bus_id": "ch_voice"}),
+            json!({"output": "stream", "video_encoder": "quantum"}),
+        ] {
+            let err = Command::decode("set_output_profile", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+        }
+    }
+
+    #[test]
     fn every_registered_command_decodes_to_its_descriptor() {
         for descriptor in registry() {
             let command = Command::decode(descriptor.name, sample_params(descriptor.name).as_ref())
@@ -2925,7 +3048,8 @@ mod tests {
         let Ok(Command::StartRecording(request)) = recording else {
             panic!("{recording:?}");
         };
-        assert_eq!(request.video_encoder, EncoderPreference::Auto);
+        // None: the recording profile's.
+        assert_eq!(request.video_encoder, None);
         let software = Command::decode(
             "start_recording",
             Some(&json!({"file_name": "a.mkv", "video_encoder": "software"})),
@@ -2933,7 +3057,7 @@ mod tests {
         let Ok(Command::StartRecording(request)) = software else {
             panic!("{software:?}");
         };
-        assert_eq!(request.video_encoder, EncoderPreference::Software);
+        assert_eq!(request.video_encoder, Some(EncoderPreference::Software));
         let streaming = Command::decode(
             "start_streaming",
             Some(&json!({"url": "rtmp://example.com/app", "video_encoder": "hardware"})),
@@ -2941,7 +3065,7 @@ mod tests {
         let Ok(Command::StartStreaming(request)) = streaming else {
             panic!("{streaming:?}");
         };
-        assert_eq!(request.video_encoder, EncoderPreference::Hardware);
+        assert_eq!(request.video_encoder, Some(EncoderPreference::Hardware));
         let err = Command::decode(
             "start_recording",
             Some(&json!({"file_name": "a.mkv", "video_encoder": "gpu"})),
@@ -3181,7 +3305,7 @@ mod tests {
         ) else {
             panic!("decode");
         };
-        assert_eq!(request.video_bitrate_kbps, 4500);
+        assert_eq!(request.video_bitrate_kbps, Some(4500));
         assert_eq!(request.reconnect.max_attempts, 0);
         assert_eq!(request.reconnect.initial_delay, Duration::from_millis(250));
         assert_eq!(request.sources, None);
@@ -3197,7 +3321,8 @@ mod tests {
         else {
             panic!("decode");
         };
-        assert_eq!(defaults.video_bitrate_kbps, 6000);
+        // None: the stream profile's.
+        assert_eq!(defaults.video_bitrate_kbps, None);
         assert_eq!(defaults.reconnect, ReconnectPolicy::default());
     }
 
@@ -3294,7 +3419,7 @@ mod tests {
             panic!("decode");
         };
         assert_eq!(request.target, target);
-        assert_eq!(request.video_bitrate_kbps, 3000);
+        assert_eq!(request.video_bitrate_kbps, Some(3000));
         for params in [
             json!({"url": "rtmp://evil/app"}),
             json!({"stream_key": "x"}),

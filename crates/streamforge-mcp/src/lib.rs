@@ -114,8 +114,9 @@ fn tool(descriptor: &CommandDescriptor) -> Tool {
         }
         "Publish the media pipeline (active scene and audio mix) over RTMP (H.264 CBR + AAC) to \
          the target configured when this server was started; the URL and key cannot be \
-         chosen here. Params: video_bitrate_kbps (default 6000), reconnect_attempts (default \
-         5), reconnect_delay_ms (default 1000), and pipeline sources as for start_recording. \
+         chosen here. Params: video_bitrate_kbps and video_encoder (default: the stream \
+         profile's), reconnect_attempts (default 5), reconnect_delay_ms (default 1000), and \
+         pipeline sources as for start_recording. \
          Returns once connected; reconnects after errors."
             .to_owned()
     } else if descriptor.least_access() != descriptor.access {

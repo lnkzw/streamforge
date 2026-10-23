@@ -266,7 +266,7 @@ pub(crate) fn remove_bus(
     let GraphBus::Aux(index) = bus_position(graph, bus, OWN)? else {
         return Err(CommandError::new(
             ErrorCode::InvalidParams,
-            "the program bus cannot be removed: it is what the outputs take",
+            "the program bus cannot be removed: it is the main mix",
         ));
     };
     for channel in &mut graph.channels {
@@ -462,6 +462,8 @@ pub(crate) fn mixer_state(graph: &AudioGraphSpec, levels: Option<&LevelReading>)
             })
             .collect(),
         buses: std::iter::once(program).chain(aux).collect(),
+        // The engine knows the outputs.
+        outputs: Vec::new(),
         warnings: double_routing(graph),
     }
 }

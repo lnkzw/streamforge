@@ -37,7 +37,7 @@ What runs:
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
 
 CI installs FFmpeg on every OS, so the recording, streaming and output acceptance tests run natively on all three:
-- **Linux:** `libpipewire-0.3-dev` and `libclang-dev` for `capture-linux`, and `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev` for `encoder-ffmpeg`.
+- **Linux:** `libpipewire-0.3-dev` and `libclang-dev` for `capture-linux`, and `libavcodec-dev`, `libavformat-dev`, `libavutil-dev` and `libswscale-dev` for `encoder-ffmpeg`. The downloaded packages are cached per Ubuntu release and week (`actions/cache`), because the runners' mirror is at times too slow for the job timeout; apt fetches only packages that changed.
 - **macOS:** `brew install ffmpeg pkgconf`.
 - **Windows:** BtbN's shared FFmpeg 8.1, with its SHA-256 checked against the release's checksum file.
 

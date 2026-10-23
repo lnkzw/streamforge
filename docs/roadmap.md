@@ -235,7 +235,7 @@ Acceptance:
 
 No release pressure: the audio model is designed and built before the protocol is frozen, so the API is designed once and the mixer UI shows the real model (`docs/architecture/ARCHITECTURE_VISION.md` §6; assessment §10.2, question 4). Inputs, channels, buses, sends, outputs and recording tracks are separate concepts in the model, the protocol and the UI; separate tracks alone are not a routing system.
 
-- [ ] ADR: the audio graph and output profiles, reviewed with the project owner before code.
+- [x] ADR 0017: the audio graph and output profiles, reviewed with the project owner before code.
 - [ ] Stable channel ids; the master becomes the program bus.
 - [ ] Buses (submixes with gain, mute, meters).
 - [ ] Sends from channels to buses, pre- or post-fader, with a level.
@@ -255,7 +255,7 @@ From the project owner's brief: a professional production studio with its own id
 
 - [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
 - [ ] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health.
-- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses and outputs), on the M11 model.
+- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model.
 - [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
 - [ ] Rollout to the remaining views; keyboard operation as specified.
 

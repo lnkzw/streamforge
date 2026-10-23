@@ -190,6 +190,19 @@ impl Engine {
             .map(|output| {
                 let running = self.output_open(output);
                 let profile = self.profiles.mix(output);
+                let tracks = match (&self.pipeline, output) {
+                    (Some(pipeline), _) if running => pipeline.output_tracks(output_id(output)),
+                    (Some(pipeline), OutputKind::Recording) => self
+                        .profiles
+                        .recording
+                        .tracks
+                        .iter()
+                        .filter(|bus| pipeline.mix_column(bus).is_some())
+                        .cloned()
+                        .collect(),
+                    (None, OutputKind::Recording) => self.profiles.recording.tracks.clone(),
+                    (_, OutputKind::Stream) => Vec::new(),
+                };
                 let bus = match &self.pipeline {
                     Some(pipeline) if running => pipeline.output_mix(output_id(output)),
                     // Started now, it would join this run: a run with an
@@ -202,6 +215,7 @@ impl Engine {
                 OutputMix {
                     output,
                     bus: bus.unwrap_or_else(|| profile.to_owned()),
+                    tracks,
                     running,
                 }
             })
@@ -257,6 +271,32 @@ impl Engine {
                 }
             }
             *self.profiles.mix_mut(output) = mix;
+        }
+        if let Some(tracks) = &request.tracks {
+            if output != OutputKind::Recording {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    "`tracks` is for the recording; a stream carries one audio track",
+                ));
+            }
+            let mut ids: Vec<String> = Vec::with_capacity(tracks.len());
+            for bus in tracks {
+                let id = match audio::bus_position(&self.audio, bus, ("tracks", "tracks"))? {
+                    GraphBus::Program => PROGRAM_BUS_ID.to_owned(),
+                    GraphBus::Aux(index) => self.audio.buses[index].id.clone(),
+                };
+                if ids.contains(&id) || id == self.profiles.recording.mix {
+                    return Err(CommandError::new(
+                        ErrorCode::InvalidParams,
+                        format!("bus `{id}` is already a track of the recording"),
+                    ));
+                }
+                ids.push(id);
+            }
+            self.profiles.recording.tracks = ids;
+            if running {
+                next_start.push("tracks");
+            }
         }
         if let Some(encoder) = request.video_encoder {
             *self.profiles.video_encoder_mut(output) = encoder;
@@ -352,14 +392,18 @@ impl Engine {
             let id = &self.audio.buses[index].id;
             let users: Vec<&str> = OutputKind::ALL
                 .into_iter()
-                .filter(|output| self.profiles.mix(*output) == id)
+                .filter(|output| {
+                    self.profiles.mix(*output) == id
+                        || (*output == OutputKind::Recording
+                            && self.profiles.recording.tracks.contains(id))
+                })
                 .map(OutputKind::as_str)
                 .collect();
             if !users.is_empty() {
                 return Err(CommandError::new(
                     ErrorCode::InvalidState,
                     format!(
-                        "bus `{}` is the {} profile's mix; give it another with \
+                        "bus `{}` is in the {} profile (its mix or a track); change it with \
                          set_output_profile first",
                         self.audio.buses[index].name,
                         users.join(" and ")

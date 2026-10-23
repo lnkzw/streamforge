@@ -16,7 +16,8 @@ use media_core::{MediaTimestamp, VideoFrame};
 use crate::audio_fifo::AudioFifo;
 use crate::{
     AudioSettings, AudioTrackStats, Counts, EncoderPreference, Item, RecorderError,
-    RecorderErrorKind, Shared, SkippedEncoder, VideoEncoderInfo, VideoSettings, VideoTrackStats,
+    RecorderErrorKind, Shared, SkippedEncoder, TrackPool, VideoEncoderInfo, VideoSettings,
+    VideoTrackStats,
 };
 
 pub(crate) mod encoders;
@@ -98,15 +99,21 @@ fn init(quiet: bool) -> Result<(), RecorderError> {
 struct Session {
     output: format::context::Output,
     video: VideoTrack,
+    /// Audio track 1.
     audio: AudioTrack,
+    /// Audio tracks 2 and on; their samples come from `pool`.
+    extra: Vec<AudioTrack>,
+    pool: Option<Arc<TrackPool>>,
     interrupt: Arc<Interrupt>,
 }
 
 impl Session {
     /// Open `url` with the muxer `container` (FFmpeg protocol `options`, e.g.
-    /// timeouts), add both tracks and write the header. Errors name the
-    /// output as `display` (never `url`, which may hold a secret) and use
-    /// `kind` for failures to open or write the output.
+    /// timeouts), add the video track and the audio tracks (one per name in
+    /// `tracks`, or one unnamed track; tracks after the first read their
+    /// samples from `pool`) and write the header. Errors name the output as
+    /// `display` (never `url`, which may hold a secret) and use `kind` for
+    /// failures to open or write the output.
     #[allow(clippy::too_many_arguments)]
     fn open(
         url: &str,
@@ -116,7 +123,7 @@ impl Session {
         kind: RecorderErrorKind,
         video: &VideoSettings,
         encoders: &mut EncoderChoice,
-        audio: &AudioSettings,
+        (settings, tracks, pool): (&AudioSettings, &[String], Option<Arc<TrackPool>>),
         shared: Arc<Shared>,
     ) -> Result<Self, RecorderError> {
         let interrupt = Interrupt::new(shared);
@@ -127,17 +134,32 @@ impl Session {
             .flags()
             .contains(format::Flags::GLOBAL_HEADER);
         let mut video = VideoTrack::open(&mut output, video, encoders, global_header)?;
-        let mut audio = AudioTrack::open(&mut output, audio, global_header)?;
+        let mut audio = AudioTrack::open(
+            &mut output,
+            settings,
+            tracks.first().cloned(),
+            global_header,
+        )?;
+        let mut extra = tracks
+            .iter()
+            .skip(1)
+            .map(|name| AudioTrack::open(&mut output, settings, Some(name.clone()), global_header))
+            .collect::<Result<Vec<_>, _>>()?;
         output
             .write_header()
             .map_err(|err| error(kind, &format!("cannot start {display}"), err))?;
         // The muxer may pick its own stream time bases while writing the header.
         video.stream_time_base = stream_time_base(&output, video.stream);
         audio.stream_time_base = stream_time_base(&output, audio.stream);
+        for track in &mut extra {
+            track.stream_time_base = stream_time_base(&output, track.stream);
+        }
         Ok(Self {
             output,
             video,
             audio,
+            extra,
+            pool,
             interrupt,
         })
     }
@@ -158,27 +180,61 @@ impl Session {
     fn write(&mut self, item: Item, end_ns: i64) -> Result<(), RecorderError> {
         match item {
             Item::Video { frame, pts } => self.video.encode(&mut self.output, &frame, pts, end_ns),
-            Item::Audio { samples, len, pts } => {
-                self.audio
-                    .push(&mut self.output, &samples[..len], pts, end_ns)
+            Item::Audio {
+                samples,
+                len,
+                pts,
+                extra,
+            } => {
+                let first = self
+                    .audio
+                    .push(&mut self.output, &samples[..len], pts, end_ns);
+                let (Some(index), Some(pool)) = (extra, &self.pool) else {
+                    return first;
+                };
+                let output = &mut self.output;
+                let rest = pool.with_tracks(index, len, |blocks| {
+                    self.extra
+                        .iter_mut()
+                        .zip(blocks)
+                        .try_for_each(|(track, block)| track.push(output, block, pts, end_ns))
+                });
+                pool.give_back(index);
+                first.and(rest)
             }
             Item::Stop => Ok(()),
         }
     }
 
-    /// Flush both tracks even if one fails, then write the trailer and close
-    /// the output; the first error wins.
-    fn finish(mut self) -> (VideoTrack, AudioTrack, Result<(), RecorderError>) {
+    /// Flush every track even if one fails, then write the trailer and
+    /// close the output; the first error wins. Returns the video track,
+    /// audio track 1 and the further audio tracks.
+    fn finish(
+        mut self,
+    ) -> (
+        VideoTrack,
+        AudioTrack,
+        Vec<AudioTrack>,
+        Result<(), RecorderError>,
+    ) {
         let video_flushed = self.video.flush(&mut self.output);
         let audio_flushed = self.audio.flush(&mut self.output);
+        let mut extra_flushed = Ok(());
+        for track in &mut self.extra {
+            let flushed = track.flush(&mut self.output);
+            extra_flushed = extra_flushed.and(flushed);
+        }
         let trailer = self
             .output
             .write_trailer()
             .map_err(|err| error(RecorderErrorKind::Output, "cannot finalize the output", err));
         drop(self.output);
         drop(self.interrupt);
-        let result = video_flushed.and(audio_flushed).and(trailer);
-        (self.video, self.audio, result)
+        let result = video_flushed
+            .and(audio_flushed)
+            .and(extra_flushed)
+            .and(trailer);
+        (self.video, self.audio, self.extra, result)
     }
 }
 
@@ -652,6 +708,8 @@ impl VideoTrack {
 struct AudioTrack {
     encoder: encoder::Audio,
     name: String,
+    /// The track's name in the file.
+    title: Option<String>,
     settings: AudioSettings,
     layout: ChannelLayout,
     stream: usize,
@@ -675,6 +733,7 @@ impl AudioTrack {
     fn open(
         output: &mut format::context::Output,
         settings: &AudioSettings,
+        title: Option<String>,
         global_header: bool,
     ) -> Result<Self, RecorderError> {
         let codec = encoder::find(codec::Id::AAC).ok_or_else(|| {
@@ -732,12 +791,18 @@ impl AudioTrack {
             })?;
             stream.set_parameters(&encoder);
             stream.set_time_base(time_base);
+            if let Some(title) = &title {
+                let mut metadata = Dictionary::new();
+                metadata.set("title", title);
+                stream.set_metadata(metadata);
+            }
             stream.index()
         };
         let channels = settings.channels as usize;
         Ok(Self {
             encoder,
             name,
+            title,
             settings: settings.clone(),
             layout,
             stream,
@@ -872,6 +937,7 @@ impl AudioTrack {
     fn stats(&self, queue_dropped: u64) -> AudioTrackStats {
         let fifo = self.fifo.stats();
         AudioTrackStats {
+            name: self.title.clone(),
             encoder: self.name.clone(),
             rate: self.settings.rate,
             channels: self.settings.channels,

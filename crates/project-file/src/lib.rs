@@ -120,6 +120,9 @@ struct FileOutputs {
 #[allow(dead_code)] // checked for its structure
 struct FileRecordingProfile {
     mix: String,
+    /// Absent: no further tracks.
+    #[serde(default)]
+    tracks: Vec<String>,
     video_encoder: Value,
 }
 
@@ -748,8 +751,34 @@ fn outputs(
                 let encoder = request.video_encoder.unwrap_or_default();
                 match kind {
                     OutputKind::Recording => {
+                        // The decoder took ids as ids; each must name a bus
+                        // of the file, once, and not the mix again.
+                        let mut tracks: Vec<String> = Vec::new();
+                        for (index, bus) in
+                            request.tracks.unwrap_or_default().into_iter().enumerate()
+                        {
+                            let at = format!("{at}.tracks[{index}]");
+                            let Some(id) = bus.id else {
+                                problems
+                                    .push(problem(&at, "a track names its bus by id".to_owned()));
+                                continue;
+                            };
+                            if let Some(audio) = audio
+                                && id != PROGRAM_BUS_ID
+                                && !audio.buses.iter().any(|bus| bus.id == id)
+                            {
+                                problems.push(problem(&at, format!("no bus has the id `{id}`")));
+                            } else if id == mix || tracks.contains(&id) {
+                                problems.push(problem(
+                                    &at,
+                                    format!("bus `{id}` is already a track of the recording"),
+                                ));
+                            }
+                            tracks.push(id);
+                        }
                         profiles.recording = RecordingProfile {
                             mix,
+                            tracks,
                             video_encoder: encoder,
                         };
                     }

@@ -152,7 +152,8 @@ impl<'a> Stream<'a> {
             RecorderErrorKind::Network,
             &self.config.video,
             &mut self.encoders,
-            &self.config.audio,
+            // One unnamed track: FLV carries one.
+            (&self.config.audio, &[], None),
             Arc::clone(&self.shared),
         );
         match opened {
@@ -216,7 +217,12 @@ impl<'a> Stream<'a> {
                 let pts = shifted(ns, origin);
                 live.write(Item::Video { frame, pts }, end_ns.saturating_sub(origin))
             }
-            Item::Audio { samples, len, pts } => {
+            Item::Audio {
+                samples,
+                len,
+                pts,
+                extra,
+            } => {
                 let Some(ns) = nanos(pts) else {
                     live.audio.blocks_dropped += 1;
                     return Ok(());
@@ -225,7 +231,12 @@ impl<'a> Stream<'a> {
                     Some(origin) if ns >= origin => {
                         let pts = shifted(ns, origin);
                         live.write(
-                            Item::Audio { samples, len, pts },
+                            Item::Audio {
+                                samples,
+                                len,
+                                pts,
+                                extra,
+                            },
                             end_ns.saturating_sub(origin),
                         )
                     }
@@ -246,13 +257,13 @@ impl<'a> Stream<'a> {
         self.last_error = Some(error.message);
         self.set_state(StreamState::Reconnecting);
         live.abort();
-        let (video, audio, _) = live.finish();
+        let (video, audio, _, _) = live.finish();
         self.absorb(&video, &audio)
     }
 
     /// Normal stop: flush, write the trailer, disconnect.
     fn close(&mut self, live: Session) {
-        let (video, audio, finished) = live.finish();
+        let (video, audio, _, finished) = live.finish();
         if let Err(error) = finished {
             self.last_error = Some(error.message);
         }
@@ -333,6 +344,7 @@ impl<'a> Stream<'a> {
             end_ms: None,
         });
         let mut audio = self.audio.unwrap_or_else(|| AudioTrackStats {
+            name: None,
             encoder: "aac".to_owned(),
             rate: settings.audio.rate,
             channels: settings.audio.channels,

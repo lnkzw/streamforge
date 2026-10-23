@@ -119,3 +119,98 @@ fn peaks_dbfs(path: &std::path::Path, window: usize) -> Vec<f64> {
         })
         .collect()
 }
+
+#[test]
+fn a_recording_carries_its_tracks_named_after_their_buses() {
+    let _media = common::media_lock();
+    let dir = TempDir::new("tracks");
+    let mut engine =
+        EngineProcess::spawn_with(&[std::ffi::OsStr::new("--output-dir"), dir.0.as_os_str()]);
+    ok(engine
+        .request(r#"{"id":1,"command":"add_bus","params":{"name":"Quiet","assign_db":null}}"#));
+    ok(engine.request(
+        r#"{"id":2,"command":"set_send","params":{"channel":"Tone","bus":"Quiet","enabled":true,"level_db":-20}}"#,
+    ));
+    let set = ok(engine.request(
+        r#"{"id":3,"command":"set_output_profile","params":{"output":"recording","tracks":["Quiet"]}}"#,
+    ));
+    let quiet = set["recording"]["tracks"][0]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    // A track's bus cannot be removed.
+    let removed = engine.request(r#"{"id":4,"command":"remove_bus","params":{"name":"Quiet"}}"#);
+    assert_eq!(removed["error"]["code"], "invalid_state", "{removed}");
+    ok(engine
+        .request(r#"{"id":5,"command":"start_recording","params":{"file_name":"tracks.mkv"}}"#));
+    let mixer = ok(engine.request(r#"{"id":6,"command":"get_mixer"}"#));
+    assert_eq!(
+        mixer["outputs"][0]["tracks"],
+        serde_json::json!([quiet]),
+        "{mixer}"
+    );
+    // The track list is fixed while it records.
+    let set = ok(engine.request(
+        r#"{"id":7,"command":"set_output_profile","params":{"output":"recording","tracks":[]}}"#,
+    ));
+    assert_eq!(set["next_start"], serde_json::json!(["tracks"]), "{set}");
+    std::thread::sleep(SPAN);
+    let stopped = ok(engine.request(r#"{"id":8,"command":"stop_recording"}"#));
+    assert!(engine.finish().success());
+    let recording = &stopped["recording"];
+    assert_eq!(recording["audio"]["name"], "Program", "{recording}");
+    assert_eq!(recording["extra_audio"][0]["name"], "Quiet", "{recording}");
+    assert_eq!(
+        recording["extra_audio"][0]["samples_encoded"], recording["audio"]["samples_encoded"],
+        "{recording}"
+    );
+
+    // Two AAC streams, named after their buses, at their buses' levels.
+    let found = track_peaks(&dir.0.join("tracks.mkv"));
+    let names: Vec<_> = found.iter().map(|(name, _)| name.as_deref()).collect();
+    assert_eq!(names, [Some("Program"), Some("Quiet")]);
+    for ((_, peak), dbfs) in found.iter().zip([-20.0, -40.0]) {
+        assert!((peak - dbfs).abs() < 1.5, "{found:?}");
+    }
+}
+
+/// Each audio stream's name and its peak (dBFS) after the first 100 ms.
+fn track_peaks(path: &std::path::Path) -> Vec<(Option<String>, f64)> {
+    ff::init().expect("init");
+    let mut input = ff::format::input(path).expect("open recording");
+    let mut tracks: Vec<(usize, Option<String>, ff::decoder::Audio, Vec<f32>)> = input
+        .streams()
+        .filter(|stream| stream.parameters().medium() == ff::media::Type::Audio)
+        .map(|stream| {
+            let decoder = ff::codec::context::Context::from_parameters(stream.parameters())
+                .expect("ctx")
+                .decoder()
+                .audio()
+                .expect("decoder");
+            let name = stream.metadata().get("title").map(str::to_owned);
+            (stream.index(), name, decoder, Vec::new())
+        })
+        .collect();
+    let mut frame = ff::frame::Audio::empty();
+    for (stream, packet) in input.packets() {
+        let Some(track) = tracks.iter_mut().find(|track| track.0 == stream.index()) else {
+            continue;
+        };
+        track.2.send_packet(&packet).expect("send");
+        while track.2.receive_frame(&mut frame).is_ok() {
+            track
+                .3
+                .extend_from_slice(&frame.plane::<f32>(0)[..frame.samples()]);
+        }
+    }
+    tracks
+        .into_iter()
+        .map(|(_, name, _, samples)| {
+            let peak = samples
+                .iter()
+                .skip(4_800)
+                .fold(0f32, |peak, sample| peak.max(sample.abs()));
+            (name, 20.0 * f64::from(peak).log10())
+        })
+        .collect()
+}

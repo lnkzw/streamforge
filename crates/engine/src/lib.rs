@@ -1235,6 +1235,7 @@ mod tests {
         let typed = Command::SetOutputProfile(command_api::SetOutputProfileRequest {
             output: command_api::OutputKind::Recording,
             mix: None,
+            tracks: None,
             video_encoder: None,
             video_bitrate_kbps: Some(1_000),
         });
@@ -1265,6 +1266,35 @@ mod tests {
         let state = mixer(run(&mut engine, "get_mixer", json!({})));
         assert_eq!(state.outputs[0].bus, voice);
         assert!(!state.outputs[0].running);
+        // Tracks: existing buses, each once, not the mix again.
+        for tracks in [
+            json!(["Voice"]),
+            json!(["Program", "Program"]),
+            json!(["Gone"]),
+        ] {
+            let command = Command::decode(
+                "set_output_profile",
+                Some(&json!({"output": "recording", "tracks": tracks})),
+            )
+            .expect("decode");
+            let error = engine.handle(command).unwrap_err();
+            assert!(
+                matches!(error.code, ErrorCode::InvalidParams | ErrorCode::NotFound),
+                "{tracks}: {error:?}"
+            );
+        }
+        let CommandOutput::OutputProfileSet(set) = run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "tracks": ["Program"]}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert_eq!(set.profiles.recording.tracks, ["bus_program"]);
+        assert_eq!(
+            mixer(run(&mut engine, "get_mixer", json!({}))).outputs[0].tracks,
+            ["bus_program"]
+        );
         // The profile keeps its bus.
         let remove =
             Command::decode("remove_bus", Some(&json!({"name": "Voice"}))).expect("decode");

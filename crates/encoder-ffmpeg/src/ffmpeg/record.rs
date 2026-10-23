@@ -15,6 +15,7 @@ use ffmpeg_next as ff;
 use super::{EncoderChoice, Session, counts_of, init};
 use crate::{
     Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
+    TrackPool,
 };
 
 const CONTAINER: &str = "matroska";
@@ -24,8 +25,9 @@ pub(crate) fn run(
     rx: Receiver<Item>,
     ready: Ready,
     shared: Arc<Shared>,
+    pool: Option<Arc<TrackPool>>,
 ) -> Result<RecordingStats, RecorderError> {
-    let mut session = match open(&config, &shared) {
+    let mut session = match open(&config, &shared, pool.clone()) {
         Ok(session) => {
             let _ = ready.send(Ok(session.video.info()));
             session
@@ -51,7 +53,7 @@ pub(crate) fn run(
         }
     }
 
-    let (mut video, mut audio, finished) = session.finish();
+    let (mut video, mut audio, mut extra, finished) = session.finish();
     // Flushing encoded what the encoders still held.
     shared.publish(counts_of(&video, &audio));
     if failure.is_some() {
@@ -61,7 +63,15 @@ pub(crate) fn run(
             shared.received(&item);
             match item {
                 Item::Video { .. } => video.frames_dropped += 1,
-                Item::Audio { .. } => audio.blocks_dropped += 1,
+                Item::Audio { extra: block, .. } => {
+                    audio.blocks_dropped += 1;
+                    for track in &mut extra {
+                        track.blocks_dropped += 1;
+                    }
+                    if let (Some(pool), Some(index)) = (&pool, block) {
+                        pool.give_back(index);
+                    }
+                }
                 Item::Stop => break,
             }
             shared.publish(counts_of(&video, &audio));
@@ -76,6 +86,11 @@ pub(crate) fn run(
         file_bytes: std::fs::metadata(&config.path).ok().map(|m| m.len()),
         video: video.stats(shared.video_dropped.load(Ordering::Relaxed)),
         audio: audio.stats(shared.audio_dropped.load(Ordering::Relaxed)),
+        // Queue drops take every track's block at once.
+        extra_audio: extra
+            .iter()
+            .map(|track| track.stats(shared.audio_dropped.load(Ordering::Relaxed)))
+            .collect(),
     };
     match failure.or(finished.err()) {
         None => Ok(stats),
@@ -86,7 +101,11 @@ pub(crate) fn run(
     }
 }
 
-fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, RecorderError> {
+fn open(
+    config: &RecorderConfig,
+    shared: &Arc<Shared>,
+    pool: Option<Arc<TrackPool>>,
+) -> Result<Session, RecorderError> {
     init(false)?;
     let path = config.path.to_str().ok_or_else(|| {
         RecorderError::new(
@@ -107,7 +126,7 @@ fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, Record
         RecorderErrorKind::Output,
         &config.video,
         &mut EncoderChoice::new(&config.video),
-        &config.audio,
+        (&config.audio, &config.audio_tracks, pool),
         // File I/O is never interrupted: the recorder has no stop deadline.
         Arc::clone(shared),
     )

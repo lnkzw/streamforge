@@ -45,11 +45,17 @@ impl OutputKind {
     }
 }
 
+/// Most audio tracks after the first (the mix) in a recording.
+pub const MAX_EXTRA_TRACKS: usize = encoder_api::MAX_AUDIO_TRACKS - 1;
+
 /// How the recording starts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordingProfile {
-    /// The id of the bus the recording takes as its mix.
+    /// The id of the bus the recording takes as its mix: audio track 1.
     pub mix: String,
+    /// The ids of the buses recorded as further audio tracks, in order;
+    /// each track is named after its bus. Fixed when a recording starts.
+    pub tracks: Vec<String>,
     pub video_encoder: EncoderPreference,
 }
 
@@ -77,6 +83,7 @@ impl Default for OutputProfiles {
         Self {
             recording: RecordingProfile {
                 mix: PROGRAM_BUS_ID.to_owned(),
+                tracks: Vec::new(),
                 video_encoder: EncoderPreference::default(),
             },
             stream: StreamProfile {
@@ -119,6 +126,8 @@ pub struct SetOutputProfileRequest {
     pub output: OutputKind,
     /// The bus to take as the mix.
     pub mix: Option<BusRef>,
+    /// The recording's further audio tracks (replacing the list).
+    pub tracks: Option<Vec<BusRef>>,
     pub video_encoder: Option<EncoderPreference>,
     pub video_bitrate_kbps: Option<u32>,
 }

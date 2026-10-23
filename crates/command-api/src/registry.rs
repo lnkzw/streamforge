@@ -19,9 +19,9 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
     ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
-    MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, OutputKind,
-    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
-    SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
+    MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest,
+    OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest,
+    SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
     SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
     UpdateSourceRequest,
 };
@@ -411,8 +411,9 @@ const GET_OUTPUT_PROFILES: CommandDescriptor = CommandDescriptor {
 const SET_OUTPUT_PROFILE: CommandDescriptor = CommandDescriptor {
     name: "set_output_profile",
     summary: "Change an output's profile. Params: output (recording or stream); mix_bus_id or \
-              mix_bus (name): the bus it takes as its mix; video_encoder (auto, software, \
-              hardware); video_bitrate_kbps (stream only). A running output fades to a new mix \
+              mix_bus (name): the bus it takes as its mix (audio track 1); tracks (recording \
+              only: up to 7 buses, ids or names, recorded as further audio tracks named after \
+              them); video_encoder (auto, software, hardware); video_bitrate_kbps (stream only). A running output fades to a new mix \
               now; encoder settings apply at its next start. Returns the profiles and which \
               fields applied now or wait for the next start.",
     access: CommandAccess::Control,
@@ -1974,6 +1975,8 @@ struct SetOutputProfileParams {
     video_encoder: Option<EncoderPreference>,
     /// Stream only: video bitrate in kbit/s.
     video_bitrate_kbps: Option<u32>,
+    /// Recording only: the buses (ids or names) recorded as audio tracks 2 and on, in order.
+    tracks: Option<Vec<String>>,
 }
 
 fn decode_set_output_profile(
@@ -1990,12 +1993,50 @@ fn decode_set_output_profile(
             )
         })
         .transpose()?;
-    if mix.is_none() && params.video_encoder.is_none() && params.video_bitrate_kbps.is_none() {
+    if mix.is_none()
+        && params.video_encoder.is_none()
+        && params.video_bitrate_kbps.is_none()
+        && params.tracks.is_none()
+    {
         return Err(invalid_params(
             command,
-            "give `mix_bus_id` or `mix_bus`, `video_encoder` or `video_bitrate_kbps`",
+            "give `mix_bus_id` or `mix_bus`, `tracks`, `video_encoder` or `video_bitrate_kbps`",
         ));
     }
+    if params.output == OutputKind::Stream && params.tracks.is_some() {
+        return Err(invalid_params(
+            command,
+            "`tracks` is for the recording; a stream carries one audio track",
+        ));
+    }
+    let tracks = params
+        .tracks
+        .map(|tracks| {
+            if tracks.len() > MAX_EXTRA_TRACKS {
+                return Err(invalid_params(
+                    command,
+                    format!("at most {MAX_EXTRA_TRACKS} `tracks` besides the mix"),
+                ));
+            }
+            tracks
+                .into_iter()
+                .map(|bus| {
+                    // An id is looked up as one; anything else is a name.
+                    if is_valid_id(BUS_ID_PREFIX, &bus) {
+                        Ok(BusRef {
+                            id: Some(bus),
+                            name: None,
+                        })
+                    } else {
+                        valid_name(command, "tracks", bus).map(|name| BusRef {
+                            id: None,
+                            name: Some(name),
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     if params.output == OutputKind::Recording && params.video_bitrate_kbps.is_some() {
         return Err(invalid_params(
             command,
@@ -2005,6 +2046,7 @@ fn decode_set_output_profile(
     Ok(SetOutputProfileRequest {
         output: params.output,
         mix,
+        tracks,
         video_encoder: params.video_encoder,
         video_bitrate_kbps: params
             .video_bitrate_kbps
@@ -2875,6 +2917,17 @@ mod tests {
             Some("bus_voice")
         );
         assert_eq!(request.video_bitrate_kbps, Some(4000));
+        // Track entries are ids when they look like one, names otherwise.
+        let Command::SetOutputProfile(request) = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "recording", "tracks": ["bus_voice", "Music"]})),
+        )
+        .expect("decode") else {
+            panic!("set_output_profile");
+        };
+        let tracks = request.tracks.expect("tracks");
+        assert_eq!(tracks[0].id.as_deref(), Some("bus_voice"));
+        assert_eq!(tracks[1].name.as_deref(), Some("Music"));
         for params in [
             json!({"output": "stream"}),
             json!({"mix_bus": "Voice"}),
@@ -2883,6 +2936,9 @@ mod tests {
             json!({"output": "stream", "video_bitrate_kbps": 1}),
             json!({"output": "stream", "mix_bus_id": "ch_voice"}),
             json!({"output": "stream", "video_encoder": "quantum"}),
+            json!({"output": "stream", "tracks": ["Voice"]}),
+            json!({"output": "recording", "tracks": ["", "Voice"]}),
+            json!({"output": "recording", "tracks": vec!["Voice"; MAX_EXTRA_TRACKS + 1]}),
         ] {
             let err = Command::decode("set_output_profile", Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");

@@ -239,8 +239,8 @@ No release pressure: the audio model is designed and built before the protocol i
 - [x] Stable channel ids; the master becomes the program bus (step 2a: `add_channel`, `remove_channel`, `update_channel`, `set_channel_input`, `update_bus`; project file version 2, version 1 migrated).
 - [x] Buses (submixes with gain, mute, meters): up to 8 aux buses, each assigned to the program bus at a level or a separate mix (step 2b: `add_bus`, `remove_bus`, `update_bus`).
 - [x] Sends from channels to buses, pre- or post-fader, with a level (step 2b: `set_send`; live, with a click-free tap change).
-- [ ] Output profiles: per output its mix, its recording tracks and its encoder settings (step 3a: mix and encoder settings, with a live mix switch; tracks follow in step 4).
-- [ ] Multitrack recording with a defined track mapping.
+- [x] Output profiles: per output its mix, its recording tracks and its encoder settings (step 3a: mix and encoder settings, with a live mix switch; step 4: tracks).
+- [x] Multitrack recording with a defined track mapping: track 1 is the mix, then up to 7 listed buses, each an AAC stream named after its bus (step 4).
 - [ ] A monitor output to an audio device, separate from the program outputs.
 - [x] Processing slots in the graph for later effects (no effects yet): 4 per channel and bus, before mute and both taps on a channel, before mute and fader on a bus (step 1).
 

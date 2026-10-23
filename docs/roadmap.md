@@ -242,7 +242,7 @@ No release pressure: the audio model is designed and built before the protocol i
 - [ ] Output profiles: per output its mix, its recording tracks and its encoder settings.
 - [ ] Multitrack recording with a defined track mapping.
 - [ ] A monitor output to an audio device, separate from the program outputs.
-- [ ] Processing slots in the graph for later effects (no effects yet).
+- [x] Processing slots in the graph for later effects (no effects yet): 4 per channel and bus, before mute and both taps on a channel, before mute and fader on a bus (step 1).
 
 Acceptance:
 - The graph has a fixed size per run: no allocation in the audio path, bounded queues, and drops or underruns counted as today.

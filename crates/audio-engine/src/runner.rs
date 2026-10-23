@@ -16,8 +16,12 @@ use media_core::{AudioRing, AudioRingStats, LatencyHistogram, LatencySummary, du
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::graph::{
+    AudioGraph, BusConfig, BusRef, ChannelConfig, GraphConfig, Limited, MAX_AUX_BUSES,
+    MAX_CHANNELS, SendConfig, SendMatrix, limit_into,
+};
 use crate::live::LiveInput;
-use crate::mixer::{MeterReading, Mixer, StripConfig};
+use crate::mixer::MeterReading;
 use crate::tone::Tone;
 
 pub const RATE: u32 = 48_000;
@@ -33,10 +37,18 @@ pub enum InputSource {
     Tone(Tone),
 }
 
+/// A channel of the graph and where its sound comes from.
 pub struct MixerInput {
     pub name: String,
     pub source: InputSource,
-    pub strip: StripConfig,
+    pub channel: ChannelConfig,
+}
+
+/// An aux bus of the graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixerBus {
+    pub name: String,
+    pub config: BusConfig,
 }
 
 /// Receives every mixed block on the mixer thread, with the block's nominal
@@ -46,12 +58,40 @@ pub trait BlockSink: Send {
 }
 
 pub struct MixerConfig {
+    /// The channels, in order.
     pub inputs: Vec<MixerInput>,
-    pub master_gain_db: f32,
+    pub aux_buses: Vec<MixerBus>,
+    pub program: BusConfig,
+    /// `inputs` × `aux_buses` in shape (see [`SendMatrix`]).
+    pub sends: SendMatrix,
     /// Sizes the latency trend buffer up front so the loop never allocates.
     pub expected_duration: Duration,
-    /// Optional consumer of the master output, e.g. a recorder.
+    /// Optional consumer of the program output, limited to [-1, 1], e.g. a
+    /// recorder.
     pub sink: Option<Box<dyn BlockSink>>,
+}
+
+impl MixerConfig {
+    /// `inputs` straight into the program bus, as a plain mixer.
+    pub fn plain(
+        inputs: Vec<MixerInput>,
+        program_gain_db: f32,
+        expected_duration: Duration,
+        sink: Option<Box<dyn BlockSink>>,
+    ) -> Self {
+        let graph = GraphConfig::plain(
+            inputs.iter().map(|input| input.channel).collect(),
+            program_gain_db,
+        );
+        Self {
+            inputs,
+            aux_buses: Vec::new(),
+            program: graph.program,
+            sends: graph.sends,
+            expected_duration,
+            sink,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -60,6 +100,13 @@ pub enum MixerError {
     ChannelMismatch { name: String, channels: usize },
     #[error("the mixer accepts at most {MAX_INPUTS} inputs, got {0}")]
     TooManyInputs(usize),
+    #[error("the mixer accepts at most {MAX_AUX_BUSES} aux buses, got {0}")]
+    TooManyBuses(usize),
+    #[error("the send matrix is {got:?} (channels, aux buses), the mixer has {want:?}")]
+    SendShape {
+        got: (usize, usize),
+        want: (usize, usize),
+    },
     #[error("cannot start the mixer thread: {0}")]
     Spawn(std::io::Error),
     #[error("the mixer thread panicked")]
@@ -165,28 +212,36 @@ pub struct MixerControl {
 
 struct ControlShared {
     pending: Mutex<PendingChanges>,
-    input_peaks: Vec<AtomicU32>,
-    master_peak: AtomicU32,
+    /// Post-fader peaks per channel.
+    channel_peaks: Vec<AtomicU32>,
+    /// Peaks per bus: the program bus, then the aux buses.
+    bus_peaks: Vec<AtomicU32>,
     /// Refreshed in place by the mixer thread after a try-lock.
     live: Mutex<LiveMixStats>,
 }
 
+/// Changes waiting for the next block; sized once, never grown.
 struct PendingChanges {
-    strips: Vec<Option<StripConfig>>,
-    master_gain_db: Option<f32>,
+    channels: Vec<Option<ChannelConfig>>,
+    /// The program bus, then the aux buses.
+    buses: Vec<Option<BusConfig>>,
+    /// Row-major: channel × (program + aux buses).
+    sends: Vec<Option<SendConfig>>,
 }
 
 /// Peaks of the recent window, in dBFS (`None`: silence).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LevelReading {
-    pub inputs: Vec<Option<f64>>,
-    pub master: Option<f64>,
+    /// Post-fader, per channel.
+    pub channels: Vec<Option<f64>>,
+    pub aux_buses: Vec<Option<f64>>,
+    pub program: Option<f64>,
 }
 
 impl MixerControl {
     /// `inputs` gives each input's name and kind, so the live snapshot is
     /// allocated here and the mixer thread only overwrites numbers.
-    fn new(inputs: &[(String, &'static str)]) -> Self {
+    fn new(inputs: &[(String, &'static str)], aux_buses: usize) -> Self {
         let live = LiveMixStats {
             inputs: inputs
                 .iter()
@@ -206,11 +261,12 @@ impl MixerControl {
         Self {
             shared: Arc::new(ControlShared {
                 pending: Mutex::new(PendingChanges {
-                    strips: vec![None; inputs.len()],
-                    master_gain_db: None,
+                    channels: vec![None; inputs.len()],
+                    buses: vec![None; aux_buses + 1],
+                    sends: vec![None; inputs.len() * (aux_buses + 1)],
                 }),
-                input_peaks: (0..inputs.len()).map(|_| AtomicU32::new(0)).collect(),
-                master_peak: AtomicU32::new(0),
+                channel_peaks: (0..inputs.len()).map(|_| AtomicU32::new(0)).collect(),
+                bus_peaks: (0..=aux_buses).map(|_| AtomicU32::new(0)).collect(),
                 live: Mutex::new(live),
             }),
         }
@@ -222,11 +278,11 @@ impl MixerControl {
         lock(&self.shared.live).clone()
     }
 
-    /// Change input `index` from the next block on (ramped). Returns `false`
-    /// for an unknown index.
-    pub fn set_input(&self, index: usize, config: StripConfig) -> bool {
+    /// Change channel `index` from the next block on (ramped). Returns
+    /// `false` for an unknown channel.
+    pub fn set_channel(&self, index: usize, config: ChannelConfig) -> bool {
         let mut pending = lock(&self.shared.pending);
-        match pending.strips.get_mut(index) {
+        match pending.channels.get_mut(index) {
             Some(slot) => {
                 *slot = Some(config);
                 true
@@ -235,8 +291,32 @@ impl MixerControl {
         }
     }
 
-    pub fn set_master_gain(&self, gain_db: f32) {
-        lock(&self.shared.pending).master_gain_db = Some(gain_db);
+    /// Change a bus from the next block on (ramped). Returns `false` for an
+    /// unknown bus.
+    pub fn set_bus(&self, bus: BusRef, config: BusConfig) -> bool {
+        let mut pending = lock(&self.shared.pending);
+        match bus.column(pending.buses.len() - 1) {
+            Some(column) => {
+                pending.buses[column] = Some(config);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Change the send of `channel` to `bus` from the next block on
+    /// (ramped; a tap change fades out and in). Returns `false` for an
+    /// unknown channel or bus.
+    pub fn set_send(&self, channel: usize, bus: BusRef, config: SendConfig) -> bool {
+        let mut pending = lock(&self.shared.pending);
+        let columns = pending.buses.len();
+        match bus.column(columns - 1) {
+            Some(column) if channel < pending.channels.len() => {
+                pending.sends[channel * columns + column] = Some(config);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Peaks of the last [`LEVEL_WINDOW_BLOCKS`] blocks.
@@ -246,61 +326,75 @@ impl MixerControl {
             (linear > 0.0).then(|| 20.0 * linear.log10())
         };
         LevelReading {
-            inputs: self.shared.input_peaks.iter().map(to_db).collect(),
-            master: to_db(&self.shared.master_peak),
+            channels: self.shared.channel_peaks.iter().map(to_db).collect(),
+            aux_buses: self.shared.bus_peaks[1..].iter().map(to_db).collect(),
+            program: to_db(&self.shared.bus_peaks[0]),
         }
     }
 
     /// Mixer thread: apply pending changes if the slot is free right now.
-    fn apply(&self, mixer: &mut Mixer) {
+    fn apply(&self, graph: &mut AudioGraph) {
         let mut pending = match self.shared.pending.try_lock() {
             Ok(pending) => pending,
             Err(TryLockError::Poisoned(pending)) => pending.into_inner(),
             Err(TryLockError::WouldBlock) => return,
         };
-        for (index, slot) in pending.strips.iter_mut().enumerate() {
+        for (index, slot) in pending.channels.iter_mut().enumerate() {
             if let Some(config) = slot.take() {
-                mixer.set_input(index, config);
+                graph.set_channel(index, config);
             }
         }
-        if let Some(gain_db) = pending.master_gain_db.take() {
-            mixer.set_master_gain(gain_db);
+        for (column, slot) in pending.buses.iter_mut().enumerate() {
+            if let Some(config) = slot.take() {
+                graph.set_bus(BusRef::from_column(column), config);
+            }
+        }
+        let columns = pending.buses.len();
+        for (index, slot) in pending.sends.iter_mut().enumerate() {
+            if let Some(config) = slot.take() {
+                graph.set_send(
+                    index / columns,
+                    BusRef::from_column(index % columns),
+                    config,
+                );
+            }
         }
     }
 
     /// Mixer thread: record the block's peaks and publish each window's
     /// maximum.
-    fn publish(&self, mixer: &Mixer, window: &mut PeakWindow) {
+    fn publish(&self, graph: &AudioGraph, window: &mut PeakWindow) {
         let slot = window.next;
         window.next = (window.next + 1) % LEVEL_WINDOW_BLOCKS;
+        let channels = self.shared.channel_peaks.len();
         let targets = self
             .shared
-            .input_peaks
+            .channel_peaks
             .iter()
-            .chain(std::iter::once(&self.shared.master_peak));
+            .chain(&self.shared.bus_peaks);
         for (index, (history, published)) in window.history.iter_mut().zip(targets).enumerate() {
-            history[slot] = if index < self.shared.input_peaks.len() {
-                mixer.input_block_peak(index).unwrap_or(0.0)
-            } else {
-                mixer.master_block_peak()
-            };
+            history[slot] = match index.checked_sub(channels) {
+                None => graph.channel_block_peak(index),
+                Some(column) => graph.bus_block_peak(BusRef::from_column(column)),
+            }
+            .unwrap_or(0.0);
             let peak = history.iter().copied().fold(0.0f32, f32::max);
             published.store(peak.to_bits(), Ordering::Relaxed);
         }
     }
 }
 
-/// Recent block peaks per input plus master; owned by the mixer thread and
-/// allocated once at start.
+/// Recent block peaks per channel, then per bus (program first); owned by
+/// the mixer thread and allocated once at start.
 struct PeakWindow {
     history: Vec<[f32; LEVEL_WINDOW_BLOCKS]>,
     next: usize,
 }
 
 impl PeakWindow {
-    fn new(inputs: usize) -> Self {
+    fn new(meters: usize) -> Self {
         Self {
-            history: vec![[0.0; LEVEL_WINDOW_BLOCKS]; inputs + 1],
+            history: vec![[0.0; LEVEL_WINDOW_BLOCKS]; meters],
             next: 0,
         }
     }
@@ -322,6 +416,14 @@ impl MixerThread {
     pub fn spawn(config: MixerConfig) -> Result<Self, MixerError> {
         if config.inputs.len() > MAX_INPUTS {
             return Err(MixerError::TooManyInputs(config.inputs.len()));
+        }
+        if config.aux_buses.len() > MAX_AUX_BUSES {
+            return Err(MixerError::TooManyBuses(config.aux_buses.len()));
+        }
+        let shape = (config.sends.channels(), config.sends.aux_buses());
+        let want = (config.inputs.len(), config.aux_buses.len());
+        if shape != want {
+            return Err(MixerError::SendShape { got: shape, want });
         }
         for input in &config.inputs {
             if let InputSource::Live(ring) = &input.source
@@ -345,7 +447,7 @@ impl MixerThread {
                 (input.name.clone(), kind)
             })
             .collect();
-        let control = MixerControl::new(&names);
+        let control = MixerControl::new(&names, config.aux_buses.len());
         let thread = thread::Builder::new()
             .name("audio-mixer".to_owned())
             .spawn({
@@ -457,7 +559,7 @@ fn publish_live(
     start: Instant,
     (mixed, late, skipped): (u64, u64, u64),
     mix_times: &LatencyHistogram,
-    mixer: &Mixer,
+    (graph, limited): (&AudioGraph, Limited),
     inputs: &[InputState],
 ) -> bool {
     let mut snapshot = match live.try_lock() {
@@ -469,8 +571,8 @@ fn publish_live(
     snapshot.blocks_mixed = mixed;
     snapshot.late_blocks = late;
     snapshot.skipped_blocks = skipped;
-    snapshot.clipped_samples = mixer.clipped_samples();
-    snapshot.invalid_samples = mixer.invalid_samples();
+    snapshot.clipped_samples = limited.clipped;
+    snapshot.invalid_samples = graph.invalid_samples() + limited.invalid;
     snapshot.mix_time = mix_times.summary();
     for (entry, input) in snapshot.inputs.iter_mut().zip(inputs) {
         entry.warmup_frames = input.warmup;
@@ -498,8 +600,18 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
     let mut sink = config.sink;
     let channels = CHANNELS as usize;
     let windows = (config.expected_duration.as_secs() / 10 + 2) as usize;
-    let strips: Vec<StripConfig> = config.inputs.iter().map(|input| input.strip).collect();
-    let mut mixer = Mixer::new(channels, &strips, config.master_gain_db);
+    let mut graph = AudioGraph::new(
+        channels,
+        BLOCK_FRAMES,
+        &GraphConfig {
+            channels: config.inputs.iter().map(|input| input.channel).collect(),
+            aux_buses: config.aux_buses.iter().map(|bus| bus.config).collect(),
+            program: config.program,
+            sends: config.sends,
+        },
+    );
+    // The program output is limited where it leaves the graph; counted.
+    let mut limited = Limited::default();
     let mut inputs: Vec<InputState> = config
         .inputs
         .into_iter()
@@ -519,7 +631,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         .collect();
     let mut out = vec![0.0f32; BLOCK_FRAMES * channels];
     let mut mix_times = LatencyHistogram::new();
-    let mut peaks = PeakWindow::new(inputs.len());
+    let mut peaks = PeakWindow::new(inputs.len() + graph.aux_bus_count() + 1);
 
     let period_ns = BLOCK_FRAMES as u64 * 1_000_000_000 / u64::from(RATE);
     let due =
@@ -544,7 +656,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         }
 
         let mix_start = Instant::now();
-        control.apply(&mut mixer);
+        control.apply(&mut graph);
         for input in &mut inputs {
             match &mut input.source {
                 Source::Live(live, trend) => {
@@ -565,9 +677,12 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             for (view, input) in views.iter_mut().zip(&inputs) {
                 *view = &input.scratch;
             }
-            mixer.mix(&views[..inputs.len().min(MAX_INPUTS)], &mut out);
+            graph.process(&views[..inputs.len().min(MAX_INPUTS)]);
         }
-        control.publish(&mixer, &mut peaks);
+        let block_limited = limit_into(graph.program(), &mut out);
+        limited.clipped += block_limited.clipped;
+        limited.invalid += block_limited.invalid;
+        control.publish(&graph, &mut peaks);
         if let Some(sink) = &mut sink {
             sink.block(&out, due(start, block));
         }
@@ -584,7 +699,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                 start,
                 (mixed, late, skipped),
                 &mix_times,
-                &mixer,
+                (&graph, limited),
                 &inputs,
             );
         }
@@ -601,9 +716,12 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         late_blocks: late,
         skipped_blocks: skipped,
         mix_time: mix_times.summary(),
-        master: mixer.master_meter(),
-        clipped_samples: mixer.clipped_samples(),
-        invalid_samples: mixer.invalid_samples(),
+        master: graph.bus_meter(BusRef::Program).unwrap_or(MeterReading {
+            peak_dbfs: None,
+            rms_dbfs: None,
+        }),
+        clipped_samples: limited.clipped,
+        invalid_samples: graph.invalid_samples() + limited.invalid,
         inputs: inputs
             .iter()
             .enumerate()
@@ -617,16 +735,13 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                     ),
                     Source::Tone(_) => ("tone", None, None, None),
                 };
-                let strip = mixer.input_config(index).unwrap_or(StripConfig {
-                    gain_db: 0.0,
-                    muted: false,
-                });
+                let channel = graph.channel_config(index).unwrap_or(ChannelConfig::UNITY);
                 InputStats {
                     name: input.name.clone(),
                     kind,
-                    gain_db: strip.gain_db,
-                    muted: strip.muted,
-                    meter: mixer.input_meter(index).unwrap_or(MeterReading {
+                    gain_db: channel.gain_db,
+                    muted: channel.muted,
+                    meter: graph.channel_meter(index).unwrap_or(MeterReading {
                         peak_dbfs: None,
                         rms_dbfs: None,
                     }),
@@ -642,43 +757,40 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
     }
 }
 
-/// Maximum number of mixer inputs.
-pub const MAX_INPUTS: usize = 8;
+/// Maximum number of mixer inputs: the graph's channels.
+pub const MAX_INPUTS: usize = MAX_CHANNELS;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn unity() -> StripConfig {
-        StripConfig {
-            gain_db: 0.0,
-            muted: false,
-        }
+    fn unity() -> ChannelConfig {
+        ChannelConfig::UNITY
     }
 
     #[test]
     fn mixer_thread_mixes_tone_and_live_input() {
         let ring = Arc::new(AudioRing::new(2, 48_000));
-        let mixer = MixerThread::spawn(MixerConfig {
-            inputs: vec![
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            vec![
                 MixerInput {
                     name: "tone".into(),
                     source: InputSource::Tone(Tone::new(1000.0, -6.0, RATE)),
-                    strip: unity(),
+                    channel: unity(),
                 },
                 MixerInput {
                     name: "live".into(),
                     source: InputSource::Live(Arc::clone(&ring)),
-                    strip: StripConfig {
+                    channel: ChannelConfig {
                         gain_db: -6.0,
-                        muted: false,
+                        ..ChannelConfig::UNITY
                     },
                 },
             ],
-            master_gain_db: 0.0,
-            expected_duration: Duration::from_secs(1),
-            sink: None,
-        })
+            0.0,
+            Duration::from_secs(1),
+            None,
+        ))
         .expect("spawn");
         for _ in 0..30 {
             ring.push(std::iter::repeat_n(0.25, 480 * 2));
@@ -723,45 +835,41 @@ mod tests {
 
     #[test]
     fn live_control_changes_gain_and_reports_levels() {
-        let mixer = MixerThread::spawn(MixerConfig {
-            inputs: vec![MixerInput {
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            vec![MixerInput {
                 name: "tone".into(),
                 source: InputSource::Tone(Tone::new(1000.0, -6.0, RATE)),
-                strip: StripConfig {
-                    gain_db: 0.0,
-                    muted: false,
-                },
+                channel: unity(),
             }],
-            master_gain_db: 0.0,
-            expected_duration: Duration::from_secs(1),
-            sink: None,
-        })
+            0.0,
+            Duration::from_secs(1),
+            None,
+        ))
         .expect("spawn");
         let control = mixer.control();
-        let before = wait_levels(&control, |levels| levels.inputs[0].is_some());
-        let peak = before.inputs[0].expect("tone level");
+        let before = wait_levels(&control, |levels| levels.channels[0].is_some());
+        let peak = before.channels[0].expect("tone level");
         assert!((peak + 6.0).abs() < 0.1, "{before:?}");
-        assert!(before.master.is_some());
+        assert!(before.program.is_some());
         // Reading does not consume the levels.
-        assert!(control.levels().inputs[0].is_some());
-        assert!(control.set_input(
+        assert!(control.levels().channels[0].is_some());
+        assert!(control.set_channel(
             0,
-            StripConfig {
-                gain_db: 0.0,
-                muted: true
+            ChannelConfig {
+                muted: true,
+                ..ChannelConfig::UNITY
             }
         ));
-        assert!(!control.set_input(
-            5,
-            StripConfig {
-                gain_db: 0.0,
-                muted: false
-            }
-        ));
+        assert!(!control.set_channel(5, ChannelConfig::UNITY));
+        assert!(!control.set_bus(BusRef::Aux(0), BusConfig::UNITY));
+        assert!(!control.set_send(0, BusRef::Aux(0), SendConfig::OFF));
+        assert!(!control.set_bus(BusRef::Aux(usize::MAX), BusConfig::UNITY));
+        assert!(!control.set_send(0, BusRef::Aux(usize::MAX), SendConfig::OFF));
+        assert!(control.set_bus(BusRef::Program, BusConfig::UNITY));
         // Silence once the window has passed the mute.
-        let muted = wait_levels(&control, |levels| levels.inputs[0].is_none());
-        assert_eq!(muted.inputs[0], None, "{muted:?}");
-        assert_eq!(muted.master, None);
+        let muted = wait_levels(&control, |levels| levels.channels[0].is_none());
+        assert_eq!(muted.channels[0], None, "{muted:?}");
+        assert_eq!(muted.program, None);
         let stats = mixer.stop().expect("stop");
         assert!(stats.inputs[0].muted);
     }
@@ -769,16 +877,16 @@ mod tests {
     #[test]
     fn sink_receives_every_block_at_exact_spacing() {
         let blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mixer = MixerThread::spawn(MixerConfig {
-            inputs: vec![MixerInput {
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            vec![MixerInput {
                 name: "tone".into(),
                 source: InputSource::Tone(Tone::new(440.0, -6.0, RATE)),
-                strip: unity(),
+                channel: unity(),
             }],
-            master_gain_db: 0.0,
-            expected_duration: Duration::from_secs(1),
-            sink: Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
-        })
+            0.0,
+            Duration::from_secs(1),
+            Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
+        ))
         .expect("spawn");
         thread::sleep(Duration::from_millis(120));
         let stats = mixer.stop().expect("stop");
@@ -792,16 +900,16 @@ mod tests {
 
     #[test]
     fn channel_mismatch_is_rejected() {
-        let result = MixerThread::spawn(MixerConfig {
-            inputs: vec![MixerInput {
+        let result = MixerThread::spawn(MixerConfig::plain(
+            vec![MixerInput {
                 name: "mono".into(),
                 source: InputSource::Live(Arc::new(AudioRing::new(1, 100))),
-                strip: unity(),
+                channel: unity(),
             }],
-            master_gain_db: 0.0,
-            expected_duration: Duration::from_secs(1),
-            sink: None,
-        });
+            0.0,
+            Duration::from_secs(1),
+            None,
+        ));
         assert!(matches!(result, Err(MixerError::ChannelMismatch { .. })));
     }
 
@@ -809,23 +917,23 @@ mod tests {
     fn live_stats_show_a_silent_live_input_and_never_hold_up_the_mixer() {
         let blocks = Arc::new(std::sync::Mutex::new(Vec::new()));
         let ring = Arc::new(AudioRing::new(2, 48_000));
-        let mixer = MixerThread::spawn(MixerConfig {
-            inputs: vec![
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            vec![
                 MixerInput {
                     name: "tone".into(),
                     source: InputSource::Tone(Tone::new(440.0, -6.0, RATE)),
-                    strip: unity(),
+                    channel: unity(),
                 },
                 MixerInput {
                     name: "mic".into(),
                     source: InputSource::Live(Arc::clone(&ring)),
-                    strip: unity(),
+                    channel: unity(),
                 },
             ],
-            master_gain_db: 0.0,
-            expected_duration: Duration::from_secs(1),
-            sink: Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
-        })
+            0.0,
+            Duration::from_secs(1),
+            Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
+        ))
         .expect("spawn");
         let control = mixer.control();
         // The live input never delivers: it stays warming up, with no fill.

@@ -142,8 +142,11 @@ fn recording_continues_when_the_stream_fails() {
     assert_eq!(stream["result"]["pipeline_stopped"], false);
 
     thread::sleep(Duration::from_millis(500));
+    // The file ends between the stop request and its reply; stopping waits
+    // for the encoder to drain, which takes long on a slow runner.
+    let until_stop = recording_started.elapsed().as_secs_f64();
     let stopped = request(&mut engine, 3, "stop_recording", json!({}));
-    let recorded_for = recording_started.elapsed().as_secs_f64();
+    let until_reply = recording_started.elapsed().as_secs_f64();
     assert_eq!(stopped["ok"], true, "{stopped}");
     let report = &stopped["result"]["recording"];
     assert_eq!(stopped["result"]["pipeline_stopped"], true);
@@ -157,7 +160,7 @@ fn recording_continues_when_the_stream_fails() {
     let input = ff::format::input(&dir.0.join("survivor.mkv")).expect("open recording");
     let seconds = input.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
     assert!(
-        seconds > recorded_for - 0.5 && seconds <= recorded_for + 0.2,
-        "file lasts {seconds:.2} s, recording ran {recorded_for:.2} s"
+        seconds > until_stop - 0.5 && seconds <= until_reply + 0.2,
+        "file lasts {seconds:.2} s; stop requested after {until_stop:.2} s, replied after {until_reply:.2} s"
     );
 }

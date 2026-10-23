@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use media_core::{AudioRing, FrameMailbox};
+use media_core::{AudioRing, FrameMailbox, SampleReader};
 
 use crate::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-    AudioStreamRequest, CaptureCapabilities, CaptureError, CaptureState, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput,
+    AudioStreamRequest, CaptureCapabilities, CaptureError, CaptureState, PlaybackRequest,
+    ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
+    VideoCaptureReport, VideoSourceInfo,
 };
 
 /// A running audio capture delivering interleaved `f32` samples until stopped.
@@ -24,6 +25,22 @@ pub trait AudioStream: Send {
 
     /// Stop capturing and return diagnostics for the whole session.
     fn stop(self: Box<Self>) -> Result<AudioCaptureReport, CaptureError>;
+}
+
+/// A running playback: the device pulls from its feed on its own thread
+/// until stopped.
+///
+/// The device's callback must not lock, wait or allocate; it reads the
+/// feed with [`SampleReader::read`], which plays silence when the feed runs
+/// short and counts it. When the device ends on its own, the backend drops
+/// the feed, so the producer sees it closed.
+pub trait PlaybackStream: Send {
+    /// Whether the device still plays; never blocks. Required, like
+    /// [`AudioStream::state`].
+    fn state(&self) -> CaptureState;
+
+    /// Stop playing and release the device.
+    fn stop(self: Box<Self>) -> Result<(), CaptureError>;
 }
 
 /// A running screen capture delivering frames until stopped.
@@ -87,6 +104,26 @@ pub trait CaptureBackend {
         &mut self,
         request: &AudioStreamRequest,
     ) -> Result<Box<dyn AudioStream>, CaptureError>;
+
+    /// Audio output devices, for backends that can play; the default has
+    /// none.
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        Err(CaptureError::unsupported(
+            "this backend cannot play audio yet",
+        ))
+    }
+
+    /// Play `feed` on an output in the requested format. On an error the
+    /// feed is dropped, which closes it.
+    fn start_playback(
+        &mut self,
+        _request: &PlaybackRequest,
+        _feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        Err(CaptureError::unsupported(
+            "this backend cannot play audio yet",
+        ))
+    }
 }
 
 /// Backend for builds without a capture implementation; every operation fails
@@ -162,6 +199,18 @@ impl CaptureBackend for UnsupportedCapture {
     ) -> Result<Box<dyn AudioStream>, CaptureError> {
         Err(self.error())
     }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        Err(self.error())
+    }
+
+    fn start_playback(
+        &mut self,
+        _request: &PlaybackRequest,
+        _feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        Err(self.error())
+    }
 }
 
 /// Screen capture from one backend and audio capture from another, e.g.
@@ -220,6 +269,18 @@ impl<V: CaptureBackend, A: CaptureBackend> CaptureBackend for SplitCapture<V, A>
     ) -> Result<Box<dyn AudioStream>, CaptureError> {
         self.audio.start_audio_stream(request)
     }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        self.audio.audio_outputs()
+    }
+
+    fn start_playback(
+        &mut self,
+        request: &PlaybackRequest,
+        feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        self.audio.start_playback(request, feed)
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +317,22 @@ mod tests {
             backend.screen_sources().unwrap_err().kind,
             CaptureErrorKind::Unsupported
         );
+        assert_eq!(
+            backend.audio_outputs().unwrap_err().kind,
+            CaptureErrorKind::Unsupported
+        );
+        let (writer, reader) = media_core::sample_ring(2, 480);
+        let request = PlaybackRequest {
+            output: None,
+            rate: 48_000,
+            channels: 2,
+        };
+        let Err(err) = backend.start_playback(&request, reader) else {
+            panic!("playback started");
+        };
+        assert_eq!(err.message, "not here");
+        // The refused feed is closed.
+        assert!(writer.is_closed());
     }
 
     #[test]

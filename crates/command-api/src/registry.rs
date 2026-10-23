@@ -128,6 +128,14 @@ const LIST_AUDIO_INPUTS: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const LIST_AUDIO_OUTPUTS: CommandDescriptor = CommandDescriptor {
+    name: "list_audio_outputs",
+    summary: "List audio output devices, for the monitor (set_monitor_device).",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
 const LIST_SCREEN_SOURCES: CommandDescriptor = CommandDescriptor {
     name: "list_screen_sources",
     summary: "List monitors and windows that can be captured by id without a picker (where the \
@@ -402,7 +410,8 @@ const SET_SEND: CommandDescriptor = CommandDescriptor {
 const GET_OUTPUT_PROFILES: CommandDescriptor = CommandDescriptor {
     name: "get_output_profiles",
     summary: "Every output's profile: the bus it takes as its mix and its encoder settings, which \
-              start_recording and start_streaming use unless their parameters say otherwise.",
+              start_recording and start_streaming use unless their parameters say otherwise; and \
+              the monitor's bus, whether it is on, and its device.",
     access: CommandAccess::ReadOnly,
     destructive: false,
     open_world: false,
@@ -410,14 +419,27 @@ const GET_OUTPUT_PROFILES: CommandDescriptor = CommandDescriptor {
 
 const SET_OUTPUT_PROFILE: CommandDescriptor = CommandDescriptor {
     name: "set_output_profile",
-    summary: "Change an output's profile. Params: output (recording or stream); mix_bus_id or \
-              mix_bus (name): the bus it takes as its mix (audio track 1); tracks (recording \
-              only: up to 7 buses, ids or names, recorded as further audio tracks named after \
-              them); video_encoder (auto, software, hardware); video_bitrate_kbps (stream only). A running output fades to a new mix \
-              now; encoder settings apply at its next start. Returns the profiles and which \
-              fields applied now or wait for the next start.",
+    summary: "Change an output's profile. Params: output (recording, stream or monitor); \
+              mix_bus_id or mix_bus (name): the bus it takes as its mix (audio track 1, or what \
+              the monitor plays); tracks (recording only: up to 7 buses, ids or names, recorded \
+              as further audio tracks named after them); video_encoder (auto, software, hardware; \
+              not for the monitor); video_bitrate_kbps (stream only); enabled (monitor only: \
+              plays the bus on its device while the pipeline runs; off by default). A running \
+              output fades to a new mix now, and the monitor switches on or off now; encoder \
+              settings apply at the next start. Returns the profiles, which fields applied now or \
+              wait for the next start, and warnings (e.g. a monitor device that did not open).",
     access: CommandAccess::Control,
     destructive: true,
+    open_world: false,
+};
+
+const SET_MONITOR_DEVICE: CommandDescriptor = CommandDescriptor {
+    name: "set_monitor_device",
+    summary: "Choose the audio device the monitor plays on, while the pipeline is idle. Params: \
+              device (a name from list_audio_outputs, or null or absent for the system default). \
+              Returns the profiles.",
+    access: CommandAccess::Sensitive,
+    destructive: false,
     open_world: false,
 };
 
@@ -479,6 +501,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     LIST_COMMANDS,
     GET_CAPTURE_CAPABILITIES,
     LIST_AUDIO_INPUTS,
+    LIST_AUDIO_OUTPUTS,
     LIST_SCREEN_SOURCES,
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
@@ -508,6 +531,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     SET_SEND,
     GET_OUTPUT_PROFILES,
     SET_OUTPUT_PROFILE,
+    SET_MONITOR_DEVICE,
     SET_PREVIEW,
     SAVE_PROJECT,
     LOAD_PROJECT,
@@ -553,6 +577,7 @@ impl Command {
             }
             "get_health" => expect_no_params(name, params).map(|()| Self::GetHealth),
             "list_audio_inputs" => expect_no_params(name, params).map(|()| Self::ListAudioInputs),
+            "list_audio_outputs" => expect_no_params(name, params).map(|()| Self::ListAudioOutputs),
             "list_screen_sources" => {
                 expect_no_params(name, params).map(|()| Self::ListScreenSources)
             }
@@ -600,6 +625,8 @@ impl Command {
             "set_output_profile" => {
                 decode_set_output_profile(name, params).map(Self::SetOutputProfile)
             }
+            "set_monitor_device" => decode_set_monitor_device(name, params)
+                .map(|device| Self::SetMonitorDevice { device }),
             "set_preview" => {
                 decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
             }
@@ -640,6 +667,7 @@ impl Command {
             Self::GetCaptureCapabilities => &GET_CAPTURE_CAPABILITIES,
             Self::GetHealth => &GET_HEALTH,
             Self::ListAudioInputs => &LIST_AUDIO_INPUTS,
+            Self::ListAudioOutputs => &LIST_AUDIO_OUTPUTS,
             Self::ListScreenSources => &LIST_SCREEN_SOURCES,
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
@@ -669,6 +697,7 @@ impl Command {
             Self::SetSend(_) => &SET_SEND,
             Self::GetOutputProfiles => &GET_OUTPUT_PROFILES,
             Self::SetOutputProfile(_) => &SET_OUTPUT_PROFILE,
+            Self::SetMonitorDevice { .. } => &SET_MONITOR_DEVICE,
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
@@ -1883,7 +1912,7 @@ fn video_bitrate(command: &str, kbps: u32) -> Result<u32, CommandError> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetOutputProfileParams {
-    /// The output: recording or stream.
+    /// The output: recording, stream or monitor.
     output: OutputKind,
     /// Id of the bus it takes as its mix (or give mix_bus).
     mix_bus_id: Option<String>,
@@ -1895,6 +1924,8 @@ struct SetOutputProfileParams {
     video_bitrate_kbps: Option<u32>,
     /// Recording only: the buses (ids or names) recorded as audio tracks 2 and on, in order.
     tracks: Option<Vec<String>>,
+    /// Monitor only: play the bus on the monitor device (live, ramped).
+    enabled: Option<bool>,
 }
 
 fn decode_set_output_profile(
@@ -1915,16 +1946,30 @@ fn decode_set_output_profile(
         && params.video_encoder.is_none()
         && params.video_bitrate_kbps.is_none()
         && params.tracks.is_none()
+        && params.enabled.is_none()
     {
         return Err(invalid_params(
             command,
-            "give `mix_bus_id` or `mix_bus`, `tracks`, `video_encoder` or `video_bitrate_kbps`",
+            "give `mix_bus_id` or `mix_bus`, `tracks`, `video_encoder`, `video_bitrate_kbps` or \
+             `enabled`",
         ));
     }
-    if params.output == OutputKind::Stream && params.tracks.is_some() {
+    if params.output != OutputKind::Recording && params.tracks.is_some() {
         return Err(invalid_params(
             command,
             "`tracks` is for the recording; a stream carries one audio track",
+        ));
+    }
+    if params.output != OutputKind::Monitor && params.enabled.is_some() {
+        return Err(invalid_params(
+            command,
+            "`enabled` is for the monitor; the recording and the stream start and stop",
+        ));
+    }
+    if params.output == OutputKind::Monitor && params.video_encoder.is_some() {
+        return Err(invalid_params(
+            command,
+            "`video_encoder` is for the recording and the stream; the monitor plays audio",
         ));
     }
     let tracks = params
@@ -1955,10 +2000,10 @@ fn decode_set_output_profile(
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
-    if params.output == OutputKind::Recording && params.video_bitrate_kbps.is_some() {
+    if params.output != OutputKind::Stream && params.video_bitrate_kbps.is_some() {
         return Err(invalid_params(
             command,
-            "`video_bitrate_kbps` is for the stream; a recording's quality is not a bitrate",
+            "`video_bitrate_kbps` is for the stream",
         ));
     }
     Ok(SetOutputProfileRequest {
@@ -1970,7 +2015,26 @@ fn decode_set_output_profile(
             .video_bitrate_kbps
             .map(|kbps| video_bitrate(command, kbps))
             .transpose()?,
+        enabled: params.enabled,
     })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetMonitorDeviceParams {
+    /// Output device name from list_audio_outputs; null or absent: the system default.
+    device: Option<String>,
+}
+
+fn decode_set_monitor_device(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<Option<String>, CommandError> {
+    let params: SetMonitorDeviceParams = decode_params(command, params)?;
+    if params.device.as_deref().is_some_and(str::is_empty) {
+        return Err(invalid_params(command, "`device` must not be empty"));
+    }
+    Ok(params.device)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2255,6 +2319,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "update_bus" => of::<UpdateBusParams>(),
         "set_send" => of::<SetSendParams>(),
         "set_output_profile" => of::<SetOutputProfileParams>(),
+        "set_monitor_device" => of::<SetMonitorDeviceParams>(),
         "set_preview" => of::<PreviewParams>(),
         // Listed explicitly so a new command without a mapping has no schema
         // (and fails the registry test) instead of an empty one.
@@ -2263,6 +2328,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "get_capture_capabilities"
         | "get_health"
         | "list_audio_inputs"
+        | "list_audio_outputs"
         | "list_screen_sources"
         | "stop_recording"
         | "stop_streaming"
@@ -2846,10 +2912,27 @@ mod tests {
         let tracks = request.tracks.expect("tracks");
         assert_eq!(tracks[0].id.as_deref(), Some("bus_voice"));
         assert_eq!(tracks[1].name.as_deref(), Some("Music"));
+        // The monitor: a bus and on or off.
+        let Command::SetOutputProfile(request) = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "monitor", "mix_bus": "Cue", "enabled": true})),
+        )
+        .expect("decode") else {
+            panic!("set_output_profile");
+        };
+        assert_eq!(
+            (request.output, request.enabled),
+            (OutputKind::Monitor, Some(true))
+        );
         for params in [
             json!({"output": "stream"}),
             json!({"mix_bus": "Voice"}),
-            json!({"output": "monitor", "mix_bus": "Voice"}),
+            json!({"output": "speakers", "mix_bus": "Voice"}),
+            json!({"output": "monitor", "video_encoder": "software"}),
+            json!({"output": "monitor", "video_bitrate_kbps": 4000}),
+            json!({"output": "monitor", "tracks": ["Voice"]}),
+            json!({"output": "recording", "enabled": true}),
+            json!({"output": "stream", "enabled": false}),
             json!({"output": "recording", "video_bitrate_kbps": 4000}),
             json!({"output": "stream", "video_bitrate_kbps": 1}),
             json!({"output": "stream", "mix_bus_id": "ch_voice"}),
@@ -2861,6 +2944,26 @@ mod tests {
             let err = Command::decode("set_output_profile", Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
         }
+    }
+
+    #[test]
+    fn the_monitor_device_is_a_name_or_the_default() {
+        let device = |params: Value| match Command::decode("set_monitor_device", Some(&params)) {
+            Ok(Command::SetMonitorDevice { device }) => Ok(device),
+            Ok(other) => panic!("{other:?}"),
+            Err(err) => Err(err.code),
+        };
+        assert_eq!(
+            device(json!({"device": "alsa_output.usb"})),
+            Ok(Some("alsa_output.usb".to_owned()))
+        );
+        assert_eq!(device(json!({"device": null})), Ok(None));
+        assert_eq!(device(json!({})), Ok(None));
+        assert_eq!(device(json!({"device": ""})), Err(ErrorCode::InvalidParams));
+        assert_eq!(
+            device(json!({"output": "x"})),
+            Err(ErrorCode::InvalidParams)
+        );
     }
 
     #[test]

@@ -29,8 +29,8 @@ use capture_api::{
     CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
 };
 use command_api::{
-    AudioGraphSpec, AudioInputList, Command, CommandError, CommandHandler, CommandList,
-    CommandOutput, EngineStatus, ErrorCode, OutputProfiles, ScreenSourceList,
+    AudioGraphSpec, AudioInputList, AudioOutputList, Command, CommandError, CommandHandler,
+    CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles, ScreenSourceList,
 };
 use encoder_ffmpeg::StreamState;
 use media_core::FrameMailbox;
@@ -172,6 +172,11 @@ impl CommandHandler for Engine {
                 .audio_inputs()
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
                 .map_err(command_error),
+            Command::ListAudioOutputs => self
+                .capture
+                .audio_outputs()
+                .map(|outputs| CommandOutput::AudioOutputs(AudioOutputList { outputs }))
+                .map_err(command_error),
             Command::ListScreenSources => self
                 .capture
                 .screen_sources()
@@ -250,6 +255,9 @@ impl CommandHandler for Engine {
             Command::SetOutputProfile(request) => self
                 .set_output_profile(request)
                 .map(CommandOutput::OutputProfileSet),
+            Command::SetMonitorDevice { device } => self
+                .set_monitor_device(device)
+                .map(CommandOutput::OutputProfiles),
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
@@ -289,6 +297,7 @@ pub(crate) fn command_error(error: CaptureError) -> CommandError {
 
 #[cfg(test)]
 mod tests {
+    mod monitor;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::time::{Duration, Instant};
@@ -315,6 +324,8 @@ mod tests {
         screen_starts: Rc<Cell<usize>>,
         /// One end switch per started screen stream, in start order.
         screen_ends: Rc<RefCell<Vec<Arc<capture_api::CaptureEnd>>>>,
+        /// What the fake speakers played, interleaved stereo.
+        played: Arc<std::sync::Mutex<Vec<f32>>>,
     }
 
     impl CaptureBackend for FakeCapture {
@@ -340,11 +351,36 @@ mod tests {
         }
 
         fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-            Ok(vec![AudioInput {
-                name: "mic".into(),
-                description: Some("Microphone".into()),
-                media_class: "Audio/Source".into(),
+            Ok(vec![
+                AudioInput {
+                    name: "mic".into(),
+                    description: Some("Microphone".into()),
+                    media_class: "Audio/Source".into(),
+                    loopback_of: None,
+                },
+                AudioInput {
+                    name: "speakers.monitor".into(),
+                    description: Some("Monitor of Speakers".into()),
+                    media_class: "Audio/Source".into(),
+                    loopback_of: Some("speakers".into()),
+                },
+            ])
+        }
+
+        fn audio_outputs(&mut self) -> Result<Vec<capture_api::AudioOutput>, CaptureError> {
+            Ok(vec![capture_api::AudioOutput {
+                name: "speakers".into(),
+                description: Some("Speakers".into()),
+                media_class: "Audio/Sink".into(),
             }])
+        }
+
+        fn start_playback(
+            &mut self,
+            request: &capture_api::PlaybackRequest,
+            feed: media_core::SampleReader,
+        ) -> Result<Box<dyn capture_api::PlaybackStream>, CaptureError> {
+            monitor::start_fake_playback(request, feed, &self.played)
         }
 
         fn probe_screen(
@@ -528,6 +564,7 @@ mod tests {
             capability_queries: Rc::clone(&queries),
             screen_starts: Rc::new(Cell::new(0)),
             screen_ends: Rc::default(),
+            played: Arc::default(),
         }));
         (engine, queries)
     }
@@ -552,6 +589,7 @@ mod tests {
             capability_queries: Rc::new(Cell::new(0)),
             screen_starts: Rc::clone(&starts),
             screen_ends: Rc::clone(&ends),
+            played: Arc::default(),
         }));
         (engine, starts, ends)
     }
@@ -1239,11 +1277,34 @@ mod tests {
             tracks: None,
             video_encoder: None,
             video_bitrate_kbps: Some(1_000),
+            enabled: None,
         });
         assert_eq!(
             engine.handle(typed).unwrap_err().code,
             ErrorCode::InvalidParams
         );
+        // And `enabled` and the encoder to the outputs they are for.
+        for (output, encoder, enabled) in [
+            (command_api::OutputKind::Stream, None, Some(true)),
+            (
+                command_api::OutputKind::Monitor,
+                Some(command_api::EncoderPreference::Software),
+                None,
+            ),
+        ] {
+            let typed = Command::SetOutputProfile(command_api::SetOutputProfileRequest {
+                output,
+                mix: None,
+                tracks: None,
+                video_encoder: encoder,
+                video_bitrate_kbps: None,
+                enabled,
+            });
+            assert_eq!(
+                engine.handle(typed).unwrap_err().code,
+                ErrorCode::InvalidParams
+            );
+        }
         let unknown = Command::decode(
             "set_output_profile",
             Some(&json!({"output": "recording", "mix_bus": "Voice"})),

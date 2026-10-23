@@ -6,15 +6,16 @@ use std::sync::Arc;
 use audio_engine::BusRef as GraphBus;
 use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
-    ErrorCode, MixerState, OutputKind, OutputMix, OutputProfileSet, PROGRAM_BUS_ID, PreviewState,
-    SceneList, SceneRef, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest,
-    SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
+    ErrorCode, MixerState, OutputKind, OutputMix, OutputProfileSet, OutputProfiles, PROGRAM_BUS_ID,
+    PreviewState, SceneList, SceneRef, SetChannelInputRequest, SetOutputProfileRequest,
+    SetSendRequest, SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest,
+    UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
 use crate::composite::FPS;
-use crate::outputs::output_id;
-use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH};
+use crate::outputs::{mix_column, output_id};
+use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH, Pipeline};
 use crate::scenes::SceneCollection;
 use crate::{Engine, audio};
 
@@ -189,21 +190,22 @@ impl Engine {
             .into_iter()
             .map(|output| {
                 let running = self.output_open(output);
-                let profile = self.profiles.mix(output);
+                let live = self.pipeline.as_ref().filter(|_| running);
                 // Not running: what it starts with, also when it joins a
                 // run (which mixes the configured graph).
-                let tracks = match (&self.pipeline, output) {
-                    (Some(pipeline), _) if running => pipeline.output_tracks(output_id(output)),
-                    (_, OutputKind::Recording) => self.profiles.recording.tracks.clone(),
-                    (_, OutputKind::Stream) => Vec::new(),
-                };
-                let bus = match &self.pipeline {
-                    Some(pipeline) if running => pipeline.output_mix(output_id(output)),
-                    _ => None,
+                let (bus, tracks) = match (output_id(output), live) {
+                    (Some(id), Some(pipeline)) => {
+                        (pipeline.output_mix(id), pipeline.output_tracks(id))
+                    }
+                    (None, Some(pipeline)) => (pipeline.monitor_mix(), Vec::new()),
+                    (_, None) if output == OutputKind::Recording => {
+                        (None, self.profiles.recording.tracks.clone())
+                    }
+                    (_, None) => (None, Vec::new()),
                 };
                 OutputMix {
                     output,
-                    bus: bus.unwrap_or_else(|| profile.to_owned()),
+                    bus: bus.unwrap_or_else(|| self.profiles.mix(output).to_owned()),
                     tracks,
                     running,
                 }
@@ -212,17 +214,39 @@ impl Engine {
         state
     }
 
+    /// Whether it runs: an open encoder output, or a monitor that plays.
     fn output_open(&self, output: OutputKind) -> bool {
         match output {
             OutputKind::Recording => self.recording.is_some(),
             OutputKind::Stream => self.streaming.is_some(),
+            OutputKind::Monitor => self
+                .pipeline
+                .as_ref()
+                .is_some_and(Pipeline::monitor_playing),
         }
+    }
+
+    /// Only while idle, like a channel's device.
+    pub(crate) fn set_monitor_device(
+        &mut self,
+        device: Option<String>,
+    ) -> Result<OutputProfiles, CommandError> {
+        if self.pipeline.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                "the monitor's device can only change while the pipeline is idle; stop the \
+                 preview and outputs first (switching the monitor on or off is live)",
+            ));
+        }
+        self.profiles.monitor.device = device;
+        Ok(self.profiles.clone())
     }
 
     /// Change an output's profile. The whole new profile is checked
     /// first, so a refused request changes nothing. A running output then
-    /// fades to a new mix now (if its run has that bus); tracks and encoder
-    /// settings wait for its next start.
+    /// fades to a new mix now; tracks and encoder settings wait for its
+    /// next start. While the pipeline runs, the monitor switches on or off
+    /// and changes its bus now.
     pub(crate) fn set_output_profile(
         &mut self,
         request: SetOutputProfileRequest,
@@ -238,6 +262,12 @@ impl Engine {
             return Err(CommandError::new(
                 ErrorCode::InvalidParams,
                 "`tracks` is for the recording; a stream carries one audio track",
+            ));
+        }
+        if output != OutputKind::Monitor && request.enabled.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                "`enabled` is for the monitor; the recording and the stream start and stop",
             ));
         }
         let bus_id = |bus, fields| -> Result<String, CommandError> {
@@ -262,7 +292,16 @@ impl Engine {
                 .collect::<Result<_, _>>()?;
         }
         if let Some(encoder) = request.video_encoder {
-            *next.video_encoder_mut(output) = encoder;
+            let Some(slot) = next.video_encoder_mut(output) else {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    "`video_encoder` is for the recording and the stream; the monitor plays audio",
+                ));
+            };
+            *slot = encoder;
+        }
+        if let Some(enabled) = request.enabled {
+            next.monitor.enabled = enabled;
         }
         if let Some(kbps) = request.video_bitrate_kbps {
             next.stream.video_bitrate_kbps = kbps;
@@ -277,7 +316,31 @@ impl Engine {
         let running = self.output_open(output);
         let mut applied_now = Vec::new();
         let mut next_start = Vec::new();
-        if running {
+        let mut warnings = Vec::new();
+        if output == OutputKind::Monitor {
+            if let Some(pipeline) = &mut self.pipeline {
+                let column = mix_column(pipeline, &next, OutputKind::Monitor);
+                if mix.is_some() && pipeline.monitor_mix().is_some() {
+                    pipeline.set_monitor_mix(column);
+                    applied_now.push("mix");
+                }
+                match request.enabled {
+                    Some(true) => {
+                        warnings = pipeline.monitor_on(
+                            self.capture.as_mut(),
+                            &next.monitor.device,
+                            column,
+                        );
+                        applied_now.push("enabled");
+                    }
+                    Some(false) => {
+                        pipeline.monitor_off();
+                        applied_now.push("enabled");
+                    }
+                    None => {}
+                }
+            }
+        } else if running && let Some(id) = output_id(output) {
             if let Some(mix) = &mix {
                 match self
                     .pipeline
@@ -285,7 +348,7 @@ impl Engine {
                     .and_then(|pipeline| Some((pipeline, pipeline.mix_column(mix)?)))
                 {
                     Some((pipeline, column)) => {
-                        pipeline.set_output_mix(output_id(output), column);
+                        pipeline.set_output_mix(id, column);
                         applied_now.push("mix");
                     }
                     // The run mixes the configured graph, which has the bus.
@@ -310,6 +373,7 @@ impl Engine {
             profiles: self.profiles.clone(),
             applied_now,
             next_start,
+            warnings,
         })
     }
 

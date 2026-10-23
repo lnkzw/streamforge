@@ -677,6 +677,7 @@ mod tests {
     fn reading(frames: u64, mean_ms: f64, skipped: u64, mix_skipped: u64) -> HealthReport {
         HealthReport {
             pipeline_running: true,
+            monitor: None,
             render: Some(LiveRenderStats {
                 frames_rendered: frames,
                 skipped_ticks: skipped,

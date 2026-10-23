@@ -8,7 +8,9 @@
 //!
 //! Each output has a profile (ADR 0017): the bus it takes as its mix and its
 //! encoder settings. A start uses its profile; the start's own parameters
-//! override it for that run.
+//! override it for that run. The monitor is an output too: it plays a bus
+//! on an audio device while the pipeline runs and the monitor is on, apart
+//! from the encoders.
 
 use std::path::PathBuf;
 
@@ -21,7 +23,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use video_compositor::RenderStats;
 
-use crate::{AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, PROGRAM_BUS_ID};
+use crate::{
+    AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, MonitorHealth,
+    PROGRAM_BUS_ID,
+};
 
 /// A stream's video bitrate when nothing else says.
 pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
@@ -32,16 +37,18 @@ pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
 pub enum OutputKind {
     Recording,
     Stream,
+    Monitor,
 }
 
 impl OutputKind {
-    pub const ALL: [Self; 2] = [Self::Recording, Self::Stream];
+    pub const ALL: [Self; 3] = [Self::Recording, Self::Stream, Self::Monitor];
 
     /// Its name in commands and files.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Recording => "recording",
             Self::Stream => "stream",
+            Self::Monitor => "monitor",
         }
     }
 }
@@ -70,16 +77,32 @@ pub struct StreamProfile {
     pub video_encoder: EncoderPreference,
 }
 
+/// How the monitor plays (ADR 0017): a bus on an audio device, never
+/// encoded or recorded. Off by default.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MonitorProfile {
+    /// The id of the bus it plays.
+    pub mix: String,
+    /// Whether it plays; switching is live and ramped. Off, a monitor that
+    /// played in this run keeps its device open and plays silence.
+    pub enabled: bool,
+    /// The output device, a name from `list_audio_outputs`; `None`: the
+    /// system default. Set with `set_monitor_device`.
+    pub device: Option<String>,
+}
+
 /// Every output's profile. Result of `get_output_profiles`, and a project
 /// file's `outputs`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OutputProfiles {
     pub recording: RecordingProfile,
     pub stream: StreamProfile,
+    pub monitor: MonitorProfile,
 }
 
 impl Default for OutputProfiles {
-    /// Both outputs take the program bus, with the default encoders.
+    /// Every output takes the program bus, with the default encoders; the
+    /// monitor is off and plays on the default device.
     fn default() -> Self {
         Self {
             recording: RecordingProfile {
@@ -92,6 +115,11 @@ impl Default for OutputProfiles {
                 video_bitrate_kbps: DEFAULT_VIDEO_BITRATE_KBPS,
                 video_encoder: EncoderPreference::default(),
             },
+            monitor: MonitorProfile {
+                mix: PROGRAM_BUS_ID.to_owned(),
+                enabled: false,
+                device: None,
+            },
         }
     }
 }
@@ -102,6 +130,7 @@ impl OutputProfiles {
         match output {
             OutputKind::Recording => &self.recording.mix,
             OutputKind::Stream => &self.stream.mix,
+            OutputKind::Monitor => &self.monitor.mix,
         }
     }
 
@@ -109,13 +138,16 @@ impl OutputProfiles {
         match output {
             OutputKind::Recording => &mut self.recording.mix,
             OutputKind::Stream => &mut self.stream.mix,
+            OutputKind::Monitor => &mut self.monitor.mix,
         }
     }
 
-    pub fn video_encoder_mut(&mut self, output: OutputKind) -> &mut EncoderPreference {
+    /// `None` for the monitor, which encodes nothing.
+    pub fn video_encoder_mut(&mut self, output: OutputKind) -> Option<&mut EncoderPreference> {
         match output {
-            OutputKind::Recording => &mut self.recording.video_encoder,
-            OutputKind::Stream => &mut self.stream.video_encoder,
+            OutputKind::Recording => Some(&mut self.recording.video_encoder),
+            OutputKind::Stream => Some(&mut self.stream.video_encoder),
+            OutputKind::Monitor => None,
         }
     }
 
@@ -161,8 +193,9 @@ impl OutputProfiles {
     }
 }
 
-/// Change an output's profile; at least one field is given, and the
-/// bitrate only for the stream.
+/// Change an output's profile; at least one field is given, each only for
+/// the outputs it applies to: tracks for the recording, the bitrate for the
+/// stream, the encoder for both, `enabled` for the monitor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetOutputProfileRequest {
     pub output: OutputKind,
@@ -172,6 +205,8 @@ pub struct SetOutputProfileRequest {
     pub tracks: Option<Vec<BusRef>>,
     pub video_encoder: Option<EncoderPreference>,
     pub video_bitrate_kbps: Option<u32>,
+    /// Switch the monitor on or off.
+    pub enabled: Option<bool>,
 }
 
 /// Result of `set_output_profile`.
@@ -185,6 +220,9 @@ pub struct OutputProfileSet {
     /// The fields the running output takes at its next start (encoder
     /// settings).
     pub next_start: Vec<&'static str>,
+    /// What the change could not do, e.g. a monitor device that did not
+    /// open (the monitor stays silent; nothing else is affected).
+    pub warnings: Vec<String>,
 }
 
 /// Start recording to a new file. Validated by `Command::decode`:
@@ -256,6 +294,8 @@ pub struct PipelineReport {
     /// 64; `scene_captures_omitted` counts older ones).
     pub scene_captures: Vec<SceneCaptureOutcome>,
     pub scene_captures_omitted: u64,
+    /// The monitor at the end of the run, if it was switched on in it.
+    pub monitor: Option<MonitorHealth>,
 }
 
 /// How the screen capture of one scene source ended.

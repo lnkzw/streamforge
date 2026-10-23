@@ -885,6 +885,7 @@ mod tests {
         };
         let health = HealthReport {
             pipeline_running: true,
+            monitor: None,
             render: None,
             mix: None,
             recording: Some(output(None, false)),

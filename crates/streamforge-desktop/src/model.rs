@@ -698,6 +698,7 @@ mod tests {
     fn report() -> HealthReport {
         HealthReport {
             pipeline_running: true,
+            monitor: None,
             render: Some(LiveRenderStats {
                 sources: vec![LiveSourceStats {
                     id: SourceId::from("src_1"),

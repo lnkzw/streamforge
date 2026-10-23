@@ -79,6 +79,7 @@ impl Engine {
             mix,
             recording,
             streaming,
+            monitor: self.pipeline.as_ref().and_then(Pipeline::monitor_health),
             captures: self
                 .pipeline
                 .as_ref()
@@ -152,12 +153,24 @@ impl Engine {
             Some(_) => Ok(false),
             None => {
                 // Every run mixes the configured channels (ADR 0017).
-                self.pipeline = Some(Pipeline::start(
+                let mut pipeline = Pipeline::start(
                     self.capture.as_mut(),
                     self.scenes.active(),
                     self.audio.clone(),
                     screen,
-                )?);
+                )?;
+                if self.profiles.monitor.enabled {
+                    // A device that does not open leaves the monitor
+                    // silent, with a warning of the run; it never fails a
+                    // start.
+                    let column = mix_column(&pipeline, &self.profiles, OutputKind::Monitor);
+                    pipeline.monitor_on(
+                        self.capture.as_mut(),
+                        &self.profiles.monitor.device,
+                        column,
+                    );
+                }
+                self.pipeline = Some(pipeline);
                 Ok(true)
             }
         }
@@ -540,11 +553,13 @@ pub(crate) fn recording_tracks(
     (mix, columns, names)
 }
 
-/// The pipeline's id of an output that has a profile.
-pub(crate) fn output_id(output: OutputKind) -> OutputId {
+/// The pipeline's id of an encoder output; `None` for the monitor, which
+/// the pipeline feeds apart from them.
+pub(crate) fn output_id(output: OutputKind) -> Option<OutputId> {
     match output {
-        OutputKind::Recording => OutputId::Recording,
-        OutputKind::Stream => OutputId::Streaming,
+        OutputKind::Recording => Some(OutputId::Recording),
+        OutputKind::Stream => Some(OutputId::Streaming),
+        OutputKind::Monitor => None,
     }
 }
 
@@ -553,7 +568,11 @@ pub(crate) fn output_id(output: OutputKind) -> OutputId {
 /// only (`set_output_profile`, `remove_bus` and the project file keep it
 /// so), so the bus is there; were it not, a release build takes the
 /// program bus rather than fail the output.
-fn mix_column(pipeline: &Pipeline, profiles: &OutputProfiles, output: OutputKind) -> usize {
+pub(crate) fn mix_column(
+    pipeline: &Pipeline,
+    profiles: &OutputProfiles,
+    output: OutputKind,
+) -> usize {
     let bus = profiles.mix(output);
     let column = pipeline.mix_column(bus);
     debug_assert!(

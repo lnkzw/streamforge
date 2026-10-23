@@ -30,7 +30,7 @@ use capture_api::{
 };
 use command_api::{
     AudioGraphSpec, AudioInputList, Command, CommandError, CommandHandler, CommandList,
-    CommandOutput, EngineStatus, ErrorCode, ScreenSourceList,
+    CommandOutput, EngineStatus, ErrorCode, OutputProfiles, ScreenSourceList,
 };
 use encoder_ffmpeg::StreamState;
 use media_core::FrameMailbox;
@@ -46,6 +46,8 @@ pub struct Engine {
     scenes: SceneCollection,
     /// Audio the pipeline mixes unless an output brings its own sources.
     audio: AudioGraphSpec,
+    /// How each output starts: its mix bus and encoder settings.
+    profiles: OutputProfiles,
     /// The preview keeps the pipeline running.
     preview_enabled: bool,
     /// Where preview frames go (see `Engine::preview_frames`).
@@ -90,6 +92,7 @@ impl Engine {
             capture_capabilities: None,
             scenes: SceneCollection::new(),
             audio: audio::default_graph(),
+            profiles: OutputProfiles::default(),
             preview_enabled: false,
             preview_frames: Arc::new(FrameMailbox::new()),
             pipeline: None,
@@ -243,6 +246,10 @@ impl CommandHandler for Engine {
             Command::RemoveBus(bus) => self.remove_bus(&bus).map(CommandOutput::MixerState),
             Command::UpdateBus(request) => self.update_bus(request).map(CommandOutput::MixerState),
             Command::SetSend(request) => self.set_send(request).map(CommandOutput::MixerState),
+            Command::GetOutputProfiles => Ok(CommandOutput::OutputProfiles(self.profiles.clone())),
+            Command::SetOutputProfile(request) => self
+                .set_output_profile(request)
+                .map(CommandOutput::OutputProfileSet),
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
@@ -622,6 +629,9 @@ mod tests {
                     "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
                     "set_send" => {
                         Some(json!({"channel": "Tone", "bus": "Program", "enabled": false}))
+                    }
+                    "set_output_profile" => {
+                        Some(json!({"output": "stream", "video_bitrate_kbps": 4000}))
                     }
                     "set_preview" => Some(json!({"enabled": false})),
                     "set_screen_source" => {
@@ -1212,6 +1222,52 @@ mod tests {
     }
 
     #[test]
+    fn output_profiles_name_existing_buses_and_keep_them() {
+        let mut engine = Engine::new();
+        let CommandOutput::OutputProfiles(profiles) =
+            run(&mut engine, "get_output_profiles", json!({}))
+        else {
+            panic!("unexpected output");
+        };
+        assert_eq!(profiles, command_api::OutputProfiles::default());
+        let unknown = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "recording", "mix_bus": "Voice"})),
+        )
+        .expect("decode");
+        let error = engine.handle(unknown).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert_eq!(error.details, Some(json!({"mix_bus": "Voice"})));
+        run(&mut engine, "add_bus", json!({"name": "Voice"}));
+        let CommandOutput::OutputProfileSet(set) = run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "mix_bus": "Voice", "video_encoder": "hardware"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        // Nothing runs: nothing applied now, nothing waits.
+        assert!(set.applied_now.is_empty() && set.next_start.is_empty());
+        let voice = set.profiles.recording.mix.clone();
+        assert!(voice.starts_with("bus_") && voice != "bus_program");
+        let state = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert_eq!(state.outputs[0].bus, voice);
+        assert!(!state.outputs[0].running);
+        // The profile keeps its bus.
+        let remove =
+            Command::decode("remove_bus", Some(&json!({"name": "Voice"}))).expect("decode");
+        let error = engine.handle(remove).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert_eq!(error.details, Some(json!({"outputs": ["recording"]})));
+        run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "mix_bus_id": "bus_program"}),
+        );
+        run(&mut engine, "remove_bus", json!({"name": "Voice"}));
+    }
+
+    #[test]
     fn aux_buses_and_sends_route_live_with_levels() {
         let _media = media_test_lock();
         let mut engine = Engine::new();
@@ -1615,6 +1671,12 @@ mod tests {
             json!({"channel": "A", "bus": "Voice", "enabled": true, "level_db": -6,
                    "tap": "pre_fader"}),
         );
+        run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "stream", "mix_bus": "Voice", "video_bitrate_kbps": 4500}),
+        );
+        let profiles_before = run(&mut engine, "get_output_profiles", json!({}));
         let before = scene_list(&mut engine);
         let mixer_before = mixer(run(&mut engine, "get_mixer", json!({})));
         let CommandOutput::ProjectSaved(saved) = run(
@@ -1647,6 +1709,10 @@ mod tests {
         assert_eq!(loaded.scenes, expected);
         assert_eq!(scene_list(&mut fresh), expected);
         assert_eq!(loaded.mixer, mixer_before);
+        assert_eq!(
+            run(&mut fresh, "get_output_profiles", json!({})),
+            profiles_before
+        );
         assert!(
             loaded.warnings[0].contains("set_screen_source"),
             "{:?}",

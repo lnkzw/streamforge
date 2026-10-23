@@ -16,14 +16,17 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread};
+use audio_engine::{
+    BLOCK_FRAMES, BlockSink, BusBlocks, CHANNELS, LiveMixStats, MixerConfig, MixerControl,
+    MixerThread,
+};
 use capture_api::{
     AudioStream, CaptureBackend, CaptureErrorKind, CaptureState, ScreenSelection, VideoStream,
 };
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
-    ErrorSummary, MixerState, PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest,
-    SourceKind, SourceSpec, UpdateBusRequest, UpdateChannelRequest,
+    ErrorSummary, MixerState, PROGRAM_BUS_ID, PipelineReport, SceneCaptureOutcome, SceneSpec,
+    SetSendRequest, SourceKind, SourceSpec, UpdateBusRequest, UpdateChannelRequest,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -442,7 +445,9 @@ impl Pipeline {
     }
 
     /// Feed `input` from now on; returns the output's epoch (media time 0).
-    pub fn attach(&self, id: OutputId, input: OutputInput) -> Instant {
+    /// Hand the output the frames and the mix of bus `mix` (see
+    /// [`Pipeline::mix_column`]) from now on; returns its time zero.
+    pub fn attach(&self, id: OutputId, input: OutputInput, mix: usize) -> Instant {
         let t0 = Instant::now();
         let progress = Arc::new(Progress::default());
         lock(&self.fanout.video).push(VideoOut {
@@ -457,8 +462,48 @@ impl Pipeline {
             input,
             t0,
             progress,
+            mix,
+            fading_from: None,
+            faded: vec![0.0; BLOCK_FRAMES * CHANNELS as usize],
         });
         t0
+    }
+
+    /// The column of the bus with id `bus` in this run's mixer (the program
+    /// bus, then the aux buses); `None` if the run has no such bus, e.g. a
+    /// run with an output's own sources has no aux buses.
+    pub fn mix_column(&self, bus: &str) -> Option<usize> {
+        if bus == PROGRAM_BUS_ID {
+            return Some(0);
+        }
+        self.audio
+            .buses
+            .iter()
+            .position(|spec| spec.id == bus)
+            .map(|index| index + 1)
+    }
+
+    /// The id of the bus output `id` takes now.
+    pub fn output_mix(&self, id: OutputId) -> Option<String> {
+        let column = lock(&self.fanout.audio)
+            .iter()
+            .find(|out| out.id == id)?
+            .mix;
+        Some(match column {
+            0 => PROGRAM_BUS_ID.to_owned(),
+            column => self.audio.buses[column - 1].id.clone(),
+        })
+    }
+
+    /// Let output `id` take bus `mix` from the next block on, fading over
+    /// one block so nothing clicks.
+    pub fn set_output_mix(&self, id: OutputId, mix: usize) {
+        if let Some(out) = lock(&self.fanout.audio).iter_mut().find(|out| out.id == id)
+            && out.mix != mix
+        {
+            out.fading_from = Some(out.mix);
+            out.mix = mix;
+        }
     }
 
     /// Detach output `id` once both producers have handed it everything
@@ -736,6 +781,12 @@ struct AudioOut {
     input: OutputInput,
     t0: Instant,
     progress: Arc<Progress>,
+    /// The column of the bus it takes (program first).
+    mix: usize,
+    /// For one block after the mix changed: the bus it fades from.
+    fading_from: Option<usize>,
+    /// Preallocated block for that fade.
+    faded: Vec<f32>,
 }
 
 /// Media time (ns) of the latest frame and block handed to an output.
@@ -857,12 +908,39 @@ impl FrameSink for VideoTap {
 struct AudioTap(Arc<Fanout>);
 
 impl BlockSink for AudioTap {
-    fn block(&mut self, samples: &[f32], at: Instant) {
-        for out in lock(&self.0.audio).iter() {
-            if let Some(pts) = since(out.t0, at) {
-                out.input.send_audio(samples, pts);
-                out.progress.audio.store(pts.ticks, Ordering::Release);
-            }
+    fn block(&mut self, buses: &BusBlocks<'_>, at: Instant) {
+        for out in lock(&self.0.audio).iter_mut() {
+            let Some(pts) = since(out.t0, at) else {
+                continue;
+            };
+            let mix = buses.column(out.mix).unwrap_or(buses.program());
+            let samples = match out.fading_from.take().and_then(|from| buses.column(from)) {
+                Some(from) => {
+                    crossfade(from, mix, &mut out.faded);
+                    out.faded.as_slice()
+                }
+                None => mix,
+            };
+            out.input.send_audio(samples, pts);
+            out.progress.audio.store(pts.ticks, Ordering::Release);
+        }
+    }
+}
+
+/// `to` faded in over `from` across one interleaved stereo block, linearly
+/// from frame to frame, into `out`.
+fn crossfade(from: &[f32], to: &[f32], out: &mut [f32]) {
+    let channels = CHANNELS as usize;
+    let frames = out.len() / channels;
+    for (frame, ((out, from), to)) in out
+        .chunks_exact_mut(channels)
+        .zip(from.chunks_exact(channels))
+        .zip(to.chunks_exact(channels))
+        .enumerate()
+    {
+        let t = (frame + 1) as f32 / frames as f32;
+        for ((out, from), to) in out.iter_mut().zip(from).zip(to) {
+            *out = from * (1.0 - t) + to * t;
         }
     }
 }
@@ -892,6 +970,23 @@ fn internal(error: impl std::fmt::Display) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mix_change_fades_linearly_over_one_block() {
+        // Two frames of stereo: from 1.0 to 0.0.
+        let (from, to) = ([1.0; 4], [0.0; 4]);
+        let mut out = [9.0; 4];
+        crossfade(&from, &to, &mut out);
+        assert_eq!(out, [0.5, 0.5, 0.0, 0.0]);
+        // Over a whole block, it ends on the new mix and never overshoots.
+        let len = BLOCK_FRAMES * CHANNELS as usize;
+        let (from, to) = (vec![0.25; len], vec![1.0; len]);
+        let mut out = vec![0.0; len];
+        crossfade(&from, &to, &mut out);
+        assert_eq!(out[len - 1], 1.0);
+        assert!(out.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(out[0] > 0.25);
+    }
 
     #[test]
     fn missing_media_before_the_end_is_counted_exactly() {

@@ -1,5 +1,7 @@
 use capture_api::{CursorMode, VideoSourceKind};
-use command_api::{ChannelInput, MAX_AUX_BUSES, MAX_CHANNELS, Rgba, SendSpec, SendTap};
+use command_api::{
+    ChannelInput, EncoderPreference, MAX_AUX_BUSES, MAX_CHANNELS, Rgba, SendSpec, SendTap,
+};
 
 use super::*;
 
@@ -108,6 +110,13 @@ fn project() -> Project {
                 muted: false,
             },
         },
+        outputs: OutputProfiles {
+            recording: RecordingProfile {
+                mix: "bus_voice00000a".to_owned(),
+                video_encoder: EncoderPreference::Software,
+            },
+            ..OutputProfiles::default()
+        },
     }
 }
 
@@ -124,6 +133,8 @@ fn loaded() -> Loaded {
 fn v1_file() -> Value {
     let mut value = file();
     value["schema_version"] = json!(1);
+    // Version 1 had no output profiles.
+    value.as_object_mut().expect("file").remove("outputs");
     value["audio"] = json!({
         "inputs": [{"input": "alsa_input.usb-mic", "gain_db": -3.5, "mute": true}],
         "tones": [{"frequency_hz": 440.0, "level_dbfs": -20.0, "gain_db": 0.0, "mute": false}],
@@ -204,6 +215,12 @@ fn the_file_reads_like_the_command_results() {
             {"bus": "bus_program", "enabled": false, "level_db": 0.0, "tap": "post_fader"},
             {"bus": "bus_voice00000a", "enabled": true, "level_db": -6.0, "tap": "pre_fader"}
         ]})
+    );
+    assert_eq!(
+        value["outputs"],
+        json!({"recording": {"mix": "bus_voice00000a", "video_encoder": "software"},
+               "stream": {"mix": "bus_program", "video_bitrate_kbps": 6000,
+                          "video_encoder": "auto"}})
     );
     assert_eq!(
         value["audio"]["buses"],
@@ -486,8 +503,9 @@ fn sends_left_out_are_the_default_and_buses_may_be_left_out() {
     value["audio"]["channels"][0]["sends"] = json!([sends[1], sends[0]]);
     let bytes = serde_json::to_vec(&value).expect("bytes");
     assert_eq!(parse(&bytes, CANVAS), Ok(loaded()));
-    // Without buses, a file is version 2 as step 2a wrote it.
+    // Without buses and profiles, a file is version 2 as step 2a wrote it.
     let mut value = file();
+    value.as_object_mut().expect("file").remove("outputs");
     let audio = value["audio"].as_object_mut().expect("audio");
     audio.remove("buses");
     for channel in audio["channels"].as_array_mut().expect("channels") {
@@ -567,6 +585,30 @@ fn bus_and_send_problems_name_their_path() {
 }
 
 #[test]
+fn output_profiles_name_existing_buses_and_follow_their_rules() {
+    // Left out: the defaults.
+    let mut value = file();
+    value.as_object_mut().expect("file").remove("outputs");
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    assert_eq!(
+        parse(&bytes, CANVAS).expect("valid").project.outputs,
+        OutputProfiles::default()
+    );
+    let mut value = file();
+    value["outputs"]["recording"]["mix"] = json!("bus_gone");
+    assert_eq!(only(&value, "no bus"), "outputs.recording.mix");
+    let mut value = file();
+    value["outputs"]["stream"]["video_bitrate_kbps"] = json!(1);
+    assert_eq!(only(&value, "`video_bitrate_kbps`"), "outputs.stream");
+    let mut value = file();
+    value["outputs"]["recording"]["video_encoder"] = json!("quantum");
+    assert_eq!(only(&value, "unknown variant"), "outputs.recording");
+    let mut value = file();
+    value["outputs"]["monitor"] = json!({});
+    assert_eq!(only(&value, "unknown field `monitor`"), "outputs.monitor");
+}
+
+#[test]
 fn a_version_1_file_is_migrated() {
     let bytes = serde_json::to_vec(&v1_file()).expect("bytes");
     let loaded = parse(&bytes, CANVAS).expect("valid");
@@ -585,6 +627,7 @@ fn a_version_1_file_is_migrated() {
     }
     assert_eq!(loaded.project.audio, expected);
     assert_eq!(loaded.project.scenes, project().scenes);
+    assert_eq!(loaded.project.outputs, OutputProfiles::default());
     // The same ids every time, until the file is saved as version 2.
     assert_eq!(parse(&bytes, CANVAS), Ok(loaded));
 }

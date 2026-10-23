@@ -32,8 +32,9 @@ pub use graph::{
 pub use live::MAX_CORRECTION;
 pub use mixer::{GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, db_to_linear};
 pub use runner::{
-    BLOCK_FRAMES, BlockSink, BufferLatency, CHANNELS, InputSource, InputStats, LEVEL_WINDOW_BLOCKS,
-    LIVE_PUBLISH_BLOCKS, LevelReading, LiveInputStats, LiveMixStats, MAX_INPUTS, MixStats,
-    MixerBus, MixerConfig, MixerControl, MixerError, MixerInput, MixerThread, RATE,
+    BLOCK_FRAMES, BlockSink, BufferLatency, BusBlocks, BusStats, CHANNELS, InputSource, InputStats,
+    LEVEL_WINDOW_BLOCKS, LIVE_PUBLISH_BLOCKS, LevelReading, LiveBusStats, LiveInputStats,
+    LiveMixStats, MAX_INPUTS, MixStats, MixerBus, MixerConfig, MixerControl, MixerError,
+    MixerInput, MixerThread, RATE,
 };
 pub use tone::Tone;

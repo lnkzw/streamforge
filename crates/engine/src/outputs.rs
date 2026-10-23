@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
 use command_api::{
-    CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, PipelineReport,
-    RecordingReport, RecordingRequest, RecordingStarted, StreamingReport, StreamingRequest,
-    StreamingStarted,
+    CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, OutputKind, OutputProfiles,
+    PipelineReport, RecordingReport, RecordingRequest, RecordingStarted, StreamingReport,
+    StreamingRequest, StreamingStarted,
 };
 use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
@@ -209,8 +209,11 @@ impl Engine {
         };
         let recorder = Recorder::start(RecorderConfig {
             path: path.clone(),
-            video: VideoSettings::h264(CANVAS_WIDTH, CANVAS_HEIGHT, FPS)
-                .with_encoders(request.video_encoder),
+            video: VideoSettings::h264(CANVAS_WIDTH, CANVAS_HEIGHT, FPS).with_encoders(
+                request
+                    .video_encoder
+                    .unwrap_or(self.profiles.recording.video_encoder),
+            ),
             audio: AudioSettings::aac(RATE, CHANNELS),
         });
         let recorder = match recorder {
@@ -230,7 +233,9 @@ impl Engine {
                 "media pipeline missing",
             ));
         };
-        let t0 = pipeline.attach(OutputId::Recording, recorder.input());
+        let (mix, mut warnings) = mix_column(pipeline, &self.profiles, OutputKind::Recording);
+        let t0 = pipeline.attach(OutputId::Recording, recorder.input(), mix);
+        warnings.extend(pipeline.audio_warnings());
         let started = RecordingStarted {
             path: display_path(&path),
             width: CANVAS_WIDTH,
@@ -239,7 +244,7 @@ impl Engine {
             sample_rate: RATE,
             channels: CHANNELS,
             video_encoder: recorder.video_encoder().clone(),
-            warnings: pipeline.audio_warnings(),
+            warnings,
         };
         self.recording = Some(RecordingOutput {
             recorder,
@@ -298,15 +303,17 @@ impl Engine {
             ));
         }
         let started_pipeline = self.ensure_pipeline(request.sources.as_ref())?;
+        let video_bitrate_kbps = request
+            .video_bitrate_kbps
+            .unwrap_or(self.profiles.stream.video_bitrate_kbps);
         let streamer = Streamer::start(StreamConfig {
             target: request.target.clone(),
-            video: VideoSettings::h264_live(
-                CANVAS_WIDTH,
-                CANVAS_HEIGHT,
-                FPS,
-                request.video_bitrate_kbps,
-            )
-            .with_encoders(request.video_encoder),
+            video: VideoSettings::h264_live(CANVAS_WIDTH, CANVAS_HEIGHT, FPS, video_bitrate_kbps)
+                .with_encoders(
+                    request
+                        .video_encoder
+                        .unwrap_or(self.profiles.stream.video_encoder),
+                ),
             audio: AudioSettings::aac_live(RATE, CHANNELS),
             reconnect: request.reconnect,
             io_timeout: STREAM_IO_TIMEOUT,
@@ -327,17 +334,19 @@ impl Engine {
                 "media pipeline missing",
             ));
         };
-        let t0 = pipeline.attach(OutputId::Streaming, streamer.input());
+        let (mix, mut warnings) = mix_column(pipeline, &self.profiles, OutputKind::Stream);
+        let t0 = pipeline.attach(OutputId::Streaming, streamer.input(), mix);
+        warnings.extend(pipeline.audio_warnings());
         let started = StreamingStarted {
             target: streamer.target().to_owned(),
             width: CANVAS_WIDTH,
             height: CANVAS_HEIGHT,
             fps: FPS,
-            video_bitrate_kbps: request.video_bitrate_kbps,
+            video_bitrate_kbps,
             sample_rate: RATE,
             channels: CHANNELS,
             video_encoder: streamer.video_encoder().clone(),
-            warnings: pipeline.audio_warnings(),
+            warnings,
         };
         self.streaming = Some(StreamingOutput { streamer, t0 });
         Ok(started)
@@ -500,4 +509,33 @@ fn display_path(path: &Path) -> String {
 
 fn to_value(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or_else(|err| Value::String(err.to_string()))
+}
+
+/// The pipeline's id of an output that has a profile.
+pub(crate) fn output_id(output: OutputKind) -> OutputId {
+    match output {
+        OutputKind::Recording => OutputId::Recording,
+        OutputKind::Stream => OutputId::Streaming,
+    }
+}
+
+/// The column of the bus `output`'s profile takes, in `pipeline`'s run;
+/// the program bus, with a warning, if the run has no such bus (a run with
+/// an output's own sources has no aux buses).
+fn mix_column(
+    pipeline: &Pipeline,
+    profiles: &OutputProfiles,
+    output: OutputKind,
+) -> (usize, Vec<String>) {
+    let bus = profiles.mix(output);
+    match pipeline.mix_column(bus) {
+        Some(column) => (column, Vec::new()),
+        None => (
+            0,
+            vec![format!(
+                "the profile's mix `{bus}` is not in this run, which mixes an output's own \
+                 sources into the program bus only; it takes the program bus"
+            )],
+        ),
+    }
 }

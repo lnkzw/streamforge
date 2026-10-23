@@ -42,6 +42,7 @@ impl Engine {
             scenes,
             active,
             audio: self.audio.clone(),
+            outputs: self.profiles.clone(),
         };
         let bytes = project_file::to_json(&project, CANVAS);
         let saved = project_file::write(dir, &request.file_name, &bytes, request.overwrite)
@@ -97,6 +98,7 @@ impl Engine {
             .count();
         self.scenes.restore((project.scenes, project.active));
         self.audio = project.audio;
+        self.profiles = project.outputs;
         let mut warnings = Vec::new();
         if let Some(version) = loaded.migrated_from {
             warnings.push(format!(

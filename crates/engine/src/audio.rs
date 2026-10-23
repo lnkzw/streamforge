@@ -462,6 +462,8 @@ pub(crate) fn mixer_state(graph: &AudioGraphSpec, levels: Option<&LevelReading>)
             })
             .collect(),
         buses: std::iter::once(program).chain(aux).collect(),
+        // The engine knows the outputs.
+        outputs: Vec::new(),
         warnings: double_routing(graph),
     }
 }

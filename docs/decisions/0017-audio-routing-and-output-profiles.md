@@ -117,7 +117,9 @@ An **output profile** describes an output, so that one command starts it and the
    - **2a:** channels with ids and the program bus; `add_channel`, `remove_channel`, `update_channel`, `set_channel_input`, `update_bus` and `get_mixer`, replacing the old mixer commands; project file version 2 with the migration of version 1.
    - **2b:** aux buses, sends and assignments with their commands, the double-routing warning and the removal rules; the project file gains buses and sends (additive within version 2).
    - **2c:** the missing-device policy: a configured channel whose device is not found runs silent and is reported, instead of failing the start. Other capture errors, and the devices an output names for its own run, still fail it.
-3. **Per-output mixes:** the mix bus per output and the fan-out per bus; output profiles in the project file; the per-run audio parameters removed, since only then do profiles and track lists need every run to use the configured graph.
+3. **Per-output mixes**, in two parts:
+   - **3a:** the mix bus per output with a live, faded switch, and the fan-out per bus (every bus limited and counted where it leaves the graph); output profiles (mix and encoder settings) with `get_output_profiles` and `set_output_profile`, in the project file; `remove_bus` refused while a profile takes the bus.
+   - **3b:** the per-run audio parameters removed, since only then do profiles and track lists need every run to use the configured graph.
 4. **Multitrack recording:** several AAC tracks in `encoder-ffmpeg`, reports per track.
 5. **The monitor output:** a lock-free ring for the feed, a playback backend (Linux through PipeWire first; Windows and macOS through cpal, behind the platform traits), device listing, drift handling, the feedback warning.
 

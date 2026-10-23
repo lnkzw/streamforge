@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{MAX_ID_LEN, is_valid_id};
+use crate::{MAX_ID_LEN, OutputKind, is_valid_id};
 
 /// Most channels; the mixer's fixed capacity.
 pub const MAX_CHANNELS: usize = audio_engine::MAX_CHANNELS;
@@ -390,7 +390,19 @@ pub struct MixerState {
     pub channels: Vec<ChannelState>,
     /// The program bus first, then the aux buses.
     pub buses: Vec<BusState>,
+    /// The bus each output takes as its mix: while it runs, the one it
+    /// takes now; otherwise its profile's.
+    pub outputs: Vec<OutputMix>,
     /// Routing that is allowed but likely unintended, e.g. a channel that
     /// reaches the program bus twice.
     pub warnings: Vec<String>,
+}
+
+/// An output's mix in `get_mixer`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OutputMix {
+    pub output: OutputKind,
+    /// The bus's id.
+    pub bus: String,
+    pub running: bool,
 }

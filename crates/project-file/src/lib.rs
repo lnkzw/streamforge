@@ -22,10 +22,11 @@ mod v1;
 use std::collections::HashSet;
 
 use command_api::{
-    AudioGraphSpec, BUS_ID_PREFIX, BusSpec, ChannelInput, ChannelSpec, Command, MAX_SCENE_SOURCES,
-    MAX_SCENES, NAME_RULE, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem, SCENE_ID_PREFIX,
-    SOURCE_ID_PREFIX, SceneSpec, SendSpec, SendTap, SourceKind, SourceRect, SourceSpec, id_rule,
-    is_valid_id, is_valid_name,
+    AudioGraphSpec, BUS_ID_PREFIX, BusSpec, ChannelInput, ChannelSpec, Command,
+    DEFAULT_VIDEO_BITRATE_KBPS, MAX_SCENE_SOURCES, MAX_SCENES, NAME_RULE, OutputKind,
+    OutputProfiles, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem, RecordingProfile,
+    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneSpec, SendSpec, SendTap, SourceKind, SourceRect,
+    SourceSpec, StreamProfile, id_rule, is_valid_id, is_valid_name,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,8 @@ pub struct Project {
     /// Id of the active scene.
     pub active: String,
     pub audio: AudioGraphSpec,
+    /// Each output's mix bus and encoder settings.
+    pub outputs: OutputProfiles,
 }
 
 /// A project read from a file.
@@ -82,6 +85,7 @@ struct FileOut<'a> {
     active_scene: &'a str,
     scenes: Vec<SceneSpec>,
     audio: &'a AudioGraphSpec,
+    outputs: &'a OutputProfiles,
 }
 
 /// The file as read: sources stay JSON objects for the `add_source` decoder.
@@ -95,6 +99,37 @@ struct FileIn {
     scenes: Vec<FileScene>,
     /// Checked by its version's rules.
     audio: Value,
+    /// The output profiles; absent: the defaults (version 1 has none).
+    #[serde(default)]
+    outputs: Option<Value>,
+}
+
+/// Each profile with every field; a profile left out is the default.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileOutputs {
+    #[serde(default)]
+    recording: Option<FileRecordingProfile>,
+    #[serde(default)]
+    stream: Option<FileStreamProfile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileRecordingProfile {
+    mix: String,
+    video_encoder: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileStreamProfile {
+    mix: String,
+    video_bitrate_kbps: Value,
+    video_encoder: Value,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +227,7 @@ pub fn to_json(project: &Project, canvas: Canvas) -> Vec<u8> {
         active_scene: &project.active,
         scenes,
         audio: &project.audio,
+        outputs: &project.outputs,
     };
     let mut bytes = serde_json::to_vec_pretty(&file).expect("project JSON");
     bytes.push(b'\n');
@@ -349,12 +385,17 @@ fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<Proje
             None
         }
     };
+    let outputs = match file.outputs {
+        None => OutputProfiles::default(),
+        Some(outputs) => self::outputs(outputs, audio.as_ref(), &mut problems),
+    };
     match audio {
         Some(audio) if problems.is_empty() => Ok(Loaded {
             project: Project {
                 scenes,
                 active: file.active_scene,
                 audio,
+                outputs,
             },
             migrated_from: (version != SCHEMA_VERSION).then_some(version),
         }),
@@ -656,6 +697,71 @@ fn channel_sends(
         }
     }
     sends
+}
+
+/// The output profiles: each checked by the `set_output_profile` rules,
+/// with its mix naming a bus of `audio` (when the audio is valid).
+fn outputs(
+    value: Value,
+    audio: Option<&AudioGraphSpec>,
+    problems: &mut Vec<ProjectProblem>,
+) -> OutputProfiles {
+    let mut profiles = OutputProfiles::default();
+    if let Err(found) = structure::<FileOutputs>("outputs", &value) {
+        problems.push(found);
+        return profiles;
+    }
+    let Value::Object(mut outputs) = value else {
+        unreachable!("the structure is an object");
+    };
+    for (output, kind) in [
+        ("recording", OutputKind::Recording),
+        ("stream", OutputKind::Stream),
+    ] {
+        let Some(Value::Object(mut params)) = outputs.remove(output) else {
+            continue;
+        };
+        let at = format!("outputs.{output}");
+        let Some(Value::String(mix)) = params.remove("mix") else {
+            unreachable!("the structure has a string mix");
+        };
+        if let Some(audio) = audio
+            && mix != PROGRAM_BUS_ID
+            && !audio.buses.iter().any(|bus| bus.id == mix)
+        {
+            problems.push(problem(
+                &format!("{at}.mix"),
+                format!("no bus has the id `{mix}`"),
+            ));
+        }
+        params.insert("output".to_owned(), json!(output));
+        params.insert("mix_bus_id".to_owned(), json!(mix));
+        match Command::decode("set_output_profile", Some(&Value::Object(params))) {
+            Ok(Command::SetOutputProfile(request)) => {
+                let encoder = request.video_encoder.unwrap_or_default();
+                match kind {
+                    OutputKind::Recording => {
+                        profiles.recording = RecordingProfile {
+                            mix,
+                            video_encoder: encoder,
+                        };
+                    }
+                    OutputKind::Stream => {
+                        profiles.stream = StreamProfile {
+                            mix,
+                            video_bitrate_kbps: request
+                                .video_bitrate_kbps
+                                .unwrap_or(DEFAULT_VIDEO_BITRATE_KBPS),
+                            video_encoder: encoder,
+                        };
+                    }
+                }
+            }
+            Ok(_) => unreachable!("set_output_profile decodes to SetOutputProfile"),
+            Err(error) => problems.push(problem(&at, without_expected(error.message))),
+        }
+    }
+    profiles
 }
 
 /// `value` as `T`, or a structure problem with its path below `at`.

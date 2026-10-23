@@ -16,8 +16,7 @@ use media_core::{MediaTimestamp, VideoFrame};
 use crate::audio_fifo::AudioFifo;
 use crate::{
     AudioSettings, AudioTrackStats, Counts, EncoderPreference, Item, RecorderError,
-    RecorderErrorKind, Shared, SkippedEncoder, TrackPool, VideoEncoderInfo, VideoSettings,
-    VideoTrackStats,
+    RecorderErrorKind, Shared, SkippedEncoder, VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
 
 pub(crate) mod encoders;
@@ -101,9 +100,9 @@ struct Session {
     video: VideoTrack,
     /// Audio track 1.
     audio: AudioTrack,
-    /// Audio tracks 2 and on; their samples come from `pool`.
+    /// Audio tracks 2 and on; their samples come in each item's
+    /// [`crate::TrackBlock`].
     extra: Vec<AudioTrack>,
-    pool: Option<Arc<TrackPool>>,
     interrupt: Arc<Interrupt>,
 }
 
@@ -123,7 +122,7 @@ impl Session {
         kind: RecorderErrorKind,
         video: &VideoSettings,
         encoders: &mut EncoderChoice,
-        (settings, tracks, pool): (&AudioSettings, &[String], Option<Arc<TrackPool>>),
+        (settings, tracks): (&AudioSettings, &[String]),
         shared: Arc<Shared>,
     ) -> Result<Self, RecorderError> {
         let interrupt = Interrupt::new(shared);
@@ -159,7 +158,6 @@ impl Session {
             video,
             audio,
             extra,
-            pool,
             interrupt,
         })
     }
@@ -189,17 +187,14 @@ impl Session {
                 let first = self
                     .audio
                     .push(&mut self.output, &samples[..len], pts, end_ns);
-                let (Some(index), Some(pool)) = (extra, &self.pool) else {
-                    return first;
-                };
-                let output = &mut self.output;
-                let rest = pool.with_tracks(index, len, |blocks| {
-                    self.extra
-                        .iter_mut()
-                        .zip(blocks)
-                        .try_for_each(|(track, block)| track.push(output, block, pts, end_ns))
-                });
-                pool.give_back(index);
+                // The block owns its buffer: nothing is locked while the
+                // tracks encode, and it goes back to its pool when dropped.
+                let rest =
+                    extra.map_or(Ok(()), |block| {
+                        self.extra.iter_mut().zip(block.tracks()).try_for_each(
+                            |(track, samples)| track.push(&mut self.output, samples, pts, end_ns),
+                        )
+                    });
                 first.and(rest)
             }
             Item::Stop => Ok(()),

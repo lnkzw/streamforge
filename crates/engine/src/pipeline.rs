@@ -454,8 +454,10 @@ impl Pipeline {
         id: OutputId,
         input: OutputInput,
         mix: usize,
-        tracks: Vec<usize>,
+        mut tracks: Vec<usize>,
     ) -> Instant {
+        // The recorder takes at most this many; the tap relies on it.
+        tracks.truncate(MAX_AUDIO_TRACKS - 1);
         let t0 = Instant::now();
         let progress = Arc::new(Progress::default());
         lock(&self.fanout.video).push(VideoOut {
@@ -496,16 +498,18 @@ impl Pipeline {
 
     /// The ids of output `id`'s further audio tracks.
     pub fn output_tracks(&self, id: OutputId) -> Vec<String> {
-        lock(&self.fanout.audio)
+        // Only the columns are copied under the lock the mixer takes.
+        let columns = lock(&self.fanout.audio)
             .iter()
             .find(|out| out.id == id)
-            .map(|out| {
-                out.tracks
-                    .iter()
-                    .map(|column| self.bus_id(*column))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|out| out.tracks.clone())
+            .unwrap_or_default();
+        self.bus_ids(&columns)
+    }
+
+    /// The ids of the buses in `columns`.
+    pub fn bus_ids(&self, columns: &[usize]) -> Vec<String> {
+        columns.iter().map(|column| self.bus_id(*column)).collect()
     }
 
     /// The column of the bus with id `bus` in this run's mixer (the program

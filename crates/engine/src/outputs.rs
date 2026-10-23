@@ -525,8 +525,9 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 /// The recording's audio in `pipeline`'s run: the mix's column, the
 /// further tracks' columns, every track's name (after its bus), and
 /// warnings for buses the run does not have (a run with an output's own
-/// sources has no aux buses), which it leaves out.
-fn recording_tracks(
+/// sources has no aux buses), which it leaves out. A bus is recorded once,
+/// also where a missing mix falls back to the program bus.
+pub(crate) fn recording_tracks(
     pipeline: &Pipeline,
     profiles: &OutputProfiles,
 ) -> (usize, Vec<usize>, Vec<String>, Vec<String>) {
@@ -534,7 +535,11 @@ fn recording_tracks(
     let mut columns = Vec::with_capacity(profiles.recording.tracks.len());
     for bus in &profiles.recording.tracks {
         match pipeline.mix_column(bus) {
-            Some(column) => columns.push(column),
+            Some(column) if column != mix && !columns.contains(&column) => columns.push(column),
+            Some(_) => warnings.push(format!(
+                "the track bus `{bus}` is already the recording's mix in this run; the \
+                 recording has it once"
+            )),
             None => warnings.push(format!(
                 "the track bus `{bus}` is not in this run, which mixes an output's own sources \
                  into the program bus only; the recording leaves it out"

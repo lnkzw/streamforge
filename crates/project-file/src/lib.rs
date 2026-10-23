@@ -725,6 +725,7 @@ fn outputs(
     let Value::Object(mut outputs) = value else {
         unreachable!("the structure is an object");
     };
+    let mut decoded = Vec::new();
     for kind in OutputKind::ALL {
         let output = kind.as_str();
         let Some(Value::Object(mut params)) = outputs.remove(output) else {
@@ -738,43 +739,23 @@ fn outputs(
         params.insert("mix_bus_id".to_owned(), json!(mix));
         match Command::decode("set_output_profile", Some(&Value::Object(params))) {
             Ok(Command::SetOutputProfile(request)) => {
-                // A well-formed id: does the file have that bus?
-                if let Some(audio) = audio
-                    && mix != PROGRAM_BUS_ID
-                    && !audio.buses.iter().any(|bus| bus.id == mix)
-                {
-                    problems.push(problem(
-                        &format!("{at}.mix"),
-                        format!("no bus has the id `{mix}`"),
-                    ));
-                }
+                decoded.push(kind);
                 let encoder = request.video_encoder.unwrap_or_default();
                 match kind {
                     OutputKind::Recording => {
-                        // The decoder took ids as ids; each must name a bus
-                        // of the file, once, and not the mix again.
+                        // A file names track buses by id (the decoder takes
+                        // anything else as a name).
                         let mut tracks: Vec<String> = Vec::new();
                         for (index, bus) in
                             request.tracks.unwrap_or_default().into_iter().enumerate()
                         {
-                            let at = format!("{at}.tracks[{index}]");
-                            let Some(id) = bus.id else {
-                                problems
-                                    .push(problem(&at, "a track names its bus by id".to_owned()));
-                                continue;
-                            };
-                            if let Some(audio) = audio
-                                && id != PROGRAM_BUS_ID
-                                && !audio.buses.iter().any(|bus| bus.id == id)
-                            {
-                                problems.push(problem(&at, format!("no bus has the id `{id}`")));
-                            } else if id == mix || tracks.contains(&id) {
-                                problems.push(problem(
-                                    &at,
-                                    format!("bus `{id}` is already a track of the recording"),
-                                ));
+                            match bus.id {
+                                Some(id) => tracks.push(id),
+                                None => problems.push(problem(
+                                    &format!("{at}.tracks[{index}]"),
+                                    "a track names its bus by id".to_owned(),
+                                )),
                             }
-                            tracks.push(id);
                         }
                         profiles.recording = RecordingProfile {
                             mix,
@@ -796,6 +777,21 @@ fn outputs(
             Ok(_) => unreachable!("set_output_profile decodes to SetOutputProfile"),
             Err(error) => problems.push(problem(&at, without_expected(error.message))),
         }
+    }
+    // Then the rules across the profiles and the graph, as the engine
+    // keeps them, for the profiles that decoded (with valid audio).
+    if let Some(audio) = audio {
+        problems.extend(
+            profiles
+                .problems(audio)
+                .into_iter()
+                .filter(|found| {
+                    decoded
+                        .iter()
+                        .any(|kind| found.path.starts_with(&format!("{}.", kind.as_str())))
+                })
+                .map(|found| problem(&format!("outputs.{}", found.path), found.message)),
+        );
     }
     profiles
 }

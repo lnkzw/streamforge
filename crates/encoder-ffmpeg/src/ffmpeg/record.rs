@@ -15,7 +15,6 @@ use ffmpeg_next as ff;
 use super::{EncoderChoice, Session, counts_of, init};
 use crate::{
     Item, Ready, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats, Shared,
-    TrackPool,
 };
 
 const CONTAINER: &str = "matroska";
@@ -25,9 +24,8 @@ pub(crate) fn run(
     rx: Receiver<Item>,
     ready: Ready,
     shared: Arc<Shared>,
-    pool: Option<Arc<TrackPool>>,
 ) -> Result<RecordingStats, RecorderError> {
-    let mut session = match open(&config, &shared, pool.clone()) {
+    let mut session = match open(&config, &shared) {
         Ok(session) => {
             let _ = ready.send(Ok(session.video.info()));
             session
@@ -63,13 +61,10 @@ pub(crate) fn run(
             shared.received(&item);
             match item {
                 Item::Video { .. } => video.frames_dropped += 1,
-                Item::Audio { extra: block, .. } => {
+                Item::Audio { .. } => {
                     audio.blocks_dropped += 1;
                     for track in &mut extra {
                         track.blocks_dropped += 1;
-                    }
-                    if let (Some(pool), Some(index)) = (&pool, block) {
-                        pool.give_back(index);
                     }
                 }
                 Item::Stop => break,
@@ -101,11 +96,7 @@ pub(crate) fn run(
     }
 }
 
-fn open(
-    config: &RecorderConfig,
-    shared: &Arc<Shared>,
-    pool: Option<Arc<TrackPool>>,
-) -> Result<Session, RecorderError> {
+fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, RecorderError> {
     init(false)?;
     let path = config.path.to_str().ok_or_else(|| {
         RecorderError::new(
@@ -126,7 +117,7 @@ fn open(
         RecorderErrorKind::Output,
         &config.video,
         &mut EncoderChoice::new(&config.video),
-        (&config.audio, &config.audio_tracks, pool),
+        (&config.audio, &config.audio_tracks),
         // File I/O is never interrupted: the recorder has no stop deadline.
         Arc::clone(shared),
     )

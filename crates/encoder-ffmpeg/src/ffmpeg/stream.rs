@@ -153,7 +153,7 @@ impl<'a> Stream<'a> {
             &self.config.video,
             &mut self.encoders,
             // One unnamed track: FLV carries one.
-            (&self.config.audio, &[], None),
+            (&self.config.audio, &[]),
             Arc::clone(&self.shared),
         );
         match opened {

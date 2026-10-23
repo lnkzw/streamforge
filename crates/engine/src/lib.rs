@@ -388,6 +388,12 @@ mod tests {
                     "no such input",
                 ));
             }
+            if request.input.as_deref() == Some("denied") {
+                return Err(CaptureError::new(
+                    CaptureErrorKind::PermissionDenied,
+                    "microphone access is not permitted",
+                ));
+            }
             let ring = Arc::new(AudioRing::new(request.channels, request.rate as usize));
             let stop = Arc::new(AtomicBool::new(false));
             let thread = std::thread::spawn({
@@ -2282,6 +2288,97 @@ mod tests {
         assert!(stats.master.rms_dbfs.is_some());
         assert_eq!(report.captures.len(), 1);
         assert!(report.captures[0].report.is_some());
+    }
+
+    #[test]
+    fn a_channel_whose_device_is_missing_is_silent_and_reported() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("silent-device");
+        let mut engine = engine().with_output_dir(&dir.0);
+        let added = mixer(run(
+            &mut engine,
+            "add_channel",
+            json!({"name": "Mic", "input": {"kind": "device", "device": "missing"}}),
+        ));
+        let mic = added.channels[1].spec.id.clone();
+        // The recording starts; its outcome says the channel is silent.
+        let CommandOutput::RecordingStarted(started) =
+            start(&mut engine, json!({"file_name": "silent.mkv"})).expect("start")
+        else {
+            panic!("unexpected output");
+        };
+        assert_eq!(started.warnings.len(), 1, "{:?}", started.warnings);
+        assert!(
+            started.warnings[0].contains("`Mic` is silent")
+                && started.warnings[0].contains("`missing` was not found"),
+            "{:?}",
+            started.warnings
+        );
+        let state = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert!(state.running);
+        assert_eq!(state.warnings, started.warnings);
+        let capture = health(&mut engine)
+            .captures
+            .into_iter()
+            .find(|capture| capture.id.as_deref() == Some(mic.as_str()))
+            .expect("the channel's capture");
+        let capture_api::CaptureState::Ended { reason } = capture.state else {
+            panic!("{capture:?}");
+        };
+        assert!(reason.starts_with("could not start"), "{reason}");
+        // The tone still reaches the file: only the missing channel is silent.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while health(&mut engine)
+            .recording
+            .is_none_or(|recording| recording.counters.samples_encoded == 0)
+        {
+            assert!(Instant::now() < deadline, "no audio encoded");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let report = match engine.handle(Command::StopRecording).expect("stop") {
+            CommandOutput::RecordingReport(report) => *report,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        let captures = &report.pipeline.audio_captures;
+        assert_eq!(captures.len(), 1, "{captures:?}");
+        assert_eq!(captures[0].input.as_deref(), Some("missing"));
+        assert!(captures[0].error.is_some() && captures[0].report.is_none());
+        assert!(report.recording.audio.samples_encoded > 0, "{report:?}");
+        let silent: Vec<_> = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("no such input"))
+            .collect();
+        assert_eq!(silent.len(), 1, "{:?}", report.warnings);
+        assert!(
+            silent[0].contains("`Mic` was silent for the whole run"),
+            "{silent:?}"
+        );
+    }
+
+    #[test]
+    fn other_device_errors_and_an_outputs_own_inputs_still_fail_the_start() {
+        let _media = media_test_lock();
+        let dir = TempDir::new("device-errors");
+        let mut engine = engine().with_output_dir(&dir.0);
+        // Not permitted: the user has to act, so the start says so.
+        run(
+            &mut engine,
+            "add_channel",
+            json!({"name": "Mic", "input": {"kind": "device", "device": "denied"}}),
+        );
+        let denied = start(&mut engine, json!({"file_name": "denied.mkv"})).unwrap_err();
+        assert_eq!(denied.code, ErrorCode::PermissionDenied);
+        assert!(!status(&mut engine).pipeline_running);
+        assert!(!dir.0.join("denied.mkv").exists());
+        // An input named for this run is checked as before.
+        let missing = start(
+            &mut engine,
+            json!({"file_name": "own.mkv", "inputs": [{"input": "missing"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, ErrorCode::NotFound);
+        assert!(!status(&mut engine).pipeline_running);
     }
 
     #[test]

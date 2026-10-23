@@ -1,5 +1,6 @@
 //! `probe_audio_mix`: mix live inputs and test tones on the mixer thread.
 
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -7,11 +8,12 @@ use audio_engine::{
     BusConfig, CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput,
     MixerThread, RATE, Tone,
 };
-use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend};
+use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend, CaptureError};
 use command_api::{
     AudioGraphSpec, CaptureOutcome, ChannelInput, CommandError, ErrorCode, ErrorSummary,
     LiveInputSpec, MixReport, MixRequest, ToneSpec,
 };
+use media_core::AudioRing;
 use serde_json::{Value, json};
 
 use crate::{audio, command_error};
@@ -70,23 +72,29 @@ pub(crate) fn probe(
     })
 }
 
-/// Start one stream per capture device (`None`: the default input); on
-/// error the streams already started are dropped, which stops them.
-pub(crate) fn start_live_inputs<'a>(
+/// Start a stream from a capture device (`None`: the default input) in the
+/// mixer's format.
+pub(crate) fn start_device(
+    capture: &mut dyn CaptureBackend,
+    device: &Option<String>,
+) -> Result<Box<dyn AudioStream>, CaptureError> {
+    capture.start_audio_stream(&AudioStreamRequest {
+        input: device.clone(),
+        rate: RATE,
+        channels: CHANNELS,
+    })
+}
+
+/// Start one stream per capture device; on error the streams already
+/// started are dropped, which stops them. A probe tests devices, so a
+/// device that does not open fails it.
+fn start_live_inputs<'a>(
     capture: &mut dyn CaptureBackend,
     devices: impl IntoIterator<Item = &'a Option<String>>,
 ) -> Result<Vec<Box<dyn AudioStream>>, CommandError> {
     devices
         .into_iter()
-        .map(|device| {
-            capture
-                .start_audio_stream(&AudioStreamRequest {
-                    input: device.clone(),
-                    rate: RATE,
-                    channels: CHANNELS,
-                })
-                .map_err(command_error)
-        })
+        .map(|device| start_device(capture, device).map_err(command_error))
         .collect()
 }
 
@@ -105,25 +113,25 @@ fn channel(gain_db: f32, muted: bool) -> ChannelConfig {
     }
 }
 
-/// The mixer inputs of `graph`'s channels, in channel order; `streams` are
-/// its devices' streams, in the same order (see [`audio::devices`]).
+/// The mixer inputs of `graph`'s channels, in channel order; `rings` are
+/// its device channels' samples, in the same order (see
+/// [`audio::devices`]), `None` for a device that did not open: that
+/// channel is silent.
 pub(crate) fn graph_inputs(
     graph: &AudioGraphSpec,
-    streams: &[Box<dyn AudioStream>],
+    rings: impl IntoIterator<Item = Option<Arc<AudioRing>>>,
 ) -> Vec<MixerInput> {
-    let mut streams = streams.iter();
+    let mut rings = rings.into_iter();
     graph
         .channels
         .iter()
         .map(|channel| MixerInput {
             name: channel.name.clone(),
             source: match &channel.input {
-                ChannelInput::Device { .. } => InputSource::Live(
-                    streams
-                        .next()
-                        .expect("one stream per device channel")
-                        .samples(),
-                ),
+                ChannelInput::Device { .. } => rings
+                    .next()
+                    .expect("one entry per device channel")
+                    .map_or(InputSource::Silent, InputSource::Live),
                 ChannelInput::Tone {
                     frequency_hz,
                     level_dbfs,
@@ -152,26 +160,34 @@ fn mixer_inputs(
     live.chain(generated).collect()
 }
 
-pub(crate) fn stop_captures<'a>(
+fn stop_captures<'a>(
     devices: impl IntoIterator<Item = &'a Option<String>>,
     streams: Vec<Box<dyn AudioStream>>,
 ) -> Vec<CaptureOutcome> {
     devices
         .into_iter()
         .zip(streams)
-        .map(|(device, stream)| match stream.stop() {
-            Ok(report) => CaptureOutcome {
-                input: device.clone(),
-                report: Some(report),
-                error: None,
-            },
-            Err(error) => CaptureOutcome {
-                input: device.clone(),
-                report: None,
-                error: Some(ErrorSummary::from(error)),
-            },
-        })
+        .map(|(device, stream)| stop_capture(device, stream))
         .collect()
+}
+
+/// Stop one device's stream; its report or error.
+pub(crate) fn stop_capture(
+    device: &Option<String>,
+    stream: Box<dyn AudioStream>,
+) -> CaptureOutcome {
+    match stream.stop() {
+        Ok(report) => CaptureOutcome {
+            input: device.clone(),
+            report: Some(report),
+            error: None,
+        },
+        Err(error) => CaptureOutcome {
+            input: device.clone(),
+            report: None,
+            error: Some(ErrorSummary::from(error)),
+        },
+    }
 }
 
 pub(crate) fn capture_warnings(captures: &[CaptureOutcome]) -> Vec<String> {

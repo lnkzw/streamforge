@@ -58,6 +58,8 @@ pub struct RecordingStarted {
     pub sample_rate: u32,
     pub channels: u32,
     pub video_encoder: VideoEncoderInfo,
+    /// E.g. a channel that is silent because its device did not open.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -71,6 +73,8 @@ pub struct StreamingStarted {
     pub sample_rate: u32,
     pub channels: u32,
     pub video_encoder: VideoEncoderInfo,
+    /// E.g. a channel that is silent because its device did not open.
+    pub warnings: Vec<String>,
 }
 
 /// The pipeline part of an output's report. Its stats are present only if

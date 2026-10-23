@@ -85,9 +85,9 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
 | `probe_audio_mix`          | see below | `sensitive` | Mix report |
-| `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels", "video_encoder"}` |
+| `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels", "video_encoder", "warnings"}` |
 | `stop_recording`           | none   | `control`, destructive | Recording report |
-| `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels", "video_encoder"}` |
+| `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels", "video_encoder", "warnings"}` |
 | `stop_streaming`           | none   | `control`, destructive | Streaming report |
 | `list_scenes`              | none   | `read_only` | Scene list |
 | `create_scene`             | see below | `control` | Scene list |
@@ -246,7 +246,7 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
 - **Timing:** `elapsed_ms`, `blocks_mixed`, `late_blocks`, `skipped_blocks`, `mix_time`.
 - **Master:** `master` meter (`{"peak_dbfs", "rms_dbfs"}`), `clipped_samples`, `invalid_samples`.
 - **Inputs:** an `inputs` array. Each entry has:
-  - `name`, `kind` (`live`/`tone`), `gain_db`, `muted`
+  - `name`, `kind` (`live`, `tone`, or `silent` for a channel whose device was not found), `gain_db`, `muted`
   - `meter`
   - `warmup_frames`, `underrun_frames`, `trimmed_frames`
   - `drift_ppm` (live inputs): the input clock's offset against the mixer clock, as tracked by the adaptive resampler
@@ -260,6 +260,7 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
 Outputs share one **media pipeline**: the active scene (see below; by default the `probe_composite` reference scene) at 1920×1080@60, and the audio mix. The preview uses the same pipeline.
 
 - **Start and stop:** the first output to start brings the pipeline up with its source parameters. The pipeline stops when the last output stops.
+- **A missing device** does not keep the pipeline from starting (ADR 0017): when a configured channel's device is not found, the channel is silent for the run, and that is reported everywhere. The `warnings` of `start_recording`, `start_streaming` and `set_preview` say so, `get_mixer` repeats it while the run lasts, `get_health` lists the channel's capture as `ended` with `reason: "could not start: …"`, and the stop report has the device's error in `audio_captures` and a warning that names the channel. Any other capture error (not permitted, no audio server, …) still fails the start, since the user has to act; so does a missing device among an output's own `inputs`, which are named for that run. A device that disappears during a run ends its capture the same way (`get_health`), and the channel goes silent; the outputs keep running. Nothing reconnects on its own: connect the device, or stop the outputs and preview and choose another input with `set_channel_input`. `probe_audio_mix` tests devices, so there a missing device is `not_found`.
 - **Joining:** an output started while another runs joins the pipeline. It must not name sources (`invalid_state` otherwise).
 - **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured channels (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run: they become the run's own channels (`Input 1`, `Tone 1`, … with the ids `ch_input_1`, `ch_tone_1`, …, the same in every run; they send to the program bus), and `screen` adds a screen layer on top of the active scene. These per-run audio parameters go with the output profiles (ADR 0017, step 3).
 - **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
@@ -289,7 +290,7 @@ Errors:
 - `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
 - `unsupported`: no recorder on this platform (Linux, Windows and macOS have one; `docs/platforms.md`), or no H.264 encoder of the requested kind opened (the message lists why for each).
 - `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
-- Capture errors are the same as for the probes.
+- Capture errors are the same as for the probes, except that a configured channel's missing device leaves that channel silent instead (see above).
 
 If `start_recording` fails, the file it created is removed.
 
@@ -462,6 +463,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 
 - **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
   - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
+  - 2026-10-23, ADR 0017 step 2c: a configured channel's missing device no longer fails the pipeline's start (it was `not_found`); its channel is silent and reported. `start_recording` and `start_streaming` gained `warnings`, and mix inputs can be `kind: "silent"`.
   - 2026-10-23, ADR 0017 step 2b: `add_bus`, `remove_bus` and `set_send` are new, `update_bus` gained `assign_db`; `get_mixer` channels gained `sends`, buses `assign_db`, and the result `warnings`; the project file may hold `buses` and channel `sends` (files without them read as before).
   - 2026-10-23, ADR 0017 step 2a: `set_mixer_strip`, `set_master_gain` and `set_audio_sources` are replaced by `add_channel`, `remove_channel`, `update_channel`, `set_channel_input` and `update_bus`; `get_mixer` returns `channels` and `buses` with ids instead of `strips` by index and the master fields; audio `captures` in `get_health` carry the channel's `id` and name; the project file is schema version 2 (version 1 is migrated); `validate_project` gained `migrates`.
   - 2026-10-23, ADR 0017 step 1: the master meter (`mix.master`, `master_peak_dbfs`) measures the program bus before the output limit, so it can exceed 0 dBFS when the mix overloads; `clipped_samples` still counts what the limit changed.

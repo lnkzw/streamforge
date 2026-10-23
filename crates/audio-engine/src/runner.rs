@@ -35,6 +35,9 @@ const WINDOW_BLOCKS: u64 = 1_000;
 pub enum InputSource {
     Live(Arc<AudioRing>),
     Tone(Tone),
+    /// Nothing to play, e.g. a channel whose device could not be opened:
+    /// silence, without counting it as an underrun.
+    Silent,
 }
 
 /// A channel of the graph and where its sound comes from.
@@ -124,7 +127,7 @@ pub struct BufferLatency {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InputStats {
     pub name: String,
-    /// `live` or `tone`.
+    /// `live`, `tone` or `silent`.
     pub kind: &'static str,
     pub gain_db: f32,
     pub muted: bool,
@@ -181,7 +184,7 @@ pub struct LiveMixStats {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveInputStats {
     pub name: String,
-    /// `live` or `tone`.
+    /// `live`, `tone` or `silent`.
     pub kind: &'static str,
     pub warmup_frames: u64,
     pub underrun_frames: u64,
@@ -440,6 +443,7 @@ impl MixerThread {
                 let kind = match input.source {
                     InputSource::Live(_) => "live",
                     InputSource::Tone(_) => "tone",
+                    InputSource::Silent => "silent",
                 };
                 (input.name.clone(), kind)
             })
@@ -546,6 +550,8 @@ fn frames_to_ms(frames: f64) -> f64 {
 enum Source {
     Live(Box<LiveInput>, LatencyTrend),
     Tone(Tone),
+    /// Its scratch stays zero.
+    Silent,
 }
 
 /// Refresh the shared snapshot in place; `false` if a reader holds it now
@@ -619,6 +625,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                     Source::Live(Box::new(LiveInput::new(ring)), LatencyTrend::new(windows))
                 }
                 InputSource::Tone(tone) => Source::Tone(tone),
+                InputSource::Silent => Source::Silent,
             },
             scratch: vec![0.0; BLOCK_FRAMES * channels],
             warmup: 0,
@@ -666,6 +673,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                     input.trimmed += outcome.trimmed;
                 }
                 Source::Tone(tone) => tone.fill(&mut input.scratch, channels),
+                Source::Silent => {}
             }
         }
         {
@@ -731,6 +739,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                         Some(live.drift_ppm()),
                     ),
                     Source::Tone(_) => ("tone", None, None, None),
+                    Source::Silent => ("silent", None, None, None),
                 };
                 let channel = graph.channel_config(index).unwrap_or(ChannelConfig::UNITY);
                 InputStats {
@@ -893,6 +902,32 @@ mod tests {
         for pair in blocks.windows(2) {
             assert_eq!(pair[1].1 - pair[0].1, Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_silent_input_mixes_nothing_and_counts_nothing() {
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            vec![MixerInput {
+                name: "gone".into(),
+                source: InputSource::Silent,
+                channel: unity(),
+            }],
+            BusConfig::UNITY,
+            Duration::from_secs(1),
+            None,
+        ))
+        .expect("spawn");
+        thread::sleep(Duration::from_millis(50));
+        let stats = mixer.stop().expect("stop");
+        let input = &stats.inputs[0];
+        assert_eq!(input.kind, "silent");
+        assert_eq!(input.meter.peak_dbfs, None);
+        assert_eq!(
+            (input.warmup_frames, input.underrun_frames),
+            (0, 0),
+            "{input:?}"
+        );
+        assert_eq!(stats.master.peak_dbfs, None);
     }
 
     #[test]

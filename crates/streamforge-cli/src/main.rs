@@ -542,6 +542,7 @@ fn stream(
         match start(engine, "start_recording", params) {
             Ok(CommandOutput::RecordingStarted(started)) => {
                 eprintln!("recording {} ...", started.path);
+                print_start_warnings(&started.warnings);
             }
             Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
             Err(err) => return Ok(report_error(&err)),
@@ -554,6 +555,7 @@ fn stream(
                 started.target,
                 duration.as_secs_f64()
             );
+            print_start_warnings(&started.warnings);
         }
         Ok(other) => bail!("engine returned unexpected output for start_streaming: {other:?}"),
         Err(err) => {
@@ -604,6 +606,13 @@ fn start(
     Command::decode(name, Some(&Value::Object(params))).and_then(|command| engine.handle(command))
 }
 
+/// What the start says to watch, e.g. a silent channel, on stderr.
+fn print_start_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+}
+
 /// Start a recording, wait, stop it and print the report. Progress goes to
 /// stderr so stdout carries only the JSON report.
 fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -> Result<ExitCode> {
@@ -616,6 +625,7 @@ fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -
                 started.path,
                 duration.as_secs_f64()
             );
+            print_start_warnings(&started.warnings);
         }
         Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
         Err(err) => return Ok(report_error(&err)),

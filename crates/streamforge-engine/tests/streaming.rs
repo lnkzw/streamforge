@@ -39,8 +39,7 @@ fn streams_to_a_local_server() {
     let mut engine = spawn(&dir);
     let (started, begun) = start_streaming(
         &mut engine,
-        json!({"url": server.url(), "stream_key": "acceptance-SECRET", "video_bitrate_kbps": 2500,
-               "tones": [{"frequency_hz": 1000, "level_dbfs": -12}]}),
+        json!({"url": server.url(), "stream_key": "acceptance-SECRET", "video_bitrate_kbps": 2500}),
     );
     assert_eq!(started["ok"], true, "{started}");
     assert!(!started.to_string().contains("SECRET"));
@@ -114,7 +113,7 @@ fn recording_continues_when_the_stream_fails() {
         &mut engine,
         1,
         "start_recording",
-        json!({"file_name": "survivor.mkv", "tones": [{"frequency_hz": 440, "level_dbfs": -12}]}),
+        json!({"file_name": "survivor.mkv"}),
     );
     assert_eq!(recording["ok"], true, "{recording}");
     let recording_started = Instant::now();

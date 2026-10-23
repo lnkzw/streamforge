@@ -30,8 +30,7 @@ impl Engine {
     }
 
     /// Write the scenes, the active scene and the audio setup. Allowed while
-    /// the pipeline runs: it saves the setup, not the running outputs'
-    /// own sources.
+    /// the pipeline runs, which mixes that setup.
     pub(crate) fn save_project(
         &self,
         request: &SaveProjectRequest,

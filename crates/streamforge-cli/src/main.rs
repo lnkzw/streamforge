@@ -218,13 +218,10 @@ fn main() -> Result<ExitCode> {
             video_encoder,
             sources,
         } => {
-            let mut params = match sources.params() {
-                Ok(params) => params,
-                Err(message) => {
-                    eprintln!("error: {message}");
-                    return Ok(ExitCode::FAILURE);
-                }
-            };
+            if let Some(failed) = mixer_from(&mut engine, &sources) {
+                return Ok(failed);
+            }
+            let mut params = sources.params();
             params.insert("file_name".into(), file.into());
             if let Some(encoder) = video_encoder {
                 params.insert("video_encoder".into(), encoder.into());
@@ -241,13 +238,6 @@ fn main() -> Result<ExitCode> {
             record,
             sources,
         } => {
-            let source_params = match sources.params() {
-                Ok(params) => params,
-                Err(message) => {
-                    eprintln!("error: {message}");
-                    return Ok(ExitCode::FAILURE);
-                }
-            };
             let explicit = key_env.is_some();
             let key_env = key_env.unwrap_or_else(|| DEFAULT_KEY_ENV.to_owned());
             let key = match std::env::var(&key_env) {
@@ -277,8 +267,12 @@ fn main() -> Result<ExitCode> {
             if let Some(encoder) = &video_encoder {
                 stream_params.insert("video_encoder".into(), encoder.clone().into());
             }
-            // The first output brings the pipeline up with the sources; a
-            // stream started alongside a recording joins it.
+            if let Some(failed) = mixer_from(&mut engine, &sources) {
+                return Ok(failed);
+            }
+            let source_params = sources.params();
+            // The first output brings the pipeline up with the screen layer;
+            // a stream started alongside a recording joins it.
             let record_params = record.map(|file| {
                 let mut params = source_params.clone();
                 params.insert("file_name".into(), file.into());
@@ -363,6 +357,53 @@ fn validate_project(file: &Path) -> Result<ExitCode> {
     }
 }
 
+/// A finite number from `text`. Non-finite values would serialize as JSON
+/// null and silently become defaults, so they are rejected here.
+fn finite(text: &str, what: &str) -> Result<f64, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("invalid {what} `{text}`: expected a finite number"))
+}
+
+/// A live input argument, `NAME[=GAIN_DB]`. Only a numeric suffix is a
+/// gain; node names may contain '='.
+fn input_spec(spec: &str) -> Result<(&str, Option<f64>), String> {
+    match spec.rsplit_once('=') {
+        Some((name, gain)) if !name.is_empty() && gain.parse::<f64>().is_ok() => {
+            Ok((name, Some(finite(gain, "gain")?)))
+        }
+        _ => Ok((spec, None)),
+    }
+}
+
+/// A test tone argument, `FREQ_HZ[@LEVEL_DBFS]`, as protocol fields.
+fn tone_spec(spec: &str) -> Result<Map<String, Value>, String> {
+    let (frequency, level) = match spec.split_once('@') {
+        Some((frequency, level)) => (frequency, Some(finite(level, "level")?)),
+        None => (spec, None),
+    };
+    let mut tone = Map::new();
+    tone.insert(
+        "frequency_hz".into(),
+        finite(frequency, "frequency")?.into(),
+    );
+    if let Some(level) = level {
+        tone.insert("level_dbfs".into(), level.into());
+    }
+    Ok(tone)
+}
+
+/// A finite master gain as a protocol value.
+fn master_gain(gain: Option<f32>) -> Result<Option<Value>, String> {
+    match gain {
+        Some(gain) if !gain.is_finite() => Err(format!(
+            "invalid master gain `{gain}`: expected a finite number"
+        )),
+        gain => Ok(gain.map(Value::from)),
+    }
+}
+
 /// Build `probe_audio_mix` params from `NAME[=GAIN_DB]` and `FREQ[@LEVEL]`
 /// arguments; value validation is left to `Command::decode`.
 fn mix_params(
@@ -371,24 +412,10 @@ fn mix_params(
     master_gain_db: Option<f32>,
     duration_ms: Option<u64>,
 ) -> Result<Map<String, Value>, String> {
-    // Non-finite values would serialize as JSON null and silently become
-    // defaults, so they are rejected here.
-    let number = |text: &str, what: &str| -> Result<f64, String> {
-        text.parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| format!("invalid {what} `{text}`: expected a finite number"))
-    };
     let mut params = Map::new();
     let mut input_list = Vec::new();
     for spec in inputs {
-        // Only a numeric suffix is a gain; node names may contain '='.
-        let (name, gain) = match spec.rsplit_once('=') {
-            Some((name, gain)) if !name.is_empty() && gain.parse::<f64>().is_ok() => {
-                (name, Some(number(gain, "gain")?))
-            }
-            _ => (spec.as_str(), None),
-        };
+        let (name, gain) = input_spec(spec)?;
         let mut input = Map::new();
         input.insert("input".into(), name.into());
         if let Some(gain) = gain {
@@ -396,35 +423,18 @@ fn mix_params(
         }
         input_list.push(Value::Object(input));
     }
-    let mut tone_list = Vec::new();
-    for spec in tones {
-        let (frequency, level) = match spec.split_once('@') {
-            Some((frequency, level)) => (frequency, Some(number(level, "level")?)),
-            None => (spec.as_str(), None),
-        };
-        let mut tone = Map::new();
-        tone.insert(
-            "frequency_hz".into(),
-            number(frequency, "frequency")?.into(),
-        );
-        if let Some(level) = level {
-            tone.insert("level_dbfs".into(), level.into());
-        }
-        tone_list.push(Value::Object(tone));
-    }
+    let tone_list = tones
+        .iter()
+        .map(|spec| tone_spec(spec).map(Value::Object))
+        .collect::<Result<Vec<_>, _>>()?;
     if !input_list.is_empty() {
         params.insert("inputs".into(), input_list.into());
     }
     if !tone_list.is_empty() {
         params.insert("tones".into(), tone_list.into());
     }
-    if let Some(gain) = master_gain_db {
-        if !gain.is_finite() {
-            return Err(format!(
-                "invalid master gain `{gain}`: expected a finite number"
-            ));
-        }
-        params.insert("master_gain_db".into(), gain.into());
+    if let Some(gain) = master_gain(master_gain_db)? {
+        params.insert("master_gain_db".into(), gain);
     }
     if let Some(duration_ms) = duration_ms {
         params.insert("duration_ms".into(), duration_ms.into());
@@ -476,7 +486,8 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
 /// Read for the stream key when `--key-env` is not given.
 const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
 
-/// Pipeline source flags shared by `record` and `stream`.
+/// Source flags shared by `record` and `stream`: a screen layer, and the
+/// engine's mixer channels for this process.
 #[derive(clap::Args, Debug)]
 struct SourceArgs {
     /// Add a live screen layer (the --source-id source, else the system picker).
@@ -491,27 +502,84 @@ struct SourceArgs {
     /// With --screen: cursor mode (hidden, embedded, metadata).
     #[arg(long, requires = "screen")]
     cursor: Option<String>,
-    /// Live input as NAME or NAME=GAIN_DB. Repeatable.
+    /// Live input as NAME or NAME=GAIN_DB, as a mixer channel. Repeatable. A device that is
+    /// not found leaves its channel silent (with a warning).
     #[arg(long = "input")]
     inputs: Vec<String>,
-    /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS. Repeatable; without inputs or tones, one
-    /// 1 kHz tone at -20 dBFS.
+    /// Test tone as FREQ_HZ or FREQ_HZ@LEVEL_DBFS (default -12), as a mixer channel.
+    /// Repeatable. Without --input, --tone or --no-tone, the default channel: a 1 kHz tone at
+    /// -20 dBFS.
     #[arg(long = "tone", conflicts_with = "no_tone")]
     tones: Vec<String>,
     /// No default test tone.
     #[arg(long)]
     no_tone: bool,
-    /// Master gain in dB (default 0).
-    #[arg(long)]
+    /// Program bus fader in dB (default 0).
+    #[arg(long, allow_negative_numbers = true)]
     master_gain_db: Option<f32>,
 }
 
+/// How `record` and `stream` set up the engine's mixer before they start,
+/// through the same commands as every other client.
+#[derive(Debug, Default, PartialEq)]
+struct MixerSetup {
+    /// `add_channel` params for channels that replace the configured ones.
+    channels: Option<Vec<Map<String, Value>>>,
+    /// The program bus fader.
+    master_gain_db: Option<Value>,
+}
+
 impl SourceArgs {
-    fn params(&self) -> Result<Map<String, Value>, String> {
-        let mut params = mix_params(&self.inputs, &self.tones, self.master_gain_db, None)?;
-        if self.no_tone {
-            params.insert("tones".into(), Value::Array(Vec::new()));
+    /// Inputs, then tones, become channels named `Input 1`, `Tone 1`, ...
+    /// (as a version 1 project's sources do).
+    fn mixer_setup(&self) -> Result<MixerSetup, String> {
+        let master_gain_db = master_gain(self.master_gain_db)?;
+        if self.inputs.is_empty() && self.tones.is_empty() && !self.no_tone {
+            return Ok(MixerSetup {
+                channels: None,
+                master_gain_db,
+            });
         }
+        // Checked before the mixer changes, so nothing is left half set up.
+        let count = self.inputs.len() + self.tones.len();
+        if count > command_api::MAX_CHANNELS {
+            return Err(format!(
+                "at most {} channels from --input and --tone, got {count}",
+                command_api::MAX_CHANNELS
+            ));
+        }
+        let mut channels = Vec::with_capacity(count);
+        for (spec, number) in self.inputs.iter().zip(1..) {
+            let (device, gain) = input_spec(spec)?;
+            let mut channel = Map::new();
+            channel.insert("name".into(), format!("Input {number}").into());
+            channel.insert(
+                "input".into(),
+                serde_json::json!({"kind": "device", "device": device}),
+            );
+            if let Some(gain) = gain {
+                channel.insert("gain_db".into(), gain.into());
+            }
+            channels.push(channel);
+        }
+        for (spec, number) in self.tones.iter().zip(1..) {
+            let mut input = Map::new();
+            input.insert("kind".into(), "tone".into());
+            input.extend(tone_spec(spec)?);
+            let mut channel = Map::new();
+            channel.insert("name".into(), format!("Tone {number}").into());
+            channel.insert("input".into(), Value::Object(input));
+            channels.push(channel);
+        }
+        Ok(MixerSetup {
+            channels: Some(channels),
+            master_gain_db,
+        })
+    }
+
+    /// The output's own params: a screen layer.
+    fn params(&self) -> Map<String, Value> {
+        let mut params = Map::new();
         if self.screen {
             params.insert("screen".into(), true.into());
         }
@@ -524,8 +592,47 @@ impl SourceArgs {
         if let Some(cursor) = &self.cursor {
             params.insert("cursor".into(), cursor.clone().into());
         }
-        Ok(params)
+        params
     }
+}
+
+/// Set up the mixer from `sources`' flags; the exit code if that fails.
+fn mixer_from(engine: &mut Engine, sources: &SourceArgs) -> Option<ExitCode> {
+    let setup = match sources.mixer_setup() {
+        Ok(setup) => setup,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return Some(ExitCode::FAILURE);
+        }
+    };
+    set_up_mixer(engine, setup)
+        .err()
+        .map(|err| report_error(&err))
+}
+
+/// Apply `setup` to the engine's mixer (before anything runs).
+fn set_up_mixer(engine: &mut Engine, setup: MixerSetup) -> Result<(), command_api::CommandError> {
+    if let Some(channels) = setup.channels {
+        let configured = match start(engine, "get_mixer", Map::new())? {
+            CommandOutput::MixerState(mixer) => mixer.channels,
+            other => unreachable!("get_mixer returns the mixer state, not {other:?}"),
+        };
+        for channel in configured {
+            let mut params = Map::new();
+            params.insert("id".into(), channel.spec.id.into());
+            start(engine, "remove_channel", params)?;
+        }
+        for params in channels {
+            start(engine, "add_channel", params)?;
+        }
+    }
+    if let Some(gain) = setup.master_gain_db {
+        let mut params = Map::new();
+        params.insert("id".into(), command_api::PROGRAM_BUS_ID.into());
+        params.insert("gain_db".into(), gain);
+        start(engine, "update_bus", params)?;
+    }
+    Ok(())
 }
 
 /// Stream (and optionally record) for `duration`, then stop both and print
@@ -819,6 +926,69 @@ mod tests {
         );
         assert!(Command::decode("probe_audio_mix", Some(&Value::Object(params))).is_ok());
         assert!(mix_params(&[], &["loud".into()], None, None).is_err());
+    }
+
+    fn source_args(inputs: &[&str], tones: &[&str], no_tone: bool) -> SourceArgs {
+        SourceArgs {
+            screen: false,
+            source_id: None,
+            source_types: Vec::new(),
+            cursor: None,
+            inputs: inputs.iter().map(|&input| input.to_owned()).collect(),
+            tones: tones.iter().map(|&tone| tone.to_owned()).collect(),
+            no_tone,
+            master_gain_db: None,
+        }
+    }
+
+    #[test]
+    fn source_flags_become_mixer_channels() {
+        // No audio flag: the configured channels stay.
+        assert_eq!(
+            source_args(&[], &[], false).mixer_setup(),
+            Ok(MixerSetup::default())
+        );
+        assert_eq!(
+            source_args(&[], &[], true).mixer_setup(),
+            Ok(MixerSetup {
+                channels: Some(Vec::new()),
+                master_gain_db: None,
+            })
+        );
+        let mut args = source_args(&["mic=-6"], &["440@-18", "1000"], false);
+        args.master_gain_db = Some(-1.0);
+        let setup = args.mixer_setup().expect("setup");
+        let channels: Vec<Value> = setup
+            .channels
+            .expect("channels")
+            .into_iter()
+            .map(Value::Object)
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                serde_json::json!({"name": "Input 1", "input": {"kind": "device", "device": "mic"},
+                                   "gain_db": -6.0}),
+                serde_json::json!({"name": "Tone 1",
+                                   "input": {"kind": "tone", "frequency_hz": 440.0,
+                                             "level_dbfs": -18.0}}),
+                serde_json::json!({"name": "Tone 2",
+                                   "input": {"kind": "tone", "frequency_hz": 1000.0}}),
+            ]
+        );
+        assert_eq!(setup.master_gain_db, Some(serde_json::json!(-1.0)));
+        for channel in channels {
+            assert!(
+                Command::decode("add_channel", Some(&channel)).is_ok(),
+                "{channel}"
+            );
+        }
+        // Too many channels fail before the mixer changes.
+        let nine: Vec<String> = (0..9).map(|index| format!("in{index}")).collect();
+        let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+        let error = source_args(&nine, &[], false).mixer_setup().unwrap_err();
+        assert!(error.contains("at most 8 channels"), "{error}");
+        assert!(source_args(&[], &["loud"], false).mixer_setup().is_err());
     }
 
     #[test]

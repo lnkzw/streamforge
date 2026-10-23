@@ -30,10 +30,10 @@ pub use error::{CommandError, ErrorCode};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
-    DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, MediaSources, OutputKind, OutputProfileSet,
-    OutputProfiles, PipelineReport, RecordingProfile, RecordingReport, RecordingRequest,
-    RecordingStarted, SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport,
-    StreamingRequest, StreamingStarted,
+    DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, OutputKind, OutputProfileSet, OutputProfiles,
+    PipelineReport, RecordingProfile, RecordingReport, RecordingRequest, RecordingStarted,
+    SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport, StreamingRequest,
+    StreamingStarted,
 };
 pub use project::{
     ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,

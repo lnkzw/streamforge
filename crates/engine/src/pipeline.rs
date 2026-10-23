@@ -82,19 +82,17 @@ enum DeviceCapture {
 }
 
 impl DeviceCapture {
-    /// Start `device`'s capture. In the configured setup, a device that is
-    /// not found leaves its channel silent (ADR 0017): a missing
-    /// microphone must not keep a stream from starting. Every other error
-    /// (no permission, no audio server), and any error for an output's own
-    /// sources, which name their devices for this run, fails the start.
+    /// Start `device`'s capture. A device that is not found leaves its
+    /// channel silent (ADR 0017): a missing microphone must not keep a
+    /// stream from starting. Every other error (no permission, no audio
+    /// server) fails the start, since the user has to act.
     fn start(
         capture: &mut dyn CaptureBackend,
         device: &Option<String>,
-        from_setup: bool,
     ) -> Result<Self, CommandError> {
         match mix::start_device(capture, device) {
             Ok(stream) => Ok(Self::Running(stream)),
-            Err(error) if from_setup && error.kind == CaptureErrorKind::NotFound => {
+            Err(error) if error.kind == CaptureErrorKind::NotFound => {
                 Ok(Self::Missing(ErrorSummary::from(error)))
             }
             Err(error) => Err(command_error(error)),
@@ -157,9 +155,6 @@ pub(crate) struct Pipeline {
     /// What this run mixes; fader, mute and balance follow live changes.
     /// `audio_streams` are its device channels' captures, in order.
     audio: AudioGraphSpec,
-    /// Whether `audio` is the engine's configured setup (rather than an
-    /// output's own sources), so live gain changes apply to both.
-    audio_from_setup: bool,
     cache: FrameCache,
     fanout: Arc<Fanout>,
 }
@@ -169,7 +164,6 @@ impl Pipeline {
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
         audio: AudioGraphSpec,
-        audio_from_setup: bool,
         extra_screen: Option<&ScreenSelection>,
     ) -> Result<Self, CommandError> {
         let extra_screen = match extra_screen {
@@ -184,7 +178,7 @@ impl Pipeline {
         // On an error, the captures already started are dropped, which
         // stops them.
         let audio_streams = audio::devices(&audio)
-            .map(|(_, device)| DeviceCapture::start(capture, device, audio_from_setup))
+            .map(|(_, device)| DeviceCapture::start(capture, device))
             .collect::<Result<Vec<_>, _>>()?;
         let fanout = Arc::new(Fanout::default());
         let mut cache = FrameCache::default();
@@ -229,7 +223,6 @@ impl Pipeline {
             extra_screen,
             audio_streams,
             audio,
-            audio_from_setup,
             cache,
             fanout,
         })
@@ -243,10 +236,6 @@ impl Pipeline {
     /// Compositor and mixer counters so far; never waits for their threads.
     pub fn live(&self) -> (LiveRenderStats, LiveMixStats) {
         (self.compositor.live(), self.control.live())
-    }
-
-    pub fn audio_from_setup(&self) -> bool {
-        self.audio_from_setup
     }
 
     /// Render `scene` from the next frame on: start captures for its new
@@ -513,8 +502,7 @@ impl Pipeline {
     }
 
     /// The column of the bus with id `bus` in this run's mixer (the program
-    /// bus, then the aux buses); `None` if the run has no such bus, e.g. a
-    /// run with an output's own sources has no aux buses.
+    /// bus, then the aux buses); `None` if the run has no such bus.
     pub fn mix_column(&self, bus: &str) -> Option<usize> {
         if bus == PROGRAM_BUS_ID {
             return Some(0);
@@ -645,7 +633,6 @@ impl Pipeline {
             extra_screen,
             audio_streams,
             audio,
-            audio_from_setup: _,
             cache: _,
             fanout: _,
         } = self;

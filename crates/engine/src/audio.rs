@@ -15,9 +15,9 @@ use audio_engine::{
 use command_api::{
     AddBusRequest, AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusSpec, BusState,
     CHANNEL_ID_PREFIX, ChannelInput, ChannelRef, ChannelSpec, ChannelState, CommandError,
-    DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ, ErrorCode, LiveInputSpec, MAX_AUX_BUSES,
-    MAX_CHANNELS, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec, SendSpec, SendTap,
-    SetChannelInputRequest, SetSendRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
+    DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ, ErrorCode, MAX_AUX_BUSES, MAX_CHANNELS, MixerState,
+    PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec, SendSpec, SendTap, SetChannelInputRequest,
+    SetSendRequest, UpdateBusRequest, UpdateChannelRequest,
 };
 
 use crate::ids::new_id;
@@ -44,48 +44,6 @@ pub(crate) fn default_graph() -> AudioGraphSpec {
         buses: Vec::new(),
         program: ProgramBusSpec {
             gain_db: 0.0,
-            muted: false,
-        },
-    }
-}
-
-/// An output's own sources as the graph of its run: live inputs, then
-/// tones, as channels `Input 1`, `Tone 1`, … with ids from their position
-/// (`ch_input_1`, `ch_tone_1`), the same in every run with the same sources.
-/// They send to the program bus only.
-pub(crate) fn from_sources(
-    inputs: &[LiveInputSpec],
-    tones: &[ToneSpec],
-    master_gain_db: f32,
-) -> AudioGraphSpec {
-    let inputs = inputs.iter().enumerate().map(|(index, input)| ChannelSpec {
-        id: format!("ch_input_{}", index + 1),
-        name: format!("Input {}", index + 1),
-        input: ChannelInput::Device {
-            device: input.input.clone(),
-        },
-        gain_db: input.gain_db,
-        muted: input.muted,
-        balance: 0.0,
-        sends: vec![SendSpec::program()],
-    });
-    let tones = tones.iter().enumerate().map(|(index, tone)| ChannelSpec {
-        id: format!("ch_tone_{}", index + 1),
-        name: format!("Tone {}", index + 1),
-        input: ChannelInput::Tone {
-            frequency_hz: tone.frequency_hz,
-            level_dbfs: tone.level_dbfs,
-        },
-        gain_db: tone.gain_db,
-        muted: tone.muted,
-        balance: 0.0,
-        sends: vec![SendSpec::program()],
-    });
-    AudioGraphSpec {
-        channels: inputs.chain(tones).collect(),
-        buses: Vec::new(),
-        program: ProgramBusSpec {
-            gain_db: master_gain_db,
             muted: false,
         },
     }
@@ -512,18 +470,8 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_graphs_keep_the_graph_rules() {
+    fn the_built_in_graph_keeps_the_graph_rules() {
         assert_eq!(default_graph().problems(), []);
-        let sources = from_sources(
-            &[LiveInputSpec {
-                input: None,
-                gain_db: 0.0,
-                muted: false,
-            }],
-            &[],
-            0.0,
-        );
-        assert_eq!(sources.problems(), []);
         // A misordered send is what the check is for.
         let mut graph = default_graph();
         add_bus(&mut graph, bus("Voice", None)).expect("voice");
@@ -791,42 +739,5 @@ mod tests {
             missing.details,
             Some(serde_json::json!({"bus_id": "bus_gone"}))
         );
-    }
-
-    #[test]
-    fn an_outputs_own_sources_become_channels_with_ids_from_their_position() {
-        let graph = from_sources(
-            &[LiveInputSpec {
-                input: Some("mic".to_owned()),
-                gain_db: -3.0,
-                muted: true,
-            }],
-            &[ToneSpec {
-                frequency_hz: 440.0,
-                level_dbfs: -12.0,
-                gain_db: 0.0,
-                muted: false,
-            }],
-            -1.0,
-        );
-        let channels: Vec<(&str, &str)> = graph
-            .channels
-            .iter()
-            .map(|c| (c.id.as_str(), c.name.as_str()))
-            .collect();
-        assert_eq!(
-            channels,
-            [("ch_input_1", "Input 1"), ("ch_tone_1", "Tone 1")]
-        );
-        assert_eq!(
-            graph.channels[0].input,
-            ChannelInput::Device {
-                device: Some("mic".to_owned())
-            }
-        );
-        assert!(graph.channels[0].muted);
-        assert_eq!(graph.channels[0].sends, [SendSpec::program()]);
-        assert_eq!(graph.program.gain_db, -1.0);
-        assert_eq!(devices(&graph).count(), 1);
     }
 }

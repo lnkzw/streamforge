@@ -34,8 +34,13 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     let responses = session(
         &dir.0,
         &[
+            // The configured channel, louder than its default -20 dBFS.
             (
-                r#"{"id":1,"command":"start_recording","params":{"file_name":"accept.mkv","tones":[{"frequency_hz":1000,"level_dbfs":-12}]}}"#,
+                r#"{"id":0,"command":"set_channel_input","params":{"name":"Tone","input":{"kind":"tone","frequency_hz":1000,"level_dbfs":-12}}}"#,
+                None,
+            ),
+            (
+                r#"{"id":1,"command":"start_recording","params":{"file_name":"accept.mkv"}}"#,
                 Some(RECORD_FOR),
             ),
             (r#"{"id":2,"command":"get_status"}"#, None),
@@ -43,16 +48,17 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         ],
     );
     assert_eq!(responses[0]["ok"], true, "{}", responses[0]);
-    assert_eq!(responses[1]["result"]["recording_active"], true);
-    assert_eq!(responses[2]["ok"], true, "{}", responses[2]);
-    let report = &responses[2]["result"]["recording"];
+    assert_eq!(responses[1]["ok"], true, "{}", responses[1]);
+    assert_eq!(responses[2]["result"]["recording_active"], true);
+    assert_eq!(responses[3]["ok"], true, "{}", responses[3]);
+    let report = &responses[3]["result"]["recording"];
     // Shared CI runners may not sustain 1080p60 x264, so drops are allowed,
     // but none may be silent: every tick before the end was encoded, counted
     // as dropped, or skipped (and counted) by the compositor.
     let count = |value: &Value| value.as_u64().unwrap_or_else(|| panic!("{report}"));
     let encoded = count(&report["video"]["frames_encoded"]);
     let dropped = count(&report["video"]["frames_dropped"]);
-    let skipped = count(&responses[2]["result"]["render"]["skipped_ticks"]);
+    let skipped = count(&responses[3]["result"]["render"]["skipped_ticks"]);
     // Ticks from the output's first frame (its epoch starts at attach, so
     // the first frame may be a tick later) to the cut-off, which the audio
     // end marks (audio has no drops; trailing video frames may be dropped).

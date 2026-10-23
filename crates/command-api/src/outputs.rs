@@ -2,8 +2,9 @@
 //! `start_streaming` and `stop_streaming`.
 //!
 //! Outputs share one media pipeline (compositor, mixer, captures). The first
-//! output to start brings it up with its `sources`; later outputs join it
-//! and must not name sources. The pipeline stops with the last output.
+//! output to start brings it up, with a screen layer if it asks for one;
+//! later outputs join it and must not ask for one. The pipeline stops with
+//! the last output.
 //!
 //! Each output has a profile (ADR 0017): the bus it takes as its mix and its
 //! encoder settings. A start uses its profile; the start's own parameters
@@ -20,10 +21,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use video_compositor::RenderStats;
 
-use crate::{
-    AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, LiveInputSpec,
-    PROGRAM_BUS_ID, ToneSpec,
-};
+use crate::{AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, PROGRAM_BUS_ID};
 
 /// A stream's video bitrate when nothing else says.
 pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
@@ -189,15 +187,6 @@ pub struct OutputProfileSet {
     pub next_start: Vec<&'static str>,
 }
 
-/// What the media pipeline renders and mixes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MediaSources {
-    pub screen: Option<ScreenSelection>,
-    pub inputs: Vec<LiveInputSpec>,
-    pub tones: Vec<ToneSpec>,
-    pub master_gain_db: f32,
-}
-
 /// Start recording to a new file. Validated by `Command::decode`:
 /// `file_name` is a plain `.mkv` name created in the engine's output
 /// directory and never overwritten.
@@ -206,9 +195,10 @@ pub struct RecordingRequest {
     pub file_name: PathBuf,
     /// Which H.264 encoders to try (ADR 0011); `None`: the profile's.
     pub video_encoder: Option<EncoderPreference>,
-    /// `None`: join the running pipeline, or start it with the default
-    /// sources (one quiet test tone).
-    pub sources: Option<MediaSources>,
+    /// A screen layer on top of the active scene, for a pipeline this
+    /// output starts; `None`: join the running pipeline, or start it with
+    /// the active scene. The audio is always the configured mixer (ADR 0017).
+    pub screen: Option<ScreenSelection>,
 }
 
 /// Start a live stream. The key lives in `target` and is never echoed.
@@ -219,7 +209,8 @@ pub struct StreamingRequest {
     pub video_bitrate_kbps: Option<u32>,
     pub video_encoder: Option<EncoderPreference>,
     pub reconnect: ReconnectPolicy,
-    pub sources: Option<MediaSources>,
+    /// As for [`RecordingRequest::screen`].
+    pub screen: Option<ScreenSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

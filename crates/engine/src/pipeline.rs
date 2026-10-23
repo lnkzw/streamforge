@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use audio_engine::{BlockSink, BusRef, LiveMixStats, MixerConfig, MixerControl, MixerThread};
+use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
-    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, SourceSpec, UpdateBusRequest,
-    UpdateChannelRequest,
+    PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec,
+    UpdateBusRequest, UpdateChannelRequest,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -129,12 +129,15 @@ impl Pipeline {
             })),
         })
         .map_err(internal)?;
-        let mixer = MixerThread::spawn(MixerConfig::plain(
-            mix::graph_inputs(&audio, &audio_streams),
-            audio::program_config(&audio.program),
-            EXPECTED_MAX_DURATION,
-            Some(Box::new(AudioTap(Arc::clone(&fanout)))),
-        ))
+        let (aux_buses, sends) = audio::mixer_routing(&audio);
+        let mixer = MixerThread::spawn(MixerConfig {
+            inputs: mix::graph_inputs(&audio, &audio_streams),
+            aux_buses,
+            program: audio::program_config(&audio.program),
+            sends,
+            expected_duration: EXPECTED_MAX_DURATION,
+            sink: Some(Box::new(AudioTap(Arc::clone(&fanout)))),
+        })
         .map_err(internal)?;
         let control = mixer.control();
         Ok(Self {
@@ -437,9 +440,20 @@ impl Pipeline {
 
     /// Apply a bus change live.
     pub fn update_bus(&mut self, request: &UpdateBusRequest) -> Result<(), CommandError> {
-        audio::update_bus(&mut self.audio, request)?;
+        let bus = audio::update_bus(&mut self.audio, request)?;
         self.control
-            .set_bus(BusRef::Program, audio::program_config(&self.audio.program));
+            .set_bus(bus.graph(), audio::config_of(&self.audio, bus));
+        Ok(())
+    }
+
+    /// Apply a send change live (ramped; a tap change fades out and in).
+    pub fn set_send(&mut self, request: &SetSendRequest) -> Result<(), CommandError> {
+        let (channel, bus) = audio::set_send(&mut self.audio, request)?;
+        self.control.set_send(
+            channel,
+            bus.graph(),
+            audio::send_of(&self.audio, channel, bus),
+        );
         Ok(())
     }
 

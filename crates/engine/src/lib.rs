@@ -239,7 +239,10 @@ impl CommandHandler for Engine {
             Command::SetChannelInput(request) => self
                 .set_channel_input(request)
                 .map(CommandOutput::MixerState),
+            Command::AddBus(request) => self.add_bus(request).map(CommandOutput::MixerState),
+            Command::RemoveBus(bus) => self.remove_bus(&bus).map(CommandOutput::MixerState),
             Command::UpdateBus(request) => self.update_bus(request).map(CommandOutput::MixerState),
+            Command::SetSend(request) => self.set_send(request).map(CommandOutput::MixerState),
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
@@ -608,7 +611,12 @@ mod tests {
                     "update_channel" => Some(json!({"name": "Tone", "mute": true})),
                     "set_channel_input" => Some(json!({"name": "Tone",
                         "input": {"kind": "tone", "frequency_hz": 500}})),
+                    "add_bus" => Some(json!({"name": "Voice", "assign_db": 0})),
+                    "remove_bus" => Some(json!({"name": "Voice"})),
                     "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
+                    "set_send" => {
+                        Some(json!({"channel": "Tone", "bus": "Program", "enabled": false}))
+                    }
                     "set_preview" => Some(json!({"enabled": false})),
                     "set_screen_source" => {
                         Some(json!({"scene": "Scene", "name": "bars", "source_id": "fake:1"}))
@@ -1198,6 +1206,85 @@ mod tests {
     }
 
     #[test]
+    fn aux_buses_and_sends_route_live_with_levels() {
+        let _media = media_test_lock();
+        let mut engine = Engine::new();
+        // A separate monitor mix, fed before the fader; the fader only
+        // lowers the program.
+        run(
+            &mut engine,
+            "add_bus",
+            json!({"name": "Monitor", "assign_db": null}),
+        );
+        run(
+            &mut engine,
+            "set_send",
+            json!({"channel": "Tone", "bus": "Monitor", "enabled": true, "tap": "pre_fader"}),
+        );
+        run(
+            &mut engine,
+            "update_channel",
+            json!({"name": "Tone", "gain_db": -12.0}),
+        );
+        let near =
+            |peak: Option<f64>, dbfs: f64| peak.is_some_and(|peak| (peak - dbfs).abs() < 0.3);
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        // The default tone peaks at -20 dBFS.
+        let live = wait_mixer(&mut engine, |state| {
+            state.running && near(state.buses[1].peak_dbfs, -20.0)
+        });
+        assert!(near(live.buses[1].peak_dbfs, -20.0), "{live:?}");
+        assert!(near(live.buses[0].peak_dbfs, -32.0), "{live:?}");
+        assert!(
+            near(live.channels[0].peak_dbfs, -32.0),
+            "post-fader: {live:?}"
+        );
+        assert!(live.warnings.is_empty(), "{live:?}");
+        // Sends change live.
+        run(
+            &mut engine,
+            "set_send",
+            json!({"channel": "Tone", "bus": "Monitor", "level_db": -6.0}),
+        );
+        let lowered = wait_mixer(&mut engine, |state| near(state.buses[1].peak_dbfs, -26.0));
+        assert!(near(lowered.buses[1].peak_dbfs, -26.0), "{lowered:?}");
+        // Assigned to program, the monitor mix adds to it: the same sine at
+        // -32 and -26 dBFS sums to about -22.5 dBFS, and the channel now
+        // reaches program twice.
+        let assigned = mixer(run(
+            &mut engine,
+            "update_bus",
+            json!({"name": "Monitor", "assign_db": 0.0}),
+        ));
+        assert_eq!(assigned.buses[1].assign_db, Some(0.0));
+        assert_eq!(assigned.warnings.len(), 1, "{assigned:?}");
+        let sum = 20.0 * (10f64.powf(-32.0 / 20.0) + 10f64.powf(-26.0 / 20.0)).log10();
+        let summed = wait_mixer(&mut engine, |state| near(state.buses[0].peak_dbfs, sum));
+        assert!(near(summed.buses[0].peak_dbfs, sum), "{sum} {summed:?}");
+        // Buses are fixed while running.
+        for (command, params) in [
+            ("add_bus", json!({"name": "Voice"})),
+            ("remove_bus", json!({"name": "Monitor"})),
+        ] {
+            let structure = Command::decode(command, Some(&params)).expect("decode");
+            assert_eq!(
+                engine.handle(structure).unwrap_err().code,
+                ErrorCode::InvalidState,
+                "{command}"
+            );
+        }
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+        // The live changes were kept; removing the bus removes its sends.
+        let after = mixer(run(&mut engine, "get_mixer", json!({})));
+        assert_eq!(after.buses[1].assign_db, Some(0.0));
+        assert_eq!(after.channels[0].spec.sends[1].level_db, -6.0);
+        let removed = mixer(run(&mut engine, "remove_bus", json!({"name": "Monitor"})));
+        assert_eq!(removed.buses.len(), 1);
+        assert_eq!(removed.channels[0].spec.sends.len(), 1);
+        assert!(removed.warnings.is_empty());
+    }
+
+    #[test]
     fn screen_captures_survive_scene_switches() {
         let _media = media_test_lock();
         let (mut engine, starts) = engine_with_screen_counter();
@@ -1510,6 +1597,17 @@ mod tests {
             &mut engine,
             "update_bus",
             json!({"id": "bus_program", "gain_db": -4, "mute": true}),
+        );
+        run(
+            &mut engine,
+            "add_bus",
+            json!({"name": "Voice", "gain_db": -1, "assign_db": -3}),
+        );
+        run(
+            &mut engine,
+            "set_send",
+            json!({"channel": "A", "bus": "Voice", "enabled": true, "level_db": -6,
+                   "tap": "pre_fader"}),
         );
         let before = scene_list(&mut engine);
         let mixer_before = mixer(run(&mut engine, "get_mixer", json!({})));

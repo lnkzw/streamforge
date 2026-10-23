@@ -19,10 +19,10 @@ mod scenes;
 
 pub use access::{AccessPolicy, Gated, label as access_label};
 pub use audio::{
-    AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusState, CHANNEL_ID_PREFIX,
-    ChannelInput, ChannelRef, ChannelSpec, ChannelState, MAX_CHANNELS, MixerState, PROGRAM_BUS_ID,
-    PROGRAM_BUS_NAME, ProgramBusSpec, SetChannelInputRequest, UpdateBusRequest,
-    UpdateChannelRequest,
+    AddBusRequest, AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusSpec, BusState,
+    CHANNEL_ID_PREFIX, ChannelInput, ChannelRef, ChannelSpec, ChannelState, MAX_AUX_BUSES,
+    MAX_CHANNELS, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec, SendSpec, SendTap,
+    SetChannelInputRequest, SetSendRequest, UpdateBusRequest, UpdateChannelRequest,
 };
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
@@ -144,8 +144,15 @@ pub enum Command {
     UpdateChannel(UpdateChannelRequest),
     /// Choose what a channel plays (only while the pipeline is idle).
     SetChannelInput(SetChannelInputRequest),
-    /// Change a bus's fader or mute (live if running).
+    /// Add an aux bus (only while the pipeline is idle).
+    AddBus(AddBusRequest),
+    /// Remove an aux bus and the sends to it (only while the pipeline is
+    /// idle).
+    RemoveBus(BusRef),
+    /// Change a bus's fader, mute or assignment (live if running).
     UpdateBus(UpdateBusRequest),
+    /// Change a channel's send to a bus (live if running).
+    SetSend(SetSendRequest),
     /// Run the pipeline for a preview (frames go to the in-process
     /// preview mailbox) or stop doing so.
     SetPreview {

@@ -1,5 +1,5 @@
 use capture_api::{CursorMode, VideoSourceKind};
-use command_api::{ChannelInput, Rgba};
+use command_api::{ChannelInput, Rgba, SendSpec, SendTap};
 
 use super::*;
 
@@ -70,6 +70,18 @@ fn project() -> Project {
                     gain_db: -3.5,
                     muted: true,
                     balance: -0.25,
+                    sends: vec![
+                        SendSpec {
+                            enabled: false,
+                            ..SendSpec::program()
+                        },
+                        SendSpec {
+                            bus: "bus_voice00000a".to_owned(),
+                            enabled: true,
+                            level_db: -6.0,
+                            tap: SendTap::PreFader,
+                        },
+                    ],
                 },
                 ChannelSpec {
                     id: "ch_test_tone".to_owned(),
@@ -81,8 +93,16 @@ fn project() -> Project {
                     gain_db: 0.0,
                     muted: false,
                     balance: 0.0,
+                    sends: vec![SendSpec::program(), SendSpec::off("bus_voice00000a")],
                 },
             ],
+            buses: vec![BusSpec {
+                id: "bus_voice00000a".to_owned(),
+                name: "Voice".to_owned(),
+                gain_db: -2.0,
+                muted: false,
+                assign_db: Some(0.0),
+            }],
             program: ProgramBusSpec {
                 gain_db: -1.0,
                 muted: false,
@@ -178,8 +198,17 @@ fn the_file_reads_like_the_command_results() {
     assert_eq!(
         value["audio"]["channels"][0],
         json!({"id": "ch_4k2m9x0q1w7e", "name": "Mic",
-               "input": {"kind": "device", "device": "alsa_input.usb-mic"},
-               "gain_db": -3.5, "mute": true, "balance": -0.25})
+        "input": {"kind": "device", "device": "alsa_input.usb-mic"},
+        "gain_db": -3.5, "mute": true, "balance": -0.25,
+        "sends": [
+            {"bus": "bus_program", "enabled": false, "level_db": 0.0, "tap": "post_fader"},
+            {"bus": "bus_voice00000a", "enabled": true, "level_db": -6.0, "tap": "pre_fader"}
+        ]})
+    );
+    assert_eq!(
+        value["audio"]["buses"],
+        json!([{"id": "bus_voice00000a", "name": "Voice", "gain_db": -2.0, "mute": false,
+                "assign_db": 0.0}])
     );
     assert_eq!(
         value["audio"]["program"],
@@ -446,6 +475,78 @@ fn channel_ids_and_names_must_be_valid_and_unique_and_within_the_limit() {
 }
 
 #[test]
+fn sends_left_out_are_the_default_and_buses_may_be_left_out() {
+    let mut value = file();
+    value["audio"]["channels"][1]
+        .as_object_mut()
+        .expect("channel")
+        .remove("sends");
+    // Out of bus order is fine; the reader puts them in order.
+    let sends = value["audio"]["channels"][0]["sends"].clone();
+    value["audio"]["channels"][0]["sends"] = json!([sends[1], sends[0]]);
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    assert_eq!(parse(&bytes, CANVAS), Ok(loaded()));
+    // Without buses, a file is version 2 as step 2a wrote it.
+    let mut value = file();
+    let audio = value["audio"].as_object_mut().expect("audio");
+    audio.remove("buses");
+    for channel in audio["channels"].as_array_mut().expect("channels") {
+        channel.as_object_mut().expect("channel").remove("sends");
+    }
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    let audio = parse(&bytes, CANVAS).expect("valid").project.audio;
+    assert!(audio.buses.is_empty());
+    assert!(
+        audio
+            .channels
+            .iter()
+            .all(|channel| channel.sends == [SendSpec::program()])
+    );
+}
+
+#[test]
+fn bus_and_send_problems_name_their_path() {
+    let mut value = file();
+    value["audio"]["buses"][0]["id"] = json!("bus_program");
+    let found = problems(&value);
+    assert_eq!(found[0].0, "audio.buses[0].id", "{found:?}");
+    let mut value = file();
+    value["audio"]["buses"][0]["name"] = json!("Program");
+    assert_eq!(only(&value, "used twice"), "audio.buses[0].name");
+    let mut value = file();
+    value["audio"]["buses"][0]["assign_db"] = json!(99);
+    assert_eq!(only(&value, "`assign_db`"), "audio.buses[0]");
+    let mut value = file();
+    value["audio"]["channels"][0]["sends"][1]["bus"] = json!("bus_gone");
+    assert_eq!(only(&value, "no bus"), "audio.channels[0].sends[1].bus");
+    let mut value = file();
+    value["audio"]["channels"][0]["sends"][1]["bus"] = json!("bus_program");
+    assert_eq!(only(&value, "twice"), "audio.channels[0].sends[1].bus");
+    let mut value = file();
+    value["audio"]["channels"][0]["sends"][1]["level_db"] = json!(-200);
+    assert_eq!(only(&value, "`level_db`"), "audio.channels[0].sends[1]");
+    let mut value = file();
+    value["audio"]["channels"][0]["sends"][1]["tap"] = json!("sideways");
+    assert_eq!(
+        only(&value, "unknown variant"),
+        "audio.channels[0].sends[1].tap"
+    );
+    let mut value = file();
+    let bus = value["audio"]["buses"][0].clone();
+    let buses: Vec<Value> = (0..=MAX_AUX_BUSES)
+        .map(|index| {
+            let mut bus = bus.clone();
+            bus["id"] = json!(format!("bus_{index}"));
+            bus["name"] = json!(format!("Bus {index}"));
+            bus
+        })
+        .collect();
+    value["audio"]["buses"] = json!(buses);
+    let found = problems(&value);
+    assert_eq!(found[0].0, "audio.buses", "{found:?}");
+}
+
+#[test]
 fn a_version_1_file_is_migrated() {
     let bytes = serde_json::to_vec(&v1_file()).expect("bytes");
     let loaded = parse(&bytes, CANVAS).expect("valid");
@@ -457,6 +558,11 @@ fn a_version_1_file_is_migrated() {
     expected.channels[0].balance = 0.0;
     expected.channels[1].id = "ch_tone_1".to_owned();
     expected.channels[1].name = "Tone 1".to_owned();
+    // Version 1 had no buses: every channel sends to program only.
+    expected.buses.clear();
+    for channel in &mut expected.channels {
+        channel.sends = vec![SendSpec::program()];
+    }
     assert_eq!(loaded.project.audio, expected);
     assert_eq!(loaded.project.scenes, project().scenes);
     // The same ids every time, until the file is saved as version 2.
@@ -487,7 +593,7 @@ fn version_1_audio_keeps_its_rules_with_paths() {
     // Version 2's shape is not version 1's.
     let mut value = file();
     value["schema_version"] = json!(1);
-    assert_eq!(only(&value, "unknown field `channels`"), "audio.channels");
+    assert_eq!(only(&value, "unknown field `buses`"), "audio.buses");
 }
 
 #[test]

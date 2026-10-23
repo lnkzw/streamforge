@@ -9,7 +9,9 @@
 //! position (`ch_input_1`, `ch_tone_1`, …), so a version 1 file gives the
 //! same ids every time it is read, until it is saved as version 2.
 
-use command_api::{AudioGraphSpec, ChannelInput, ChannelSpec, ProgramBusSpec, ProjectProblem};
+use command_api::{
+    AudioGraphSpec, ChannelInput, ChannelSpec, ProgramBusSpec, ProjectProblem, SendSpec,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -135,8 +137,10 @@ pub(crate) fn migrate(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem
                 gain_db,
                 muted,
                 balance: 0.0,
+                sends: vec![SendSpec::program()],
             })
             .collect(),
+        buses: Vec::new(),
         program: ProgramBusSpec {
             gain_db: audio.master_gain_db,
             muted: false,

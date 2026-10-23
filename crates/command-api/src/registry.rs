@@ -10,19 +10,19 @@ use capture_api::{
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 
 use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
 use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
-    AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX, ChannelInput,
-    ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_ID_LEN,
-    MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest, Rgba,
-    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef, SetChannelInputRequest,
-    SourceKind, SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest,
-    UpdateChannelRequest, UpdateSourceRequest,
+    AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
+    ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
+    MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest, Rgba,
+    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef, SendTap,
+    SetChannelInputRequest, SetSendRequest, SourceKind, SourceRect, SourceRef, StreamingRequest,
+    ToneSpec, UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -357,10 +357,41 @@ const SET_CHANNEL_INPUT: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const ADD_BUS: CommandDescriptor = CommandDescriptor {
+    name: "add_bus",
+    summary: "Add an aux bus while the pipeline is idle: a submix (with assign_db, its level \
+              into the program bus) or a separate mix (assign_db null, e.g. for monitoring). \
+              Params: name (unique among buses), gain_db (-96..24), mute, assign_db (-96..24 or \
+              null). Every channel's send to it starts off. Returns the mixer state.",
+    access: CommandAccess::Control,
+    destructive: false,
+    open_world: false,
+};
+
+const REMOVE_BUS: CommandDescriptor = CommandDescriptor {
+    name: "remove_bus",
+    summary: "Remove an aux bus and every send to it while the pipeline is idle; the program \
+              bus cannot be removed. Params: id, or name. Returns the mixer state.",
+    access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
+};
+
 const UPDATE_BUS: CommandDescriptor = CommandDescriptor {
     name: "update_bus",
-    summary: "Change a bus's fader or mute (live if running). Params: id (bus_program) or name \
-              (Program); gain_db (-96..24), mute. Returns the mixer state.",
+    summary: "Change a bus's fader, mute or assignment (live if running). Params: id (e.g. \
+              bus_program) or name (e.g. Program); gain_db (-96..24), mute, assign_db (aux \
+              buses: -96..24, or null for a separate mix). Returns the mixer state.",
+    access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
+};
+
+const SET_SEND: CommandDescriptor = CommandDescriptor {
+    name: "set_send",
+    summary: "Change a channel's send to a bus (live if running). Params: channel_id or \
+              channel (name); bus_id or bus (name); enabled, level_db (-96..24), tap (pre_fader: \
+              the channel fader does not move it; post_fader). Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -447,7 +478,10 @@ const COMMANDS: &[CommandDescriptor] = &[
     REMOVE_CHANNEL,
     UPDATE_CHANNEL,
     SET_CHANNEL_INPUT,
+    ADD_BUS,
+    REMOVE_BUS,
     UPDATE_BUS,
+    SET_SEND,
     SET_PREVIEW,
     SAVE_PROJECT,
     LOAD_PROJECT,
@@ -530,7 +564,10 @@ impl Command {
             "set_channel_input" => {
                 decode_set_channel_input(name, params).map(Self::SetChannelInput)
             }
+            "add_bus" => decode_add_bus(name, params).map(Self::AddBus),
+            "remove_bus" => decode_remove_bus(name, params).map(Self::RemoveBus),
             "update_bus" => decode_update_bus(name, params).map(Self::UpdateBus),
+            "set_send" => decode_set_send(name, params).map(Self::SetSend),
             "set_preview" => {
                 decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
             }
@@ -594,7 +631,10 @@ impl Command {
             Self::RemoveChannel(_) => &REMOVE_CHANNEL,
             Self::UpdateChannel(_) => &UPDATE_CHANNEL,
             Self::SetChannelInput(_) => &SET_CHANNEL_INPUT,
+            Self::AddBus(_) => &ADD_BUS,
+            Self::RemoveBus(_) => &REMOVE_BUS,
             Self::UpdateBus(_) => &UPDATE_BUS,
+            Self::SetSend(_) => &SET_SEND,
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
@@ -1615,24 +1655,25 @@ fn decode_add_channel(
     })
 }
 
-/// Something named by `id` (with `prefix`), by `name`, or by both.
+/// Something named by its id (with `prefix`), by its name, or by both;
+/// each with the parameter it came in.
 fn named_ref(
     command: &str,
     what: &str,
     prefix: &str,
-    id: Option<String>,
-    name: Option<String>,
+    (id_field, id): (&str, Option<String>),
+    (name_field, name): (&str, Option<String>),
 ) -> Result<(Option<String>, Option<String>), CommandError> {
     let id = id
-        .map(|id| valid_id(command, "id", prefix, id))
+        .map(|id| valid_id(command, id_field, prefix, id))
         .transpose()?;
     let name = name
-        .map(|name| valid_name(command, "name", name))
+        .map(|name| valid_name(command, name_field, name))
         .transpose()?;
     if id.is_none() && name.is_none() {
         return Err(invalid_params(
             command,
-            format!("give the {what}'s `id` or `name`"),
+            format!("give the {what}'s `{id_field}` or `{name_field}`"),
         ));
     }
     Ok((id, name))
@@ -1643,8 +1684,33 @@ fn channel_ref(
     id: Option<String>,
     name: Option<String>,
 ) -> Result<ChannelRef, CommandError> {
-    let (id, name) = named_ref(command, "channel", CHANNEL_ID_PREFIX, id, name)?;
+    let (id, name) = named_ref(
+        command,
+        "channel",
+        CHANNEL_ID_PREFIX,
+        ("id", id),
+        ("name", name),
+    )?;
     Ok(ChannelRef { id, name })
+}
+
+fn bus_ref(
+    command: &str,
+    id: (&str, Option<String>),
+    name: (&str, Option<String>),
+) -> Result<BusRef, CommandError> {
+    let (id, name) = named_ref(command, "bus", BUS_ID_PREFIX, id, name)?;
+    Ok(BusRef { id, name })
+}
+
+/// For a field where `null` means something: absent is `None`, `null` is
+/// `Some(None)`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1728,6 +1794,46 @@ fn decode_set_channel_input(
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct AddBusParams {
+    /// Bus name, unique among the buses (Program is taken).
+    name: String,
+    /// Fader in dB, -96 to 24 (default 0).
+    gain_db: Option<f32>,
+    /// Mute the bus (default false).
+    mute: Option<bool>,
+    /// Level into the program bus in dB, -96 to 24; null or absent: a separate mix.
+    assign_db: Option<f32>,
+}
+
+fn decode_add_bus(command: &str, params: Option<&Value>) -> Result<AddBusRequest, CommandError> {
+    let params: AddBusParams = decode_params(command, params)?;
+    Ok(AddBusRequest {
+        name: valid_name(command, "name", params.name)?,
+        gain_db: gain_db(command, "gain_db", params.gain_db.unwrap_or(0.0))?,
+        muted: params.mute.unwrap_or(false),
+        assign_db: params
+            .assign_db
+            .map(|value| gain_db(command, "assign_db", value))
+            .transpose()?,
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BusParams {
+    /// Bus id from get_mixer (or give name).
+    id: Option<String>,
+    /// Bus name.
+    name: Option<String>,
+}
+
+fn decode_remove_bus(command: &str, params: Option<&Value>) -> Result<BusRef, CommandError> {
+    let params: BusParams = decode_params(command, params)?;
+    bus_ref(command, ("id", params.id), ("name", params.name))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct UpdateBusParams {
     /// Bus id from get_mixer, e.g. bus_program (or give name).
     id: Option<String>,
@@ -1737,6 +1843,9 @@ struct UpdateBusParams {
     gain_db: Option<f32>,
     /// Mute the bus.
     mute: Option<bool>,
+    /// An aux bus's level into the program bus in dB, -96 to 24; null: a separate mix.
+    #[serde(default, deserialize_with = "present")]
+    assign_db: Option<Option<f32>>,
 }
 
 fn decode_update_bus(
@@ -1744,17 +1853,73 @@ fn decode_update_bus(
     params: Option<&Value>,
 ) -> Result<UpdateBusRequest, CommandError> {
     let params: UpdateBusParams = decode_params(command, params)?;
-    if params.gain_db.is_none() && params.mute.is_none() {
-        return Err(invalid_params(command, "give `gain_db`, `mute` or both"));
+    if params.gain_db.is_none() && params.mute.is_none() && params.assign_db.is_none() {
+        return Err(invalid_params(
+            command,
+            "give `gain_db`, `mute` or `assign_db`",
+        ));
     }
-    let (id, name) = named_ref(command, "bus", BUS_ID_PREFIX, params.id, params.name)?;
     Ok(UpdateBusRequest {
-        bus: BusRef { id, name },
+        bus: bus_ref(command, ("id", params.id), ("name", params.name))?,
         gain_db: params
             .gain_db
             .map(|value| gain_db(command, "gain_db", value))
             .transpose()?,
         muted: params.mute,
+        assign_db: params
+            .assign_db
+            .map(|assign| {
+                assign
+                    .map(|value| gain_db(command, "assign_db", value))
+                    .transpose()
+            })
+            .transpose()?,
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetSendParams {
+    /// Channel id from get_mixer (or give channel).
+    channel_id: Option<String>,
+    /// Channel name.
+    channel: Option<String>,
+    /// Bus id from get_mixer (or give bus).
+    bus_id: Option<String>,
+    /// Bus name.
+    bus: Option<String>,
+    /// Whether the channel feeds the bus.
+    enabled: Option<bool>,
+    /// Send level in dB, -96 to 24.
+    level_db: Option<f32>,
+    /// Where the send takes the channel's signal: pre_fader or post_fader.
+    tap: Option<SendTap>,
+}
+
+fn decode_set_send(command: &str, params: Option<&Value>) -> Result<SetSendRequest, CommandError> {
+    let params: SetSendParams = decode_params(command, params)?;
+    if params.enabled.is_none() && params.level_db.is_none() && params.tap.is_none() {
+        return Err(invalid_params(
+            command,
+            "give `enabled`, `level_db` or `tap`",
+        ));
+    }
+    let (id, name) = named_ref(
+        command,
+        "channel",
+        CHANNEL_ID_PREFIX,
+        ("channel_id", params.channel_id),
+        ("channel", params.channel),
+    )?;
+    Ok(SetSendRequest {
+        channel: ChannelRef { id, name },
+        bus: bus_ref(command, ("bus_id", params.bus_id), ("bus", params.bus))?,
+        enabled: params.enabled,
+        level_db: params
+            .level_db
+            .map(|value| gain_db(command, "level_db", value))
+            .transpose()?,
+        tap: params.tap,
     })
 }
 
@@ -2035,7 +2200,10 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "remove_channel" => of::<ChannelParams>(),
         "update_channel" => of::<UpdateChannelParams>(),
         "set_channel_input" => of::<SetChannelInputParams>(),
+        "add_bus" => of::<AddBusParams>(),
+        "remove_bus" => of::<BusParams>(),
         "update_bus" => of::<UpdateBusParams>(),
+        "set_send" => of::<SetSendParams>(),
         "set_preview" => of::<PreviewParams>(),
         // Listed explicitly so a new command without a mapping has no schema
         // (and fails the registry test) instead of an empty one.
@@ -2148,7 +2316,10 @@ mod tests {
             "update_channel" => Some(json!({"id": "ch_a1", "mute": true})),
             "set_channel_input" => Some(json!({"name": "Mic", "input": {"kind": "device",
                 "device": "alsa_input.usb"}})),
+            "add_bus" => Some(json!({"name": "Voice", "assign_db": 0})),
+            "remove_bus" => Some(json!({"name": "Voice"})),
             "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
+            "set_send" => Some(json!({"channel": "Mic", "bus": "Voice", "enabled": true})),
             "set_preview" => Some(json!({"enabled": false})),
             "set_screen_source" => Some(json!({"id": "src_a1", "source_id": "monitor:1"})),
             "save_project" | "load_project" | "validate_project" => {
@@ -2482,8 +2653,47 @@ mod tests {
             panic!("update_bus");
         };
         assert_eq!(
-            (bus.bus.name.as_deref(), bus.muted),
-            (Some("Program"), Some(true))
+            (bus.bus.name.as_deref(), bus.muted, bus.assign_db),
+            (Some("Program"), Some(true), None)
+        );
+        // `assign_db`: absent changes nothing, null makes a separate mix.
+        let Command::UpdateBus(separate) = Command::decode(
+            "update_bus",
+            Some(&json!({"name": "Voice", "assign_db": null})),
+        )
+        .expect("decode") else {
+            panic!("update_bus");
+        };
+        assert_eq!(separate.assign_db, Some(None));
+        let Command::AddBus(added) =
+            Command::decode("add_bus", Some(&json!({"name": "Voice"}))).expect("decode")
+        else {
+            panic!("add_bus");
+        };
+        assert_eq!(
+            added,
+            AddBusRequest {
+                name: "Voice".to_owned(),
+                gain_db: 0.0,
+                muted: false,
+                assign_db: None,
+            }
+        );
+        let Command::SetSend(send) = Command::decode(
+            "set_send",
+            Some(
+                &json!({"channel_id": "ch_a1", "bus": "Voice", "level_db": -6,
+                         "tap": "pre_fader"}),
+            ),
+        )
+        .expect("decode") else {
+            panic!("set_send");
+        };
+        assert_eq!(send.channel, ChannelRef::id("ch_a1"));
+        assert_eq!(send.bus.name.as_deref(), Some("Voice"));
+        assert_eq!(
+            (send.enabled, send.level_db, send.tap),
+            (None, Some(-6.0), Some(SendTap::PreFader))
         );
         for (command, params) in [
             ("add_channel", json!({"name": "Mic"})),
@@ -2530,6 +2740,26 @@ mod tests {
             ("update_bus", json!({"gain_db": 0})),
             ("update_bus", json!({"id": "ch_program", "gain_db": 0})),
             ("update_bus", json!({"id": "bus_program", "gain_db": -200})),
+            ("update_bus", json!({"name": "Voice", "assign_db": 30})),
+            ("add_bus", json!({})),
+            ("add_bus", json!({"name": "Voice", "assign_db": -200})),
+            ("remove_bus", json!({})),
+            ("remove_bus", json!({"id": "ch_voice"})),
+            ("set_send", json!({"channel": "Mic", "bus": "Voice"})),
+            ("set_send", json!({"bus": "Voice", "enabled": true})),
+            ("set_send", json!({"channel": "Mic", "enabled": true})),
+            (
+                "set_send",
+                json!({"channel": "Mic", "bus": "Voice", "tap": "sideways"}),
+            ),
+            (
+                "set_send",
+                json!({"channel": "Mic", "bus": "Voice", "level_db": 99}),
+            ),
+            (
+                "set_send",
+                json!({"channel_id": "bus_mic", "bus": "Voice", "enabled": true}),
+            ),
         ] {
             let err = Command::decode(command, Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{command} {params}");

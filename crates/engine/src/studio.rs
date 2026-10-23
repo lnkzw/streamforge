@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use command_api::{
-    AddChannelRequest, AddSourceRequest, ChannelRef, CommandError, ErrorCode, MixerState,
-    PreviewState, SceneList, SceneRef, SetChannelInputRequest, SourceKind, SourceRef,
-    UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
+    AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
+    ErrorCode, MixerState, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
+    SetSendRequest, SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest,
+    UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
@@ -190,9 +191,9 @@ impl Engine {
         if self.pipeline.is_some() {
             return Err(CommandError::new(
                 ErrorCode::InvalidState,
-                "channels can only be added, removed or given another input while the pipeline \
-                 is idle; stop the preview and outputs first (fader, mute and balance change \
-                 live with update_channel)",
+                "channels and buses can only be added or removed, and a channel given another \
+                 input, while the pipeline is idle; stop the preview and outputs first (levels, \
+                 mutes, balance, sends and assignments change live)",
             ));
         }
         Ok(())
@@ -245,6 +246,34 @@ impl Engine {
         Ok(self.mixer_state())
     }
 
+    pub(crate) fn add_bus(&mut self, request: AddBusRequest) -> Result<MixerState, CommandError> {
+        self.audio_structure_idle()?;
+        audio::add_bus(&mut self.audio, request)?;
+        Ok(self.mixer_state())
+    }
+
+    pub(crate) fn remove_bus(&mut self, bus: &BusRef) -> Result<MixerState, CommandError> {
+        self.audio_structure_idle()?;
+        audio::remove_bus(&mut self.audio, bus)?;
+        Ok(self.mixer_state())
+    }
+
+    /// Live, as [`Engine::update_channel`].
+    pub(crate) fn set_send(&mut self, request: SetSendRequest) -> Result<MixerState, CommandError> {
+        match &mut self.pipeline {
+            Some(pipeline) => {
+                pipeline.set_send(&request)?;
+                if pipeline.audio_from_setup() {
+                    audio::set_send(&mut self.audio, &request)?;
+                }
+            }
+            None => {
+                audio::set_send(&mut self.audio, &request)?;
+            }
+        }
+        Ok(self.mixer_state())
+    }
+
     pub(crate) fn update_bus(
         &mut self,
         request: UpdateBusRequest,
@@ -256,7 +285,9 @@ impl Engine {
                     audio::update_bus(&mut self.audio, &request)?;
                 }
             }
-            None => audio::update_bus(&mut self.audio, &request)?,
+            None => {
+                audio::update_bus(&mut self.audio, &request)?;
+            }
         }
         Ok(self.mixer_state())
     }

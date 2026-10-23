@@ -231,23 +231,44 @@ Acceptance:
 - Failures of sources and outputs are visible while they run, through the same command surface for every client.
 - Every step keeps the existing tests and adds tests for its behavior.
 
-## M11 — Desktop UI, second pass
+## M11 — Audio routing and output profiles
 
-The UI changes before the first release. The requirements come from the project owner in a separate, detailed brief; they are not designed ahead of it. The brief should say which changes the first release needs and which can come later.
+No release pressure: the audio model is designed and built before the protocol is frozen, so the API is designed once and the mixer UI shows the real model (`docs/architecture/ARCHITECTURE_VISION.md` §6; assessment §10.2, question 4). Inputs, channels, buses, sends, outputs and recording tracks are separate concepts in the model, the protocol and the UI; separate tracks alone are not a routing system.
 
-Known to be part of it:
-- [ ] Saving and loading projects in the desktop (`--project-dir`, a way to pick a file), and the commands the UI needs for it (e.g. `list_projects`).
+- [ ] ADR: the audio graph and output profiles, reviewed with the project owner before code.
+- [ ] Stable channel ids; the master becomes the program bus.
+- [ ] Buses (submixes with gain, mute, meters).
+- [ ] Sends from channels to buses, pre- or post-fader, with a level.
+- [ ] Output profiles: per output its mix, its recording tracks and its encoder settings.
+- [ ] Multitrack recording with a defined track mapping.
+- [ ] A monitor output to an audio device, separate from the program outputs.
+- [ ] Processing slots in the graph for later effects (no effects yet).
 
 Acceptance:
-- The desktop covers what the brief marks as needed for the first release.
+- The graph has a fixed size per run: no allocation in the audio path, bounded queues, and drops or underruns counted as today.
+- Every routing change is a typed command and is saved in the project file (with a schema migration).
+- Tests cover summing, send semantics, per-output mixes and track mapping; the bench measures the cost of buses and sends.
+
+## M12 — Desktop UI, second pass
+
+From the project owner's brief: a professional production studio with its own identity. The "Control Room" direction is approved: `docs/ui/design-system.md`, `docs/ui/audit.md`, and ADR 0016 (egui stays, with an own design system).
+
+- [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
+- [ ] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health.
+- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses and outputs), on the M11 model.
+- [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
+- [ ] Rollout to the remaining views; keyboard operation as specified.
+
+Acceptance:
+- Every change is checked on renders of the running app at 1280×720, 1400×900 and 1920×1080, not only by building.
 - New or changed commands go through `command-api`, so CLI, protocol and MCP get them too.
 
-## M12 — Stable Linux release (0.1.0)
+## M13 — Stable Linux release (0.1.0)
 
 Linux first; Windows and macOS follow with tests on real machines.
 
 - [ ] Protocol review before the freeze: the breaking changes still wanted (e.g. `media_engine_ready`, the legacy `screen: true` output layer, the name `source_id` for capture targets). From 0.1.0 on, the versioning policy in `docs/protocol.md` applies.
-- [ ] Soak test on the development machine: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end.
+- [ ] Soak test on the development machine, after the UI changes: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end.
 - [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.
 - [ ] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries.
 - [ ] Version 0.1.0: changelog, tag, published release.
@@ -255,3 +276,5 @@ Linux first; Windows and macOS follow with tests on real machines.
 Acceptance:
 - The soak test passes, and CI on `main` stays green over several runs.
 - The release installs from its tarball on the development machine and works there.
+
+After 0.1.0, additive: effects in the processing slots (EQ, compressor, gate, ducking), per-output video compositions, production states and automation, plugins.

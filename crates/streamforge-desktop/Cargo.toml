@@ -20,3 +20,10 @@ serde_json.workspace = true
 # (owner's choice for M7); the default features bring winit with Wayland and
 # X11, the glow (OpenGL) renderer and AccessKit.
 eframe = "0.36.2"
+
+[dev-dependencies]
+# Renders the real UI headless (wgpu) to images, so layout and visual
+# changes are checked on the rendered result (tests/render.rs).
+egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot", "eframe"] }
+# Writes those renders as PNG (the version egui_kittest uses).
+image = { version = "0.25", default-features = false, features = ["png"] }

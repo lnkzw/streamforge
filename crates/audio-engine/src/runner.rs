@@ -17,8 +17,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::graph::{
-    AudioGraph, BusConfig, BusRef, ChannelConfig, GraphConfig, MAX_AUX_BUSES, MAX_CHANNELS,
-    SendConfig, SendMatrix, limit_into,
+    AudioGraph, BusConfig, BusRef, ChannelConfig, GraphConfig, Limited, MAX_AUX_BUSES,
+    MAX_CHANNELS, SendConfig, SendMatrix, limit_into,
 };
 use crate::live::LiveInput;
 use crate::mixer::MeterReading;
@@ -79,15 +79,15 @@ impl MixerConfig {
         expected_duration: Duration,
         sink: Option<Box<dyn BlockSink>>,
     ) -> Self {
-        let sends = SendMatrix::program_only(inputs.len(), 0);
+        let graph = GraphConfig::plain(
+            inputs.iter().map(|input| input.channel).collect(),
+            program_gain_db,
+        );
         Self {
             inputs,
             aux_buses: Vec::new(),
-            program: BusConfig {
-                gain_db: program_gain_db,
-                ..BusConfig::UNITY
-            },
-            sends,
+            program: graph.program,
+            sends: graph.sends,
             expected_duration,
             sink,
         }
@@ -295,14 +295,9 @@ impl MixerControl {
     /// unknown bus.
     pub fn set_bus(&self, bus: BusRef, config: BusConfig) -> bool {
         let mut pending = lock(&self.shared.pending);
-        let index = match bus {
-            BusRef::Program => 0,
-            BusRef::Aux(aux) if aux < pending.buses.len() - 1 => aux + 1,
-            BusRef::Aux(_) => return false,
-        };
-        match pending.buses.get_mut(index) {
-            Some(slot) => {
-                *slot = Some(config);
+        match bus.column(pending.buses.len() - 1) {
+            Some(column) => {
+                pending.buses[column] = Some(config);
                 true
             }
             None => false,
@@ -315,16 +310,13 @@ impl MixerControl {
     pub fn set_send(&self, channel: usize, bus: BusRef, config: SendConfig) -> bool {
         let mut pending = lock(&self.shared.pending);
         let columns = pending.buses.len();
-        let column = match bus {
-            BusRef::Program => 0,
-            BusRef::Aux(aux) if aux < columns - 1 => aux + 1,
-            BusRef::Aux(_) => return false,
-        };
-        if channel >= pending.channels.len() {
-            return false;
+        match bus.column(columns - 1) {
+            Some(column) if channel < pending.channels.len() => {
+                pending.sends[channel * columns + column] = Some(config);
+                true
+            }
+            _ => false,
         }
-        pending.sends[channel * columns + column] = Some(config);
-        true
     }
 
     /// Peaks of the last [`LEVEL_WINDOW_BLOCKS`] blocks.
@@ -352,24 +344,19 @@ impl MixerControl {
                 graph.set_channel(index, config);
             }
         }
-        for (index, slot) in pending.buses.iter_mut().enumerate() {
+        for (column, slot) in pending.buses.iter_mut().enumerate() {
             if let Some(config) = slot.take() {
-                let bus = if index == 0 {
-                    BusRef::Program
-                } else {
-                    BusRef::Aux(index - 1)
-                };
-                graph.set_bus(bus, config);
+                graph.set_bus(BusRef::from_column(column), config);
             }
         }
         let columns = pending.buses.len();
         for (index, slot) in pending.sends.iter_mut().enumerate() {
             if let Some(config) = slot.take() {
-                let bus = match index % columns {
-                    0 => BusRef::Program,
-                    column => BusRef::Aux(column - 1),
-                };
-                graph.set_send(index / columns, bus, config);
+                graph.set_send(
+                    index / columns,
+                    BusRef::from_column(index % columns),
+                    config,
+                );
             }
         }
     }
@@ -388,8 +375,7 @@ impl MixerControl {
         for (index, (history, published)) in window.history.iter_mut().zip(targets).enumerate() {
             history[slot] = match index.checked_sub(channels) {
                 None => graph.channel_block_peak(index),
-                Some(0) => graph.bus_block_peak(BusRef::Program),
-                Some(bus) => graph.bus_block_peak(BusRef::Aux(bus - 1)),
+                Some(column) => graph.bus_block_peak(BusRef::from_column(column)),
             }
             .unwrap_or(0.0);
             let peak = history.iter().copied().fold(0.0f32, f32::max);
@@ -573,7 +559,7 @@ fn publish_live(
     start: Instant,
     (mixed, late, skipped): (u64, u64, u64),
     mix_times: &LatencyHistogram,
-    (graph, clipped): (&AudioGraph, u64),
+    (graph, limited): (&AudioGraph, Limited),
     inputs: &[InputState],
 ) -> bool {
     let mut snapshot = match live.try_lock() {
@@ -585,8 +571,8 @@ fn publish_live(
     snapshot.blocks_mixed = mixed;
     snapshot.late_blocks = late;
     snapshot.skipped_blocks = skipped;
-    snapshot.clipped_samples = clipped;
-    snapshot.invalid_samples = graph.invalid_samples();
+    snapshot.clipped_samples = limited.clipped;
+    snapshot.invalid_samples = graph.invalid_samples() + limited.invalid;
     snapshot.mix_time = mix_times.summary();
     for (entry, input) in snapshot.inputs.iter_mut().zip(inputs) {
         entry.warmup_frames = input.warmup;
@@ -625,7 +611,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         },
     );
     // The program output is limited where it leaves the graph; counted.
-    let mut clipped = 0u64;
+    let mut limited = Limited::default();
     let mut inputs: Vec<InputState> = config
         .inputs
         .into_iter()
@@ -693,7 +679,9 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             }
             graph.process(&views[..inputs.len().min(MAX_INPUTS)]);
         }
-        clipped += limit_into(graph.program(), &mut out);
+        let block_limited = limit_into(graph.program(), &mut out);
+        limited.clipped += block_limited.clipped;
+        limited.invalid += block_limited.invalid;
         control.publish(&graph, &mut peaks);
         if let Some(sink) = &mut sink {
             sink.block(&out, due(start, block));
@@ -711,7 +699,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
                 start,
                 (mixed, late, skipped),
                 &mix_times,
-                (&graph, clipped),
+                (&graph, limited),
                 &inputs,
             );
         }
@@ -732,8 +720,8 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
             peak_dbfs: None,
             rms_dbfs: None,
         }),
-        clipped_samples: clipped,
-        invalid_samples: graph.invalid_samples(),
+        clipped_samples: limited.clipped,
+        invalid_samples: graph.invalid_samples() + limited.invalid,
         inputs: inputs
             .iter()
             .enumerate()

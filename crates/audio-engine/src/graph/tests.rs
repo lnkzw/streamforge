@@ -258,7 +258,13 @@ fn the_limit_is_applied_and_counted_where_a_bus_leaves_the_graph() {
     // The bus itself is not limited: its meter shows the overload.
     assert_eq!(graph.program(), [1.25, -1.25, 0.5]);
     let mut out = [0.0; 3];
-    assert_eq!(limit_into(graph.program(), &mut out), 2);
+    assert_eq!(
+        limit_into(graph.program(), &mut out),
+        Limited {
+            clipped: 2,
+            invalid: 0
+        }
+    );
     assert_eq!(out, [1.0, -1.0, 0.5]);
 }
 
@@ -326,4 +332,69 @@ fn an_empty_graph_is_silent() {
         graph.bus_meter(BusRef::Program).expect("meter").peak_dbfs,
         None
     );
+}
+
+#[test]
+fn an_input_that_is_not_one_block_is_rejected_and_counted() {
+    let mut graph = mono(&plain(2), 2);
+    graph.process(&[&[0.5, 0.5, 0.5], &[0.25, 0.25]]);
+    assert_eq!(graph.program(), [0.25, 0.25], "only the valid input");
+    assert_eq!(graph.invalid_samples(), 3);
+    graph.process(&[&[0.5], &[0.25, 0.25]]);
+    assert_eq!(graph.program(), [0.25, 0.25]);
+    assert_eq!(graph.invalid_samples(), 4);
+}
+
+#[test]
+fn a_non_finite_level_is_silence() {
+    let mut config = with_aux(
+        SendConfig {
+            enabled: true,
+            level_db: f32::NAN,
+            tap: Tap::PreFader,
+        },
+        BusConfig {
+            assign_db: Some(f32::INFINITY),
+            ..BusConfig::UNITY
+        },
+    );
+    config.channels[0].gain_db = f32::INFINITY;
+    let mut graph = mono(&config, 2);
+    graph.process(&[&[0.5, 0.0]]);
+    assert_eq!(graph.aux(0).expect("aux"), [0.0, 0.0]);
+    assert_eq!(graph.program(), [0.0, 0.0]);
+    // Finite levels beyond the range are held at its end.
+    graph.set_channel(
+        0,
+        ChannelConfig {
+            gain_db: 1000.0,
+            ..ChannelConfig::UNITY
+        },
+    );
+    graph.process(&[&[0.01, 0.01]]);
+    graph.process(&[&[0.01, 0.01]]);
+    assert_eq!(graph.program()[0], 0.01 * db_to_linear(MAX_GAIN_DB));
+}
+
+#[test]
+fn an_overflow_in_the_graph_never_reaches_an_output() {
+    let loud = ChannelConfig {
+        gain_db: MAX_GAIN_DB,
+        ..ChannelConfig::UNITY
+    };
+    let mut graph = mono(&GraphConfig::plain(vec![loud; 2], 0.0), 2);
+    // Finite, but +24 dB takes them to ±inf, which sum to NaN.
+    graph.process(&[&[1e38, 0.5], &[-1e38, 0.25]]);
+    assert!(graph.program()[0].is_nan());
+    let mut out = [1.0; 2];
+    let limited = limit_into(graph.program(), &mut out);
+    assert_eq!(out, [0.0, 1.0]);
+    assert_eq!(
+        limited,
+        Limited {
+            clipped: 1,
+            invalid: 1
+        }
+    );
+    assert_eq!(graph.invalid_samples(), 0, "the inputs were valid");
 }

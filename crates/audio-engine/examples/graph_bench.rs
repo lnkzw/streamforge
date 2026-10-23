@@ -101,7 +101,7 @@ fn run(label: &str, config: &GraphConfig, blocks: usize) {
         }
         let start = Instant::now();
         graph.process(&views);
-        clipped += limit_into(graph.program(), &mut out);
+        clipped += limit_into(graph.program(), &mut out).clipped;
         times.push(start.elapsed());
     }
     times.sort_unstable();

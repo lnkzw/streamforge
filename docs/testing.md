@@ -174,7 +174,7 @@ What the baseline shows:
 ### Other measurements
 
 - `cargo run --release -p video-compositor --example render_bench [frames]`: per-frame render time of the reference scene with 1 thread and the default thread count.
-- `cargo run --release -p audio-engine --example graph_bench [blocks]`: per-block cost of the audio graph (ADR 0017), for today's default (2 channels into program) and the full graph (8 channels, 8 aux buses, every send on, every aux bus assigned). On an i5-13600KF (Arch Linux, release build, 10 000 blocks): default 8.8 µs mean and 10.2 µs p99; full 86 µs mean and 91 µs p99, under 1 % of the 10 ms a block lasts.
+- `cargo run --release -p audio-engine --example graph_bench [blocks]`: per-block cost of the audio graph (ADR 0017), for today's default (2 channels into program) and the full graph (8 channels, 8 aux buses, every send on, every aux bus assigned). On an i5-13600KF (Arch Linux, release build, 10 000 blocks): default 9.1 µs mean and 11.1 µs p99; full 88 µs mean and 94 µs p99, under 1 % of the 10 ms a block lasts.
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 [--screen] [--snapshot out.ppm]`: the real render loop at 60 FPS, reporting late frames, skipped ticks and source drops.
 - `cargo run --release -p streamforge-cli -- mix --input <name> --tone 1000@-12 --duration-ms 600000`: the M4 10-minute latency test; check `buffer.windows_ms` for growth.
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 60000 [--screen] [--input <name>]`: a real recording; check `frames_dropped`, `blocks_dropped`, `gap_samples` and the compositor's late frames, then `ffprobe` the file.

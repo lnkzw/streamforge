@@ -53,7 +53,7 @@ fn mix(graph: &mut AudioGraph, inputs: &[Vec<f32>]) -> (Vec<f32>, u64) {
             .map(|input| &input[index * block..(index + 1) * block])
             .collect();
         graph.process(&views);
-        clipped += limit_into(graph.program(), chunk);
+        clipped += limit_into(graph.program(), chunk).clipped;
     }
     (out, clipped)
 }

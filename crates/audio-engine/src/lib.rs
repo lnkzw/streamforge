@@ -14,7 +14,7 @@
 //!   silence, and bursts far above target are trimmed; both are counted.
 //! - **Clipping:** channels and buses are summed without intermediate
 //!   clipping. A bus is hard-limited to `[-1, 1]` where it leaves the graph
-//!   for an output, and every limited sample is counted.
+//!   for an output, with non-finite samples silenced, and both are counted.
 //! - **Routing:** channels, sends, aux buses and the program bus form the
 //!   graph of ADR 0017 ([`graph`]).
 
@@ -25,8 +25,9 @@ pub mod runner;
 pub mod tone;
 
 pub use graph::{
-    AudioGraph, BusConfig, BusRef, ChannelConfig, GraphConfig, MAX_AUX_BUSES, MAX_CHANNELS,
-    PROCESSING_SLOTS, Processor, SendConfig, SendMatrix, Tap, balance_gains, limit_into,
+    AudioGraph, BusConfig, BusRef, ChannelConfig, GraphConfig, Limited, MAX_AUX_BUSES,
+    MAX_CHANNELS, PROCESSING_SLOTS, Processor, SendConfig, SendMatrix, Tap, balance_gains,
+    limit_into,
 };
 pub use live::MAX_CORRECTION;
 pub use mixer::{GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, db_to_linear};

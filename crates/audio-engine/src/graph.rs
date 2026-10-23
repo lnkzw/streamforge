@@ -20,7 +20,7 @@
 use std::f32::consts::FRAC_PI_2;
 use std::fmt;
 
-use crate::mixer::{GainRamp, Meter, MeterReading, db_to_linear};
+use crate::mixer::{GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, db_to_linear};
 
 /// Most channels in a graph.
 pub const MAX_CHANNELS: usize = 8;
@@ -103,6 +103,26 @@ pub enum BusRef {
     Aux(usize),
 }
 
+impl BusRef {
+    /// The bus's column in a send matrix with `aux_buses` aux buses: the
+    /// program bus first, then the aux buses. `None` for an unknown bus.
+    pub(crate) fn column(self, aux_buses: usize) -> Option<usize> {
+        match self {
+            Self::Program => Some(0),
+            Self::Aux(aux) if aux < aux_buses => Some(aux + 1),
+            Self::Aux(_) => None,
+        }
+    }
+
+    /// The bus in `column` (see [`BusRef::column`]).
+    pub(crate) fn from_column(column: usize) -> Self {
+        match column {
+            0 => Self::Program,
+            column => Self::Aux(column - 1),
+        }
+    }
+}
+
 /// The sends of every channel to every bus: a channel × (program + aux)
 /// matrix, so a graph's shape fixes it.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,11 +162,7 @@ impl SendMatrix {
     }
 
     fn index(&self, channel: usize, bus: BusRef) -> Option<usize> {
-        let column = match bus {
-            BusRef::Program => 0,
-            BusRef::Aux(aux) if aux < self.aux_buses => aux + 1,
-            BusRef::Aux(_) => return None,
-        };
+        let column = bus.column(self.aux_buses)?;
         (channel < self.channels).then(|| channel * (self.aux_buses + 1) + column)
     }
 
@@ -244,13 +260,24 @@ pub fn balance_gains(balance: f32) -> (f32, f32) {
     }
 }
 
+/// Linear gain for `db`, within [`MIN_GAIN_DB`, `MAX_GAIN_DB`]. A
+/// non-finite level is silence, so it cannot turn a bus into NaN; commands
+/// validate levels before they get here.
+fn gain(db: f32) -> f32 {
+    if db.is_finite() {
+        db_to_linear(db.clamp(MIN_GAIN_DB, MAX_GAIN_DB))
+    } else {
+        0.0
+    }
+}
+
 fn switch(on: bool) -> f32 {
     if on { 1.0 } else { 0.0 }
 }
 
 fn send_gain(send: SendConfig) -> f32 {
     if send.enabled {
-        db_to_linear(send.level_db)
+        gain(send.level_db)
     } else {
         0.0
     }
@@ -275,7 +302,7 @@ impl Channel {
         Self {
             config,
             mute: GainRamp::new(switch(!config.muted)),
-            fader: GainRamp::new(db_to_linear(config.gain_db)),
+            fader: GainRamp::new(gain(config.gain_db)),
             left: GainRamp::new(left),
             right: GainRamp::new(right),
             meter: Meter::default(),
@@ -287,7 +314,7 @@ impl Channel {
     fn set(&mut self, config: ChannelConfig) {
         self.config = config;
         self.mute.set_target(switch(!config.muted));
-        self.fader.set_target(db_to_linear(config.gain_db));
+        self.fader.set_target(gain(config.gain_db));
         let (left, right) = balance_gains(config.balance);
         self.left.set_target(left);
         self.right.set_target(right);
@@ -356,8 +383,8 @@ impl Bus {
         Self {
             config,
             mute: GainRamp::new(switch(!config.muted)),
-            fader: GainRamp::new(db_to_linear(config.gain_db)),
-            assign: GainRamp::new(config.assign_db.map_or(0.0, db_to_linear)),
+            fader: GainRamp::new(gain(config.gain_db)),
+            assign: GainRamp::new(config.assign_db.map_or(0.0, gain)),
             meter: Meter::default(),
             block_peak: 0.0,
             slots: Slots::empty(),
@@ -368,9 +395,8 @@ impl Bus {
     fn set(&mut self, config: BusConfig) {
         self.config = config;
         self.mute.set_target(switch(!config.muted));
-        self.fader.set_target(db_to_linear(config.gain_db));
-        self.assign
-            .set_target(config.assign_db.map_or(0.0, db_to_linear));
+        self.fader.set_target(gain(config.gain_db));
+        self.assign.set_target(config.assign_db.map_or(0.0, gain));
     }
 
     /// Slots, mute and fader on the summed block, in place; meter it.
@@ -475,17 +501,13 @@ impl AudioGraph {
 
     /// Change a send from the next block on; `false` if unknown.
     pub fn set_send(&mut self, channel: usize, bus: BusRef, config: SendConfig) -> bool {
-        let columns = self.aux.len() + 1;
-        let column = match bus {
-            BusRef::Program => 0,
-            BusRef::Aux(aux) if aux < self.aux.len() => aux + 1,
-            BusRef::Aux(_) => return false,
-        };
-        if channel >= self.channels.len() {
-            return false;
+        match bus.column(self.aux.len()) {
+            Some(column) if channel < self.channels.len() => {
+                self.sends[channel * (self.aux.len() + 1) + column].set(config);
+                true
+            }
+            _ => false,
         }
-        self.sends[channel * columns + column].set(config);
-        true
     }
 
     /// Processing slot `slot` of channel `index`: after the input check,
@@ -526,9 +548,11 @@ impl AudioGraph {
         }
     }
 
-    /// Process one block. `inputs[i]` is channel `i`'s input, interleaved;
-    /// a missing or short input counts as silence. Non-finite input samples
-    /// become silence and are counted, so they cannot reach any bus.
+    /// Process one block. `inputs[i]` is channel `i`'s input, interleaved
+    /// and exactly one block long; a missing input is silence. Non-finite
+    /// input samples become silence and are counted, so they cannot reach
+    /// any bus; an input of another length is silence for the block, and
+    /// all its samples are counted as invalid.
     pub fn process(&mut self, inputs: &[&[f32]]) {
         let width = self.width;
         let frames = self.pre.len() / width;
@@ -542,14 +566,19 @@ impl AudioGraph {
         }
         for (index, channel) in self.channels.iter_mut().enumerate() {
             let input = inputs.get(index).copied().unwrap_or(&[]);
-            for (position, sample) in self.pre.iter_mut().enumerate() {
-                let value = input.get(position).copied().unwrap_or(0.0);
-                *sample = if value.is_finite() {
-                    value
-                } else {
-                    self.invalid_samples += 1;
-                    0.0
-                };
+            if input.len() == self.pre.len() {
+                for (sample, &value) in self.pre.iter_mut().zip(input) {
+                    *sample = if value.is_finite() {
+                        value
+                    } else {
+                        self.invalid_samples += 1;
+                        0.0
+                    };
+                }
+            } else {
+                // Not one block: rejected as a whole, never cut or padded.
+                self.pre.fill(0.0);
+                self.invalid_samples += input.len() as u64;
             }
             channel.slots.run(&mut self.pre, width);
             channel.block_peak = 0.0;
@@ -672,25 +701,40 @@ impl AudioGraph {
         }
     }
 
-    /// Non-finite input samples replaced by silence so far.
+    /// Input samples replaced by silence so far: non-finite ones, and those
+    /// of inputs that were not one block long.
     pub fn invalid_samples(&self) -> u64 {
         self.invalid_samples
     }
 }
 
-/// Copy `block` into `out`, hard-limited to `[-1, 1]`, where a bus leaves
-/// the graph for an output; returns how many samples were limited.
-pub fn limit_into(block: &[f32], out: &mut [f32]) -> u64 {
-    let mut clipped = 0;
+/// What [`limit_into`] changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Limited {
+    /// Samples beyond full scale, clamped to it.
+    pub clipped: u64,
+    /// Non-finite samples (an overflow in the graph, a processor's fault),
+    /// replaced by silence.
+    pub invalid: u64,
+}
+
+/// Copy `block` into `out` where a bus leaves the graph for an output:
+/// hard-limited to `[-1, 1]`, with non-finite samples silenced, so an
+/// output only ever receives valid samples. Counts both.
+pub fn limit_into(block: &[f32], out: &mut [f32]) -> Limited {
+    let mut limited = Limited::default();
     for (dst, &src) in out.iter_mut().zip(block) {
-        *dst = if src.abs() > 1.0 {
-            clipped += 1;
+        *dst = if !src.is_finite() {
+            limited.invalid += 1;
+            0.0
+        } else if src.abs() > 1.0 {
+            limited.clipped += 1;
             src.clamp(-1.0, 1.0)
         } else {
             src
         };
     }
-    clipped
+    limited
 }
 
 #[cfg(test)]

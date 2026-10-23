@@ -597,6 +597,10 @@ fn output_profiles_name_existing_buses_and_follow_their_rules() {
     let mut value = file();
     value["outputs"]["recording"]["mix"] = json!("bus_gone");
     assert_eq!(only(&value, "no bus"), "outputs.recording.mix");
+    // Not an id at all: one problem, from the command's rules.
+    let mut value = file();
+    value["outputs"]["recording"]["mix"] = json!("Voice");
+    assert_eq!(only(&value, "`mix_bus_id`"), "outputs.recording");
     let mut value = file();
     value["outputs"]["stream"]["video_bitrate_kbps"] = json!(1);
     assert_eq!(only(&value, "`video_bitrate_kbps`"), "outputs.stream");
@@ -653,10 +657,15 @@ fn version_1_audio_keeps_its_rules_with_paths() {
     let tone = value["audio"]["tones"][0].clone();
     value["audio"]["tones"] = json!(vec![tone; 9]);
     assert_eq!(only(&value, "at most 8 sources"), "audio");
-    // Version 2's shape is not version 1's.
+    // Version 2's shape is not version 1's: neither its audio nor its
+    // output profiles.
     let mut value = file();
     value["schema_version"] = json!(1);
+    value.as_object_mut().expect("file").remove("outputs");
     assert_eq!(only(&value, "unknown field `buses`"), "audio.buses");
+    let mut value = v1_file();
+    value["outputs"] = json!({});
+    assert_eq!(only(&value, "version 1 has no output profiles"), "outputs");
 }
 
 #[test]

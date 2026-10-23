@@ -4,7 +4,8 @@
 //! A channel is one input's strip: what it plays (a capture device or a
 //! test tone), its fader, mute and balance, and one send to every bus. A
 //! bus sums its sends; an aux bus is a submix that can be assigned to the
-//! program bus, or a separate mix. The program bus is what the outputs take.
+//! program bus, or a separate mix. The program bus is the main mix and each
+//! output's default; an output can take any bus (its profile's mix).
 //! Adding or removing a channel or bus, and choosing what a channel plays,
 //! need an idle pipeline; levels, mutes, balance, sends and assignments
 //! change live.

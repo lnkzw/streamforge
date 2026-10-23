@@ -660,11 +660,6 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
     let mut sink = config.sink;
     let channels = CHANNELS as usize;
     let windows = (config.expected_duration.as_secs() / 10 + 2) as usize;
-    let aux_names: Vec<String> = config
-        .aux_buses
-        .iter()
-        .map(|bus| bus.name.clone())
-        .collect();
     let mut graph = AudioGraph::new(
         channels,
         BLOCK_FRAMES,
@@ -796,8 +791,10 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         }),
         clipped_samples: limited[0].clipped,
         invalid_samples: graph.invalid_samples() + limited[0].invalid,
-        aux_buses: aux_names
+        aux_buses: config
+            .aux_buses
             .into_iter()
+            .map(|bus| bus.name)
             .zip(&limited[1..])
             .enumerate()
             .map(|(index, (name, limited))| BusStats {

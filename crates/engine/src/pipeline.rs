@@ -496,13 +496,11 @@ impl Pipeline {
     }
 
     /// Let output `id` take bus `mix` from the next block on, fading over
-    /// one block so nothing clicks.
+    /// one block so nothing clicks. The fade starts from the bus the output
+    /// last played, even when the mix changes twice within a block.
     pub fn set_output_mix(&self, id: OutputId, mix: usize) {
-        if let Some(out) = lock(&self.fanout.audio).iter_mut().find(|out| out.id == id)
-            && out.mix != mix
-        {
-            out.fading_from = Some(out.mix);
-            out.mix = mix;
+        if let Some(out) = lock(&self.fanout.audio).iter_mut().find(|out| out.id == id) {
+            switch_mix(&mut out.mix, &mut out.fading_from, mix);
         }
     }
 
@@ -927,6 +925,21 @@ impl BlockSink for AudioTap {
     }
 }
 
+/// Take bus `to` from the next block on, fading from the bus last played:
+/// a fade still pending keeps its start, and going back to that bus needs
+/// none.
+fn switch_mix(mix: &mut usize, fading_from: &mut Option<usize>, to: usize) {
+    if *mix == to {
+        return;
+    }
+    *fading_from = match *fading_from {
+        None => Some(*mix),
+        Some(from) if from == to => None,
+        pending => pending,
+    };
+    *mix = to;
+}
+
 /// `to` faded in over `from` across one interleaved stereo block, linearly
 /// from frame to frame, into `out`.
 fn crossfade(from: &[f32], to: &[f32], out: &mut [f32]) {
@@ -970,6 +983,22 @@ fn internal(error: impl std::fmt::Display) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mix_change_fades_from_the_bus_last_played() {
+        let (mut mix, mut from) = (0, None);
+        switch_mix(&mut mix, &mut from, 1);
+        assert_eq!((mix, from), (1, Some(0)));
+        // Again within the block: still from the bus that played.
+        switch_mix(&mut mix, &mut from, 2);
+        assert_eq!((mix, from), (2, Some(0)));
+        // Back to it: no fade at all.
+        switch_mix(&mut mix, &mut from, 0);
+        assert_eq!((mix, from), (0, None));
+        // The same bus changes nothing.
+        switch_mix(&mut mix, &mut from, 0);
+        assert_eq!((mix, from), (0, None));
+    }
 
     #[test]
     fn a_mix_change_fades_linearly_over_one_block() {

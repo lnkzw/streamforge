@@ -185,16 +185,23 @@ impl Engine {
             Some(pipeline) => pipeline.mixer_state(),
             None => audio::mixer_state(&self.audio, None),
         };
-        state.outputs = [OutputKind::Recording, OutputKind::Stream]
+        state.outputs = OutputKind::ALL
             .into_iter()
             .map(|output| {
                 let running = self.output_open(output);
-                let now = running
-                    .then(|| self.pipeline.as_ref()?.output_mix(output_id(output)))
-                    .flatten();
+                let profile = self.profiles.mix(output);
+                let bus = match &self.pipeline {
+                    Some(pipeline) if running => pipeline.output_mix(output_id(output)),
+                    // Started now, it would join this run: a run with an
+                    // output's own sources has the program bus only.
+                    Some(pipeline) if pipeline.mix_column(profile).is_none() => {
+                        Some(PROGRAM_BUS_ID.to_owned())
+                    }
+                    _ => None,
+                };
                 OutputMix {
                     output,
-                    bus: now.unwrap_or_else(|| self.profiles.mix(output).to_owned()),
+                    bus: bus.unwrap_or_else(|| profile.to_owned()),
                     running,
                 }
             })
@@ -216,6 +223,12 @@ impl Engine {
         request: SetOutputProfileRequest,
     ) -> Result<OutputProfileSet, CommandError> {
         let output = request.output;
+        if output != OutputKind::Stream && request.video_bitrate_kbps.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                "`video_bitrate_kbps` is for the stream; a recording's quality is not a bitrate",
+            ));
+        }
         let running = self.output_open(output);
         let mut applied_now = Vec::new();
         let mut next_start = Vec::new();
@@ -243,16 +256,10 @@ impl Engine {
                     None => next_start.push("mix"),
                 }
             }
-            match output {
-                OutputKind::Recording => self.profiles.recording.mix = mix,
-                OutputKind::Stream => self.profiles.stream.mix = mix,
-            }
+            *self.profiles.mix_mut(output) = mix;
         }
         if let Some(encoder) = request.video_encoder {
-            match output {
-                OutputKind::Recording => self.profiles.recording.video_encoder = encoder,
-                OutputKind::Stream => self.profiles.stream.video_encoder = encoder,
-            }
+            *self.profiles.video_encoder_mut(output) = encoder;
             if running {
                 next_start.push("video_encoder");
             }
@@ -343,13 +350,10 @@ impl Engine {
         self.audio_structure_idle()?;
         if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus, ("id", "name"))? {
             let id = &self.audio.buses[index].id;
-            let users: Vec<&str> = [OutputKind::Recording, OutputKind::Stream]
+            let users: Vec<&str> = OutputKind::ALL
                 .into_iter()
                 .filter(|output| self.profiles.mix(*output) == id)
-                .map(|output| match output {
-                    OutputKind::Recording => "recording",
-                    OutputKind::Stream => "stream",
-                })
+                .map(OutputKind::as_str)
                 .collect();
             if !users.is_empty() {
                 return Err(CommandError::new(

@@ -209,7 +209,8 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
     name: "start_streaming",
     summary: "Publish the media pipeline over RTMP (H.264 CBR + AAC in FLV). Params: url \
               (required, rtmp:// or rtmps://, no credentials), stream_key (secret, never echoed), \
-              video_bitrate_kbps and video_encoder (as for start_recording; default: the stream profile's), \
+              video_bitrate_kbps (300..50000) and video_encoder (auto, software, hardware), both by \
+              default the stream profile's, \
               reconnect_attempts (default 5), reconnect_delay_ms (default 1000, doubling up to \
               30 s), and sources as for start_recording. Returns once connected, with the encoder \
               in use; reconnects after errors; independent of recording.",
@@ -969,9 +970,9 @@ struct StartStreamingParams {
     /// Secret stream key, appended to the URL when connecting; never echoed.
     #[schemars(with = "Option<String>")]
     stream_key: Option<Value>,
-    /// Constant video bit rate in kbit/s, 300 to 50000 (default 6000).
+    /// Constant video bit rate in kbit/s, 300 to 50000 (default: the stream profile's).
     video_bitrate_kbps: Option<u32>,
-    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
+    /// H.264 encoder: auto (hardware if one works here, else software), software or hardware (default: the stream profile's).
     video_encoder: Option<EncoderPreference>,
     /// Reconnect attempts after a lost connection, 0 to 100 (default 5).
     reconnect_attempts: Option<u32>,

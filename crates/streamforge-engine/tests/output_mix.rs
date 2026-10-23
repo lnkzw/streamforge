@@ -68,7 +68,7 @@ fn a_recording_takes_its_profiles_mix_and_switches_live() {
         .unwrap_or_else(|| panic!("never switched: {peaks:?}"));
     // About one span in: well after the start, well before the end.
     assert!(
-        (16..peaks.len() - 10).contains(&switch),
+        (16..peaks.len().saturating_sub(10)).contains(&switch),
         "switch at window {switch}: {peaks:?}"
     );
     let quiet_part = &peaks[2..switch - 1];

@@ -33,6 +33,18 @@ pub enum OutputKind {
     Stream,
 }
 
+impl OutputKind {
+    pub const ALL: [Self; 2] = [Self::Recording, Self::Stream];
+
+    /// Its name in commands and files.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recording => "recording",
+            Self::Stream => "stream",
+        }
+    }
+}
+
 /// How the recording starts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordingProfile {
@@ -82,6 +94,20 @@ impl OutputProfiles {
         match output {
             OutputKind::Recording => &self.recording.mix,
             OutputKind::Stream => &self.stream.mix,
+        }
+    }
+
+    pub fn mix_mut(&mut self, output: OutputKind) -> &mut String {
+        match output {
+            OutputKind::Recording => &mut self.recording.mix,
+            OutputKind::Stream => &mut self.stream.mix,
+        }
+    }
+
+    pub fn video_encoder_mut(&mut self, output: OutputKind) -> &mut EncoderPreference {
+        match output {
+            OutputKind::Recording => &mut self.recording.video_encoder,
+            OutputKind::Stream => &mut self.stream.video_encoder,
         }
     }
 }

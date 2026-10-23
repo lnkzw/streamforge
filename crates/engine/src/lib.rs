@@ -1230,6 +1230,18 @@ mod tests {
             panic!("unexpected output");
         };
         assert_eq!(profiles, command_api::OutputProfiles::default());
+        // The handler keeps the bitrate to the stream, whoever builds the
+        // request.
+        let typed = Command::SetOutputProfile(command_api::SetOutputProfileRequest {
+            output: command_api::OutputKind::Recording,
+            mix: None,
+            video_encoder: None,
+            video_bitrate_kbps: Some(1_000),
+        });
+        assert_eq!(
+            engine.handle(typed).unwrap_err().code,
+            ErrorCode::InvalidParams
+        );
         let unknown = Command::decode(
             "set_output_profile",
             Some(&json!({"output": "recording", "mix_bus": "Voice"})),

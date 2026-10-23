@@ -387,6 +387,14 @@ fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<Proje
     };
     let outputs = match file.outputs {
         None => OutputProfiles::default(),
+        // Version 1's rules are kept as they were: it had no profiles.
+        Some(_) if version == 1 => {
+            problems.push(problem(
+                "outputs",
+                "unknown field `outputs`: version 1 has no output profiles".to_owned(),
+            ));
+            OutputProfiles::default()
+        }
         Some(outputs) => self::outputs(outputs, audio.as_ref(), &mut problems),
     };
     match audio {
@@ -714,10 +722,8 @@ fn outputs(
     let Value::Object(mut outputs) = value else {
         unreachable!("the structure is an object");
     };
-    for (output, kind) in [
-        ("recording", OutputKind::Recording),
-        ("stream", OutputKind::Stream),
-    ] {
+    for kind in OutputKind::ALL {
+        let output = kind.as_str();
         let Some(Value::Object(mut params)) = outputs.remove(output) else {
             continue;
         };
@@ -725,19 +731,20 @@ fn outputs(
         let Some(Value::String(mix)) = params.remove("mix") else {
             unreachable!("the structure has a string mix");
         };
-        if let Some(audio) = audio
-            && mix != PROGRAM_BUS_ID
-            && !audio.buses.iter().any(|bus| bus.id == mix)
-        {
-            problems.push(problem(
-                &format!("{at}.mix"),
-                format!("no bus has the id `{mix}`"),
-            ));
-        }
         params.insert("output".to_owned(), json!(output));
         params.insert("mix_bus_id".to_owned(), json!(mix));
         match Command::decode("set_output_profile", Some(&Value::Object(params))) {
             Ok(Command::SetOutputProfile(request)) => {
+                // A well-formed id: does the file have that bus?
+                if let Some(audio) = audio
+                    && mix != PROGRAM_BUS_ID
+                    && !audio.buses.iter().any(|bus| bus.id == mix)
+                {
+                    problems.push(problem(
+                        &format!("{at}.mix"),
+                        format!("no bus has the id `{mix}`"),
+                    ));
+                }
                 let encoder = request.video_encoder.unwrap_or_default();
                 match kind {
                     OutputKind::Recording => {

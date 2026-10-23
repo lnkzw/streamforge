@@ -99,8 +99,10 @@ impl Icon {
                 painter.rect_filled(rect_at(4.0, 4.0, 12.0, 12.0), 1.0 * scale, color);
             }
             Self::Preview => {
-                arc(8.0, 13.0, 7.0, 207.0, 333.0);
-                arc(8.0, 3.0, 7.0, 27.0, 153.0);
+                // Two lids, arcs of radius 7 centred 5 below and above the
+                // middle line; they meet at (8 ± 4.9, 8).
+                arc(8.0, 13.0, 7.0, 225.6, 314.4);
+                arc(8.0, 3.0, 7.0, 45.6, 134.4);
                 painter.circle_stroke(at(8.0, 8.0), 2.2 * scale, stroke);
             }
             Self::Scene => {

@@ -38,4 +38,4 @@ The binaries run from anywhere; copy `bin/*` into a directory on your `PATH` (e.
 
 ## License
 
-StreamForge is licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License 2.0 (`LICENSE-APACHE`), at your option. The binaries link the system FFmpeg, so they are also subject to the license of that FFmpeg build. With libx264, as both distributions build it, that is the GPL. The StreamForge source code is at https://github.com/lnkzw/streamforge.
+StreamForge is licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License 2.0 (`LICENSE-APACHE`), at your option. The desktop app embeds the IBM Plex fonts, licensed under the SIL Open Font License 1.1 (`LICENSE-OFL-IBM-Plex.txt`). The binaries link the system FFmpeg, so they are also subject to the license of that FFmpeg build. With libx264, as both distributions build it, that is the GPL. The StreamForge source code is at https://github.com/lnkzw/streamforge.

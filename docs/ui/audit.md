@@ -1,4 +1,4 @@
-# Desktop UI audit (before M11)
+# Desktop UI audit (before the M12 redesign)
 
 The state of `streamforge-desktop` at `56ddcdd`, from the code (`crates/streamforge-desktop/src/app.rs`) and from headless renders of the running app at 1280×720, 1400×900 and 1920×1080. The renders come from `tests/render.rs`, which drives the real model and engine: idle, and live with the preview on and a recording running.
 
@@ -30,7 +30,7 @@ The desktop is a working control surface, not a production tool. Every function 
 - **The mixer is a list of boxed groups.** Each strip has a horizontal meter, a horizontal gain slider and a checkbox. There is no dB scale, peak hold, clip indicator, or vertical fader layout. "idle — levels show while previewing or live" wraps across two lines.
 - **Audio sources cannot be configured** in the desktop: the mixer shows the default test tone, and inputs can only be set through the CLI or protocol.
 - **No keyboard shortcuts** for any live action, and few tooltips.
-- **No project handling:** scenes are lost on exit (planned for M11).
+- **No project handling:** scenes are lost on exit; the engine saves projects since M10, the desktop gets it in M12.
 
 ## Visual language
 

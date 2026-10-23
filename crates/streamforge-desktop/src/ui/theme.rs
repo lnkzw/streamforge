@@ -120,7 +120,11 @@ impl TextRole {
     }
 }
 
-/// Install the fonts and the style. Call once, when the app starts.
+/// Install the fonts and the style. Call once in the eframe creation
+/// closure, before the first frame: fonts take effect from the next pass,
+/// and the components of this module use font families that exist only
+/// after this (epaint panics on an unknown family). Calling it lazily from
+/// a frame would crash that frame.
 pub fn apply(ctx: &egui::Context) {
     fonts::install(ctx);
     ctx.set_theme(egui::Theme::Dark);

@@ -3,7 +3,9 @@ name = "streamforge-desktop"
 description = "Desktop UI: scenes, preview, mixer and output controls over the command API"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# The code is MIT OR Apache-2.0 like the workspace; the binary embeds the
+# IBM Plex fonts (assets/fonts, SIL OFL 1.1).
+license = "(MIT OR Apache-2.0) AND OFL-1.1"
 rust-version = "1.95"
 
 [[bin]]
@@ -22,8 +24,9 @@ serde_json.workspace = true
 eframe = "0.36.2"
 
 [dev-dependencies]
-# Renders the real UI headless (wgpu) to images, so layout and visual
-# changes are checked on the rendered result (tests/render.rs).
-egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot", "eframe"] }
+# Drives the real UI headless: simulated input for component behaviour
+# (tests/widgets.rs) and wgpu renders to check the visual result
+# (tests/render.rs).
+egui_kittest = { version = "0.36.2", features = ["wgpu", "eframe"] }
 # Writes those renders as PNG (the version egui_kittest uses).
 image = { version = "0.25", default-features = false, features = ["png"] }

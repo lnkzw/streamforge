@@ -2,9 +2,11 @@
 //! controls of their own. Every interactive component reports a role and
 //! label to AccessKit and draws the same focus ring.
 
+use std::time::Duration;
+
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
-    Widget, WidgetInfo, WidgetType, pos2, vec2,
+    Widget, WidgetInfo, WidgetType, pos2, text::LayoutJob, vec2,
 };
 
 use super::icons::{Icon, icon_rect};
@@ -36,6 +38,27 @@ impl VisualState {
             Self::Normal
         }
     }
+}
+
+/// Whether to draw the focus ring: keyboard focus shows even while the
+/// pointer is over the control.
+fn shows_focus(forced: Option<VisualState>, response: &Response) -> bool {
+    match forced {
+        Some(state) => state == VisualState::Focused,
+        None => response.has_focus(),
+    }
+}
+
+/// How often animations repaint: the app's own live cadence, not the
+/// display rate.
+const ANIMATION_FRAME: Duration = Duration::from_millis(33);
+
+/// The position in a repeating animation of `period` seconds, from 0 to 1.
+/// Taken in `f64` before narrowing, so it stays smooth after days of
+/// uptime.
+fn phase(ui: &Ui, period: f64) -> f32 {
+    let time = ui.input(|input| input.time);
+    ((time % period) / period) as f32
 }
 
 /// The 2 px accent ring around a focused control, 1 px outside it.
@@ -164,7 +187,7 @@ impl Widget for Button<'_> {
             galley,
             text,
         );
-        if state == VisualState::Focused {
+        if shows_focus(self.forced, &response) {
             focus_ring(painter, rect, size::RADIUS_CONTROL);
         }
         response
@@ -235,8 +258,8 @@ fn button_colors(kind: ButtonKind, state: VisualState) -> (Color32, Stroke, Colo
 
 /// A small rotating arc; keeps repainting while shown.
 pub fn spinner(ui: &Ui, rect: Rect, color: Color32) {
-    let time = ui.input(|input| input.time) as f32;
-    let start = time * 6.0;
+    // One turn per second.
+    let start = phase(ui, 1.0) * std::f32::consts::TAU;
     let radius = rect.width() / 2.0 - 1.0;
     let points: Vec<_> = (0..=20)
         .map(|i| {
@@ -246,7 +269,7 @@ pub fn spinner(ui: &Ui, rect: Rect, color: Color32) {
         .collect();
     ui.painter()
         .add(egui::Shape::line(points, Stroke::new(1.5, color)));
-    ui.ctx().request_repaint();
+    ui.ctx().request_repaint_after(ANIMATION_FRAME);
 }
 
 /// What a transport button controls.
@@ -312,11 +335,17 @@ impl Widget for TransportButton {
                 Sense::hover()
             },
         );
-        let action = match (self.transport, self.state) {
-            (Transport::Record, TransportState::Running(_)) => "Stop recording",
-            (Transport::Record, _) => "Start recording",
-            (Transport::Live, TransportState::Running(_)) => "End the stream",
-            (Transport::Live, _) => "Go live",
+        // Starting includes reconnecting: the output is active, so the
+        // action is to stop it.
+        let active = matches!(
+            self.state,
+            TransportState::Running(_) | TransportState::Starting
+        );
+        let action = match (self.transport, active) {
+            (Transport::Record, true) => "Stop recording",
+            (Transport::Record, false) => "Start recording",
+            (Transport::Live, true) => "End the stream",
+            (Transport::Live, false) => "Go live",
         };
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, self.enabled, action));
         if !ui.is_rect_visible(rect) {
@@ -341,10 +370,11 @@ impl Widget for TransportButton {
                 None,
             ),
             TransportState::Starting => {
-                let time = ui.input(|input| input.time) as f32;
-                let pulse =
-                    0.55 + 0.45 * (time * std::f32::consts::TAU / motion::PULSE).cos().abs();
-                ui.ctx().request_repaint();
+                // One slow breath per period: bright, dim, bright.
+                let wave =
+                    0.5 + 0.5 * (phase(ui, f64::from(motion::PULSE)) * std::f32::consts::TAU).cos();
+                let pulse = 0.55 + 0.45 * wave;
+                ui.ctx().request_repaint_after(ANIMATION_FRAME);
                 (
                     color::BG_RAISED,
                     Stroke::new(size::STROKE, color::STATE_WARN),
@@ -380,6 +410,21 @@ impl Widget for TransportButton {
                 None,
             ),
         };
+        // Disabled (e.g. while a stop is in flight) dims every state, so it
+        // never looks clickable.
+        let dim = |color: Color32| {
+            if self.enabled {
+                color
+            } else {
+                color.gamma_multiply(0.45)
+            }
+        };
+        let (fill, stroke, fg, icon_color) = (
+            dim(fill),
+            Stroke::new(stroke.width, dim(stroke.color)),
+            dim(fg),
+            dim(icon_color),
+        );
         painter.rect(rect, radius, fill, stroke, StrokeKind::Inside);
         let icon_box = icon_rect(pos2(rect.left() + 18.0, rect.center().y), size::ICON);
         if self.state == TransportState::Failed {
@@ -399,11 +444,11 @@ impl Widget for TransportButton {
             _ => status.map(|text| (text.to_owned(), TextRole::Meta)),
         };
         if let Some((text, role)) = trailing {
-            let color = if matches!(self.state, TransportState::Running(_)) {
+            let color = dim(if matches!(self.state, TransportState::Running(_)) {
                 Color32::WHITE
             } else {
                 color::TEXT_SECONDARY
-            };
+            });
             painter.text(
                 pos2(rect.right() - 10.0, rect.center().y),
                 Align2::RIGHT_CENTER,
@@ -412,7 +457,7 @@ impl Widget for TransportButton {
                 color,
             );
         }
-        if state == VisualState::Focused {
+        if shows_focus(self.forced, &response) {
             focus_ring(painter, rect, size::RADIUS_CONTROL);
         }
         response
@@ -576,36 +621,101 @@ pub fn meter_scale(ui: &mut Ui, height: f32) -> Response {
     response
 }
 
-/// A vertical gain fader from `range` (dB) with a unity mark. The returned
-/// response is dragged or changed like a slider's; callers commit when a
-/// drag ends.
+/// Gain change per arrow key or assistive-technology step, in dB.
+pub const FADER_STEP_DB: f32 = 0.5;
+
+/// A vertical gain fader over `range` (dB) with a unity mark; `label`
+/// names it for assistive technology (e.g. the channel's name).
+///
+/// - **Pointer:** dragging moves the fader from where it was grabbed; a
+///   plain click changes nothing, so touching a live fader never jumps it.
+///   Grabbing the track off the thumb moves the thumb there. Near 0 dB a
+///   drag snaps to unity, like the detent of a physical fader.
+/// - **Keyboard:** with focus, Up and Down change it by [`FADER_STEP_DB`];
+///   AccessKit's increment, decrement and set-value do the same.
+///
+/// The response is changed whenever the value is; callers commit when a
+/// drag ends, or at once for keyboard changes, as with egui's sliders. A
+/// value outside `range` (set elsewhere) is drawn at the nearest end.
 pub fn fader(
     ui: &mut Ui,
     height: f32,
     gain_db: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    label: &str,
 ) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(24.0, height), Sense::click_and_drag());
     let (min, max) = (*range.start(), *range.end());
     let track = Rect::from_center_size(rect.center(), vec2(4.0, height - 12.0));
-    let to_y = |db: f32| track.bottom() - (db - min) / (max - min) * track.height();
-    if let Some(pointer) = response.interact_pointer_pos()
-        && (response.dragged() || response.clicked())
+    let to_y = |db: f32| track.bottom() - (db.clamp(min, max) - min) / (max - min) * track.height();
+    let from_y =
+        |y: f32| min + ((track.bottom() - y) / track.height()).clamp(0.0, 1.0) * (max - min);
+    let mut value = None;
+
+    // Where on the thumb the drag began, kept for the drag's duration.
+    let grab_id = response.id.with("grab");
+    if response.drag_started()
+        && let Some(pointer) = response.interact_pointer_pos()
     {
-        let fraction = ((track.bottom() - pointer.y) / track.height()).clamp(0.0, 1.0);
-        let value = min + fraction * (max - min);
-        // Snap to unity near 0 dB, as a physical fader detents.
-        let value = if value.abs() < 0.6 {
+        let offset = pointer.y - to_y(*gain_db);
+        let on_thumb = offset.abs() <= 6.0;
+        ui.data_mut(|data| data.insert_temp(grab_id, if on_thumb { offset } else { 0.0 }));
+    }
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let offset: f32 = ui.data(|data| data.get_temp(grab_id)).unwrap_or(0.0);
+        let dragged = from_y(pointer.y - offset);
+        value = Some(if dragged.abs() < 0.6 {
             0.0
         } else {
-            (value * 10.0).round() / 10.0
-        };
-        if value != *gain_db {
-            *gain_db = value;
-            response.mark_changed();
-        }
+            (dragged * 10.0).round() / 10.0
+        });
     }
-    response.widget_info(|| WidgetInfo::slider(true, f64::from(*gain_db), "gain"));
+
+    let mut steps = 0i32;
+    if response.has_focus() {
+        ui.input(|input| {
+            steps += input.num_presses(egui::Key::ArrowUp) as i32;
+            steps -= input.num_presses(egui::Key::ArrowDown) as i32;
+        });
+    }
+    ui.input(|input| {
+        use egui::accesskit::{Action, ActionData};
+        steps += input.num_accesskit_action_requests(response.id, Action::Increment) as i32;
+        steps -= input.num_accesskit_action_requests(response.id, Action::Decrement) as i32;
+        for request in input.accesskit_action_requests(response.id, Action::SetValue) {
+            if let Some(ActionData::NumericValue(target)) = request.data {
+                value = Some(target as f32);
+            }
+        }
+    });
+    if steps != 0 {
+        value = Some(*gain_db + steps as f32 * FADER_STEP_DB);
+    }
+    if let Some(value) = value.map(|value| value.clamp(min, max))
+        && value != *gain_db
+    {
+        *gain_db = value;
+        response.mark_changed();
+    }
+
+    response.widget_info(|| WidgetInfo::slider(true, f64::from(*gain_db), label));
+    let current = *gain_db;
+    ui.ctx().accesskit_node_builder(response.id, |builder| {
+        use egui::accesskit::Action;
+        builder.set_min_numeric_value(f64::from(min));
+        builder.set_max_numeric_value(f64::from(max));
+        builder.set_numeric_value_step(f64::from(FADER_STEP_DB));
+        builder.add_action(Action::SetValue);
+        if current < max {
+            builder.add_action(Action::Increment);
+        }
+        if current > min {
+            builder.add_action(Action::Decrement);
+        }
+    });
+
     let painter = ui.painter();
     painter.rect_filled(track, 0.0, color::BG_INSET);
     let unity = to_y(0.0);
@@ -649,16 +759,26 @@ pub fn fader(
     response
 }
 
+/// The tracking of section labels (`TextRole::Section`).
+const SECTION_TRACKING: f32 = 0.6;
+
 /// A dock or section heading: the label, an optional count, and room for
 /// actions on the right (returned rect).
 pub fn section_header(ui: &mut Ui, label: &str, count: Option<usize>) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
     let painter = ui.painter();
-    let galley = painter.layout_no_wrap(
-        label.to_uppercase(),
-        TextRole::Section.font(),
-        TextRole::Section.color(),
+    let mut job = LayoutJob::default();
+    job.append(
+        &label.to_uppercase(),
+        0.0,
+        egui::TextFormat {
+            font_id: TextRole::Section.font(),
+            color: TextRole::Section.color(),
+            extra_letter_spacing: SECTION_TRACKING,
+            ..Default::default()
+        },
     );
+    let galley = painter.layout_job(job);
     let text_pos = pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
     let label_width = galley.size().x;
     painter.galley(text_pos, galley, TextRole::Section.color());
@@ -767,13 +887,6 @@ impl Widget for ListRow<'_> {
                 color::TEXT_TERTIARY
             },
         );
-        painter.text(
-            pos2(rect.left() + 30.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            self.label,
-            TextRole::Body.font(),
-            text,
-        );
         let mut right = rect.right() - size::SPACE_8;
         if self.program {
             let galley = painter.layout_no_wrap(
@@ -792,15 +905,29 @@ impl Widget for ListRow<'_> {
             right -= 10.0;
         }
         if let Some(meta) = self.meta {
-            painter.text(
+            let meta = painter.text(
                 pos2(right, rect.center().y),
                 Align2::RIGHT_CENTER,
                 meta,
                 TextRole::Meta.font(),
                 color::TEXT_TERTIARY,
             );
+            right = meta.left() - size::SPACE_8;
         }
-        if state == VisualState::Focused {
+        // The name gets what is left, cut with an ellipsis.
+        let left = rect.left() + 30.0;
+        let mut job = LayoutJob::single_section(
+            self.label.to_owned(),
+            egui::TextFormat::simple(TextRole::Body.font(), text),
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width((right - left).max(0.0));
+        let galley = painter.layout_job(job);
+        painter.galley(
+            pos2(left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text,
+        );
+        if shows_focus(self.forced, &response) {
             painter.rect_stroke(
                 rect.shrink(1.0),
                 0.0,

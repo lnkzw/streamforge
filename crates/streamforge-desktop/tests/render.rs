@@ -321,6 +321,15 @@ fn specimen(ui: &mut egui::Ui) {
                 );
                 ui.add(ListRow::new(Icon::Scene, "Be right back").forced(VisualState::Hovered));
                 ui.add(ListRow::new(Icon::Scene, "Starting soon").meta("4 sources"));
+                // In a 220 px dock, as at small window sizes: the name is cut.
+                let (dock, _) = ui.allocate_exact_size(vec2(220.0, 26.0), egui::Sense::hover());
+                ui.scope_builder(egui::UiBuilder::new().max_rect(dock), |ui| {
+                    ui.add(
+                        ListRow::new(Icon::Scene, "Interview with a guest whose name is long")
+                            .meta("12 sources")
+                            .program(true),
+                    );
+                });
                 ui.add_space(8.0);
                 widgets::section_header(ui, "Sources", Some(3));
                 ui.add(
@@ -355,7 +364,7 @@ fn specimen(ui: &mut egui::Ui) {
                                     peak - 1.0,
                                     clipped,
                                 );
-                                widgets::fader(ui, height, &mut gain, -60.0..=12.0);
+                                widgets::fader(ui, height, &mut gain, -60.0..=12.0, "channel");
                             });
                             ui.label(
                                 TextRole::Numeric

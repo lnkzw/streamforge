@@ -1,6 +1,6 @@
 # StreamForge design system: "Control Room"
 
-The visual direction and the reusable rules for the desktop (M11). Tokens and components live in code (`crates/streamforge-desktop/src/ui/`). This document says why they are what they are, and views follow it instead of styling themselves.
+The visual direction and the reusable rules for the desktop (roadmap M12). Tokens and components live in code (`crates/streamforge-desktop/src/ui/`). This document says why they are what they are, and views follow it instead of styling themselves.
 
 ## Direction
 

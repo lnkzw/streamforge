@@ -51,7 +51,7 @@
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
-| `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, egui panels | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
+| `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, egui panels; the "Control Room" design system in `ui` (tokens, bundled IBM Plex fonts, painted icons, components; ADR 0016) | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
 | `streamforge-bench` | bin | Measurement harness (M10 step 7): records and streams to a local ingest (a child process) for a fixed time, reports render, drop and CPU figures | `command-api`, `engine`, `rtmp-test-server` (`libc` / `windows-sys` for process CPU time) |
 | `streamforge-mcp` | bin + lib | MCP server on stdio (ADR 0008): tools from the registry with generated schemas, an access policy chosen at startup, streaming only to a configured target | `command-api`, `encoder-api`, `engine`, `capture-platform` (`rmcp`, `tokio`) |
 

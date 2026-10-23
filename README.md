@@ -80,7 +80,7 @@ StreamForge is not a replacement for OBS yet.
 
 ## Licensing
 
-The StreamForge source code is licensed under either of the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms.
+The StreamForge source code is licensed under either of the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1 (`crates/streamforge-desktop/assets/fonts`).
 
 Builds link the system FFmpeg libraries dynamically, so a binary is also subject to the license of the FFmpeg build it links. With libx264 (`--enable-gpl`), as in most distribution packages, that is the GPL. Anyone distributing binaries must comply with it (ADR 0005).
 

@@ -26,6 +26,8 @@ for bin in "${bins[@]}"; do
   install -m 0755 "target/release/$bin" "$out/bin/"
 done
 cp LICENSE-MIT LICENSE-APACHE README.md packaging/linux/INSTALL.md "$out/"
+# The desktop binary embeds IBM Plex, whose licence must travel with it.
+cp crates/streamforge-desktop/assets/fonts/OFL.txt "$out/LICENSE-OFL-IBM-Plex.txt"
 
 # Every library the binaries link must be found here.
 missing=$(ldd "$out"/bin/* | grep 'not found' || true)

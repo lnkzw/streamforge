@@ -75,18 +75,15 @@ impl MixerConfig {
     /// `inputs` straight into the program bus, as a plain mixer.
     pub fn plain(
         inputs: Vec<MixerInput>,
-        program_gain_db: f32,
+        program: BusConfig,
         expected_duration: Duration,
         sink: Option<Box<dyn BlockSink>>,
     ) -> Self {
-        let graph = GraphConfig::plain(
-            inputs.iter().map(|input| input.channel).collect(),
-            program_gain_db,
-        );
+        let graph = GraphConfig::plain(inputs.iter().map(|input| input.channel).collect(), 0.0);
         Self {
             inputs,
             aux_buses: Vec::new(),
-            program: graph.program,
+            program,
             sends: graph.sends,
             expected_duration,
             sink,
@@ -787,7 +784,7 @@ mod tests {
                     },
                 },
             ],
-            0.0,
+            BusConfig::UNITY,
             Duration::from_secs(1),
             None,
         ))
@@ -841,7 +838,7 @@ mod tests {
                 source: InputSource::Tone(Tone::new(1000.0, -6.0, RATE)),
                 channel: unity(),
             }],
-            0.0,
+            BusConfig::UNITY,
             Duration::from_secs(1),
             None,
         ))
@@ -883,7 +880,7 @@ mod tests {
                 source: InputSource::Tone(Tone::new(440.0, -6.0, RATE)),
                 channel: unity(),
             }],
-            0.0,
+            BusConfig::UNITY,
             Duration::from_secs(1),
             Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
         ))
@@ -906,7 +903,7 @@ mod tests {
                 source: InputSource::Live(Arc::new(AudioRing::new(1, 100))),
                 channel: unity(),
             }],
-            0.0,
+            BusConfig::UNITY,
             Duration::from_secs(1),
             None,
         ));
@@ -930,7 +927,7 @@ mod tests {
                     channel: unity(),
                 },
             ],
-            0.0,
+            BusConfig::UNITY,
             Duration::from_secs(1),
             Some(Box::new(RecordingSink(Arc::clone(&blocks)))),
         ))

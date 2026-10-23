@@ -101,7 +101,7 @@ impl Engine {
         if let Some(version) = loaded.migrated_from {
             warnings.push(format!(
                 "the file has schema version {version} and was migrated: its audio inputs and \
-                 tones became channels with new ids; save it to write version {}",
+                 tones became channels (`ch_input_1`, `ch_tone_1`, …); save it to write version {}",
                 project_file::SCHEMA_VERSION
             ));
         }

@@ -7,10 +7,12 @@
 
 mod audio;
 mod composite;
+mod ids;
 mod mix;
 mod outputs;
 mod pipeline;
 mod project;
+mod refs;
 mod scenes;
 mod studio;
 mod thread;

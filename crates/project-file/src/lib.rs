@@ -111,8 +111,8 @@ struct FileScene {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileAudio {
-    channels: Vec<Map<String, Value>>,
-    program: Map<String, Value>,
+    channels: Vec<Value>,
+    program: Value,
 }
 
 /// Every field explicit.
@@ -122,10 +122,20 @@ struct FileAudio {
 struct FileChannel {
     id: String,
     name: String,
-    input: Value,
+    input: FileInput,
     gain_db: f32,
     mute: bool,
     balance: f32,
+}
+
+/// Every field explicit, except that a device channel's `device` may be
+/// left out (or `null`) for the system default input.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+enum FileInput {
+    Device { device: Option<String> },
+    Tone { frequency_hz: f64, level_dbfs: f64 },
 }
 
 #[derive(Deserialize)]
@@ -388,7 +398,7 @@ fn source(
 /// Version 2's audio: each channel an id and what `add_channel` accepts,
 /// the program bus what `update_bus` accepts for it.
 fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
-    let audio: FileAudio = structure("audio", audio).map_err(|found| vec![found])?;
+    let audio: FileAudio = structure("audio", &audio).map_err(|found| vec![found])?;
     let mut problems = Vec::new();
     if audio.channels.len() > MAX_CHANNELS {
         problems.push(problem(
@@ -402,12 +412,15 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
     let mut channels = Vec::with_capacity(audio.channels.len());
-    for (index, mut object) in audio.channels.into_iter().enumerate() {
+    for (index, value) in audio.channels.into_iter().enumerate() {
         let at = format!("audio.channels[{index}]");
-        if let Err(found) = structure::<FileChannel>(&at, Value::Object(object.clone())) {
+        if let Err(found) = structure::<FileChannel>(&at, &value) {
             problems.push(found);
             continue;
         }
+        let Value::Object(mut object) = value else {
+            unreachable!("the structure is an object");
+        };
         let Some(Value::String(id)) = object.remove("id") else {
             unreachable!("the structure has a string id");
         };
@@ -442,28 +455,29 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
             balance: request.balance,
         });
     }
-    let program =
-        match structure::<FileProgram>("audio.program", Value::Object(audio.program.clone())) {
-            Ok(_) => {
-                let mut params = audio.program;
-                params.insert("id".to_owned(), json!(PROGRAM_BUS_ID));
-                match Command::decode("update_bus", Some(&Value::Object(params))) {
-                    Ok(Command::UpdateBus(request)) => Some(ProgramBusSpec {
-                        gain_db: request.gain_db.unwrap_or(0.0),
-                        muted: request.muted.unwrap_or(false),
-                    }),
-                    Ok(_) => unreachable!("update_bus decodes to UpdateBus"),
-                    Err(error) => {
-                        problems.push(problem("audio.program", error.message));
-                        None
-                    }
+    let program = match structure::<FileProgram>("audio.program", &audio.program) {
+        Ok(_) => {
+            let Value::Object(mut params) = audio.program else {
+                unreachable!("the structure is an object");
+            };
+            params.insert("id".to_owned(), json!(PROGRAM_BUS_ID));
+            match Command::decode("update_bus", Some(&Value::Object(params))) {
+                Ok(Command::UpdateBus(request)) => Some(ProgramBusSpec {
+                    gain_db: request.gain_db.unwrap_or(0.0),
+                    muted: request.muted.unwrap_or(false),
+                }),
+                Ok(_) => unreachable!("update_bus decodes to UpdateBus"),
+                Err(error) => {
+                    problems.push(problem("audio.program", error.message));
+                    None
                 }
             }
-            Err(found) => {
-                problems.push(found);
-                None
-            }
-        };
+        }
+        Err(found) => {
+            problems.push(found);
+            None
+        }
+    };
     match program {
         Some(program) if problems.is_empty() => Ok(AudioGraphSpec { channels, program }),
         _ => Err(problems),
@@ -471,7 +485,7 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
 }
 
 /// `value` as `T`, or a structure problem with its path below `at`.
-pub(crate) fn structure<T: DeserializeOwned>(at: &str, value: Value) -> Result<T, ProjectProblem> {
+pub(crate) fn structure<T: DeserializeOwned>(at: &str, value: &Value) -> Result<T, ProjectProblem> {
     serde_path_to_error::deserialize(value).map_err(|error| {
         let path = error.path().to_string();
         let path = if path == "." {

@@ -241,6 +241,31 @@ fn structure_errors_name_their_path() {
     let mut value = file();
     value["audio"]["program"]["solo"] = json!(true);
     assert_eq!(only(&value, "unknown field `solo`"), "audio.program.solo");
+    // Every input field is given too, but a device may be left out (the
+    // default input).
+    let mut value = file();
+    value["audio"]["channels"][1]["input"]
+        .as_object_mut()
+        .expect("input")
+        .remove("level_dbfs");
+    assert_eq!(
+        only(&value, "missing field `level_dbfs`"),
+        "audio.channels[1].input"
+    );
+    let mut value = file();
+    value["audio"]["channels"][1]["input"]["kind"] = json!("file");
+    assert_eq!(
+        only(&value, "unknown variant"),
+        "audio.channels[1].input.kind"
+    );
+    let mut value = file();
+    value["audio"]["channels"][0]["input"] = json!({"kind": "device"});
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    let loaded = parse(&bytes, CANVAS).expect("valid");
+    assert_eq!(
+        loaded.project.audio.channels[0].input,
+        ChannelInput::Device { device: None }
+    );
     let mut value = file();
     value["scenes"][0]
         .as_object_mut()
@@ -425,21 +450,17 @@ fn a_version_1_file_is_migrated() {
     let bytes = serde_json::to_vec(&v1_file()).expect("bytes");
     let loaded = parse(&bytes, CANVAS).expect("valid");
     assert_eq!(loaded.migrated_from, Some(1));
+    // Ids and names from the position, everything else as version 1 had it.
     let mut expected = project().audio;
+    expected.channels[0].id = "ch_input_1".to_owned();
     expected.channels[0].name = "Input 1".to_owned();
     expected.channels[0].balance = 0.0;
+    expected.channels[1].id = "ch_tone_1".to_owned();
     expected.channels[1].name = "Tone 1".to_owned();
-    let audio = loaded.project.audio;
-    // Fresh ids, everything else as version 1 had it.
-    for channel in &audio.channels {
-        assert!(channel.id.starts_with(CHANNEL_ID_PREFIX), "{}", channel.id);
-    }
-    assert_ne!(audio.channels[0].id, audio.channels[1].id);
-    for (found, wanted) in audio.channels.iter().zip(&mut expected.channels) {
-        wanted.id = found.id.clone();
-    }
-    assert_eq!(audio, expected);
+    assert_eq!(loaded.project.audio, expected);
     assert_eq!(loaded.project.scenes, project().scenes);
+    // The same ids every time, until the file is saved as version 2.
+    assert_eq!(parse(&bytes, CANVAS), Ok(loaded));
 }
 
 #[test]

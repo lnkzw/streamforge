@@ -11,7 +11,6 @@ mod audio;
 mod composite;
 mod error;
 mod health;
-mod ids;
 mod mix;
 mod outputs;
 mod project;
@@ -28,7 +27,6 @@ pub use audio::{
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
-pub use ids::new_id;
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     MediaSources, PipelineReport, RecordingReport, RecordingRequest, RecordingStarted,
@@ -38,8 +36,8 @@ pub use project::{
     ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
 };
 pub use registry::{
-    CommandAccess, CommandDescriptor, CommandList, NAME_RULE, decode_streaming_to, is_valid_id,
-    is_valid_name, params_schema, registry,
+    CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
+    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, registry,
 };
 pub use scenes::{
     AddSourceRequest, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, PreviewState,

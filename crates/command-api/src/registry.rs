@@ -188,7 +188,7 @@ const START_RECORDING: CommandDescriptor = CommandDescriptor {
               output directory, never overwritten); video_encoder (auto: hardware if one works \
               here, else software; software; hardware); optional sources (screen, source_id, \
               source_types, cursor, inputs, tones, master_gain_db) only while no preview or \
-              output runs: they replace the configured audio (set_audio_sources, which may \
+              output runs: they replace the configured channels (see get_mixer; they may \
               include microphones) for this run and add a screen layer. Returns immediately with \
               the encoder in use; recording continues until stop_recording.",
     access: CommandAccess::Sensitive,
@@ -669,7 +669,10 @@ struct ToneParams {
 }
 
 const DEFAULT_TONE_LEVEL_DBFS: f64 = -12.0;
-const DEFAULT_TONE_HZ: f64 = 1000.0;
+/// The test tone outputs use when nothing else is configured: 1 kHz at
+/// −20 dBFS, quiet but audibly alive.
+pub const DEFAULT_TONE_HZ: f64 = 1000.0;
+pub const DEFAULT_OUTPUT_TONE_DBFS: f64 = -20.0;
 
 fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest, CommandError> {
     let mut params: MixProbeParams = decode_params(command, params)?;
@@ -785,8 +788,6 @@ struct SourceParams {
     tones: Option<Vec<ToneParams>>,
     master_gain_db: Option<f32>,
 }
-
-const DEFAULT_OUTPUT_TONE_DBFS: f64 = -20.0;
 
 /// `None` if no source field is present: the output joins the running
 /// pipeline, or the engine starts one with its configured channels.
@@ -1614,21 +1615,35 @@ fn decode_add_channel(
     })
 }
 
-/// A channel named by `id`, or by `name`, or both.
-fn channel_ref(
+/// Something named by `id` (with `prefix`), by `name`, or by both.
+fn named_ref(
     command: &str,
+    what: &str,
+    prefix: &str,
     id: Option<String>,
     name: Option<String>,
-) -> Result<ChannelRef, CommandError> {
+) -> Result<(Option<String>, Option<String>), CommandError> {
     let id = id
-        .map(|id| valid_id(command, "id", CHANNEL_ID_PREFIX, id))
+        .map(|id| valid_id(command, "id", prefix, id))
         .transpose()?;
     let name = name
         .map(|name| valid_name(command, "name", name))
         .transpose()?;
     if id.is_none() && name.is_none() {
-        return Err(invalid_params(command, "give the channel's `id` or `name`"));
+        return Err(invalid_params(
+            command,
+            format!("give the {what}'s `id` or `name`"),
+        ));
     }
+    Ok((id, name))
+}
+
+fn channel_ref(
+    command: &str,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<ChannelRef, CommandError> {
+    let (id, name) = named_ref(command, "channel", CHANNEL_ID_PREFIX, id, name)?;
     Ok(ChannelRef { id, name })
 }
 
@@ -1732,17 +1747,7 @@ fn decode_update_bus(
     if params.gain_db.is_none() && params.mute.is_none() {
         return Err(invalid_params(command, "give `gain_db`, `mute` or both"));
     }
-    let id = params
-        .id
-        .map(|id| valid_id(command, "id", BUS_ID_PREFIX, id))
-        .transpose()?;
-    let name = params
-        .name
-        .map(|name| valid_name(command, "name", name))
-        .transpose()?;
-    if id.is_none() && name.is_none() {
-        return Err(invalid_params(command, "give the bus's `id` or `name`"));
-    }
+    let (id, name) = named_ref(command, "bus", BUS_ID_PREFIX, params.id, params.name)?;
     Ok(UpdateBusRequest {
         bus: BusRef { id, name },
         gain_db: params

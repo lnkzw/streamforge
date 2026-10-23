@@ -5,12 +5,11 @@
 //! gone, so its rules live on here, with its limits as they were, and do not
 //! follow later changes to the commands. A version 1 file migrates on load:
 //! inputs, then tones, become channels sending to the program bus, and the
-//! master gain becomes the program bus fader.
+//! master gain becomes the program bus fader. Their ids come from their
+//! position (`ch_input_1`, `ch_tone_1`, …), so a version 1 file gives the
+//! same ids every time it is read, until it is saved as version 2.
 
-use command_api::{
-    AudioGraphSpec, CHANNEL_ID_PREFIX, ChannelInput, ChannelSpec, ProgramBusSpec, ProjectProblem,
-    new_id,
-};
+use command_api::{AudioGraphSpec, ChannelInput, ChannelSpec, ProgramBusSpec, ProjectProblem};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -50,7 +49,7 @@ struct Tone {
 
 /// Check version 1's `audio` and migrate it to the graph.
 pub(crate) fn migrate(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
-    let audio: Audio = structure("audio", audio).map_err(|found| vec![found])?;
+    let audio: Audio = structure("audio", &audio).map_err(|found| vec![found])?;
     let mut problems = Vec::new();
     let sources = audio.inputs.len() + audio.tones.len();
     if sources > MAX_SOURCES {
@@ -83,6 +82,7 @@ pub(crate) fn migrate(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem
         }
         gain(&mut problems, format!("{at}.gain_db"), input.gain_db);
         channels.push((
+            format!("ch_input_{}", index + 1),
             format!("Input {}", index + 1),
             ChannelInput::Device {
                 device: input.input,
@@ -112,6 +112,7 @@ pub(crate) fn migrate(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem
         }
         gain(&mut problems, format!("{at}.gain_db"), tone.gain_db);
         channels.push((
+            format!("ch_tone_{}", index + 1),
             format!("Tone {}", index + 1),
             ChannelInput::Tone {
                 frequency_hz: tone.frequency_hz,
@@ -124,23 +125,18 @@ pub(crate) fn migrate(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem
     if !problems.is_empty() {
         return Err(problems);
     }
-    let mut migrated: Vec<ChannelSpec> = Vec::with_capacity(channels.len());
-    for (name, input, gain_db, muted) in channels {
-        let id = new_id(CHANNEL_ID_PREFIX, |id| {
-            migrated.iter().any(|channel| channel.id == id)
-        })
-        .map_err(|error| vec![problem("audio", error.message)])?;
-        migrated.push(ChannelSpec {
-            id,
-            name,
-            input,
-            gain_db,
-            muted,
-            balance: 0.0,
-        });
-    }
     Ok(AudioGraphSpec {
-        channels: migrated,
+        channels: channels
+            .into_iter()
+            .map(|(id, name, input, gain_db, muted)| ChannelSpec {
+                id,
+                name,
+                input,
+                gain_db,
+                muted,
+                balance: 0.0,
+            })
+            .collect(),
         program: ProgramBusSpec {
             gain_db: audio.master_gain_db,
             muted: false,

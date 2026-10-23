@@ -2,13 +2,13 @@
 //! (about 62 bits), so ids from different projects do not collide when
 //! scenes or channels are copied between them.
 
-use crate::{CommandError, ErrorCode};
+use command_api::{CommandError, ErrorCode};
 
 const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 const LENGTH: usize = 12;
 
 /// A new id with `prefix` for which `taken` is false.
-pub fn new_id(prefix: &str, taken: impl Fn(&str) -> bool) -> Result<String, CommandError> {
+pub(crate) fn new_id(prefix: &str, taken: impl Fn(&str) -> bool) -> Result<String, CommandError> {
     loop {
         let id = random_id(prefix)?;
         if !taken(&id) {

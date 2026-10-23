@@ -258,7 +258,7 @@ Outputs share one **media pipeline**: the active scene (see below; by default th
 
 - **Start and stop:** the first output to start brings the pipeline up with its source parameters. The pipeline stops when the last output stops.
 - **Joining:** an output started while another runs joins the pipeline. It must not name sources (`invalid_state` otherwise).
-- **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured channels (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run: they become the run's own channels (`Input 1`, `Tone 1`, … with fresh ids, sending to the program bus), and `screen` adds a screen layer on top of the active scene. These per-run audio parameters go with the output profiles (ADR 0017, step 3).
+- **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured channels (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run: they become the run's own channels (`Input 1`, `Tone 1`, … with the ids `ch_input_1`, `ch_tone_1`, …, the same in every run; they send to the program bus), and `screen` adds a screen layer on top of the active scene. These per-run audio parameters go with the output profiles (ADR 0017, step 3).
 - **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
 - **Exclusive engine:** while any output is open, the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
 
@@ -433,9 +433,9 @@ The file (`schema_version` 2):
 ```
 
 - **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
-- **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given, checked by the `add_channel` rules; **`program`** is checked by the `update_bus` rules.
+- **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given (a device channel's `device` may be left out or `null` for the default input), checked by the `add_channel` rules; **`program`** is checked by the `update_bus` rules.
 - **Checked across the file:** scene, source and channel ids (form, and unique; source ids across all scenes), unique scene and channel names, unique source names within a scene, at most 16 scenes of 16 sources and 8 channels, `active_scene` naming a scene, and the canvas matching the engine's.
-- **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … with fresh ids, at centre balance; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
+- **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
 - **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
 

@@ -129,14 +129,13 @@ impl Pipeline {
             })),
         })
         .map_err(internal)?;
-        let mut mixer_config = MixerConfig::plain(
+        let mixer = MixerThread::spawn(MixerConfig::plain(
             mix::graph_inputs(&audio, &audio_streams),
-            audio.program.gain_db,
+            audio::program_config(&audio.program),
             EXPECTED_MAX_DURATION,
             Some(Box::new(AudioTap(Arc::clone(&fanout)))),
-        );
-        mixer_config.program = audio::program_config(&audio.program);
-        let mixer = MixerThread::spawn(mixer_config).map_err(internal)?;
+        ))
+        .map_err(internal)?;
         let control = mixer.control();
         Ok(Self {
             compositor,
@@ -477,10 +476,10 @@ impl Pipeline {
             None => (None, None),
         };
         retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
-        let devices: Vec<Option<String>> = audio::devices(&audio)
-            .map(|(_, device)| device.clone())
-            .collect();
-        let audio_captures = mix::stop_captures(&devices, audio_streams);
+        let audio_captures = mix::stop_captures(
+            audio::devices(&audio).map(|(_, device)| device),
+            audio_streams,
+        );
 
         if let Some(render) = &render
             && (render.late_frames > 0 || render.skipped_ticks > 0)

@@ -156,7 +156,7 @@ impl Engine {
                             &sources.inputs,
                             &sources.tones,
                             sources.master_gain_db,
-                        )?,
+                        ),
                         false,
                         sources.screen.as_ref(),
                     ),

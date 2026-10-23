@@ -9,17 +9,18 @@
 use audio_engine::{BusConfig, ChannelConfig, LevelReading};
 use command_api::{
     AddChannelRequest, AudioGraphSpec, BusRef, BusState, CHANNEL_ID_PREFIX, ChannelInput,
-    ChannelRef, ChannelSpec, ChannelState, CommandError, ErrorCode, LiveInputSpec, MAX_CHANNELS,
-    MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec, SetChannelInputRequest, ToneSpec,
-    UpdateBusRequest, UpdateChannelRequest, new_id,
+    ChannelRef, ChannelSpec, ChannelState, CommandError, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
+    ErrorCode, LiveInputSpec, MAX_CHANNELS, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME,
+    ProgramBusSpec, SetChannelInputRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
 };
 use serde_json::json;
 
-/// The built-in channel of a new engine: a quiet tone, so outputs started
-/// without configuring audio have an audibly alive track.
+use crate::ids::new_id;
+use crate::refs::{self, Kind};
+
+/// The built-in channel of a new engine: the default tone, so outputs
+/// started without configuring audio have an audibly alive track.
 pub(crate) const DEFAULT_CHANNEL_ID: &str = "ch_test_tone";
-const DEFAULT_TONE_HZ: f64 = 1000.0;
-const DEFAULT_TONE_DBFS: f64 = -20.0;
 
 pub(crate) fn default_graph() -> AudioGraphSpec {
     AudioGraphSpec {
@@ -28,7 +29,7 @@ pub(crate) fn default_graph() -> AudioGraphSpec {
             name: "Tone".to_owned(),
             input: ChannelInput::Tone {
                 frequency_hz: DEFAULT_TONE_HZ,
-                level_dbfs: DEFAULT_TONE_DBFS,
+                level_dbfs: DEFAULT_OUTPUT_TONE_DBFS,
             },
             gain_db: 0.0,
             muted: false,
@@ -41,58 +42,42 @@ pub(crate) fn default_graph() -> AudioGraphSpec {
     }
 }
 
-/// An output's own sources as the graph of its run: channels with fresh ids,
-/// live inputs first, named `Input 1`, `Tone 1` and so on.
+/// An output's own sources as the graph of its run: live inputs, then
+/// tones, as channels `Input 1`, `Tone 1`, … with ids from their position
+/// (`ch_input_1`, `ch_tone_1`), the same in every run with the same sources.
 pub(crate) fn from_sources(
     inputs: &[LiveInputSpec],
     tones: &[ToneSpec],
     master_gain_db: f32,
-) -> Result<AudioGraphSpec, CommandError> {
-    let mut channels: Vec<ChannelSpec> = Vec::with_capacity(inputs.len() + tones.len());
-    let specs = inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| {
-            (
-                format!("Input {}", index + 1),
-                ChannelInput::Device {
-                    device: input.input.clone(),
-                },
-                input.gain_db,
-                input.muted,
-            )
-        })
-        .chain(tones.iter().enumerate().map(|(index, tone)| {
-            (
-                format!("Tone {}", index + 1),
-                ChannelInput::Tone {
-                    frequency_hz: tone.frequency_hz,
-                    level_dbfs: tone.level_dbfs,
-                },
-                tone.gain_db,
-                tone.muted,
-            )
-        }));
-    for (name, input, gain_db, muted) in specs {
-        let id = new_id(CHANNEL_ID_PREFIX, |id| {
-            channels.iter().any(|channel| channel.id == id)
-        })?;
-        channels.push(ChannelSpec {
-            id,
-            name,
-            input,
-            gain_db,
-            muted,
-            balance: 0.0,
-        });
-    }
-    Ok(AudioGraphSpec {
-        channels,
+) -> AudioGraphSpec {
+    let inputs = inputs.iter().enumerate().map(|(index, input)| ChannelSpec {
+        id: format!("ch_input_{}", index + 1),
+        name: format!("Input {}", index + 1),
+        input: ChannelInput::Device {
+            device: input.input.clone(),
+        },
+        gain_db: input.gain_db,
+        muted: input.muted,
+        balance: 0.0,
+    });
+    let tones = tones.iter().enumerate().map(|(index, tone)| ChannelSpec {
+        id: format!("ch_tone_{}", index + 1),
+        name: format!("Tone {}", index + 1),
+        input: ChannelInput::Tone {
+            frequency_hz: tone.frequency_hz,
+            level_dbfs: tone.level_dbfs,
+        },
+        gain_db: tone.gain_db,
+        muted: tone.muted,
+        balance: 0.0,
+    });
+    AudioGraphSpec {
+        channels: inputs.chain(tones).collect(),
         program: ProgramBusSpec {
             gain_db: master_gain_db,
             muted: false,
         },
-    })
+    }
 }
 
 /// The position of the channel `channel` names: by id first; a name given
@@ -101,40 +86,16 @@ pub(crate) fn channel_index(
     graph: &AudioGraphSpec,
     channel: &ChannelRef,
 ) -> Result<usize, CommandError> {
-    match (&channel.id, &channel.name) {
-        (Some(id), name) => {
-            let index = graph
-                .channels
-                .iter()
-                .position(|channel| channel.id == *id)
-                .ok_or_else(|| {
-                    CommandError::new(ErrorCode::NotFound, format!("no channel with id `{id}`"))
-                        .with_details(json!({ "id": id }))
-                })?;
-            let found = &graph.channels[index].name;
-            if let Some(name) = name
-                && name != found
-            {
-                return Err(CommandError::new(
-                    ErrorCode::InvalidParams,
-                    format!("channel `{id}` is named `{found}`, not `{name}`"),
-                ));
-            }
-            Ok(index)
-        }
-        (None, Some(name)) => graph
-            .channels
-            .iter()
-            .position(|channel| channel.name == *name)
-            .ok_or_else(|| {
-                CommandError::new(ErrorCode::NotFound, format!("no channel named `{name}`"))
-                    .with_details(json!({ "name": name }))
-            }),
-        (None, None) => Err(CommandError::new(
-            ErrorCode::InvalidParams,
-            "no channel given: pass its `id` or `name`",
-        )),
-    }
+    refs::position(
+        &graph.channels,
+        channel.id.as_deref(),
+        channel.name.as_deref(),
+        &Kind {
+            what: "channel",
+            id_field: "id",
+        },
+        |channel| (&channel.id, &channel.name),
+    )
 }
 
 /// Add a channel at the end; returns its id.
@@ -399,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn an_outputs_own_sources_become_channels_with_fresh_ids() {
+    fn an_outputs_own_sources_become_channels_with_ids_from_their_position() {
         let graph = from_sources(
             &[LiveInputSpec {
                 input: Some("mic".to_owned()),
@@ -413,11 +374,16 @@ mod tests {
                 muted: false,
             }],
             -1.0,
-        )
-        .expect("graph");
-        let names: Vec<&str> = graph.channels.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["Input 1", "Tone 1"]);
-        assert_ne!(graph.channels[0].id, graph.channels[1].id);
+        );
+        let channels: Vec<(&str, &str)> = graph
+            .channels
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.as_str()))
+            .collect();
+        assert_eq!(
+            channels,
+            [("ch_input_1", "Input 1"), ("ch_tone_1", "Tone 1")]
+        );
         assert_eq!(
             graph.channels[0].input,
             ChannelInput::Device {

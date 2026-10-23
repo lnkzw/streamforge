@@ -10,8 +10,6 @@
 //! Channels and buses have stable ids like scenes (ADR 0014), and commands
 //! name them by id or by name.
 
-use std::fmt;
-
 use serde::Serialize;
 
 /// Most channels; the mixer's fixed capacity.
@@ -95,16 +93,6 @@ impl ChannelRef {
         Self {
             id: None,
             name: Some(name.into()),
-        }
-    }
-}
-
-impl fmt::Display for ChannelRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.id, &self.name) {
-            (Some(id), _) => write!(f, "`{id}`"),
-            (None, Some(name)) => write!(f, "`{name}`"),
-            (None, None) => f.write_str("(no channel given)"),
         }
     }
 }

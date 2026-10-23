@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use audio_engine::{
-    CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput, MixerThread,
-    RATE, Tone,
+    BusConfig, CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput,
+    MixerThread, RATE, Tone,
 };
 use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend};
 use command_api::{
@@ -33,7 +33,10 @@ pub(crate) fn probe(
 
     let mixer = MixerThread::spawn(MixerConfig::plain(
         inputs,
-        request.master_gain_db,
+        BusConfig {
+            gain_db: request.master_gain_db,
+            ..BusConfig::UNITY
+        },
         request.duration,
         None,
     ))
@@ -149,12 +152,12 @@ fn mixer_inputs(
     live.chain(generated).collect()
 }
 
-pub(crate) fn stop_captures(
-    devices: &[Option<String>],
+pub(crate) fn stop_captures<'a>(
+    devices: impl IntoIterator<Item = &'a Option<String>>,
     streams: Vec<Box<dyn AudioStream>>,
 ) -> Vec<CaptureOutcome> {
     devices
-        .iter()
+        .into_iter()
         .zip(streams)
         .map(|(device, stream)| match stream.stop() {
             Ok(report) => CaptureOutcome {

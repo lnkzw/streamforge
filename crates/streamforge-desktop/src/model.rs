@@ -407,6 +407,9 @@ impl Model {
                         encoder_label(&started.video_encoder)
                     ),
                 );
+                for warning in &started.warnings {
+                    self.push(Level::Warning, warning.clone());
+                }
                 self.recording = Some(started);
             }
             CommandOutput::RecordingReport(report) => {
@@ -435,6 +438,9 @@ impl Model {
                         encoder_label(&started.video_encoder)
                     ),
                 );
+                for warning in &started.warnings {
+                    self.push(Level::Warning, warning.clone());
+                }
                 self.streaming = Some(started);
             }
             CommandOutput::StreamingReport(report) => {

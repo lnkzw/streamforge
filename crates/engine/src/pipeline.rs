@@ -17,14 +17,16 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread};
-use capture_api::{AudioStream, CaptureBackend, CaptureState, ScreenSelection, VideoStream};
+use capture_api::{
+    AudioStream, CaptureBackend, CaptureErrorKind, CaptureState, ScreenSelection, VideoStream,
+};
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
     ErrorSummary, MixerState, PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest,
     SourceKind, SourceSpec, UpdateBusRequest, UpdateChannelRequest,
 };
 use encoder_ffmpeg::OutputInput;
-use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
+use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
 use video_compositor::{
     Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats, downscale,
 };
@@ -71,8 +73,71 @@ struct SceneCapture {
 /// A device channel's capture for one run.
 enum DeviceCapture {
     Running(Box<dyn AudioStream>),
-    /// It did not start; the channel is silent.
-    Failed(ErrorSummary),
+    /// The device was not found; the channel is silent for this run.
+    Missing(ErrorSummary),
+}
+
+impl DeviceCapture {
+    /// Start `device`'s capture. In the configured setup, a device that is
+    /// not found leaves its channel silent (ADR 0017): a missing
+    /// microphone must not keep a stream from starting. Every other error
+    /// (no permission, no audio server), and any error for an output's own
+    /// sources, which name their devices for this run, fails the start.
+    fn start(
+        capture: &mut dyn CaptureBackend,
+        device: &Option<String>,
+        from_setup: bool,
+    ) -> Result<Self, CommandError> {
+        match mix::start_device(capture, device) {
+            Ok(stream) => Ok(Self::Running(stream)),
+            Err(error) if from_setup && error.kind == CaptureErrorKind::NotFound => {
+                Ok(Self::Missing(ErrorSummary::from(error)))
+            }
+            Err(error) => Err(command_error(error)),
+        }
+    }
+
+    fn samples(&self) -> Option<Arc<AudioRing>> {
+        match self {
+            Self::Running(stream) => Some(stream.samples()),
+            Self::Missing(_) => None,
+        }
+    }
+
+    fn state(&self) -> CaptureState {
+        match self {
+            Self::Running(stream) => stream.state(),
+            Self::Missing(error) => CaptureState::Ended {
+                reason: format!("could not start: {}", error.message),
+            },
+        }
+    }
+
+    fn missing(&self) -> Option<&ErrorSummary> {
+        match self {
+            Self::Running(_) => None,
+            Self::Missing(error) => Some(error),
+        }
+    }
+
+    fn stop(self, device: &Option<String>) -> CaptureOutcome {
+        match self {
+            Self::Running(stream) => mix::stop_capture(device, stream),
+            Self::Missing(error) => CaptureOutcome {
+                input: device.clone(),
+                report: None,
+                error: Some(error),
+            },
+        }
+    }
+}
+
+/// `device`'s name in a message.
+fn device_label(device: &Option<String>) -> String {
+    device.as_deref().map_or_else(
+        || "the default input".to_owned(),
+        |name| format!("`{name}`"),
+    )
 }
 
 /// Field order is drop order: producers stop before the captures end.
@@ -112,15 +177,11 @@ impl Pipeline {
             None => None,
         };
         let scene_screens = start_screens(capture, scene, &[])?;
-        // A device that does not open leaves its channel silent instead of
-        // failing the start (ADR 0017); the start, get_mixer and get_health
-        // report it.
-        let audio_streams: Vec<DeviceCapture> = audio::devices(&audio)
-            .map(|(_, device)| match mix::start_device(capture, device) {
-                Ok(stream) => DeviceCapture::Running(stream),
-                Err(error) => DeviceCapture::Failed(ErrorSummary::from(error)),
-            })
-            .collect();
+        // On an error, the captures already started are dropped, which
+        // stops them.
+        let audio_streams = audio::devices(&audio)
+            .map(|(_, device)| DeviceCapture::start(capture, device, audio_from_setup))
+            .collect::<Result<Vec<_>, _>>()?;
         let fanout = Arc::new(Fanout::default());
         let mut cache = FrameCache::default();
         let update = scenes::build(
@@ -145,13 +206,7 @@ impl Pipeline {
         .map_err(internal)?;
         let (aux_buses, sends) = audio::mixer_routing(&audio);
         let mixer = MixerThread::spawn(MixerConfig {
-            inputs: mix::graph_inputs(
-                &audio,
-                audio_streams.iter().map(|capture| match capture {
-                    DeviceCapture::Running(stream) => Some(stream.samples()),
-                    DeviceCapture::Failed(_) => None,
-                }),
-            ),
+            inputs: mix::graph_inputs(&audio, audio_streams.iter().map(DeviceCapture::samples)),
             aux_buses,
             program: audio::program_config(&audio.program),
             sends,
@@ -373,12 +428,7 @@ impl Pipeline {
                     kind: CaptureKind::Audio,
                     id: Some(channel.id.clone()),
                     name: channel.name.clone(),
-                    state: match capture {
-                        DeviceCapture::Running(stream) => stream.state(),
-                        DeviceCapture::Failed(error) => CaptureState::Ended {
-                            reason: format!("could not start: {}", error.message),
-                        },
-                    },
+                    state: capture.state(),
                 });
         screens.chain(layer).chain(audio).collect()
     }
@@ -459,23 +509,19 @@ impl Pipeline {
     }
 
     /// One warning per device channel that is silent because its device
-    /// did not open.
+    /// was not found.
     pub fn audio_warnings(&self) -> Vec<String> {
         audio::devices(&self.audio)
             .zip(&self.audio_streams)
-            .filter_map(|((channel, device), capture)| match capture {
-                DeviceCapture::Running(_) => None,
-                DeviceCapture::Failed(error) => Some(format!(
-                    "channel `{}` is silent: {} could not be opened ({}); stop the outputs and \
-                     preview, then choose another input with set_channel_input or connect the \
-                     device",
+            .filter_map(|((channel, device), capture)| {
+                let error = capture.missing()?;
+                Some(format!(
+                    "channel `{}` is silent: {} was not found ({}); connect the device, or stop \
+                     the outputs and preview and choose another input with set_channel_input",
                     channel.name,
-                    device.as_deref().map_or_else(
-                        || "the default input".to_owned(),
-                        |name| format!("`{name}`")
-                    ),
+                    device_label(device),
                     error.message
-                )),
+                ))
             })
             .collect()
     }
@@ -537,17 +583,26 @@ impl Pipeline {
             None => (None, None),
         };
         retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
-        let audio_captures = audio::devices(&audio)
-            .zip(audio_streams)
-            .map(|((_, device), capture)| match capture {
-                DeviceCapture::Running(stream) => mix::stop_capture(device, stream),
-                DeviceCapture::Failed(error) => CaptureOutcome {
-                    input: device.clone(),
-                    report: None,
-                    error: Some(error),
-                },
-            })
-            .collect::<Vec<_>>();
+        // A missing device's channel was silent the whole run: say which.
+        let (mut silent, mut failed) = (Vec::new(), Vec::new());
+        let mut audio_captures = Vec::with_capacity(audio_streams.len());
+        for ((channel, device), capture) in audio::devices(&audio).zip(audio_streams) {
+            let missing = capture.missing().map(|error| {
+                format!(
+                    "channel `{}` was silent for the whole run: {} was not found ({})",
+                    channel.name,
+                    device_label(device),
+                    error.message
+                )
+            });
+            let outcome = capture.stop(device);
+            match (missing, &outcome.error) {
+                (Some(warning), _) => silent.push(warning),
+                (None, Some(error)) => failed.push(format!("capture failed: {}", error.message)),
+                (None, None) => {}
+            }
+            audio_captures.push(outcome);
+        }
 
         if let Some(render) = &render
             && (render.late_frames > 0 || render.skipped_ticks > 0)
@@ -560,7 +615,8 @@ impl Pipeline {
         if let Some(mix) = &mix {
             warnings.extend(mix::mix_warnings(mix));
         }
-        warnings.extend(mix::capture_warnings(&audio_captures));
+        warnings.extend(silent);
+        warnings.extend(failed);
         if let Some(error) = &screen_capture_error {
             warnings.push(format!("screen capture failed: {}", error.message));
         }

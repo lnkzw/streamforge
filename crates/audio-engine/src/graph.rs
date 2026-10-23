@@ -106,7 +106,7 @@ pub enum BusRef {
 impl BusRef {
     /// The bus's column in a send matrix with `aux_buses` aux buses: the
     /// program bus first, then the aux buses. `None` for an unknown bus.
-    pub(crate) fn column(self, aux_buses: usize) -> Option<usize> {
+    pub fn column(self, aux_buses: usize) -> Option<usize> {
         match self {
             Self::Program => Some(0),
             Self::Aux(aux) if aux < aux_buses => Some(aux + 1),
@@ -115,7 +115,7 @@ impl BusRef {
     }
 
     /// The bus in `column` (see [`BusRef::column`]).
-    pub(crate) fn from_column(column: usize) -> Self {
+    pub fn from_column(column: usize) -> Self {
         match column {
             0 => Self::Program,
             column => Self::Aux(column - 1),

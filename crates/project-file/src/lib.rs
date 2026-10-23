@@ -22,10 +22,10 @@ mod v1;
 use std::collections::HashSet;
 
 use command_api::{
-    AudioGraphSpec, CHANNEL_ID_PREFIX, ChannelSpec, Command, MAX_CHANNELS, MAX_ID_LEN,
-    MAX_SCENE_SOURCES, MAX_SCENES, NAME_RULE, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem,
-    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneSpec, SourceKind, SourceRect, SourceSpec, is_valid_id,
-    is_valid_name,
+    AudioGraphSpec, BUS_ID_PREFIX, BusSpec, ChannelInput, ChannelSpec, Command, MAX_SCENE_SOURCES,
+    MAX_SCENES, NAME_RULE, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem, SCENE_ID_PREFIX,
+    SOURCE_ID_PREFIX, SceneSpec, SendSpec, SendTap, SourceKind, SourceRect, SourceSpec, id_rule,
+    is_valid_id, is_valid_name,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -112,10 +112,14 @@ struct FileScene {
 #[serde(deny_unknown_fields)]
 struct FileAudio {
     channels: Vec<Value>,
+    /// Aux buses; absent: none.
+    #[serde(default)]
+    buses: Vec<Value>,
     program: Value,
 }
 
-/// Every field explicit.
+/// Every field explicit, except `sends`: a send that is left out is the
+/// default (on to the program bus, off to an aux bus).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)] // checked for its structure
@@ -126,6 +130,31 @@ struct FileChannel {
     gain_db: f32,
     mute: bool,
     balance: f32,
+    #[serde(default)]
+    sends: Vec<FileSend>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileSend {
+    bus: String,
+    enabled: bool,
+    level_db: f32,
+    tap: SendTap,
+}
+
+/// Every field explicit, except that `assign_db` may be left out (or
+/// `null`) for a separate mix.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileBus {
+    id: String,
+    name: String,
+    gain_db: f32,
+    mute: bool,
+    assign_db: Option<f32>,
 }
 
 /// Every field explicit, except that a device channel's `device` may be
@@ -395,57 +424,59 @@ fn source(
     })
 }
 
-/// Version 2's audio: each channel an id and what `add_channel` accepts,
-/// the program bus what `update_bus` accepts for it.
+/// Version 2's audio: each bus an id and what `add_bus` accepts, each
+/// channel an id and what `add_channel` accepts with its sends as
+/// `set_send` accepts them, the program bus what `update_bus` accepts.
+/// Then the rules across them, as the engine keeps them
+/// ([`AudioGraphSpec::problems`]); an entry that is wrong on its own keeps
+/// its place, id and name for that, so every problem is found at once.
 fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
     let audio: FileAudio = structure("audio", &audio).map_err(|found| vec![found])?;
     let mut problems = Vec::new();
-    if audio.channels.len() > MAX_CHANNELS {
-        problems.push(problem(
-            "audio.channels",
-            format!(
-                "at most {MAX_CHANNELS} channels, got {}",
-                audio.channels.len()
-            ),
-        ));
-    }
-    let mut ids = HashSet::new();
-    let mut names = HashSet::new();
+    // Entries without a readable id and name: the graph check skips them.
+    let mut unreadable = Vec::new();
+    let buses = buses(audio.buses, &mut problems, &mut unreadable);
     let mut channels = Vec::with_capacity(audio.channels.len());
     for (index, value) in audio.channels.into_iter().enumerate() {
         let at = format!("audio.channels[{index}]");
+        let mut placeholder = ChannelSpec {
+            id: String::new(),
+            name: format!("\u{0}{index}"),
+            input: ChannelInput::Device { device: None },
+            gain_db: 0.0,
+            muted: false,
+            balance: 0.0,
+            sends: default_sends(&buses),
+        };
         if let Err(found) = structure::<FileChannel>(&at, &value) {
             problems.push(found);
+            unreadable.push(format!("channels[{index}]"));
+            channels.push(placeholder);
             continue;
         }
         let Value::Object(mut object) = value else {
             unreachable!("the structure is an object");
         };
-        let Some(Value::String(id)) = object.remove("id") else {
-            unreachable!("the structure has a string id");
+        let (Some(Value::String(id)), Some(Value::String(name))) =
+            (object.remove("id"), object.get("name").cloned())
+        else {
+            unreachable!("the structure has a string id and name");
         };
-        if !is_valid_id(CHANNEL_ID_PREFIX, &id) {
-            problems.push(problem(&format!("{at}.id"), id_rule(CHANNEL_ID_PREFIX)));
-        } else if !ids.insert(id.clone()) {
-            problems.push(problem(
-                &format!("{at}.id"),
-                format!("channel id `{id}` is used twice"),
-            ));
-        }
+        let sends = match object.remove("sends") {
+            Some(Value::Array(sends)) => channel_sends(sends, &buses, &at, &mut problems),
+            _ => default_sends(&buses),
+        };
         let request = match Command::decode("add_channel", Some(&Value::Object(object))) {
             Ok(Command::AddChannel(request)) => request,
             Ok(_) => unreachable!("add_channel decodes to AddChannel"),
             Err(error) => {
                 problems.push(problem(&at, error.message));
+                placeholder.id = id;
+                placeholder.name = name;
+                channels.push(placeholder);
                 continue;
             }
         };
-        if !names.insert(request.name.clone()) {
-            problems.push(problem(
-                &format!("{at}.name"),
-                format!("channel name `{}` is used twice", request.name),
-            ));
-        }
         channels.push(ChannelSpec {
             id,
             name: request.name,
@@ -453,6 +484,7 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
             gain_db: request.gain_db,
             muted: request.muted,
             balance: request.balance,
+            sends,
         });
     }
     let program = match structure::<FileProgram>("audio.program", &audio.program) {
@@ -478,10 +510,152 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
             None
         }
     };
-    match program {
-        Some(program) if problems.is_empty() => Ok(AudioGraphSpec { channels, program }),
-        _ => Err(problems),
+    let graph = AudioGraphSpec {
+        channels,
+        buses,
+        program: program.unwrap_or(ProgramBusSpec {
+            gain_db: 0.0,
+            muted: false,
+        }),
+    };
+    problems.extend(
+        graph
+            .problems()
+            .into_iter()
+            .filter(|found| {
+                !unreadable.iter().any(|entry| {
+                    found
+                        .path
+                        .strip_prefix(entry.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+                })
+            })
+            .map(|found| problem(&format!("audio.{}", found.path), found.message)),
+    );
+    if problems.is_empty() {
+        Ok(graph)
+    } else {
+        Err(problems)
     }
+}
+
+/// The aux buses, in file order. A bus that is wrong on its own keeps its
+/// place, id and name (or is listed in `unreadable` without them).
+fn buses(
+    values: Vec<Value>,
+    problems: &mut Vec<ProjectProblem>,
+    unreadable: &mut Vec<String>,
+) -> Vec<BusSpec> {
+    let mut buses = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let at = format!("audio.buses[{index}]");
+        let mut placeholder = BusSpec {
+            id: value
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            name: format!("\u{0}{index}"),
+            gain_db: 0.0,
+            muted: false,
+            assign_db: None,
+        };
+        if let Err(found) = structure::<FileBus>(&at, &value) {
+            problems.push(found);
+            unreadable.push(format!("buses[{index}]"));
+            buses.push(placeholder);
+            continue;
+        }
+        let Value::Object(mut object) = value else {
+            unreachable!("the structure is an object");
+        };
+        let (Some(Value::String(id)), Some(Value::String(name))) =
+            (object.remove("id"), object.get("name").cloned())
+        else {
+            unreachable!("the structure has a string id and name");
+        };
+        let request = match Command::decode("add_bus", Some(&Value::Object(object))) {
+            Ok(Command::AddBus(request)) => request,
+            Ok(_) => unreachable!("add_bus decodes to AddBus"),
+            Err(error) => {
+                problems.push(problem(&at, error.message));
+                placeholder.id = id;
+                placeholder.name = name;
+                buses.push(placeholder);
+                continue;
+            }
+        };
+        buses.push(BusSpec {
+            id,
+            name: request.name,
+            gain_db: request.gain_db,
+            muted: request.muted,
+            assign_db: request.assign_db,
+        });
+    }
+    buses
+}
+
+/// A new channel's sends: on to program, off to every aux bus.
+fn default_sends(buses: &[BusSpec]) -> Vec<SendSpec> {
+    std::iter::once(SendSpec::program())
+        .chain(buses.iter().map(|bus| SendSpec::off(&bus.id)))
+        .collect()
+}
+
+/// A channel's sends, one per bus in bus order: the file's, or the
+/// default for a bus it leaves out (or gives wrongly, with a problem).
+fn channel_sends(
+    values: Vec<Value>,
+    buses: &[BusSpec],
+    at: &str,
+    problems: &mut Vec<ProjectProblem>,
+) -> Vec<SendSpec> {
+    let mut sends = default_sends(buses);
+    let mut given = vec![false; sends.len()];
+    for (index, value) in values.into_iter().enumerate() {
+        let at = format!("{at}.sends[{index}]");
+        let Value::Object(mut params) = value else {
+            unreachable!("the structure is an object");
+        };
+        let Some(Value::String(bus)) = params.remove("bus") else {
+            unreachable!("the structure has a string bus");
+        };
+        let Some(column) = sends.iter().position(|send| send.bus == bus) else {
+            problems.push(problem(
+                &format!("{at}.bus"),
+                format!("no bus has the id `{bus}`"),
+            ));
+            continue;
+        };
+        if given[column] {
+            problems.push(problem(
+                &format!("{at}.bus"),
+                format!("this channel's send to `{bus}` is given twice"),
+            ));
+            continue;
+        }
+        given[column] = true;
+        // Any valid ids will do: the decoder only checks their form.
+        params.insert("channel_id".to_owned(), json!("ch_file"));
+        params.insert(
+            "bus_id".to_owned(),
+            json!(BUS_ID_PREFIX.to_owned() + "file"),
+        );
+        match Command::decode("set_send", Some(&Value::Object(params))) {
+            Ok(Command::SetSend(request)) => {
+                sends[column] = SendSpec {
+                    bus,
+                    enabled: request.enabled.unwrap_or(false),
+                    level_db: request.level_db.unwrap_or(0.0),
+                    tap: request.tap.unwrap_or(SendTap::PostFader),
+                };
+            }
+            Ok(_) => unreachable!("set_send decodes to SetSend"),
+            Err(error) => problems.push(problem(&at, error.message)),
+        }
+    }
+    sends
 }
 
 /// `value` as `T`, or a structure problem with its path below `at`.
@@ -504,10 +678,6 @@ fn without_expected(message: String) -> String {
         Some(end) if message.contains("unknown field") => message[..end].to_owned(),
         _ => message,
     }
-}
-
-fn id_rule(prefix: &str) -> String {
-    format!("an id must be `{prefix}`, then `a-z`, `0-9` or `_` (at most {MAX_ID_LEN} bytes)")
 }
 
 pub(crate) fn problem(path: &str, message: String) -> ProjectProblem {

@@ -101,11 +101,14 @@ impl DesktopApp {
                 .max(METER_FLOOR_DB);
         };
         if let Some(mixer) = &self.model.mixer {
-            self.meters.resize(mixer.strips.len(), METER_FLOOR_DB);
-            for (meter, strip) in self.meters.iter_mut().zip(&mixer.strips) {
-                decay(meter, strip.peak_dbfs);
+            self.meters.resize(mixer.channels.len(), METER_FLOOR_DB);
+            for (meter, channel) in self.meters.iter_mut().zip(&mixer.channels) {
+                decay(meter, channel.peak_dbfs);
             }
-            decay(&mut self.master_meter, mixer.master_peak_dbfs);
+            decay(
+                &mut self.master_meter,
+                mixer.buses.first().and_then(|program| program.peak_dbfs),
+            );
         }
     }
 
@@ -241,26 +244,30 @@ impl DesktopApp {
         if !mixer.running {
             ui.label(RichText::new("idle — levels show while previewing or live").weak());
         }
-        for (strip, meter) in mixer.strips.iter().zip(&self.meters) {
+        for (channel, meter) in mixer.channels.iter().zip(&self.meters) {
+            let channel = &channel.spec;
             ui.group(|ui| {
-                ui.label(&strip.name);
+                ui.label(&channel.name);
                 meter_bar(ui, *meter);
-                let mut gain = strip.gain_db;
-                let mut muted = strip.muted;
+                let mut gain = channel.gain_db;
+                let mut muted = channel.muted;
                 let gain_changed =
                     committed(&ui.add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB")));
                 let mute_changed = ui.checkbox(&mut muted, "Mute").changed();
                 if gain_changed || mute_changed {
-                    self.model.set_strip(strip.index, gain, muted);
+                    self.model.update_channel(&channel.id, gain, muted);
                 }
             });
         }
         ui.separator();
-        ui.label("Master");
+        let Some(program) = mixer.buses.first() else {
+            return;
+        };
+        ui.label(&program.name);
         meter_bar(ui, self.master_meter);
-        let mut master = mixer.master_gain_db;
-        if committed(&ui.add(egui::Slider::new(&mut master, -60.0..=12.0).suffix(" dB"))) {
-            self.model.set_master_gain(master);
+        let mut gain = program.gain_db;
+        if committed(&ui.add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB"))) {
+            self.model.update_bus(&program.id, gain);
         }
     }
 

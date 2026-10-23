@@ -69,7 +69,7 @@ impl Engine {
         }
         let bytes = project_file::read(dir, file_name)
             .map_err(|error| io_error(file_name, Access::Read, error))?;
-        let project = project_file::parse(&bytes, CANVAS).map_err(|invalid| {
+        let loaded = project_file::parse(&bytes, CANVAS).map_err(|invalid| {
             let first = match invalid.problems.first() {
                 Some(first) if first.path.is_empty() => first.message.clone(),
                 Some(first) => format!("{}: {}", first.path, first.message),
@@ -88,6 +88,7 @@ impl Engine {
                 "problems": invalid.problems,
             }))
         })?;
+        let project = loaded.project;
         let screens = project
             .scenes
             .iter()
@@ -97,6 +98,13 @@ impl Engine {
         self.scenes.restore((project.scenes, project.active));
         self.audio = project.audio;
         let mut warnings = Vec::new();
+        if let Some(version) = loaded.migrated_from {
+            warnings.push(format!(
+                "the file has schema version {version} and was migrated: its audio inputs and \
+                 tones became channels (`ch_input_1`, `ch_tone_1`, …); save it to write version {}",
+                project_file::SCHEMA_VERSION
+            ));
+        }
         if screens > 0 {
             warnings.push(format!(
                 "{screens} screen source(s) have no capture target (it is not saved): choose one \
@@ -119,14 +127,19 @@ impl Engine {
         let dir = self.project_dir()?;
         let bytes = project_file::read(dir, file_name)
             .map_err(|error| io_error(file_name, Access::Read, error))?;
-        let (schema_version, problems) = match project_file::parse(&bytes, CANVAS) {
-            Ok(_) => (Some(project_file::SCHEMA_VERSION), Vec::new()),
-            Err(invalid) => (invalid.schema_version, invalid.problems),
+        let (schema_version, migrated, problems) = match project_file::parse(&bytes, CANVAS) {
+            Ok(loaded) => (
+                Some(loaded.migrated_from.unwrap_or(project_file::SCHEMA_VERSION)),
+                loaded.migrated_from.is_some(),
+                Vec::new(),
+            ),
+            Err(invalid) => (invalid.schema_version, false, invalid.problems),
         };
         Ok(ProjectValidation {
             file_name: file_name.display().to_string(),
             valid: problems.is_empty(),
             schema_version,
+            migrates: migrated,
             problems,
         })
     }

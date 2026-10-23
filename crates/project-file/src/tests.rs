@@ -1,5 +1,5 @@
 use capture_api::{CursorMode, VideoSourceKind};
-use command_api::{LiveInputSpec, Rgba, ToneSpec};
+use command_api::{ChannelInput, Rgba};
 
 use super::*;
 
@@ -59,21 +59,57 @@ fn project() -> Project {
             },
         ],
         active: "scene_k3j9x2m4q8w1".to_owned(),
-        audio: AudioSetup {
-            inputs: vec![LiveInputSpec {
-                input: Some("alsa_input.usb-mic".to_owned()),
-                gain_db: -3.5,
-                muted: true,
-            }],
-            tones: vec![ToneSpec {
-                frequency_hz: 440.0,
-                level_dbfs: -20.0,
-                gain_db: 0.0,
+        audio: AudioGraphSpec {
+            channels: vec![
+                ChannelSpec {
+                    id: "ch_4k2m9x0q1w7e".to_owned(),
+                    name: "Mic".to_owned(),
+                    input: ChannelInput::Device {
+                        device: Some("alsa_input.usb-mic".to_owned()),
+                    },
+                    gain_db: -3.5,
+                    muted: true,
+                    balance: -0.25,
+                },
+                ChannelSpec {
+                    id: "ch_test_tone".to_owned(),
+                    name: "Tone".to_owned(),
+                    input: ChannelInput::Tone {
+                        frequency_hz: 440.0,
+                        level_dbfs: -20.0,
+                    },
+                    gain_db: 0.0,
+                    muted: false,
+                    balance: 0.0,
+                },
+            ],
+            program: ProgramBusSpec {
+                gain_db: -1.0,
                 muted: false,
-            }],
-            master_gain_db: -1.0,
+            },
         },
     }
+}
+
+/// `project()` as it reads back from its file.
+fn loaded() -> Loaded {
+    Loaded {
+        project: project(),
+        migrated_from: None,
+    }
+}
+
+/// `project()` as a version 1 file: its audio as `set_audio_sources`
+/// parameters, as version 1 stored it.
+fn v1_file() -> Value {
+    let mut value = file();
+    value["schema_version"] = json!(1);
+    value["audio"] = json!({
+        "inputs": [{"input": "alsa_input.usb-mic", "gain_db": -3.5, "mute": true}],
+        "tones": [{"frequency_hz": 440.0, "level_dbfs": -20.0, "gain_db": 0.0, "mute": false}],
+        "master_gain_db": -1.0
+    });
+    value
 }
 
 fn file() -> Value {
@@ -105,7 +141,7 @@ fn a_saved_project_loads_back_unchanged() {
     let original = project();
     let bytes = to_json(&original, CANVAS);
     assert!(bytes.ends_with(b"}\n"));
-    assert_eq!(parse(&bytes, CANVAS), Ok(original));
+    assert_eq!(parse(&bytes, CANVAS), Ok(loaded()));
 }
 
 #[test]
@@ -122,14 +158,14 @@ fn screen_capture_targets_are_not_saved() {
         "{text}"
     );
     // Everything else comes back.
-    let loaded = parse(&bytes, CANVAS).expect("valid");
-    assert_eq!(loaded, project());
+    let found = parse(&bytes, CANVAS).expect("valid");
+    assert_eq!(found, loaded());
 }
 
 #[test]
 fn the_file_reads_like_the_command_results() {
     let value = file();
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["canvas"], json!({"width": 1920, "height": 1080}));
     assert_eq!(value["active_scene"], "scene_k3j9x2m4q8w1");
     // A source is its `list_scenes` object.
@@ -138,10 +174,16 @@ fn the_file_reads_like_the_command_results() {
         json!({"id": "src_overlay", "name": "overlay", "kind": "solid", "color": "#99999999",
                "x": 64.0, "y": 120.0, "width": 160.0, "height": 160.0, "opacity": 0.6})
     );
-    // The audio is `set_audio_sources` parameters.
+    // A channel is its `get_mixer` object without the level.
     assert_eq!(
-        value["audio"]["inputs"][0],
-        json!({"input": "alsa_input.usb-mic", "gain_db": -3.5, "mute": true})
+        value["audio"]["channels"][0],
+        json!({"id": "ch_4k2m9x0q1w7e", "name": "Mic",
+               "input": {"kind": "device", "device": "alsa_input.usb-mic"},
+               "gain_db": -3.5, "mute": true, "balance": -0.25})
+    );
+    assert_eq!(
+        value["audio"]["program"],
+        json!({"gain_db": -1.0, "mute": false})
     );
 }
 
@@ -152,7 +194,7 @@ fn a_hand_written_source_may_leave_out_its_rectangle_and_opacity() {
         json!({"id": "src_bars", "name": "bars", "kind": "color_bars"});
     let bytes = serde_json::to_vec(&value).expect("bytes");
     let loaded = parse(&bytes, CANVAS).expect("valid");
-    let bars = &loaded.scenes[0].sources[0];
+    let bars = &loaded.project.scenes[0].sources[0];
     assert_eq!(bars.rect, rect(0.0, 0.0, 1920.0, 1080.0));
     assert_eq!(bars.opacity, 1.0);
 }
@@ -168,13 +210,13 @@ fn unreadable_files_and_other_versions_are_refused() {
         "schema_version"
     );
     let mut value = file();
-    value["schema_version"] = json!(2);
+    value["schema_version"] = json!(3);
     assert_eq!(
         only(&value, "newer than this build reads"),
         "schema_version"
     );
     let invalid = parse(&serde_json::to_vec(&value).expect("bytes"), CANVAS).unwrap_err();
-    assert_eq!(invalid.schema_version, Some(2));
+    assert_eq!(invalid.schema_version, Some(3));
     value["schema_version"] = json!(0);
     assert_eq!(only(&value, "not supported"), "schema_version");
 }
@@ -188,8 +230,42 @@ fn structure_errors_name_their_path() {
     value["scenes"][1]["name"] = json!(7);
     assert_eq!(only(&value, "invalid type"), "scenes[1].name");
     let mut value = file();
-    value["audio"]["tones"][0]["mute"] = json!("no");
-    assert_eq!(only(&value, "invalid type"), "audio.tones[0].mute");
+    value["audio"]["channels"][1]["mute"] = json!("no");
+    assert_eq!(only(&value, "invalid type"), "audio.channels[1].mute");
+    let mut value = file();
+    value["audio"]["channels"][0]
+        .as_object_mut()
+        .expect("channel")
+        .remove("balance");
+    assert_eq!(only(&value, "missing field `balance`"), "audio.channels[0]");
+    let mut value = file();
+    value["audio"]["program"]["solo"] = json!(true);
+    assert_eq!(only(&value, "unknown field `solo`"), "audio.program.solo");
+    // Every input field is given too, but a device may be left out (the
+    // default input).
+    let mut value = file();
+    value["audio"]["channels"][1]["input"]
+        .as_object_mut()
+        .expect("input")
+        .remove("level_dbfs");
+    assert_eq!(
+        only(&value, "missing field `level_dbfs`"),
+        "audio.channels[1].input"
+    );
+    let mut value = file();
+    value["audio"]["channels"][1]["input"]["kind"] = json!("file");
+    assert_eq!(
+        only(&value, "unknown variant"),
+        "audio.channels[1].input.kind"
+    );
+    let mut value = file();
+    value["audio"]["channels"][0]["input"] = json!({"kind": "device"});
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    let loaded = parse(&bytes, CANVAS).expect("valid");
+    assert_eq!(
+        loaded.project.audio.channels[0].input,
+        ChannelInput::Device { device: None }
+    );
     let mut value = file();
     value["scenes"][0]
         .as_object_mut()
@@ -308,20 +384,110 @@ fn source_ids_must_be_valid_and_unique_across_scenes() {
 }
 
 #[test]
-fn audio_problems_come_from_the_set_audio_sources_rules() {
+fn audio_problems_come_from_the_command_rules() {
     let mut value = file();
-    value["audio"]["master_gain_db"] = json!(99);
-    assert_eq!(only(&value, "`master_gain_db` must be between"), "audio");
+    value["audio"]["program"]["gain_db"] = json!(99);
+    assert_eq!(only(&value, "`gain_db` must be between"), "audio.program");
     // Beyond f32: refused, not rounded to infinity and then to a default.
     let mut value = file();
+    value["audio"]["channels"][1]["gain_db"] = json!(1e39);
+    assert_eq!(
+        only(&value, "`gain_db` must be between"),
+        "audio.channels[1]"
+    );
+    let mut value = file();
+    value["audio"]["channels"][1]["input"]["frequency_hz"] = json!(30_000);
+    assert_eq!(only(&value, "`frequency_hz`"), "audio.channels[1]");
+    let mut value = file();
+    value["audio"]["channels"][0]["input"]["device"] = json!("");
+    assert_eq!(
+        only(&value, "`device` must not be empty"),
+        "audio.channels[0]"
+    );
+    let mut value = file();
+    value["audio"]["channels"][0]["balance"] = json!(2);
+    assert_eq!(only(&value, "`balance`"), "audio.channels[0]");
+}
+
+#[test]
+fn channel_ids_and_names_must_be_valid_and_unique_and_within_the_limit() {
+    let mut value = file();
+    value["audio"]["channels"][1]["id"] = json!("ch_4k2m9x0q1w7e");
+    value["audio"]["channels"][1]["name"] = json!("Mic");
+    let found = problems(&value);
+    assert_eq!(
+        found
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["audio.channels[1].id", "audio.channels[1].name"],
+        "{found:?}"
+    );
+    let mut value = file();
+    value["audio"]["channels"][0]["id"] = json!("scene_mic");
+    assert_eq!(only(&value, "`ch_`"), "audio.channels[0].id");
+    let mut value = file();
+    let channel = value["audio"]["channels"][1].clone();
+    value["audio"]["channels"] = json!(vec![channel; MAX_CHANNELS + 1]);
+    let found = problems(&value);
+    assert_eq!(found[0].0, "audio.channels", "{found:?}");
+    // No channels is a silent mix.
+    let mut value = file();
+    value["audio"]["channels"] = json!([]);
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    assert!(
+        parse(&bytes, CANVAS)
+            .expect("valid")
+            .project
+            .audio
+            .channels
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_version_1_file_is_migrated() {
+    let bytes = serde_json::to_vec(&v1_file()).expect("bytes");
+    let loaded = parse(&bytes, CANVAS).expect("valid");
+    assert_eq!(loaded.migrated_from, Some(1));
+    // Ids and names from the position, everything else as version 1 had it.
+    let mut expected = project().audio;
+    expected.channels[0].id = "ch_input_1".to_owned();
+    expected.channels[0].name = "Input 1".to_owned();
+    expected.channels[0].balance = 0.0;
+    expected.channels[1].id = "ch_tone_1".to_owned();
+    expected.channels[1].name = "Tone 1".to_owned();
+    assert_eq!(loaded.project.audio, expected);
+    assert_eq!(loaded.project.scenes, project().scenes);
+    // The same ids every time, until the file is saved as version 2.
+    assert_eq!(parse(&bytes, CANVAS), Ok(loaded));
+}
+
+#[test]
+fn version_1_audio_keeps_its_rules_with_paths() {
+    let mut value = v1_file();
+    value["audio"]["master_gain_db"] = json!(99);
+    assert_eq!(only(&value, "between"), "audio.master_gain_db");
+    let mut value = v1_file();
     value["audio"]["tones"][0]["gain_db"] = json!(1e39);
-    assert_eq!(only(&value, "`gain_db` must be between"), "audio");
-    let mut value = file();
+    assert_eq!(only(&value, "between"), "audio.tones[0].gain_db");
+    let mut value = v1_file();
     value["audio"]["tones"][0]["frequency_hz"] = json!(30_000);
-    assert_eq!(only(&value, "`frequency_hz`"), "audio");
-    let mut value = file();
+    assert_eq!(only(&value, "between 0"), "audio.tones[0].frequency_hz");
+    let mut value = v1_file();
     value["audio"]["inputs"][0]["input"] = json!("");
-    assert_eq!(only(&value, "`input` must not be empty"), "audio");
+    assert_eq!(only(&value, "must not be empty"), "audio.inputs[0].input");
+    let mut value = v1_file();
+    value["audio"]["tones"][0]["mute"] = json!("no");
+    assert_eq!(only(&value, "invalid type"), "audio.tones[0].mute");
+    let mut value = v1_file();
+    let tone = value["audio"]["tones"][0].clone();
+    value["audio"]["tones"] = json!(vec![tone; 9]);
+    assert_eq!(only(&value, "at most 8 sources"), "audio");
+    // Version 2's shape is not version 1's.
+    let mut value = file();
+    value["schema_version"] = json!(1);
+    assert_eq!(only(&value, "unknown field `channels`"), "audio.channels");
 }
 
 #[test]
@@ -364,10 +530,15 @@ fn every_problem_is_reported_at_once() {
     value["canvas"] = json!({"width": 1280, "height": 720});
     value["scenes"][0]["sources"][1]["opacity"] = json!(2);
     value["active_scene"] = json!("scene_gone");
-    value["audio"]["master_gain_db"] = json!(99);
+    value["audio"]["program"]["gain_db"] = json!(99);
     let paths: Vec<_> = problems(&value).into_iter().map(|(path, _)| path).collect();
     assert_eq!(
         paths,
-        ["canvas", "scenes[0].sources[1]", "active_scene", "audio"]
+        [
+            "canvas",
+            "scenes[0].sources[1]",
+            "active_scene",
+            "audio.program"
+        ]
     );
 }

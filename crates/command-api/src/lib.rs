@@ -7,6 +7,7 @@
 //! adapter. This crate knows nothing about transports or engine internals.
 
 mod access;
+mod audio;
 mod composite;
 mod error;
 mod health;
@@ -17,6 +18,12 @@ mod registry;
 mod scenes;
 
 pub use access::{AccessPolicy, Gated, label as access_label};
+pub use audio::{
+    AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusState, CHANNEL_ID_PREFIX,
+    ChannelInput, ChannelRef, ChannelSpec, ChannelState, MAX_CHANNELS, MixerState, PROGRAM_BUS_ID,
+    PROGRAM_BUS_NAME, ProgramBusSpec, SetChannelInputRequest, UpdateBusRequest,
+    UpdateChannelRequest,
+};
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
@@ -29,14 +36,13 @@ pub use project::{
     ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
 };
 pub use registry::{
-    CommandAccess, CommandDescriptor, CommandList, NAME_RULE, decode_streaming_to, default_sources,
-    is_valid_id, is_valid_name, params_schema, registry,
+    CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
+    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, registry,
 };
 pub use scenes::{
-    AddSourceRequest, AudioSetup, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
-    MixerState, PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef,
-    SceneSpec, SourceKind, SourceRect, SourceRef, SourceSpec, StripChange, StripState,
-    UpdateSourceRequest,
+    AddSourceRequest, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, PreviewState,
+    Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind,
+    SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
@@ -128,14 +134,18 @@ pub enum Command {
     ValidateProject {
         file_name: PathBuf,
     },
-    /// Mixer strips, gains and peak levels.
+    /// Channels and buses with their settings and peak levels.
     GetMixer,
-    SetMixerStrip(StripChange),
-    SetMasterGain {
-        gain_db: f32,
-    },
-    /// Configure audio inputs and tones (only while the pipeline is idle).
-    SetAudioSources(AudioSetup),
+    /// Add a channel (only while the pipeline is idle).
+    AddChannel(AddChannelRequest),
+    /// Remove a channel (only while the pipeline is idle).
+    RemoveChannel(ChannelRef),
+    /// Change a channel's fader, mute or balance (live if running).
+    UpdateChannel(UpdateChannelRequest),
+    /// Choose what a channel plays (only while the pipeline is idle).
+    SetChannelInput(SetChannelInputRequest),
+    /// Change a bus's fader or mute (live if running).
+    UpdateBus(UpdateBusRequest),
     /// Run the pipeline for a preview (frames go to the in-process
     /// preview mailbox) or stop doing so.
     SetPreview {

@@ -5,12 +5,14 @@
 //! [`CommandHandler`]. Platform capture is injected as a [`CaptureBackend`]
 //! by the composition root.
 
+mod audio;
 mod composite;
 mod ids;
 mod mix;
 mod outputs;
 mod pipeline;
 mod project;
+mod refs;
 mod scenes;
 mod studio;
 mod thread;
@@ -27,8 +29,8 @@ use capture_api::{
     CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
 };
 use command_api::{
-    AudioInputList, AudioSetup, Command, CommandError, CommandHandler, CommandList, CommandOutput,
-    EngineStatus, ErrorCode, ScreenSourceList,
+    AudioGraphSpec, AudioInputList, Command, CommandError, CommandHandler, CommandList,
+    CommandOutput, EngineStatus, ErrorCode, ScreenSourceList,
 };
 use encoder_ffmpeg::StreamState;
 use media_core::FrameMailbox;
@@ -43,7 +45,7 @@ pub struct Engine {
     /// Scenes; the pipeline renders the active one.
     scenes: SceneCollection,
     /// Audio the pipeline mixes unless an output brings its own sources.
-    audio: AudioSetup,
+    audio: AudioGraphSpec,
     /// The preview keeps the pipeline running.
     preview_enabled: bool,
     /// Where preview frames go (see `Engine::preview_frames`).
@@ -87,7 +89,7 @@ impl Engine {
             project_dir: None,
             capture_capabilities: None,
             scenes: SceneCollection::new(),
-            audio: default_audio(),
+            audio: audio::default_graph(),
             preview_enabled: false,
             preview_frames: Arc::new(FrameMailbox::new()),
             pipeline: None,
@@ -225,15 +227,19 @@ impl CommandHandler for Engine {
                 .restart_source(&source, source_id.as_deref())
                 .map(CommandOutput::SceneList),
             Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
-            Command::SetMixerStrip(change) => {
-                self.set_mixer_strip(change).map(CommandOutput::MixerState)
+            Command::AddChannel(request) => {
+                self.add_channel(request).map(CommandOutput::MixerState)
             }
-            Command::SetMasterGain { gain_db } => {
-                Ok(CommandOutput::MixerState(self.set_master_gain(gain_db)))
+            Command::RemoveChannel(channel) => {
+                self.remove_channel(&channel).map(CommandOutput::MixerState)
             }
-            Command::SetAudioSources(setup) => {
-                self.set_audio_sources(setup).map(CommandOutput::MixerState)
+            Command::UpdateChannel(request) => {
+                self.update_channel(request).map(CommandOutput::MixerState)
             }
+            Command::SetChannelInput(request) => self
+                .set_channel_input(request)
+                .map(CommandOutput::MixerState),
+            Command::UpdateBus(request) => self.update_bus(request).map(CommandOutput::MixerState),
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
@@ -250,17 +256,6 @@ impl CommandHandler for Engine {
                 .validate_project(&file_name)
                 .map(CommandOutput::ProjectValidation),
         }
-    }
-}
-
-/// Audio before `set_audio_sources`: one quiet test tone (as outputs use
-/// when started without sources).
-fn default_audio() -> AudioSetup {
-    let defaults = command_api::default_sources();
-    AudioSetup {
-        inputs: defaults.inputs,
-        tones: defaults.tones,
-        master_gain_db: defaults.master_gain_db,
     }
 }
 
@@ -607,8 +602,13 @@ mod tests {
                     "remove_source" | "restart_source" => {
                         Some(json!({"scene": "Scene", "name": "bars"}))
                     }
-                    "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
-                    "set_master_gain" => Some(json!({"gain_db": -3.0})),
+                    "add_channel" => Some(json!({"name": "Extra",
+                        "input": {"kind": "tone", "frequency_hz": 440}})),
+                    "remove_channel" => Some(json!({"name": "Extra"})),
+                    "update_channel" => Some(json!({"name": "Tone", "mute": true})),
+                    "set_channel_input" => Some(json!({"name": "Tone",
+                        "input": {"kind": "tone", "frequency_hz": 500}})),
+                    "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
                     "set_preview" => Some(json!({"enabled": false})),
                     "set_screen_source" => {
                         Some(json!({"scene": "Scene", "name": "bars", "source_id": "fake:1"}))
@@ -1099,16 +1099,21 @@ mod tests {
         let mut engine = Engine::new();
         let idle = mixer(run(&mut engine, "get_mixer", json!({})));
         assert!(!idle.running);
-        assert_eq!(idle.strips.len(), 1);
-        assert_eq!(idle.strips[0].kind, "tone");
+        assert_eq!(idle.channels.len(), 1);
+        assert_eq!(idle.channels[0].spec.id, audio::DEFAULT_CHANNEL_ID);
+        assert_eq!(idle.channels[0].spec.input.kind(), "tone");
+        assert_eq!(idle.buses[0].id, "bus_program");
         let muted = mixer(run(
             &mut engine,
-            "set_mixer_strip",
-            json!({"index": 0, "mute": true}),
+            "update_channel",
+            json!({"id": audio::DEFAULT_CHANNEL_ID, "mute": true}),
         ));
-        assert!(muted.strips[0].muted);
-        let missing = Command::decode("set_mixer_strip", Some(&json!({"index": 3, "mute": true})))
-            .expect("decode");
+        assert!(muted.channels[0].spec.muted);
+        let missing = Command::decode(
+            "update_channel",
+            Some(&json!({"name": "Mic", "mute": true})),
+        )
+        .expect("decode");
         assert_eq!(
             engine.handle(missing).unwrap_err().code,
             ErrorCode::NotFound
@@ -1116,46 +1121,80 @@ mod tests {
 
         run(&mut engine, "set_preview", json!({"enabled": true}));
         let running = wait_mixer(&mut engine, |state| state.running);
-        assert!(running.strips[0].muted);
-        assert_eq!(running.strips[0].peak_dbfs, None, "{running:?}");
+        assert!(running.channels[0].spec.muted);
+        assert_eq!(running.channels[0].peak_dbfs, None, "{running:?}");
         run(
             &mut engine,
-            "set_mixer_strip",
-            json!({"index": 0, "mute": false}),
+            "update_channel",
+            json!({"name": "Tone", "mute": false}),
         );
         // The default tone peaks at -20 dBFS.
         // Past the unmute ramp, the window holds full-level blocks.
         let live = wait_mixer(&mut engine, |state| {
-            state.strips[0].peak_dbfs.is_some_and(|peak| peak > -20.1)
+            state.channels[0].peak_dbfs.is_some_and(|peak| peak > -20.1)
         });
-        let peak = live.strips[0].peak_dbfs.expect("tone level");
+        let peak = live.channels[0].peak_dbfs.expect("tone level");
         assert!((peak + 20.0).abs() < 0.2, "{live:?}");
         // Reading levels is read-only: a second reader sees them too.
         assert!(
-            mixer(run(&mut engine, "get_mixer", json!({}))).strips[0]
+            mixer(run(&mut engine, "get_mixer", json!({}))).channels[0]
                 .peak_dbfs
                 .is_some()
         );
         let gain = mixer(run(
             &mut engine,
-            "set_master_gain",
-            json!({"gain_db": -6.0}),
+            "update_bus",
+            json!({"name": "Program", "gain_db": -6.0}),
         ));
-        assert_eq!(gain.master_gain_db, -6.0);
-        // Sources are fixed while running; gains are not.
-        let setup =
-            Command::decode("set_audio_sources", Some(&json!({"tones": []}))).expect("decode");
-        assert_eq!(
-            engine.handle(setup).unwrap_err().code,
-            ErrorCode::InvalidState
-        );
+        assert_eq!(gain.buses[0].gain_db, -6.0);
+        // Hard left takes the right side away: the peak stays (left), and
+        // the change is live.
+        let panned = mixer(run(
+            &mut engine,
+            "update_channel",
+            json!({"name": "Tone", "balance": -1.0}),
+        ));
+        assert_eq!(panned.channels[0].spec.balance, -1.0);
+        // Channels are fixed while running; faders are not.
+        for (command, params) in [
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "device"}}),
+            ),
+            ("remove_channel", json!({"name": "Tone"})),
+            (
+                "set_channel_input",
+                json!({"name": "Tone", "input": {"kind": "device"}}),
+            ),
+        ] {
+            let structure = Command::decode(command, Some(&params)).expect("decode");
+            assert_eq!(
+                engine.handle(structure).unwrap_err().code,
+                ErrorCode::InvalidState,
+                "{command}"
+            );
+        }
         run(&mut engine, "set_preview", json!({"enabled": false}));
         // The live changes were kept in the configuration.
         let after = mixer(run(&mut engine, "get_mixer", json!({})));
-        assert!(!after.running && !after.strips[0].muted);
-        assert_eq!(after.master_gain_db, -6.0);
-        let silent = mixer(run(&mut engine, "set_audio_sources", json!({"tones": []})));
-        assert!(silent.strips.is_empty());
+        assert!(!after.running && !after.channels[0].spec.muted);
+        assert_eq!(after.buses[0].gain_db, -6.0);
+        assert_eq!(after.channels[0].spec.balance, -1.0);
+        let added = mixer(run(
+            &mut engine,
+            "add_channel",
+            json!({"name": "Music", "input": {"kind": "tone", "frequency_hz": 440},
+                   "gain_db": -12.0}),
+        ));
+        assert_eq!(added.channels.len(), 2);
+        assert!(added.channels[1].spec.id.starts_with("ch_"));
+        let silent = mixer(run(&mut engine, "remove_channel", json!({"name": "Tone"})));
+        let silent = mixer(run(
+            &mut engine,
+            "remove_channel",
+            json!({"id": silent.channels[0].spec.id}),
+        ));
+        assert!(silent.channels.is_empty());
     }
 
     #[test]
@@ -1463,9 +1502,14 @@ mod tests {
         run(&mut engine, "set_active_scene", json!({"name": "Show"}));
         run(
             &mut engine,
-            "set_audio_sources",
-            json!({"tones": [{"frequency_hz": 440, "level_dbfs": -18, "gain_db": -2, "mute": true}],
-                   "master_gain_db": -4}),
+            "add_channel",
+            json!({"name": "A", "input": {"kind": "tone", "frequency_hz": 440, "level_dbfs": -18},
+                   "gain_db": -2, "mute": true, "balance": 0.25}),
+        );
+        run(
+            &mut engine,
+            "update_bus",
+            json!({"id": "bus_program", "gain_db": -4, "mute": true}),
         );
         let before = scene_list(&mut engine);
         let mixer_before = mixer(run(&mut engine, "get_mixer", json!({})));
@@ -1519,7 +1563,89 @@ mod tests {
             panic!("unexpected output");
         };
         assert!(validation.valid && validation.problems.is_empty());
+        assert_eq!(validation.schema_version, Some(2));
+        assert!(!validation.migrates);
+    }
+
+    #[test]
+    fn a_version_1_project_is_migrated_on_load() {
+        let dir = TempDir::new("project-v1");
+        let v1 = json!({
+            "schema_version": 1,
+            "canvas": {"width": 1920, "height": 1080},
+            "active_scene": "scene_test_pattern",
+            "scenes": [{"id": "scene_test_pattern", "name": "Test pattern", "sources": []}],
+            "audio": {
+                "inputs": [{"input": "mic", "gain_db": -3, "mute": true}],
+                "tones": [{"frequency_hz": 440, "level_dbfs": -18, "gain_db": 0, "mute": false}],
+                "master_gain_db": -1
+            }
+        });
+        std::fs::write(dir.0.join("old.json"), v1.to_string()).expect("write");
+        let mut engine = engine().with_project_dir(&dir.0);
+        let CommandOutput::ProjectValidation(validation) = run(
+            &mut engine,
+            "validate_project",
+            json!({"file_name": "old.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(validation.valid, "{validation:?}");
         assert_eq!(validation.schema_version, Some(1));
+        assert!(validation.migrates);
+        let CommandOutput::ProjectLoaded(loaded) = run(
+            &mut engine,
+            "load_project",
+            json!({"file_name": "old.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(
+            loaded.warnings[0].contains("migrated"),
+            "{:?}",
+            loaded.warnings
+        );
+        let channels: Vec<_> = loaded
+            .mixer
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.spec.name.as_str(),
+                    channel.spec.input.kind(),
+                    channel.spec.gain_db,
+                    channel.spec.muted,
+                )
+            })
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                ("Input 1", "device", -3.0, true),
+                ("Tone 1", "tone", 0.0, false)
+            ]
+        );
+        assert_eq!(loaded.mixer.buses[0].gain_db, -1.0);
+        // Saving writes version 2, which loads without a migration.
+        run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "old.json", "overwrite": true}),
+        );
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.0.join("old.json")).expect("read"))
+                .expect("json");
+        assert_eq!(written["schema_version"], 2);
+        assert_eq!(written["audio"]["channels"][1]["name"], "Tone 1");
+        let CommandOutput::ProjectLoaded(again) = run(
+            &mut engine,
+            "load_project",
+            json!({"file_name": "old.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+        assert_eq!(again.mixer, loaded.mixer);
     }
 
     #[test]

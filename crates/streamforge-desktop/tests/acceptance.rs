@@ -226,7 +226,7 @@ fn preview_frames_reach_the_ui() {
     wait_polling(&mut model, "live levels", |m| {
         m.mixer
             .as_ref()
-            .is_some_and(|mixer| mixer.running && mixer.strips[0].peak_dbfs.is_some())
+            .is_some_and(|mixer| mixer.running && mixer.channels[0].peak_dbfs.is_some())
     });
     model.set_preview(false);
     wait(&mut model, "the preview to stop", |m| !m.preview_enabled);

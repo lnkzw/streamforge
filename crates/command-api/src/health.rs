@@ -46,10 +46,11 @@ impl CaptureKind {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CaptureHealth {
     pub kind: CaptureKind,
-    /// The scene source's `id`, as in `list_scenes` and `render.sources`
-    /// (screen sources of a scene only).
+    /// The scene source's `id`, as in `list_scenes` and `render.sources`,
+    /// or the channel's, as in `get_mixer` (`None` for the screen layer).
     pub id: Option<String>,
-    /// Scene source name, `screen layer`, or the audio input's name.
+    /// The scene source's or channel's name, or `screen layer`. A channel's
+    /// device is in `get_mixer`.
     pub name: String,
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
     #[serde(flatten)]

@@ -170,7 +170,7 @@ Acceptance:
 Known limitations, deferred:
 - Scenes and settings are not persisted.
 - Sources are placed numerically; no dragging on the preview, no undo.
-- The UI has no audio-input picker yet (`set_audio_sources` exists in the API).
+- The UI has no audio-input picker yet (`add_channel` and `set_channel_input` exist in the API).
 - The egui layer has no automated UI test; the model below it is tested.
 - Requires Rust 1.95 or newer (eframe 0.36).
 
@@ -236,7 +236,7 @@ Acceptance:
 No release pressure: the audio model is designed and built before the protocol is frozen, so the API is designed once and the mixer UI shows the real model (`docs/architecture/ARCHITECTURE_VISION.md` §6; assessment §10.2, question 4). Inputs, channels, buses, sends, outputs and recording tracks are separate concepts in the model, the protocol and the UI; separate tracks alone are not a routing system.
 
 - [x] ADR 0017: the audio graph and output profiles, reviewed with the project owner before code.
-- [ ] Stable channel ids; the master becomes the program bus.
+- [x] Stable channel ids; the master becomes the program bus (step 2a: `add_channel`, `remove_channel`, `update_channel`, `set_channel_input`, `update_bus`; project file version 2, version 1 migrated).
 - [ ] Buses (submixes with gain, mute, meters).
 - [ ] Sends from channels to buses, pre- or post-fader, with a level.
 - [ ] Output profiles: per output its mix, its recording tracks and its encoder settings.

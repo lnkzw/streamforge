@@ -1,6 +1,6 @@
-//! Scene and source ids (ADR 0014): a type prefix and 12 random base-36
-//! characters (about 62 bits), so ids from different projects do not
-//! collide when scenes are copied between them.
+//! Stable ids (ADR 0014): a type prefix and 12 random base-36 characters
+//! (about 62 bits), so ids from different projects do not collide when
+//! scenes or channels are copied between them.
 
 use command_api::{CommandError, ErrorCode};
 

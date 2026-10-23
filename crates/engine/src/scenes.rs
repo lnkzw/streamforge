@@ -14,14 +14,15 @@ use command_api::{
     SourceRef, SourceSpec, UpdateSourceRequest,
 };
 use media_core::{FrameMailbox, VideoFrame};
-use serde_json::json;
+
+use crate::ids::new_id;
+use crate::refs::{self, Kind, mismatch, not_found, not_found_id};
 use video_compositor::{
     Animation, Layer, Rect, Scene, SceneUpdate, SourceConfig, SourceId, SourceInput, Transform,
     pattern,
 };
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, overlay_x};
-use crate::ids::new_id;
 
 /// The built-in scene (the M3 reference scene).
 pub(crate) const DEFAULT_SCENE: &str = "Test pattern";
@@ -119,30 +120,16 @@ impl SceneCollection {
     /// The scene `scene` names: by id first; a name given as well must be
     /// that scene's.
     fn scene_index(&self, scene: &SceneRef) -> Result<usize, CommandError> {
-        match (&scene.id, &scene.name) {
-            (Some(id), name) => {
-                let index = self
-                    .scenes
-                    .iter()
-                    .position(|scene| scene.id == *id)
-                    .ok_or_else(|| not_found_id("scene", "scene_id", id))?;
-                let found = &self.scenes[index].name;
-                if let Some(name) = name
-                    && name != found
-                {
-                    return Err(mismatch(format!(
-                        "scene `{id}` is named `{found}`, not `{name}`"
-                    )));
-                }
-                Ok(index)
-            }
-            (None, Some(name)) => self
-                .scenes
-                .iter()
-                .position(|scene| scene.name == *name)
-                .ok_or_else(|| not_found("scene", name)),
-            (None, None) => Err(mismatch("no scene given: pass `scene_id` or a name")),
-        }
+        refs::position(
+            &self.scenes,
+            scene.id.as_deref(),
+            scene.name.as_deref(),
+            &Kind {
+                what: "scene",
+                id_field: "scene_id",
+            },
+            |scene| (&scene.id, &scene.name),
+        )
     }
 
     /// Where the source `source` names is: by id first (ids are unique
@@ -343,21 +330,6 @@ fn full_canvas() -> SourceRect {
     }
 }
 
-fn not_found(what: &str, name: &str) -> CommandError {
-    CommandError::new(ErrorCode::NotFound, format!("no {what} named `{name}`"))
-        .with_details(json!({ what: name }))
-}
-
-fn not_found_id(what: &str, field: &str, id: &str) -> CommandError {
-    CommandError::new(ErrorCode::NotFound, format!("no {what} with id `{id}`"))
-        .with_details(json!({ field: id }))
-}
-
-/// An id and a name that do not name the same scene or source.
-fn mismatch(message: impl Into<String>) -> CommandError {
-    CommandError::new(ErrorCode::InvalidParams, message)
-}
-
 /// Static frames by content, so rebuilding a scene reuses the same frames
 /// and the compositor keeps those sources' state.
 #[derive(Default)]
@@ -507,6 +479,8 @@ fn internal(error: impl std::fmt::Display) -> CommandError {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn source(scene: &str, name: &str, kind: SourceKind) -> AddSourceRequest {

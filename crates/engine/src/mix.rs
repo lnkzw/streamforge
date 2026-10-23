@@ -4,17 +4,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use audio_engine::{
-    CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput, MixerThread,
-    RATE, Tone,
+    BusConfig, CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput,
+    MixerThread, RATE, Tone,
 };
 use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend};
 use command_api::{
-    CaptureOutcome, CommandError, ErrorCode, ErrorSummary, LiveInputSpec, MixReport, MixRequest,
-    ToneSpec,
+    AudioGraphSpec, CaptureOutcome, ChannelInput, CommandError, ErrorCode, ErrorSummary,
+    LiveInputSpec, MixReport, MixRequest, ToneSpec,
 };
 use serde_json::{Value, json};
 
-use crate::command_error;
+use crate::{audio, command_error};
 
 /// How often the waiting engine thread checks whether the mixer died.
 const WATCH_INTERVAL: Duration = Duration::from_millis(50);
@@ -23,12 +23,20 @@ pub(crate) fn probe(
     capture: &mut dyn CaptureBackend,
     request: &MixRequest,
 ) -> Result<MixReport, CommandError> {
-    let streams = start_live_inputs(capture, &request.inputs)?;
+    let devices: Vec<Option<String>> = request
+        .inputs
+        .iter()
+        .map(|spec| spec.input.clone())
+        .collect();
+    let streams = start_live_inputs(capture, &devices)?;
     let inputs = mixer_inputs(&request.inputs, &streams, &request.tones);
 
     let mixer = MixerThread::spawn(MixerConfig::plain(
         inputs,
-        request.master_gain_db,
+        BusConfig {
+            gain_db: request.master_gain_db,
+            ..BusConfig::UNITY
+        },
         request.duration,
         None,
     ))
@@ -44,7 +52,7 @@ pub(crate) fn probe(
     let stats = mixer.stop();
 
     // Stop every capture on every path, so its diagnostics are kept.
-    let captures = stop_captures(&request.inputs, streams);
+    let captures = stop_captures(&devices, streams);
     let mix = match stats {
         Ok(stats) => stats,
         Err(error) => {
@@ -62,18 +70,18 @@ pub(crate) fn probe(
     })
 }
 
-/// Start one stream per live input; on error the streams already started
-/// are dropped, which stops them.
-pub(crate) fn start_live_inputs(
+/// Start one stream per capture device (`None`: the default input); on
+/// error the streams already started are dropped, which stops them.
+pub(crate) fn start_live_inputs<'a>(
     capture: &mut dyn CaptureBackend,
-    specs: &[LiveInputSpec],
+    devices: impl IntoIterator<Item = &'a Option<String>>,
 ) -> Result<Vec<Box<dyn AudioStream>>, CommandError> {
-    specs
-        .iter()
-        .map(|spec| {
+    devices
+        .into_iter()
+        .map(|device| {
             capture
                 .start_audio_stream(&AudioStreamRequest {
-                    input: spec.input.clone(),
+                    input: device.clone(),
                     rate: RATE,
                     channels: CHANNELS,
                 })
@@ -82,14 +90,14 @@ pub(crate) fn start_live_inputs(
         .collect()
 }
 
-/// A live input's name in the mixer, the health report and idle mixer
-/// state: the requested input, or `default`.
-pub(crate) fn input_name(spec: &LiveInputSpec) -> String {
+/// A probe input's name in the mix report: the requested input, or
+/// `default`.
+fn input_name(spec: &LiveInputSpec) -> String {
     spec.input.clone().unwrap_or_else(|| "default".to_owned())
 }
 
-/// Today's strips are channels at centre balance, straight into program.
-pub(crate) fn channel(gain_db: f32, muted: bool) -> ChannelConfig {
+/// A probe's sources are channels at centre balance, straight into program.
+fn channel(gain_db: f32, muted: bool) -> ChannelConfig {
     ChannelConfig {
         gain_db,
         muted,
@@ -97,7 +105,36 @@ pub(crate) fn channel(gain_db: f32, muted: bool) -> ChannelConfig {
     }
 }
 
-pub(crate) fn mixer_inputs(
+/// The mixer inputs of `graph`'s channels, in channel order; `streams` are
+/// its devices' streams, in the same order (see [`audio::devices`]).
+pub(crate) fn graph_inputs(
+    graph: &AudioGraphSpec,
+    streams: &[Box<dyn AudioStream>],
+) -> Vec<MixerInput> {
+    let mut streams = streams.iter();
+    graph
+        .channels
+        .iter()
+        .map(|channel| MixerInput {
+            name: channel.name.clone(),
+            source: match &channel.input {
+                ChannelInput::Device { .. } => InputSource::Live(
+                    streams
+                        .next()
+                        .expect("one stream per device channel")
+                        .samples(),
+                ),
+                ChannelInput::Tone {
+                    frequency_hz,
+                    level_dbfs,
+                } => InputSource::Tone(Tone::new(*frequency_hz, *level_dbfs, RATE)),
+            },
+            channel: audio::channel_config(channel),
+        })
+        .collect()
+}
+
+fn mixer_inputs(
     specs: &[LiveInputSpec],
     streams: &[Box<dyn AudioStream>],
     tones: &[ToneSpec],
@@ -115,21 +152,21 @@ pub(crate) fn mixer_inputs(
     live.chain(generated).collect()
 }
 
-pub(crate) fn stop_captures(
-    specs: &[LiveInputSpec],
+pub(crate) fn stop_captures<'a>(
+    devices: impl IntoIterator<Item = &'a Option<String>>,
     streams: Vec<Box<dyn AudioStream>>,
 ) -> Vec<CaptureOutcome> {
-    specs
-        .iter()
+    devices
+        .into_iter()
         .zip(streams)
-        .map(|(spec, stream)| match stream.stop() {
+        .map(|(device, stream)| match stream.stop() {
             Ok(report) => CaptureOutcome {
-                input: spec.input.clone(),
+                input: device.clone(),
                 report: Some(report),
                 error: None,
             },
             Err(error) => CaptureOutcome {
-                input: spec.input.clone(),
+                input: device.clone(),
                 report: None,
                 error: Some(ErrorSummary::from(error)),
             },
@@ -176,7 +213,7 @@ pub(crate) fn mix_warnings(mix: &audio_engine::MixStats) -> Vec<String> {
     }
     if mix.clipped_samples > 0 {
         warnings.push(format!(
-            "{} sample(s) clipped on the master bus; lower the gains",
+            "{} sample(s) clipped on the program bus; lower the gains",
             mix.clipped_samples
         ));
     }

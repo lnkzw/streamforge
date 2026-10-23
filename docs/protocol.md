@@ -99,13 +99,15 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
 | `set_screen_source`        | see below | `sensitive` | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
-| `set_mixer_strip`          | see below | `control` | Mixer state |
-| `set_master_gain`          | see below | `control` | Mixer state |
-| `set_audio_sources`        | see below | `sensitive` | Mixer state |
+| `add_channel`              | see below | `sensitive` | Mixer state |
+| `remove_channel`           | see below | `control`, destructive | Mixer state |
+| `update_channel`           | see below | `control` | Mixer state |
+| `set_channel_input`        | see below | `sensitive` | Mixer state |
+| `update_bus`               | see below | `control` | Mixer state |
 | `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 | `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
 | `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
-| `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "problems": [{"path", "message"}]}` |
+| `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "migrates", "problems": [{"path", "message"}]}` |
 
 `access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
 - **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
@@ -130,12 +132,12 @@ Both probes are `sensitive` because they capture private content. Screen capture
                "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth", "connects", "reconnect_attempts"},
  "streaming": {... the same fields; "state" is the stream state},
  "captures": [{"kind": "screen", "id": "src_k3j9x2m4q8w1", "name": "desk", "state": "running"},
-              {"kind": "audio", "id": null, "name": "default", "state": "ended", "reason": "..."}]}
+              {"kind": "audio", "id": "ch_4k2m9x0q1w7e", "name": "Mic", "state": "ended", "reason": "..."}]}
 ```
 
 - **Without a pipeline:** `render` and `mix` are `null`, `captures` is empty, and `recording` and `streaming` are `null` while no output is open.
 - **Freshness:** `render` and `mix` are refreshed every 250 ms; a refresh that finds a reader copying the snapshot is retried on the next frame or block. Output counters are refreshed after every item.
-- **Ended captures:** `captures` lists every running capture (ADR 0013): the scenes' screen sources (with their `id`, as in `list_scenes` and `render.sources`), the screen layer and live audio inputs (named as in `mix.inputs`). `state` is `ended`, with the system's `reason`, once the capture delivers nothing more: a closed window, an ended portal session, a removed device, a revoked permission. Outputs keep running, and the source shows its last frame.
+- **Ended captures:** `captures` lists every running capture (ADR 0013): the scenes' screen sources (with their `id`, as in `list_scenes` and `render.sources`), the screen layer and the channels that capture a device (with the channel's `id` and name, as in `get_mixer` and `mix.inputs`). `state` is `ended`, with the system's `reason`, once the capture delivers nothing more: a closed window, an ended portal session, a removed device, a revoked permission. Outputs keep running, and the source shows its last frame.
 - **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). Screen captures may deliver only when the content changes, so a long age alone is not an error; an ended capture's age keeps growing too. `frames_consumed: 0` means it never delivered.
 - **Silent inputs:** a live audio input whose `underrun_frames` grow while `fill_ms` stays near 0 has stopped delivering.
 - **Drops:** `frames_dropped` and `blocks_dropped` cover every cause the stop report counts: producer side (copy pool or queue full), encoder side, and, for streams, media while offline.
@@ -256,7 +258,7 @@ Outputs share one **media pipeline**: the active scene (see below; by default th
 
 - **Start and stop:** the first output to start brings the pipeline up with its source parameters. The pipeline stops when the last output stops.
 - **Joining:** an output started while another runs joins the pipeline. It must not name sources (`invalid_state` otherwise).
-- **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured audio (`set_audio_sources`; initially one 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run, and `screen` adds a screen layer on top of the active scene.
+- **Defaults:** without source parameters and without a running pipeline, the pipeline mixes the configured channels (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS). With source parameters, the output's `inputs`, `tones` and `master_gain_db` replace that audio for this run: they become the run's own channels (`Input 1`, `Tone 1`, … with the ids `ch_input_1`, `ch_tone_1`, …, the same in every run; they send to the program bus), and `screen` adds a screen layer on top of the active scene. These per-run audio parameters go with the output profiles (ADR 0017, step 3).
 - **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
 - **Exclusive engine:** while any output is open, the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
 
@@ -381,11 +383,13 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - Only while the source has no capture; with one (running or ended), it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
   - It is `sensitive`, like `add_source`: it decides what is captured. If the source is in the rendered scene, its capture starts now, and a failure (e.g. `not_found` for a gone source) changes nothing.
 
-Mixer:
-- **Strips:** the pipeline's audio is a list of strips, live inputs first, then tones.
-- **`get_mixer`:** returns `{"running", "strips": [{"index", "name", "kind", "gain_db", "muted", "peak_dbfs"}], "master_gain_db", "master_peak_dbfs"}`. Peaks are the highest level of the last 300 ms (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
-- **`set_mixer_strip {index, gain_db?, mute?}` and `set_master_gain {gain_db}`:** change gains live (ramped over one block) and keep the change in the configuration.
-- **`set_audio_sources {inputs, tones, master_gain_db}`:** parameters as for `probe_audio_mix`. Without inputs and without `tones`, one −20 dBFS tone is used. It configures what the pipeline mixes, but only while the pipeline is idle (`invalid_state` otherwise). It is `sensitive` because the inputs are microphones. An output that brings its own source parameters overrides this configuration for its run.
+Mixer (ADR 0017):
+- **Channels:** the pipeline mixes a list of channels, each one input's strip: what it plays (a capture device or a test tone), a fader, mute and balance. Every channel sends to the program bus, post-fader at 0 dB; aux buses and sends come later. At most 8 channels. Channels have stable ids (`ch_…`, ADR 0014), and commands name one by `id`, `name` or both (which must then agree; the id is looked up first). Names are unique among the channels.
+- **The program bus:** `bus_program`, named `Program`, with a fader and mute. It is what every output records or streams, hard-limited to [−1, 1] where it leaves the graph.
+- **`get_mixer`:** returns `{"running", "channels": [{"id", "name", "input", "gain_db", "mute", "balance", "peak_dbfs"}], "buses": [{"id", "name", "kind", "gain_db", "mute", "peak_dbfs"}]}`, the program bus first (`kind: "program"`). `input` is `{"kind": "device", "device": name or null for the default input}` or `{"kind": "tone", "frequency_hz", "level_dbfs"}`. Peaks are the highest level of the last 300 ms: a channel's after its fader, a bus's before the output limit, so it can exceed 0 dBFS when the mix overloads (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll.
+- **`add_channel {name, input, gain_db?, mute?, balance?}`:** adds a channel at the end, with a fresh id. A tone's `level_dbfs` defaults to −12; gain is −96 to +24 dB, balance −1 (left only) to 1 (right only), centre unity on both sides. It is `sensitive`, because a device channel captures a microphone. A duplicate name is `invalid_params`, a ninth channel `invalid_state`.
+- **`remove_channel {id | name}`** and **`set_channel_input {id | name, input}`** (`sensitive`, as it chooses what is captured): like `add_channel`, they change the mixer's structure, so they need an idle pipeline (`invalid_state` while a preview or output runs).
+- **`update_channel {id | name, gain_db?, mute?, balance?}`** and **`update_bus {id | name, gain_db?, mute?}`:** live while running (ramped over one block, so nothing clicks), and kept in the configuration. Mute silences the channel in every mix. During a run with an output's own sources, they apply to that run's channels only.
 
 Preview:
 - **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
@@ -395,40 +399,44 @@ Preview:
 
 ### Projects
 
-A project file holds the scenes with their ids, the active scene and the audio setup (ADR 0015). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`; a directory that does not exist stops them at start).
+A project file holds the scenes with their ids, the active scene and the audio channels and program bus (ADR 0015, ADR 0017). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`; a directory that does not exist stops them at start).
 - Without it, the project commands are `invalid_state`, and the MCP server does not offer them.
 - Commands name a file by a plain `.json` name. Directories, `..`, absolute paths and Windows device names (`CON`, `NUL`, `COM1`, …) are `invalid_params`.
 - Only regular files are read or replaced. A link is followed when reading, but saving does not replace it with a file; a directory or device is `invalid_params`.
 
-- **`save_project {file_name, overwrite}`:** writes the current scenes and audio setup, also while the pipeline runs.
+- **`save_project {file_name, overwrite}`:** writes the current scenes and audio, also while the pipeline runs (the configured audio, not a run's own sources).
   - An existing file is `invalid_params` unless `overwrite` is `true`. A replaced file keeps its permissions (Windows refuses to replace a read-only file).
   - Writing is atomic: a temporary file next to the target, flushed to disk and renamed over it. A save that fails or is cut off leaves the previous file whole.
   - Result: `{"file_name", "path", "replaced", "scenes", "bytes"}`.
-- **`load_project {file_name}`:** replaces the scenes, the active scene and the audio setup with the file's, all or nothing.
+- **`load_project {file_name}`:** replaces the scenes, the active scene and the audio with the file's, all or nothing.
   - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
   - Screen sources load without a capture target; a warning says so. Choose one with `set_screen_source`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
   - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`, at most 100 plus one that counts the rest).
   - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.
-- **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "problems"}`; an invalid file is a result, not an error. `read_only`.
+- **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "migrates", "problems"}`; `migrates` is true for a valid file of an older schema version. An invalid file is a result, not an error. `read_only`.
 - **Errors:** a missing file (or, for a save, a missing directory) is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
 - **Not stored:** stream keys, file paths, and what screen sources capture (`source_id`: machine-specific, and window titles can be private).
 
-The file (`schema_version` 1):
+The file (`schema_version` 2):
 
 ```json
-{"schema_version": 1,
+{"schema_version": 2,
  "canvas": {"width": 1920, "height": 1080},
  "active_scene": "scene_k3j9x2m4q8w1",
  "scenes": [{"id": "scene_k3j9x2m4q8w1", "name": "Show", "sources": [
    {"id": "src_a1b2c3d4e5f6", "name": "red", "kind": "solid", "color": "#ff000080",
     "x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0, "opacity": 0.5}]}],
- "audio": {"inputs": [{"input": null, "gain_db": 0.0, "mute": false}],
-           "tones": [], "master_gain_db": 0.0}}
+ "audio": {"channels": [{"id": "ch_4k2m9x0q1w7e", "name": "Mic",
+                         "input": {"kind": "device", "device": null},
+                         "gain_db": 0.0, "mute": false, "balance": 0.0}],
+           "program": {"gain_db": 0.0, "mute": false}}}
 ```
 
-- **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1). **`audio`** is `set_audio_sources` parameters with every field given.
-- **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's.
-- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
+- **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
+- **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given (a device channel's `device` may be left out or `null` for the default input), checked by the `add_channel` rules; **`program`** is checked by the `update_bus` rules.
+- **Checked across the file:** scene, source and channel ids (form, and unique; source ids across all scenes), unique scene and channel names, unique source names within a scene, at most 16 scenes of 16 sources and 8 channels, `active_scene` naming a scene, and the canvas matching the engine's.
+- **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
+- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
 
 ## Example session
@@ -436,7 +444,7 @@ The file (`schema_version` 1):
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","set_mixer_strip","set_master_gain","set_audio_sources","set_preview","save_project","load_project","validate_project"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","update_bus","set_preview","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.
@@ -445,6 +453,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 
 - **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
   - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
+  - 2026-10-23, ADR 0017 step 2a: `set_mixer_strip`, `set_master_gain` and `set_audio_sources` are replaced by `add_channel`, `remove_channel`, `update_channel`, `set_channel_input` and `update_bus`; `get_mixer` returns `channels` and `buses` with ids instead of `strips` by index and the master fields; audio `captures` in `get_health` carry the channel's `id` and name; the project file is schema version 2 (version 1 is migrated); `validate_project` gained `migrates`.
   - 2026-10-23, ADR 0017 step 1: the master meter (`mix.master`, `master_peak_dbfs`) measures the program bus before the output limit, so it can exceed 0 dBFS when the mix overloads; `clipped_samples` still counts what the limit changed.
 - Adding a command, adding optional fields to a result, or adding an error code is backward compatible within v1. Clients must ignore unknown result fields and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.

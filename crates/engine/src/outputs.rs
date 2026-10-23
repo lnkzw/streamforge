@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
 use command_api::{
-    AudioSetup, CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, PipelineReport,
+    CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, PipelineReport,
     RecordingReport, RecordingRequest, RecordingStarted, StreamingReport, StreamingRequest,
     StreamingStarted,
 };
@@ -22,9 +22,9 @@ use encoder_ffmpeg::{
 use media_core::{MediaTimestamp, duration_millis};
 use serde_json::{Map, Value, json};
 
-use crate::Engine;
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::pipeline::{OutputId, Pipeline, since};
+use crate::{Engine, audio};
 
 /// Bound for each blocking network operation of a stream (connect, write).
 const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -152,11 +152,11 @@ impl Engine {
             None => {
                 let (audio, from_setup, screen) = match sources {
                     Some(sources) => (
-                        AudioSetup {
-                            inputs: sources.inputs.clone(),
-                            tones: sources.tones.clone(),
-                            master_gain_db: sources.master_gain_db,
-                        },
+                        audio::from_sources(
+                            &sources.inputs,
+                            &sources.tones,
+                            sources.master_gain_db,
+                        ),
                         false,
                         sources.screen.as_ref(),
                     ),

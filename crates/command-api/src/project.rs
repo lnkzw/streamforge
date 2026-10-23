@@ -2,7 +2,7 @@
 //! `validate_project`; ADR 0015).
 //!
 //! A project file holds the scenes with their ids, the active scene and the
-//! audio setup. It lives in the engine's project directory (`--project-dir`),
+//! audio graph. It lives in the engine's project directory (`--project-dir`),
 //! and commands name it by a plain file name.
 
 use std::path::PathBuf;
@@ -58,5 +58,8 @@ pub struct ProjectValidation {
     pub valid: bool,
     /// The file's `schema_version`, if it could be read.
     pub schema_version: Option<u64>,
+    /// A valid file of an older version: loading migrates it, and saving
+    /// writes the current version.
+    pub migrates: bool,
     pub problems: Vec<ProjectProblem>,
 }

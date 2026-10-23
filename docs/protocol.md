@@ -86,33 +86,33 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `probe_composite`          | see below | `sensitive` | Composite report |
 | `probe_audio_mix`          | see below | `sensitive` | Mix report |
 | `start_recording`          | see below | `sensitive` | `{"path", "width", "height", "fps", "sample_rate", "channels", "video_encoder"}` |
-| `stop_recording`           | none   | `control`   | Recording report |
+| `stop_recording`           | none   | `control`, destructive | Recording report |
 | `start_streaming`          | see below | `sensitive` | `{"target", "width", "height", "fps", "video_bitrate_kbps", "sample_rate", "channels", "video_encoder"}` |
-| `stop_streaming`           | none   | `control`   | Streaming report |
+| `stop_streaming`           | none   | `control`, destructive | Streaming report |
 | `list_scenes`              | none   | `read_only` | Scene list |
 | `create_scene`             | see below | `control` | Scene list |
-| `delete_scene`             | see below | `sensitive` | Scene list |
-| `set_active_scene`         | see below | `sensitive` | Scene list |
+| `delete_scene`             | see below | `sensitive`, destructive | Scene list |
+| `set_active_scene`         | see below | `sensitive`, destructive | Scene list |
 | `add_source`               | see below | `sensitive` | Scene list |
-| `update_source`            | see below | `control` | Scene list |
-| `remove_source`            | see below | `control` | Scene list |
+| `update_source`            | see below | `control`, destructive | Scene list |
+| `remove_source`            | see below | `control`, destructive | Scene list |
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
 | `set_screen_source`        | see below | `sensitive` | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `add_channel`              | see below | `sensitive` | Mixer state |
 | `remove_channel`           | see below | `control`, destructive | Mixer state |
-| `update_channel`           | see below | `control` | Mixer state |
-| `set_channel_input`        | see below | `sensitive` | Mixer state |
+| `update_channel`           | see below | `control`, destructive | Mixer state |
+| `set_channel_input`        | see below | `sensitive`, destructive | Mixer state |
 | `add_bus`                  | see below | `control` | Mixer state |
 | `remove_bus`               | see below | `control`, destructive | Mixer state |
-| `update_bus`               | see below | `control` | Mixer state |
-| `set_send`                 | see below | `control` | Mixer state |
+| `update_bus`               | see below | `control`, destructive | Mixer state |
+| `set_send`                 | see below | `control`, destructive | Mixer state |
 | `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 | `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
 | `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
 | `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "migrates", "problems": [{"path", "message"}]}` |
 
-`access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
+`access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. "destructive" marks a command that may overwrite, remove or end something (a scene, a gain, a running output), as opposed to only adding or inspecting; it is `list_commands`' `destructive` and MCP's destructive hint. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
 - **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
 - **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`. Parameters are decoded first, so `required` is what that call needs.
 - **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
@@ -390,11 +390,11 @@ Mixer (ADR 0017):
 - **Channels:** the pipeline mixes a list of channels, each one input's strip: what it plays (a capture device or a test tone), a fader, mute and balance, and one send to every bus. At most 8 channels. Channels have stable ids (`ch_…`, ADR 0014), and commands name one by `id`, `name` or both (which must then agree; the id is looked up first). Names are unique among the channels.
 - **Buses:** the program bus, `bus_program` named `Program`, is what every output records or streams, hard-limited to [−1, 1] where it leaves the graph; it cannot be removed. Up to 8 aux buses (`bus_…`) add submixes and separate mixes: each has a fader and mute, and `assign_db`, its level into the program bus, or `null` for a separate mix (e.g. for monitoring) that reaches no output yet. Bus names are unique, `Program` included. Two tiers only: an aux bus feeds the program bus or nothing, so no loop can be built.
 - **Sends:** each channel has one send per bus, in bus order (program first): `{"bus", "enabled", "level_db", "tap"}`. `tap` is `post_fader` (after fader and balance) or `pre_fader` (after mute, before the fader: the channel fader does not move it). Mute comes before both taps, so a muted channel is silent in every bus. A new channel sends to the program bus post-fader at 0 dB and nowhere else; a new bus starts with every channel's send to it off.
-- **`get_mixer`:** returns `{"running", "channels": [{"id", "name", "input", "gain_db", "mute", "balance", "sends", "peak_dbfs"}], "buses": [{"id", "name", "kind", "gain_db", "mute", "assign_db", "peak_dbfs"}], "warnings"}`, the program bus first (`kind: "program"`, then `"aux"`). `input` is `{"kind": "device", "device": name or null for the default input}` or `{"kind": "tone", "frequency_hz", "level_dbfs"}`. Peaks are the highest level of the last 300 ms: a channel's after its fader, a bus's before the output limit, so it can exceed 0 dBFS when the mix overloads (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll. `warnings` lists routing that is allowed but rarely meant: a channel that reaches the program bus twice, directly and through an assigned aux bus (+6 dB at equal levels).
+- **`get_mixer`:** returns `{"running", "channels": [{"id", "name", "input", "gain_db", "mute", "balance", "sends", "peak_dbfs"}], "buses": [{"id", "name", "kind", "gain_db", "mute", "assign_db", "peak_dbfs"}], "warnings"}`, the program bus first (`kind: "program"`, then `"aux"`). `input` is `{"kind": "device", "device": name or null for the default input}` or `{"kind": "tone", "frequency_hz", "level_dbfs"}`. Peaks are the highest level of the last 300 ms: a channel's after its fader, a bus's before the output limit, so it can exceed 0 dBFS when the mix overloads (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll. `warnings` lists routing that is allowed but rarely meant: a channel that reaches the program bus more than once, directly and through each assigned aux bus it sends to (+6 dB for two equal paths). It is about the routing, so mutes and levels, which change live, do not count.
 - **`add_channel {name, input, gain_db?, mute?, balance?}`:** adds a channel at the end, with a fresh id. A tone's `level_dbfs` defaults to −12; gain is −96 to +24 dB, balance −1 (left only) to 1 (right only), centre unity on both sides. It is `sensitive`, because a device channel captures a microphone. A duplicate name is `invalid_params`, a ninth channel `invalid_state`.
 - **`add_bus {name, gain_db?, mute?, assign_db?}`** (`assign_db` absent or `null`: a separate mix) and **`remove_bus {id | name}`** (which removes every send to it; the program bus is `invalid_params`).
 - **Structure needs an idle pipeline:** `add_channel`, `remove_channel {id | name}`, `set_channel_input {id | name, input}` (`sensitive`, as it chooses what is captured), `add_bus` and `remove_bus` change the mixer's structure, so they are `invalid_state` while a preview or output runs.
-- **Live:** **`update_channel {id | name, gain_db?, mute?, balance?}`**, **`update_bus {id | name, gain_db?, mute?, assign_db?}`** (`assign_db: null` makes an aux bus a separate mix; on the program bus it is `invalid_params`) and **`set_send {channel_id | channel, bus_id | bus, enabled?, level_db?, tap?}`** apply while running, ramped over one block so nothing clicks; a tap change fades out on the old tap, then in on the new one. They are kept in the configuration. During a run with an output's own sources, they apply to that run's channels only.
+- **Live:** **`update_channel {id | name, gain_db?, mute?, balance?}`**, **`update_bus {id | name, gain_db?, mute?, assign_db?}`** (`assign_db: null` makes an aux bus a separate mix; on the program bus it is `invalid_params`) and **`set_send {channel_id | channel, bus_id | bus, enabled?, level_db?, tap?}`** apply while running, ramped over one block so nothing clicks; a tap change fades out on the old tap, then in on the new one. They are kept in the configuration. During a run with an output's own sources, `get_mixer` and these commands address that run's channels and its program bus, which has no aux buses beside it; the configured mixer comes back when the run ends.
 
 Preview:
 - **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
@@ -443,7 +443,7 @@ The file (`schema_version` 2):
 - **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
 - **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given (a device channel's `device` may be left out or `null` for the default input), checked by the `add_channel` rules. Their **`sends`** are checked by the `set_send` rules, each naming an existing bus once; a send that is left out is the default (on to program, off to an aux bus), in any order.
 - **`buses`** (aux buses, in mixer order; may be left out for none) are their `get_mixer` objects without `kind` and `peak_dbfs`, checked by the `add_bus` rules (`assign_db` may be left out for a separate mix). **`program`** is checked by the `update_bus` rules.
-- **Checked across the file:** scene, source and channel ids (form, and unique; source ids across all scenes), unique scene and channel names, unique source names within a scene, at most 16 scenes of 16 sources and 8 channels, `active_scene` naming a scene, and the canvas matching the engine's.
+- **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's. The audio is checked by the graph's own rules, the ones the engine keeps: channel and bus ids (form, unique, an aux bus not `bus_program`), unique channel names, unique bus names (`Program` is taken), at most 8 channels and 8 aux buses, and every send naming an existing bus once. An entry that is wrong on its own still counts for these, so every problem is reported at once.
 - **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
 - **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.

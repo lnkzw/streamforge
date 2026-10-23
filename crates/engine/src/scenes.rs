@@ -127,6 +127,7 @@ impl SceneCollection {
             &Kind {
                 what: "scene",
                 id_field: "scene_id",
+                name_field: "scene",
             },
             |scene| (&scene.id, &scene.name),
         )
@@ -175,7 +176,7 @@ impl SceneCollection {
             .sources
             .iter()
             .position(|source| source.name == *name)
-            .ok_or_else(|| not_found("source", name))?;
+            .ok_or_else(|| not_found("source", "name", name))?;
         Ok((scene, index))
     }
 

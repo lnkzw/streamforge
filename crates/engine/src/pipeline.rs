@@ -442,18 +442,15 @@ impl Pipeline {
     pub fn update_bus(&mut self, request: &UpdateBusRequest) -> Result<(), CommandError> {
         let bus = audio::update_bus(&mut self.audio, request)?;
         self.control
-            .set_bus(bus.graph(), audio::config_of(&self.audio, bus));
+            .set_bus(bus, audio::config_of(&self.audio, bus));
         Ok(())
     }
 
     /// Apply a send change live (ramped; a tap change fades out and in).
     pub fn set_send(&mut self, request: &SetSendRequest) -> Result<(), CommandError> {
         let (channel, bus) = audio::set_send(&mut self.audio, request)?;
-        self.control.set_send(
-            channel,
-            bus.graph(),
-            audio::send_of(&self.audio, channel, bus),
-        );
+        self.control
+            .set_send(channel, bus, audio::send_of(&self.audio, channel, bus));
         Ok(())
     }
 

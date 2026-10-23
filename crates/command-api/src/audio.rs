@@ -12,8 +12,12 @@
 //! Channels and buses have stable ids like scenes (ADR 0014), and commands
 //! name them by id or by name.
 
+use std::collections::HashSet;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::{MAX_ID_LEN, is_valid_id};
 
 /// Most channels; the mixer's fixed capacity.
 pub const MAX_CHANNELS: usize = audio_engine::MAX_CHANNELS;
@@ -147,6 +151,106 @@ impl AudioGraphSpec {
             .chain(self.buses.iter().map(|bus| SendSpec::off(&bus.id)))
             .collect()
     }
+
+    /// The rules across the graph that no single command's parameters
+    /// show: limits, ids (form, unique), names (unique; `Program` is the
+    /// program bus's), and every channel's sends, one per bus in bus order.
+    /// The engine's commands keep them; a project file is checked by them.
+    pub fn problems(&self) -> Vec<GraphProblem> {
+        let mut problems = Vec::new();
+        let mut problem = |path: String, message: String| {
+            problems.push(GraphProblem { path, message });
+        };
+        if self.channels.len() > MAX_CHANNELS {
+            problem(
+                "channels".to_owned(),
+                format!(
+                    "at most {MAX_CHANNELS} channels, got {}",
+                    self.channels.len()
+                ),
+            );
+        }
+        if self.buses.len() > MAX_AUX_BUSES {
+            problem(
+                "buses".to_owned(),
+                format!(
+                    "at most {MAX_AUX_BUSES} aux buses, got {}",
+                    self.buses.len()
+                ),
+            );
+        }
+        let mut ids = HashSet::new();
+        let mut names = HashSet::from([PROGRAM_BUS_NAME]);
+        for (index, bus) in self.buses.iter().enumerate() {
+            if !is_valid_id(BUS_ID_PREFIX, &bus.id) || bus.id == PROGRAM_BUS_ID {
+                problem(
+                    format!("buses[{index}].id"),
+                    format!("{} (and not `{PROGRAM_BUS_ID}`)", id_rule(BUS_ID_PREFIX)),
+                );
+            } else if !ids.insert(bus.id.as_str()) {
+                problem(
+                    format!("buses[{index}].id"),
+                    format!("bus id `{}` is used twice", bus.id),
+                );
+            }
+            if !names.insert(bus.name.as_str()) {
+                problem(
+                    format!("buses[{index}].name"),
+                    format!(
+                        "bus name `{}` is used twice (`{PROGRAM_BUS_NAME}` is the program bus's)",
+                        bus.name
+                    ),
+                );
+            }
+        }
+        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
+        let order: Vec<&str> = std::iter::once(PROGRAM_BUS_ID)
+            .chain(self.buses.iter().map(|bus| bus.id.as_str()))
+            .collect();
+        for (index, channel) in self.channels.iter().enumerate() {
+            if !is_valid_id(CHANNEL_ID_PREFIX, &channel.id) {
+                problem(format!("channels[{index}].id"), id_rule(CHANNEL_ID_PREFIX));
+            } else if !ids.insert(channel.id.as_str()) {
+                problem(
+                    format!("channels[{index}].id"),
+                    format!("channel id `{}` is used twice", channel.id),
+                );
+            }
+            if !names.insert(channel.name.as_str()) {
+                problem(
+                    format!("channels[{index}].name"),
+                    format!("channel name `{}` is used twice", channel.name),
+                );
+            }
+            if !channel
+                .sends
+                .iter()
+                .map(|send| send.bus.as_str())
+                .eq(order.iter().copied())
+            {
+                problem(
+                    format!("channels[{index}].sends"),
+                    "one send per bus, in bus order: the program bus, then the aux buses"
+                        .to_owned(),
+                );
+            }
+        }
+        problems
+    }
+}
+
+/// A problem in an [`AudioGraphSpec`]: where, as a path below the graph
+/// (e.g. `channels[1].name`), and what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphProblem {
+    pub path: String,
+    pub message: String,
+}
+
+/// What an id must look like.
+pub fn id_rule(prefix: &str) -> String {
+    format!("an id must be `{prefix}`, then `a-z`, `0-9` or `_` (at most {MAX_ID_LEN} bytes)")
 }
 
 /// How a command names a channel: by id, by name, or by both, which must

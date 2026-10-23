@@ -5,10 +5,12 @@ use command_api::{CommandError, ErrorCode};
 use serde_json::json;
 
 /// What is looked up, for messages: e.g. `scene` with its id parameter
-/// `scene_id`.
+/// `scene_id`. The parameters name the error details' keys, so a client can
+/// point at the one that was wrong.
 pub(crate) struct Kind {
     pub what: &'static str,
     pub id_field: &'static str,
+    pub name_field: &'static str,
 }
 
 /// The position in `items` of the one `id` and `name` name; `key` gives an
@@ -38,17 +40,17 @@ pub(crate) fn position<T>(
         (None, Some(name)) => items
             .iter()
             .position(|item| key(item).1 == name)
-            .ok_or_else(|| not_found(what, name)),
+            .ok_or_else(|| not_found(what, kind.name_field, name)),
         (None, None) => Err(mismatch(format!(
-            "no {what} given: pass its `{}` or its name",
-            kind.id_field
+            "no {what} given: pass `{}` or `{}`",
+            kind.id_field, kind.name_field
         ))),
     }
 }
 
-pub(crate) fn not_found(what: &str, name: &str) -> CommandError {
+pub(crate) fn not_found(what: &str, field: &str, name: &str) -> CommandError {
     CommandError::new(ErrorCode::NotFound, format!("no {what} named `{name}`"))
-        .with_details(json!({ what: name }))
+        .with_details(json!({ field: name }))
 }
 
 pub(crate) fn not_found_id(what: &str, field: &str, id: &str) -> CommandError {

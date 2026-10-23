@@ -1,5 +1,5 @@
 use capture_api::{CursorMode, VideoSourceKind};
-use command_api::{ChannelInput, Rgba, SendSpec, SendTap};
+use command_api::{ChannelInput, MAX_AUX_BUSES, MAX_CHANNELS, Rgba, SendSpec, SendTap};
 
 use super::*;
 
@@ -508,8 +508,23 @@ fn sends_left_out_are_the_default_and_buses_may_be_left_out() {
 fn bus_and_send_problems_name_their_path() {
     let mut value = file();
     value["audio"]["buses"][0]["id"] = json!("bus_program");
-    let found = problems(&value);
-    assert_eq!(found[0].0, "audio.buses[0].id", "{found:?}");
+    // All at once: the id, and the sends that named the bus by its old id.
+    let paths: Vec<String> = problems(&value).into_iter().map(|(path, _)| path).collect();
+    assert_eq!(
+        paths,
+        [
+            "audio.channels[0].sends[1].bus",
+            "audio.channels[1].sends[1].bus",
+            "audio.buses[0].id"
+        ]
+    );
+    // A bus that is wrong on its own keeps its id: the sends to it add
+    // nothing, and a duplicate name next to it is still found.
+    let mut value = file();
+    value["audio"]["buses"][0]["gain_db"] = json!(99);
+    value["audio"]["channels"][1]["name"] = json!("Mic");
+    let paths: Vec<String> = problems(&value).into_iter().map(|(path, _)| path).collect();
+    assert_eq!(paths, ["audio.buses[0]", "audio.channels[1].name"]);
     let mut value = file();
     value["audio"]["buses"][0]["name"] = json!("Program");
     assert_eq!(only(&value, "used twice"), "audio.buses[0].name");
@@ -543,7 +558,12 @@ fn bus_and_send_problems_name_their_path() {
         .collect();
     value["audio"]["buses"] = json!(buses);
     let found = problems(&value);
-    assert_eq!(found[0].0, "audio.buses", "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(path, message)| path == "audio.buses" && message.contains("at most")),
+        "{found:?}"
+    );
 }
 
 #[test]

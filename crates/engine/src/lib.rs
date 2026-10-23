@@ -44,7 +44,7 @@ pub struct Engine {
     streaming: Option<StreamingOutput>,
     /// Scenes; the pipeline renders the active one.
     scenes: SceneCollection,
-    /// Audio the pipeline mixes unless an output brings its own sources.
+    /// The configured audio graph; every run mixes it (ADR 0017).
     audio: AudioGraphSpec,
     /// How each output starts: its mix bus and encoder settings.
     profiles: OutputProfiles,
@@ -719,11 +719,12 @@ mod tests {
         let mut engine = engine().with_output_dir(&dir.0);
         assert!(!status(&mut engine).recording_active);
 
-        let started = start(
+        run(
             &mut engine,
-            json!({"file_name": "take.mkv", "inputs": [{"input": "mic"}]}),
-        )
-        .expect("start");
+            "set_channel_input",
+            json!({"name": "Tone", "input": {"kind": "device", "device": "mic"}}),
+        );
+        let started = start(&mut engine, json!({"file_name": "take.mkv"})).expect("start");
         let CommandOutput::RecordingStarted(started) = started else {
             panic!("unexpected output");
         };
@@ -874,10 +875,10 @@ mod tests {
         });
         let mut engine = engine().with_output_dir(&dir.0);
         start(&mut engine, json!({"file_name": "keep.mkv"})).expect("start recording");
-        // Outputs share the running pipeline; they cannot bring their own sources.
+        // Outputs share the running pipeline; they cannot add a screen layer.
         let own_sources = Command::decode(
             "start_streaming",
-            Some(&json!({"url": server.url(), "tones": []})),
+            Some(&json!({"url": server.url(), "screen": true})),
         )
         .expect("decode");
         assert_eq!(
@@ -2483,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn other_device_errors_and_an_outputs_own_inputs_still_fail_the_start() {
+    fn other_device_errors_still_fail_the_start() {
         let _media = media_test_lock();
         let dir = TempDir::new("device-errors");
         let mut engine = engine().with_output_dir(&dir.0);
@@ -2497,14 +2498,6 @@ mod tests {
         assert_eq!(denied.code, ErrorCode::PermissionDenied);
         assert!(!status(&mut engine).pipeline_running);
         assert!(!dir.0.join("denied.mkv").exists());
-        // An input named for this run is checked as before.
-        let missing = start(
-            &mut engine,
-            json!({"file_name": "own.mkv", "inputs": [{"input": "missing"}]}),
-        )
-        .unwrap_err();
-        assert_eq!(missing.code, ErrorCode::NotFound);
-        assert!(!status(&mut engine).pipeline_running);
     }
 
     #[test]

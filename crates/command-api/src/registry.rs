@@ -184,14 +184,14 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
 
 const START_RECORDING: CommandDescriptor = CommandDescriptor {
     name: "start_recording",
-    summary: "Record the media pipeline (the active scene at 1920x1080@60 and the audio mix) to \
-              H.264/AAC in Matroska. Params: file_name (required, plain .mkv name in the engine's \
-              output directory, never overwritten); video_encoder (auto: hardware if one works \
-              here, else software; software; hardware); optional sources (screen, source_id, \
-              source_types, cursor, inputs, tones, master_gain_db) only while no preview or \
-              output runs: they replace the configured channels (see get_mixer; they may \
-              include microphones) for this run and add a screen layer. Returns immediately with \
-              the encoder in use; recording continues until stop_recording.",
+    summary: "Record the media pipeline (the active scene at 1920x1080@60 and the configured \
+              mixer: the recording profile's mix and tracks, see get_output_profiles) to H.264/AAC \
+              in Matroska. Params: file_name (required, plain .mkv name in the engine's output \
+              directory, never overwritten); video_encoder (auto: hardware if one works here, else \
+              software; software; hardware; default: the profile's); optional screen layer \
+              (screen, source_id, source_types, cursor) only while no preview or output runs. \
+              Returns immediately with the encoder in use; recording continues until \
+              stop_recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -212,8 +212,8 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
               video_bitrate_kbps (300..50000) and video_encoder (auto, software, hardware), both by \
               default the stream profile's, \
               reconnect_attempts (default 5), reconnect_delay_ms (default 1000, doubling up to \
-              30 s), and sources as for start_recording. Returns once connected, with the encoder \
-              in use; reconnects after errors; independent of recording.",
+              30 s), and a screen layer as for start_recording. Returns once connected, with the \
+              encoder in use; reconnects after errors; independent of recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: true,
@@ -851,20 +851,17 @@ fn tone_level(command: &str, dbfs: Option<f64>) -> Result<f64, CommandError> {
     }
 }
 
-/// Pipeline source fields shared by the output commands.
+/// Pipeline source fields shared by the output commands: a screen layer.
+/// The audio is always the configured mixer (ADR 0017).
 struct SourceParams {
     screen: Option<bool>,
     source_id: Option<String>,
     source_types: Option<Vec<VideoSourceKind>>,
     cursor: Option<CursorMode>,
-    inputs: Option<Vec<LiveInputParams>>,
-    /// Absent: one quiet test tone if there are no `inputs`; `[]`: no tones.
-    tones: Option<Vec<ToneParams>>,
-    master_gain_db: Option<f32>,
 }
 
 /// `None` if no source field is present: the output joins the running
-/// pipeline, or the engine starts one with its configured channels.
+/// pipeline, or the engine starts one with the active scene.
 fn output_sources(
     command: &str,
     params: SourceParams,
@@ -872,22 +869,10 @@ fn output_sources(
     let given = params.screen.is_some()
         || params.source_id.is_some()
         || params.source_types.is_some()
-        || params.cursor.is_some()
-        || params.inputs.is_some()
-        || params.tones.is_some()
-        || params.master_gain_db.is_some();
+        || params.cursor.is_some();
     if !given {
         return Ok(None);
     }
-    let inputs = params.inputs.unwrap_or_default();
-    // Without any source, a quiet tone keeps the audio track audibly alive;
-    // with live inputs, only they are mixed.
-    let tones = match params.tones {
-        Some(tones) => tones,
-        None if inputs.is_empty() => vec![default_tone()],
-        None => Vec::new(),
-    };
-    let sources = mix_sources(command, inputs, tones, params.master_gain_db)?;
     Ok(Some(MediaSources {
         screen: optional_screen(
             command,
@@ -896,19 +881,7 @@ fn output_sources(
             params.source_types,
             params.cursor,
         )?,
-        inputs: sources.inputs,
-        tones: sources.tones,
-        master_gain_db: sources.master_gain_db,
     }))
-}
-
-fn default_tone() -> ToneParams {
-    ToneParams {
-        frequency_hz: DEFAULT_TONE_HZ,
-        level_dbfs: Some(DEFAULT_OUTPUT_TONE_DBFS),
-        gain_db: None,
-        mute: None,
-    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -926,12 +899,6 @@ struct StartRecordingParams {
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
-    /// Live audio inputs (names from list_audio_inputs).
-    inputs: Option<Vec<LiveInputParams>>,
-    /// Test tones.
-    tones: Option<Vec<ToneParams>>,
-    /// Master gain in dB, -96 to 24.
-    master_gain_db: Option<f32>,
 }
 
 fn decode_start_recording(
@@ -949,9 +916,6 @@ fn decode_start_recording(
                 source_id: params.source_id,
                 source_types: params.source_types,
                 cursor: params.cursor,
-                inputs: params.inputs,
-                tones: params.tones,
-                master_gain_db: params.master_gain_db,
             },
         )?,
     })
@@ -987,12 +951,6 @@ struct StartStreamingParams {
     source_types: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
     cursor: Option<CursorMode>,
-    /// Live audio inputs (names from list_audio_inputs).
-    inputs: Option<Vec<LiveInputParams>>,
-    /// Test tones.
-    tones: Option<Vec<ToneParams>>,
-    /// Master gain in dB, -96 to 24.
-    master_gain_db: Option<f32>,
 }
 
 /// Stands in for an adapter's fixed target while its parameters decode.
@@ -1084,9 +1042,6 @@ fn decode_start_streaming(
                 source_id: params.source_id,
                 source_types: params.source_types,
                 cursor: params.cursor,
-                inputs: params.inputs,
-                tones: params.tones,
-                master_gain_db: params.master_gain_db,
             },
         )?,
     })
@@ -3302,49 +3257,34 @@ mod tests {
     fn start_recording_params() {
         let Ok(Command::StartRecording(request)) = Command::decode(
             "start_recording",
-            Some(&json!({"file_name": "take1.MKV", "inputs": [{"input": "mic"}]})),
+            Some(&json!({"file_name": "take1.MKV", "screen": true})),
         ) else {
             panic!("decode");
         };
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
         let sources = request.sources.expect("sources given");
-        assert_eq!(sources.screen, None);
-        assert_eq!(sources.inputs.len(), 1);
-        // With live inputs there is no default tone.
-        assert!(sources.tones.is_empty());
-        // No source field at all: join the pipeline or use the defaults.
+        assert!(sources.screen.is_some());
+        // No source field at all: join the pipeline or start it with the
+        // active scene.
         let Ok(Command::StartRecording(no_sources)) =
             Command::decode("start_recording", Some(&json!({"file_name": "a.mkv"})))
         else {
             panic!("decode");
         };
         assert_eq!(no_sources.sources, None);
-        // Any source field counts: here only the master gain, so one tone.
-        let Ok(Command::StartRecording(gain_only)) = Command::decode(
-            "start_recording",
-            Some(&json!({"file_name": "a.mkv", "master_gain_db": -3.0})),
-        ) else {
-            panic!("decode");
-        };
-        let gain_only = gain_only.sources.expect("sources given");
-        assert_eq!((gain_only.tones.len(), gain_only.master_gain_db), (1, -3.0));
-        // Eight live inputs fit; the default tone does not count against them.
-        let eight: Vec<_> = (0..8).map(|i| json!({"input": format!("in{i}")})).collect();
-        assert!(
-            Command::decode(
-                "start_recording",
-                Some(&json!({"file_name": "a.mkv", "inputs": eight}))
-            )
-            .is_ok()
-        );
-        let Ok(Command::StartRecording(silent)) = Command::decode(
-            "start_recording",
-            Some(&json!({"file_name": "a.mkv", "tones": []})),
-        ) else {
-            panic!("decode");
-        };
-        let silent = silent.sources.expect("sources given");
-        assert!(silent.tones.is_empty() && silent.inputs.is_empty());
+        // The audio is the configured mixer's (ADR 0017): per-run audio
+        // parameters are unknown fields.
+        for field in ["inputs", "tones", "master_gain_db"] {
+            let mut params = json!({"file_name": "a.mkv"});
+            params[field] = json!([]);
+            let err = Command::decode("start_recording", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{field}");
+            assert!(err.message.contains(field), "{}", err.message);
+            let mut params = json!({"url": "rtmp://host/app"});
+            params[field] = json!([]);
+            let err = Command::decode("start_streaming", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{field}");
+        }
     }
 
     #[test]

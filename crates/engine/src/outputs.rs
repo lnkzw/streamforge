@@ -22,9 +22,9 @@ use encoder_ffmpeg::{
 use media_core::{MediaTimestamp, duration_millis};
 use serde_json::{Map, Value, json};
 
+use crate::Engine;
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::pipeline::{OutputId, Pipeline, since};
-use crate::{Engine, audio};
 
 /// Bound for each blocking network operation of a stream (connect, write).
 const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,8 +140,8 @@ impl Engine {
             Some(_) if sources.is_some() => Err(CommandError::new(
                 ErrorCode::InvalidState,
                 "the media pipeline already runs (for the preview or another output); omit the \
-                 source parameters (screen, source_types, cursor, inputs, tones, \
-                 master_gain_db) to join it, or turn the preview off first",
+                 screen layer parameters (screen, source_id, source_types, cursor) to join it, \
+                 or turn the preview off first",
             )),
             Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
                 ErrorCode::InvalidState,
@@ -150,24 +150,12 @@ impl Engine {
             )),
             Some(_) => Ok(false),
             None => {
-                let (audio, from_setup, screen) = match sources {
-                    Some(sources) => (
-                        audio::from_sources(
-                            &sources.inputs,
-                            &sources.tones,
-                            sources.master_gain_db,
-                        ),
-                        false,
-                        sources.screen.as_ref(),
-                    ),
-                    None => (self.audio.clone(), true, None),
-                };
+                // Every run mixes the configured channels (ADR 0017).
                 self.pipeline = Some(Pipeline::start(
                     self.capture.as_mut(),
                     self.scenes.active(),
-                    audio,
-                    from_setup,
-                    screen,
+                    self.audio.clone(),
+                    sources.and_then(|sources| sources.screen.as_ref()),
                 )?);
                 Ok(true)
             }
@@ -524,9 +512,8 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 
 /// The recording's audio in `pipeline`'s run: the mix's column, the
 /// further tracks' columns, every track's name (after its bus), and
-/// warnings for buses the run does not have (a run with an output's own
-/// sources has no aux buses), which it leaves out. A bus is recorded once,
-/// also where a missing mix falls back to the program bus.
+/// warnings for buses the run does not have, which it leaves out. A bus is
+/// recorded once, also where a missing mix falls back to the program bus.
 pub(crate) fn recording_tracks(
     pipeline: &Pipeline,
     profiles: &OutputProfiles,
@@ -541,8 +528,7 @@ pub(crate) fn recording_tracks(
                  recording has it once"
             )),
             None => warnings.push(format!(
-                "the track bus `{bus}` is not in this run, which mixes an output's own sources \
-                 into the program bus only; the recording leaves it out"
+                "the track bus `{bus}` is not in this run; the recording leaves it out"
             )),
         }
     }
@@ -562,8 +548,7 @@ pub(crate) fn output_id(output: OutputKind) -> OutputId {
 }
 
 /// The column of the bus `output`'s profile takes, in `pipeline`'s run;
-/// the program bus, with a warning, if the run has no such bus (a run with
-/// an output's own sources has no aux buses).
+/// the program bus, with a warning, if the run has no such bus.
 fn mix_column(
     pipeline: &Pipeline,
     profiles: &OutputProfiles,
@@ -572,11 +557,12 @@ fn mix_column(
     let bus = profiles.mix(output);
     match pipeline.mix_column(bus) {
         Some(column) => (column, Vec::new()),
+        // Profiles name configured buses, and a run mixes the configured
+        // graph; this is only a safety net.
         None => (
             0,
             vec![format!(
-                "the profile's mix `{bus}` is not in this run, which mixes an output's own \
-                 sources into the program bus only; it takes the program bus"
+                "the profile's mix `{bus}` is not in this run; it takes the program bus"
             )],
         ),
     }

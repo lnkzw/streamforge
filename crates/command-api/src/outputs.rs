@@ -2,8 +2,9 @@
 //! `start_streaming` and `stop_streaming`.
 //!
 //! Outputs share one media pipeline (compositor, mixer, captures). The first
-//! output to start brings it up with its `sources`; later outputs join it
-//! and must not name sources. The pipeline stops with the last output.
+//! output to start brings it up, with a screen layer if it asks for one;
+//! later outputs join it and must not name sources. The pipeline stops with
+//! the last output.
 //!
 //! Each output has a profile (ADR 0017): the bus it takes as its mix and its
 //! encoder settings. A start uses its profile; the start's own parameters
@@ -20,10 +21,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use video_compositor::RenderStats;
 
-use crate::{
-    AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, LiveInputSpec,
-    PROGRAM_BUS_ID, ToneSpec,
-};
+use crate::{AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, PROGRAM_BUS_ID};
 
 /// A stream's video bitrate when nothing else says.
 pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
@@ -189,13 +187,11 @@ pub struct OutputProfileSet {
     pub next_start: Vec<&'static str>,
 }
 
-/// What the media pipeline renders and mixes.
+/// What a pipeline started by an output adds to the active scene: a screen
+/// layer. The audio is always the configured mixer (ADR 0017).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaSources {
     pub screen: Option<ScreenSelection>,
-    pub inputs: Vec<LiveInputSpec>,
-    pub tones: Vec<ToneSpec>,
-    pub master_gain_db: f32,
 }
 
 /// Start recording to a new file. Validated by `Command::decode`:

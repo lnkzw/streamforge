@@ -201,8 +201,9 @@ impl Engine {
                 };
                 let bus = match &self.pipeline {
                     Some(pipeline) if running => pipeline.output_mix(output_id(output)),
-                    // Started now, it would join this run: a run with an
-                    // output's own sources has the program bus only.
+                    // Started now, it would join this run, which takes the
+                    // program bus for a bus it lacks (a safety net: a run
+                    // mixes the configured graph).
                     Some(pipeline) if pipeline.mix_column(profile).is_none() => {
                         Some(PROGRAM_BUS_ID.to_owned())
                     }
@@ -295,7 +296,8 @@ impl Engine {
                         pipeline.set_output_mix(output_id(output), column);
                         applied_now.push("mix");
                     }
-                    // A run with an output's own sources has no aux buses.
+                    // Not in this run (a safety net: a run mixes the
+                    // configured graph).
                     None => next_start.push("mix"),
                 }
             }
@@ -358,23 +360,17 @@ impl Engine {
         Ok(self.mixer_state())
     }
 
-    /// Live while the pipeline runs. A run with an output's own sources has
-    /// its own channels; then the change applies to the run only.
+    /// Live while the pipeline runs.
     pub(crate) fn update_channel(
         &mut self,
         request: UpdateChannelRequest,
     ) -> Result<MixerState, CommandError> {
-        match &mut self.pipeline {
-            Some(pipeline) => {
-                pipeline.update_channel(&request)?;
-                if pipeline.audio_from_setup() {
-                    audio::update_channel(&mut self.audio, &request)?;
-                }
-            }
-            None => {
-                audio::update_channel(&mut self.audio, &request)?;
-            }
+        // The run mixes the configured graph: change both, the run first
+        // (it checks the request the same way).
+        if let Some(pipeline) = &mut self.pipeline {
+            pipeline.update_channel(&request)?;
         }
+        audio::update_channel(&mut self.audio, &request)?;
         Ok(self.mixer_state())
     }
 
@@ -418,17 +414,12 @@ impl Engine {
 
     /// Live, as [`Engine::update_channel`].
     pub(crate) fn set_send(&mut self, request: SetSendRequest) -> Result<MixerState, CommandError> {
-        match &mut self.pipeline {
-            Some(pipeline) => {
-                pipeline.set_send(&request)?;
-                if pipeline.audio_from_setup() {
-                    audio::set_send(&mut self.audio, &request)?;
-                }
-            }
-            None => {
-                audio::set_send(&mut self.audio, &request)?;
-            }
+        // The run mixes the configured graph: change both, the run first
+        // (it checks the request the same way).
+        if let Some(pipeline) = &mut self.pipeline {
+            pipeline.set_send(&request)?;
         }
+        audio::set_send(&mut self.audio, &request)?;
         Ok(self.mixer_state())
     }
 
@@ -436,17 +427,12 @@ impl Engine {
         &mut self,
         request: UpdateBusRequest,
     ) -> Result<MixerState, CommandError> {
-        match &mut self.pipeline {
-            Some(pipeline) => {
-                pipeline.update_bus(&request)?;
-                if pipeline.audio_from_setup() {
-                    audio::update_bus(&mut self.audio, &request)?;
-                }
-            }
-            None => {
-                audio::update_bus(&mut self.audio, &request)?;
-            }
+        // The run mixes the configured graph: change both, the run first
+        // (it checks the request the same way).
+        if let Some(pipeline) = &mut self.pipeline {
+            pipeline.update_bus(&request)?;
         }
+        audio::update_bus(&mut self.audio, &request)?;
         Ok(self.mixer_state())
     }
 

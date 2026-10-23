@@ -255,7 +255,7 @@ From the project owner's brief: a professional production studio with its own id
 
 - [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
 - [ ] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health.
-- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses and outputs), on the M11 model.
+- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model.
 - [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
 - [ ] Rollout to the remaining views; keyboard operation as specified.
 

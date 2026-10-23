@@ -1,14 +1,14 @@
-//! Scene and source ids (ADR 0014): a type prefix and 12 random base-36
-//! characters (about 62 bits), so ids from different projects do not
-//! collide when scenes are copied between them.
+//! Stable ids (ADR 0014): a type prefix and 12 random base-36 characters
+//! (about 62 bits), so ids from different projects do not collide when
+//! scenes or channels are copied between them.
 
-use command_api::{CommandError, ErrorCode};
+use crate::{CommandError, ErrorCode};
 
 const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 const LENGTH: usize = 12;
 
 /// A new id with `prefix` for which `taken` is false.
-pub(crate) fn new_id(prefix: &str, taken: impl Fn(&str) -> bool) -> Result<String, CommandError> {
+pub fn new_id(prefix: &str, taken: impl Fn(&str) -> bool) -> Result<String, CommandError> {
     loop {
         let id = random_id(prefix)?;
         if !taken(&id) {

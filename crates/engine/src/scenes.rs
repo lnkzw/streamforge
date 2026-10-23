@@ -11,7 +11,7 @@ use std::sync::Arc;
 use command_api::{
     AddSourceRequest, CommandError, ErrorCode, MAX_SCENE_SOURCES, MAX_SCENES, Rgba,
     SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind, SourceRect,
-    SourceRef, SourceSpec, UpdateSourceRequest,
+    SourceRef, SourceSpec, UpdateSourceRequest, new_id,
 };
 use media_core::{FrameMailbox, VideoFrame};
 use serde_json::json;
@@ -21,7 +21,6 @@ use video_compositor::{
 };
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, overlay_x};
-use crate::ids::new_id;
 
 /// The built-in scene (the M3 reference scene).
 pub(crate) const DEFAULT_SCENE: &str = "Test pattern";

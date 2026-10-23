@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Random stable ids (ADR 0014), shared by the engine and project migration.
+getrandom = "0.4"
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

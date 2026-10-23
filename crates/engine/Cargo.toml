@@ -12,8 +12,6 @@ audio-engine = { path = "../audio-engine" }
 encoder-ffmpeg = { path = "../encoder-ffmpeg" }
 media-core = { path = "../media-core" }
 project-file = { path = "../project-file" }
-# Random scene and source ids (ADR 0014), from the OS generator.
-getrandom = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 

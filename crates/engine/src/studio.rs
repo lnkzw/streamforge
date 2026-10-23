@@ -4,17 +4,16 @@
 use std::sync::Arc;
 
 use command_api::{
-    AddSourceRequest, AudioSetup, CommandError, ErrorCode, MixerState, PreviewState, SceneList,
-    SceneRef, SourceKind, SourceRef, StripChange, UpdateSourceRequest,
+    AddChannelRequest, AddSourceRequest, ChannelRef, CommandError, ErrorCode, MixerState,
+    PreviewState, SceneList, SceneRef, SetChannelInputRequest, SourceKind, SourceRef,
+    UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
 
-use crate::Engine;
 use crate::composite::FPS;
-use crate::pipeline::{
-    PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH, apply_strip, idle_mixer_state,
-};
+use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH};
 use crate::scenes::SceneCollection;
+use crate::{Engine, audio};
 
 impl Engine {
     /// The in-process preview: the newest quarter-resolution frame while
@@ -181,51 +180,84 @@ impl Engine {
     pub(crate) fn mixer_state(&self) -> MixerState {
         match &self.pipeline {
             Some(pipeline) => pipeline.mixer_state(),
-            None => idle_mixer_state(&self.audio),
+            None => audio::mixer_state(&self.audio, None),
         }
     }
 
-    pub(crate) fn set_mixer_strip(
+    /// Structure changes need an idle pipeline: its mixer is built for a
+    /// fixed set of channels.
+    fn audio_structure_idle(&self) -> Result<(), CommandError> {
+        if self.pipeline.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                "channels can only be added, removed or given another input while the pipeline \
+                 is idle; stop the preview and outputs first (fader, mute and balance change \
+                 live with update_channel)",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_channel(
         &mut self,
-        change: StripChange,
+        request: AddChannelRequest,
+    ) -> Result<MixerState, CommandError> {
+        self.audio_structure_idle()?;
+        audio::add_channel(&mut self.audio, request)?;
+        Ok(self.mixer_state())
+    }
+
+    pub(crate) fn remove_channel(
+        &mut self,
+        channel: &ChannelRef,
+    ) -> Result<MixerState, CommandError> {
+        self.audio_structure_idle()?;
+        audio::remove_channel(&mut self.audio, channel)?;
+        Ok(self.mixer_state())
+    }
+
+    pub(crate) fn set_channel_input(
+        &mut self,
+        request: SetChannelInputRequest,
+    ) -> Result<MixerState, CommandError> {
+        self.audio_structure_idle()?;
+        audio::set_channel_input(&mut self.audio, request)?;
+        Ok(self.mixer_state())
+    }
+
+    /// Live while the pipeline runs. A run with an output's own sources has
+    /// its own channels; then the change applies to the run only.
+    pub(crate) fn update_channel(
+        &mut self,
+        request: UpdateChannelRequest,
     ) -> Result<MixerState, CommandError> {
         match &mut self.pipeline {
             Some(pipeline) => {
-                pipeline.set_strip(change)?;
+                pipeline.update_channel(&request)?;
                 if pipeline.audio_from_setup() {
-                    apply_strip(&mut self.audio, change)?;
+                    audio::update_channel(&mut self.audio, &request)?;
                 }
             }
             None => {
-                apply_strip(&mut self.audio, change)?;
+                audio::update_channel(&mut self.audio, &request)?;
             }
         }
         Ok(self.mixer_state())
     }
 
-    pub(crate) fn set_master_gain(&mut self, gain_db: f32) -> MixerState {
-        if let Some(pipeline) = &mut self.pipeline {
-            pipeline.set_master_gain(gain_db);
-            if !pipeline.audio_from_setup() {
-                return self.mixer_state();
-            }
-        }
-        self.audio.master_gain_db = gain_db;
-        self.mixer_state()
-    }
-
-    pub(crate) fn set_audio_sources(
+    pub(crate) fn update_bus(
         &mut self,
-        setup: AudioSetup,
+        request: UpdateBusRequest,
     ) -> Result<MixerState, CommandError> {
-        if self.pipeline.is_some() {
-            return Err(CommandError::new(
-                ErrorCode::InvalidState,
-                "audio sources can only change while the pipeline is idle; stop the preview and \
-                 outputs first (gains and mutes change live with set_mixer_strip)",
-            ));
+        match &mut self.pipeline {
+            Some(pipeline) => {
+                pipeline.update_bus(&request)?;
+                if pipeline.audio_from_setup() {
+                    audio::update_bus(&mut self.audio, &request)?;
+                }
+            }
+            None => audio::update_bus(&mut self.audio, &request)?,
         }
-        self.audio = setup;
         Ok(self.mixer_state())
     }
 

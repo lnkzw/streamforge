@@ -1,33 +1,41 @@
-//! The StreamForge project file, schema version 1 (ADR 0015): the scenes
-//! with their ids, the active scene and the audio setup, as JSON.
+//! The StreamForge project file, schema version 2 (ADR 0015, ADR 0017):
+//! the scenes with their ids, the active scene and the audio graph, as JSON.
 //!
 //! The file reuses the command vocabulary instead of a second set of rules:
 //! a source is the object `list_scenes` shows for it, without the screen
-//! `source_id`, and it is checked by the `add_source` decoder; the audio is
-//! checked by the `set_audio_sources` decoder. This crate adds what the
-//! commands cannot see: ids, unique names, references and limits across
-//! the whole file. Every problem names its JSON path.
+//! `source_id`, and it is checked by the `add_source` decoder; a channel is
+//! its `get_mixer` object without the level, checked by the `add_channel`
+//! decoder, and the program bus by the `update_bus` decoder. This crate adds
+//! what the commands cannot see: ids, unique names, references and limits
+//! across the whole file. Every problem names its JSON path.
+//!
+//! Version 1 files (with the audio of the former `set_audio_sources`) are
+//! migrated on load ([`v1`]); saving writes version 2.
 //!
 //! Not stored: stream keys, file paths, and what screen sources capture
 //! (machine-specific, and window titles can be private, ADR 0010).
 
 mod store;
 mod strict;
+mod v1;
 
 use std::collections::HashSet;
 
 use command_api::{
-    AudioSetup, Command, MAX_ID_LEN, MAX_SCENE_SOURCES, MAX_SCENES, NAME_RULE, ProjectProblem,
+    AudioGraphSpec, CHANNEL_ID_PREFIX, ChannelSpec, Command, MAX_CHANNELS, MAX_ID_LEN,
+    MAX_SCENE_SOURCES, MAX_SCENES, NAME_RULE, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem,
     SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneSpec, SourceKind, SourceRect, SourceSpec, is_valid_id,
     is_valid_name,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 pub use store::{MAX_FILE_BYTES, Saved, read, write};
 
-/// The schema version this build writes and reads.
-pub const SCHEMA_VERSION: u64 = 1;
+/// The schema version this build writes. It also reads version 1 and
+/// migrates it.
+pub const SCHEMA_VERSION: u64 = 2;
 /// Most problems reported for one file; a last one says how many more
 /// there were.
 pub const MAX_PROBLEMS: usize = 100;
@@ -38,7 +46,16 @@ pub struct Project {
     pub scenes: Vec<SceneSpec>,
     /// Id of the active scene.
     pub active: String,
-    pub audio: AudioSetup,
+    pub audio: AudioGraphSpec,
+}
+
+/// A project read from a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Loaded {
+    pub project: Project,
+    /// The file's schema version when it was migrated; saving writes
+    /// [`SCHEMA_VERSION`].
+    pub migrated_from: Option<u64>,
 }
 
 /// The canvas the source rectangles are in, in pixels.
@@ -64,7 +81,7 @@ struct FileOut<'a> {
     canvas: Canvas,
     active_scene: &'a str,
     scenes: Vec<SceneSpec>,
-    audio: &'a AudioSetup,
+    audio: &'a AudioGraphSpec,
 }
 
 /// The file as read: sources stay JSON objects for the `add_source` decoder.
@@ -76,8 +93,8 @@ struct FileIn {
     canvas: Canvas,
     active_scene: String,
     scenes: Vec<FileScene>,
-    #[allow(dead_code)] // checked for its structure; decoded from the JSON
-    audio: FileAudio,
+    /// Checked by its version's rules.
+    audio: Value,
 }
 
 #[derive(Deserialize)]
@@ -88,34 +105,33 @@ struct FileScene {
     sources: Vec<Map<String, Value>>,
 }
 
-/// `set_audio_sources` parameters, every field explicit. Read for the
-/// paths of structure errors only; the decoder gets the file's own JSON, so
-/// no number is rounded on the way (a gain of 1e39 is an error, not 0 dB).
+/// Version 2's audio. Read for the structure and the paths of its errors;
+/// the decoders get the file's own JSON, so no number is rounded on the way
+/// (a gain of 1e39 is an error, not 0 dB).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAudio {
+    channels: Vec<Map<String, Value>>,
+    program: Map<String, Value>,
+}
+
+/// Every field explicit.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)] // checked for its structure
-struct FileAudio {
-    inputs: Vec<FileInput>,
-    tones: Vec<FileTone>,
-    master_gain_db: f32,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)]
-struct FileInput {
-    /// `null`: the system default input.
-    input: Option<String>,
+struct FileChannel {
+    id: String,
+    name: String,
+    input: Value,
     gain_db: f32,
     mute: bool,
+    balance: f32,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
-struct FileTone {
-    frequency_hz: f64,
-    level_dbfs: f64,
+#[allow(dead_code)] // checked for its structure
+struct FileProgram {
     gain_db: f32,
     mute: bool,
 }
@@ -151,8 +167,9 @@ fn without_screen_target(source: &SourceSpec) -> SourceSpec {
     source
 }
 
-/// Read and check a project file for a `canvas`-sized engine.
-pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Project, Invalid> {
+/// Read and check a project file for a `canvas`-sized engine; a version 1
+/// file is migrated.
+pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Loaded, Invalid> {
     let invalid = |schema_version, path: &str, message: String| Invalid {
         schema_version,
         problems: vec![problem(path, message)],
@@ -165,30 +182,29 @@ pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Project, Invalid> {
     };
     let Some(version) = version else {
         let found = if value.is_object() {
-            "`schema_version` must be a whole number (this build reads 1)"
+            "`schema_version` must be a whole number (this build reads 1 and 2)"
         } else {
             "a project file is a JSON object"
         };
         return Err(invalid(None, "schema_version", found.to_owned()));
     };
-    if version != SCHEMA_VERSION {
+    if version != 1 && version != SCHEMA_VERSION {
         let message = if version > SCHEMA_VERSION {
             format!(
                 "schema version {version} is newer than this build reads \
                  ({SCHEMA_VERSION}); update StreamForge"
             )
         } else {
-            format!("schema version {version} is not supported (this build reads {SCHEMA_VERSION})")
+            format!("schema version {version} is not supported (this build reads 1 and 2)")
         };
         return Err(invalid(Some(version), "schema_version", message));
     }
-    let audio = value.get("audio").cloned().unwrap_or(Value::Null);
     let file: FileIn = serde_path_to_error::deserialize(value).map_err(|error| {
         let path = error.path().to_string();
         let path = if path == "." { String::new() } else { path };
         invalid(Some(version), &path, error.into_inner().to_string())
     })?;
-    check(file, &audio, canvas).map_err(|mut problems| {
+    check(file, version, canvas).map_err(|mut problems| {
         if problems.len() > MAX_PROBLEMS {
             let more = problems.len() - MAX_PROBLEMS;
             problems.truncate(MAX_PROBLEMS);
@@ -202,7 +218,7 @@ pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Project, Invalid> {
 }
 
 /// The checks across the whole file, collecting every problem.
-fn check(file: FileIn, audio: &Value, canvas: Canvas) -> Result<Project, Vec<ProjectProblem>> {
+fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<ProjectProblem>> {
     let mut problems = Vec::new();
     if file.canvas != canvas {
         problems.push(problem(
@@ -282,19 +298,26 @@ fn check(file: FileIn, audio: &Value, canvas: Canvas) -> Result<Project, Vec<Pro
             format!("no scene has the id `{}`", file.active_scene),
         ));
     }
-    let audio = self::audio(audio).map_err(|message| problem("audio", message));
+    let audio = if version == 1 {
+        v1::migrate(file.audio)
+    } else {
+        audio(file.audio)
+    };
     let audio = match audio {
         Ok(audio) => Some(audio),
         Err(found) => {
-            problems.push(found);
+            problems.extend(found);
             None
         }
     };
     match audio {
-        Some(audio) if problems.is_empty() => Ok(Project {
-            scenes,
-            active: file.active_scene,
-            audio,
+        Some(audio) if problems.is_empty() => Ok(Loaded {
+            project: Project {
+                scenes,
+                active: file.active_scene,
+                audio,
+            },
+            migrated_from: (version != SCHEMA_VERSION).then_some(version),
         }),
         _ => Err(problems),
     }
@@ -362,12 +385,102 @@ fn source(
     })
 }
 
-fn audio(params: &Value) -> Result<AudioSetup, String> {
-    match Command::decode("set_audio_sources", Some(params)) {
-        Ok(Command::SetAudioSources(setup)) => Ok(setup),
-        Ok(_) => unreachable!("set_audio_sources decodes to SetAudioSources"),
-        Err(error) => Err(error.message),
+/// Version 2's audio: each channel an id and what `add_channel` accepts,
+/// the program bus what `update_bus` accepts for it.
+fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
+    let audio: FileAudio = structure("audio", audio).map_err(|found| vec![found])?;
+    let mut problems = Vec::new();
+    if audio.channels.len() > MAX_CHANNELS {
+        problems.push(problem(
+            "audio.channels",
+            format!(
+                "at most {MAX_CHANNELS} channels, got {}",
+                audio.channels.len()
+            ),
+        ));
     }
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    let mut channels = Vec::with_capacity(audio.channels.len());
+    for (index, mut object) in audio.channels.into_iter().enumerate() {
+        let at = format!("audio.channels[{index}]");
+        if let Err(found) = structure::<FileChannel>(&at, Value::Object(object.clone())) {
+            problems.push(found);
+            continue;
+        }
+        let Some(Value::String(id)) = object.remove("id") else {
+            unreachable!("the structure has a string id");
+        };
+        if !is_valid_id(CHANNEL_ID_PREFIX, &id) {
+            problems.push(problem(&format!("{at}.id"), id_rule(CHANNEL_ID_PREFIX)));
+        } else if !ids.insert(id.clone()) {
+            problems.push(problem(
+                &format!("{at}.id"),
+                format!("channel id `{id}` is used twice"),
+            ));
+        }
+        let request = match Command::decode("add_channel", Some(&Value::Object(object))) {
+            Ok(Command::AddChannel(request)) => request,
+            Ok(_) => unreachable!("add_channel decodes to AddChannel"),
+            Err(error) => {
+                problems.push(problem(&at, error.message));
+                continue;
+            }
+        };
+        if !names.insert(request.name.clone()) {
+            problems.push(problem(
+                &format!("{at}.name"),
+                format!("channel name `{}` is used twice", request.name),
+            ));
+        }
+        channels.push(ChannelSpec {
+            id,
+            name: request.name,
+            input: request.input,
+            gain_db: request.gain_db,
+            muted: request.muted,
+            balance: request.balance,
+        });
+    }
+    let program =
+        match structure::<FileProgram>("audio.program", Value::Object(audio.program.clone())) {
+            Ok(_) => {
+                let mut params = audio.program;
+                params.insert("id".to_owned(), json!(PROGRAM_BUS_ID));
+                match Command::decode("update_bus", Some(&Value::Object(params))) {
+                    Ok(Command::UpdateBus(request)) => Some(ProgramBusSpec {
+                        gain_db: request.gain_db.unwrap_or(0.0),
+                        muted: request.muted.unwrap_or(false),
+                    }),
+                    Ok(_) => unreachable!("update_bus decodes to UpdateBus"),
+                    Err(error) => {
+                        problems.push(problem("audio.program", error.message));
+                        None
+                    }
+                }
+            }
+            Err(found) => {
+                problems.push(found);
+                None
+            }
+        };
+    match program {
+        Some(program) if problems.is_empty() => Ok(AudioGraphSpec { channels, program }),
+        _ => Err(problems),
+    }
+}
+
+/// `value` as `T`, or a structure problem with its path below `at`.
+pub(crate) fn structure<T: DeserializeOwned>(at: &str, value: Value) -> Result<T, ProjectProblem> {
+    serde_path_to_error::deserialize(value).map_err(|error| {
+        let path = error.path().to_string();
+        let path = if path == "." {
+            at.to_owned()
+        } else {
+            format!("{at}.{path}")
+        };
+        problem(&path, error.into_inner().to_string())
+    })
 }
 
 /// serde's unknown-field message lists the command's fields, among them
@@ -383,7 +496,7 @@ fn id_rule(prefix: &str) -> String {
     format!("an id must be `{prefix}`, then `a-z`, `0-9` or `_` (at most {MAX_ID_LEN} bytes)")
 }
 
-fn problem(path: &str, message: String) -> ProjectProblem {
+pub(crate) fn problem(path: &str, message: String) -> ProjectProblem {
     ProjectProblem {
         path: path.to_owned(),
         message,

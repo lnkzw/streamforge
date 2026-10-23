@@ -313,15 +313,15 @@ impl Model {
         self.act("set_preview", json!({ "enabled": enabled }));
     }
 
-    pub fn set_strip(&mut self, index: usize, gain_db: f32, muted: bool) {
+    pub fn update_channel(&mut self, id: &str, gain_db: f32, muted: bool) {
         self.act(
-            "set_mixer_strip",
-            json!({ "index": index, "gain_db": gain_db, "mute": muted }),
+            "update_channel",
+            json!({ "id": id, "gain_db": gain_db, "mute": muted }),
         );
     }
 
-    pub fn set_master_gain(&mut self, gain_db: f32) {
-        self.act("set_master_gain", json!({ "gain_db": gain_db }));
+    pub fn update_bus(&mut self, id: &str, gain_db: f32) {
+        self.act("update_bus", json!({ "id": id, "gain_db": gain_db }));
     }
 
     pub fn start_recording(&mut self, file_name: &str) {

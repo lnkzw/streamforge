@@ -16,15 +16,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use audio_engine::{
-    BlockSink, BusConfig, BusRef, ChannelConfig, LiveMixStats, MixerConfig, MixerControl,
-    MixerThread,
-};
+use audio_engine::{BlockSink, BusRef, LiveMixStats, MixerConfig, MixerControl, MixerThread};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
-    AudioSetup, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
-    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, SourceSpec, StripChange,
-    StripState,
+    AudioGraphSpec, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
+    PipelineReport, SceneCaptureOutcome, SceneSpec, SourceKind, SourceSpec, UpdateBusRequest,
+    UpdateChannelRequest,
 };
 use encoder_ffmpeg::OutputInput;
 use media_core::{FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
@@ -34,7 +31,7 @@ use video_compositor::{
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::scenes::{self, FrameCache, LiveFrames};
-use crate::{command_error, mix};
+use crate::{audio, command_error, mix};
 
 /// Copies of rendered frames per output waiting for its encoder; beyond
 /// this, that output's frames are dropped and counted.
@@ -81,8 +78,9 @@ pub(crate) struct Pipeline {
     retired_omitted: u64,
     extra_screen: Option<Box<dyn VideoStream>>,
     audio_streams: Vec<Box<dyn AudioStream>>,
-    /// What this run mixes; gains follow live changes.
-    audio: AudioSetup,
+    /// What this run mixes; fader, mute and balance follow live changes.
+    /// `audio_streams` are its device channels' streams, in order.
+    audio: AudioGraphSpec,
     /// Whether `audio` is the engine's configured setup (rather than an
     /// output's own sources), so live gain changes apply to both.
     audio_from_setup: bool,
@@ -94,7 +92,7 @@ impl Pipeline {
     pub fn start(
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
-        audio: AudioSetup,
+        audio: AudioGraphSpec,
         audio_from_setup: bool,
         extra_screen: Option<&ScreenSelection>,
     ) -> Result<Self, CommandError> {
@@ -107,7 +105,8 @@ impl Pipeline {
             None => None,
         };
         let scene_screens = start_screens(capture, scene, &[])?;
-        let audio_streams = mix::start_live_inputs(capture, &audio.inputs)?;
+        let audio_streams =
+            mix::start_live_inputs(capture, audio::devices(&audio).map(|(_, device)| device))?;
         let fanout = Arc::new(Fanout::default());
         let mut cache = FrameCache::default();
         let update = scenes::build(
@@ -130,13 +129,14 @@ impl Pipeline {
             })),
         })
         .map_err(internal)?;
-        let mixer = MixerThread::spawn(MixerConfig::plain(
-            mix::mixer_inputs(&audio.inputs, &audio_streams, &audio.tones),
-            audio.master_gain_db,
+        let mut mixer_config = MixerConfig::plain(
+            mix::graph_inputs(&audio, &audio_streams),
+            audio.program.gain_db,
             EXPECTED_MAX_DURATION,
             Some(Box::new(AudioTap(Arc::clone(&fanout)))),
-        ))
-        .map_err(internal)?;
+        );
+        mixer_config.program = audio::program_config(&audio.program);
+        let mixer = MixerThread::spawn(mixer_config).map_err(internal)?;
         let control = mixer.control();
         Ok(Self {
             compositor,
@@ -344,17 +344,15 @@ impl Pipeline {
             name: "screen layer".to_owned(),
             state: stream.state(),
         });
-        let audio = self
-            .audio
-            .inputs
-            .iter()
-            .zip(&self.audio_streams)
-            .map(|(spec, stream)| CaptureHealth {
-                kind: CaptureKind::Audio,
-                id: None,
-                name: mix::input_name(spec),
-                state: stream.state(),
-            });
+        let audio =
+            audio::devices(&self.audio)
+                .zip(&self.audio_streams)
+                .map(|((channel, _), stream)| CaptureHealth {
+                    kind: CaptureKind::Audio,
+                    id: Some(channel.id.clone()),
+                    name: channel.name.clone(),
+                    state: stream.state(),
+                });
         screens.chain(layer).chain(audio).collect()
     }
 
@@ -425,34 +423,25 @@ impl Pipeline {
         previous.map(|out| (out.published, out.dropped))
     }
 
-    /// Strips with live gains and the peaks since the previous call.
+    /// The run's channels and buses with their levels.
     pub fn mixer_state(&self) -> MixerState {
-        let levels = self.control.levels();
-        let mut state = idle_mixer_state(&self.audio);
-        state.running = true;
-        for (strip, peak) in state.strips.iter_mut().zip(levels.channels) {
-            strip.peak_dbfs = peak;
-        }
-        state.master_peak_dbfs = levels.program;
-        state
+        audio::mixer_state(&self.audio, Some(&self.control.levels()))
     }
 
-    /// Apply a strip change live; returns the strip's new configuration.
-    pub fn set_strip(&mut self, change: StripChange) -> Result<ChannelConfig, CommandError> {
-        let config = apply_strip(&mut self.audio, change)?;
-        self.control.set_channel(change.index, config);
-        Ok(config)
+    /// Apply a fader, mute or balance change live.
+    pub fn update_channel(&mut self, request: &UpdateChannelRequest) -> Result<(), CommandError> {
+        let index = audio::update_channel(&mut self.audio, request)?;
+        self.control
+            .set_channel(index, audio::channel_config(&self.audio.channels[index]));
+        Ok(())
     }
 
-    pub fn set_master_gain(&mut self, gain_db: f32) {
-        self.audio.master_gain_db = gain_db;
-        self.control.set_bus(
-            BusRef::Program,
-            BusConfig {
-                gain_db,
-                ..BusConfig::UNITY
-            },
-        );
+    /// Apply a bus change live.
+    pub fn update_bus(&mut self, request: &UpdateBusRequest) -> Result<(), CommandError> {
+        audio::update_bus(&mut self.audio, request)?;
+        self.control
+            .set_bus(BusRef::Program, audio::program_config(&self.audio.program));
+        Ok(())
     }
 
     /// Stop producers, then captures; report everything.
@@ -488,7 +477,10 @@ impl Pipeline {
             None => (None, None),
         };
         retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
-        let audio_captures = mix::stop_captures(&audio.inputs, audio_streams);
+        let devices: Vec<Option<String>> = audio::devices(&audio)
+            .map(|(_, device)| device.clone())
+            .collect();
+        let audio_captures = mix::stop_captures(&devices, audio_streams);
 
         if let Some(render) = &render
             && (render.late_frames > 0 || render.skipped_ticks > 0)
@@ -586,65 +578,6 @@ fn stop_scene_capture(screen: SceneCapture) -> SceneCaptureOutcome {
             error: Some(ErrorSummary::from(error)),
         },
     }
-}
-
-/// Strip names and kinds in mixer order: live inputs, then tones.
-pub(crate) fn idle_mixer_state(audio: &AudioSetup) -> MixerState {
-    let live = audio
-        .inputs
-        .iter()
-        .map(|input| (mix::input_name(input), "live", input.gain_db, input.muted));
-    let tones = audio.tones.iter().map(|tone| {
-        (
-            format!("tone {} Hz", tone.frequency_hz),
-            "tone",
-            tone.gain_db,
-            tone.muted,
-        )
-    });
-    MixerState {
-        running: false,
-        strips: live
-            .chain(tones)
-            .enumerate()
-            .map(|(index, (name, kind, gain_db, muted))| StripState {
-                index,
-                name,
-                kind,
-                gain_db,
-                muted,
-                peak_dbfs: None,
-            })
-            .collect(),
-        master_gain_db: audio.master_gain_db,
-        master_peak_dbfs: None,
-    }
-}
-
-/// Apply `change` to the strip it names in `audio`.
-pub(crate) fn apply_strip(
-    audio: &mut AudioSetup,
-    change: StripChange,
-) -> Result<ChannelConfig, CommandError> {
-    let inputs = audio.inputs.len();
-    let (gain_db, muted) = if change.index < inputs {
-        let input = &mut audio.inputs[change.index];
-        (&mut input.gain_db, &mut input.muted)
-    } else if let Some(tone) = audio.tones.get_mut(change.index - inputs) {
-        (&mut tone.gain_db, &mut tone.muted)
-    } else {
-        return Err(CommandError::new(
-            ErrorCode::NotFound,
-            format!(
-                "no mixer strip {}; there are {}",
-                change.index,
-                inputs + audio.tones.len()
-            ),
-        ));
-    };
-    *gain_db = change.gain_db.unwrap_or(*gain_db);
-    *muted = change.muted.unwrap_or(*muted);
-    Ok(mix::channel(*gain_db, *muted))
 }
 
 /// The attached consumers. The compositor and mixer threads lock their list

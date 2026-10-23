@@ -17,11 +17,12 @@ use audio_engine::{MAX_GAIN_DB, MAX_INPUTS, MIN_GAIN_DB};
 use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
-    AddSourceRequest, AudioSetup, Command, CommandError, CompositeRequest, ErrorCode,
-    LiveInputSpec, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest,
-    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
-    SourceKind, SourceRect, SourceRef, StreamingRequest, StripChange, ToneSpec,
-    UpdateSourceRequest,
+    AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX, ChannelInput,
+    ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec, MAX_ID_LEN,
+    MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest, RecordingRequest, Rgba,
+    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef, SetChannelInputRequest,
+    SourceKind, SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest,
+    UpdateChannelRequest, UpdateSourceRequest,
 };
 
 /// Permission class of a command.
@@ -310,36 +311,57 @@ const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const GET_MIXER: CommandDescriptor = CommandDescriptor {
     name: "get_mixer",
-    summary: "Mixer strips with gain, mute and the peak level since the previous call.",
+    summary: "Mixer channels and buses with their ids, settings and the peak level of the last \
+              300 ms.",
     access: CommandAccess::ReadOnly,
     destructive: false,
     open_world: false,
 };
 
-const SET_MIXER_STRIP: CommandDescriptor = CommandDescriptor {
-    name: "set_mixer_strip",
-    summary: "Change one strip (live if running). Params: index, gain_db (-96..24), mute. Returns \
+const ADD_CHANNEL: CommandDescriptor = CommandDescriptor {
+    name: "add_channel",
+    summary: "Add a mixer channel, sending to the program bus, while the pipeline is idle. \
+              Params: name (unique), input ({kind: device, device: a name from \
+              list_audio_inputs, or null for the default input} or {kind: tone, frequency_hz, \
+              level_dbfs -96..0, default -12}), gain_db (-96..24), mute, balance (-1..1). \
+              Returns the mixer state.",
+    access: CommandAccess::Sensitive,
+    destructive: false,
+    open_world: false,
+};
+
+const REMOVE_CHANNEL: CommandDescriptor = CommandDescriptor {
+    name: "remove_channel",
+    summary: "Remove a mixer channel while the pipeline is idle. Params: id, or name. Returns \
               the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
 };
 
-const SET_MASTER_GAIN: CommandDescriptor = CommandDescriptor {
-    name: "set_master_gain",
-    summary: "Change the master gain (live if running). Params: gain_db (-96..24). Returns the \
-              mixer state.",
+const UPDATE_CHANNEL: CommandDescriptor = CommandDescriptor {
+    name: "update_channel",
+    summary: "Change a channel's fader, mute or balance (live if running). Params: id or name; \
+              gain_db (-96..24), mute, balance (-1..1). Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
 };
 
-const SET_AUDIO_SOURCES: CommandDescriptor = CommandDescriptor {
-    name: "set_audio_sources",
-    summary: "Configure the pipeline's audio while it is idle. Params: inputs, tones, \
-              master_gain_db (as for probe_audio_mix; one -20 dBFS tone if neither inputs nor \
-              tones are given). Returns the mixer state.",
+const SET_CHANNEL_INPUT: CommandDescriptor = CommandDescriptor {
+    name: "set_channel_input",
+    summary: "Choose what a channel plays while the pipeline is idle. Params: id or name; input \
+              as for add_channel. Returns the mixer state.",
     access: CommandAccess::Sensitive,
+    destructive: true,
+    open_world: false,
+};
+
+const UPDATE_BUS: CommandDescriptor = CommandDescriptor {
+    name: "update_bus",
+    summary: "Change a bus's fader or mute (live if running). Params: id (bus_program) or name \
+              (Program); gain_db (-96..24), mute. Returns the mixer state.",
+    access: CommandAccess::Control,
     destructive: true,
     open_world: false,
 };
@@ -421,9 +443,11 @@ const COMMANDS: &[CommandDescriptor] = &[
     RESTART_SOURCE,
     SET_SCREEN_SOURCE,
     GET_MIXER,
-    SET_MIXER_STRIP,
-    SET_MASTER_GAIN,
-    SET_AUDIO_SOURCES,
+    ADD_CHANNEL,
+    REMOVE_CHANNEL,
+    UPDATE_CHANNEL,
+    SET_CHANNEL_INPUT,
+    UPDATE_BUS,
     SET_PREVIEW,
     SAVE_PROJECT,
     LOAD_PROJECT,
@@ -500,11 +524,13 @@ impl Command {
             "validate_project" => decode_project_file(name, params)
                 .map(|file_name| Self::ValidateProject { file_name }),
             "get_mixer" => expect_no_params(name, params).map(|()| Self::GetMixer),
-            "set_mixer_strip" => decode_mixer_strip(name, params).map(Self::SetMixerStrip),
-            "set_master_gain" => {
-                decode_master_gain(name, params).map(|gain_db| Self::SetMasterGain { gain_db })
+            "add_channel" => decode_add_channel(name, params).map(Self::AddChannel),
+            "remove_channel" => decode_remove_channel(name, params).map(Self::RemoveChannel),
+            "update_channel" => decode_update_channel(name, params).map(Self::UpdateChannel),
+            "set_channel_input" => {
+                decode_set_channel_input(name, params).map(Self::SetChannelInput)
             }
-            "set_audio_sources" => decode_audio_sources(name, params).map(Self::SetAudioSources),
+            "update_bus" => decode_update_bus(name, params).map(Self::UpdateBus),
             "set_preview" => {
                 decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
             }
@@ -564,9 +590,11 @@ impl Command {
             Self::RestartSource { .. } => &RESTART_SOURCE,
             Self::SetScreenSource { .. } => &SET_SCREEN_SOURCE,
             Self::GetMixer => &GET_MIXER,
-            Self::SetMixerStrip(_) => &SET_MIXER_STRIP,
-            Self::SetMasterGain { .. } => &SET_MASTER_GAIN,
-            Self::SetAudioSources(_) => &SET_AUDIO_SOURCES,
+            Self::AddChannel(_) => &ADD_CHANNEL,
+            Self::RemoveChannel(_) => &REMOVE_CHANNEL,
+            Self::UpdateChannel(_) => &UPDATE_CHANNEL,
+            Self::SetChannelInput(_) => &SET_CHANNEL_INPUT,
+            Self::UpdateBus(_) => &UPDATE_BUS,
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
@@ -705,28 +733,11 @@ fn mix_sources(
             muted: input.mute.unwrap_or(false),
         });
     }
-    let nyquist = f64::from(audio_engine::RATE) / 2.0;
     let mut generated = Vec::with_capacity(tones.len());
     for tone in tones {
-        if !(tone.frequency_hz.is_finite()
-            && tone.frequency_hz > 0.0
-            && tone.frequency_hz < nyquist)
-        {
-            return Err(invalid_params(
-                command,
-                format!("`frequency_hz` must be between 0 and {nyquist} (exclusive)"),
-            ));
-        }
-        let level = tone.level_dbfs.unwrap_or(DEFAULT_TONE_LEVEL_DBFS);
-        if !(level.is_finite() && (f64::from(MIN_GAIN_DB)..=0.0).contains(&level)) {
-            return Err(invalid_params(
-                command,
-                format!("`level_dbfs` must be between {MIN_GAIN_DB} and 0"),
-            ));
-        }
         generated.push(ToneSpec {
-            frequency_hz: tone.frequency_hz,
-            level_dbfs: level,
+            frequency_hz: tone_frequency(command, tone.frequency_hz)?,
+            level_dbfs: tone_level(command, tone.level_dbfs)?,
             gain_db: gain("gain_db", tone.gain_db)?,
             muted: tone.mute.unwrap_or(false),
         });
@@ -736,6 +747,31 @@ fn mix_sources(
         tones: generated,
         master_gain_db: gain("master_gain_db", master_gain_db)?,
     })
+}
+
+fn tone_frequency(command: &str, hz: f64) -> Result<f64, CommandError> {
+    let nyquist = f64::from(audio_engine::RATE) / 2.0;
+    if hz.is_finite() && hz > 0.0 && hz < nyquist {
+        Ok(hz)
+    } else {
+        Err(invalid_params(
+            command,
+            format!("`frequency_hz` must be between 0 and {nyquist} (exclusive)"),
+        ))
+    }
+}
+
+/// A tone's level; `None` is the default level.
+fn tone_level(command: &str, dbfs: Option<f64>) -> Result<f64, CommandError> {
+    let level = dbfs.unwrap_or(DEFAULT_TONE_LEVEL_DBFS);
+    if level.is_finite() && (f64::from(MIN_GAIN_DB)..=0.0).contains(&level) {
+        Ok(level)
+    } else {
+        Err(invalid_params(
+            command,
+            format!("`level_dbfs` must be between {MIN_GAIN_DB} and 0"),
+        ))
+    }
 }
 
 /// Pipeline source fields shared by the output commands.
@@ -753,8 +789,7 @@ struct SourceParams {
 const DEFAULT_OUTPUT_TONE_DBFS: f64 = -20.0;
 
 /// `None` if no source field is present: the output joins the running
-/// pipeline, or the engine starts one with [`MediaSources::default`]-like
-/// defaults (see `default_sources`).
+/// pipeline, or the engine starts one with its configured channels.
 fn output_sources(
     command: &str,
     params: SourceParams,
@@ -798,21 +833,6 @@ fn default_tone() -> ToneParams {
         level_dbfs: Some(DEFAULT_OUTPUT_TONE_DBFS),
         gain_db: None,
         mute: None,
-    }
-}
-
-/// Sources of an output started without any: one quiet test tone.
-pub fn default_sources() -> MediaSources {
-    MediaSources {
-        screen: None,
-        inputs: Vec::new(),
-        tones: vec![ToneSpec {
-            frequency_hz: DEFAULT_TONE_HZ,
-            level_dbfs: DEFAULT_OUTPUT_TONE_DBFS,
-            gain_db: 0.0,
-            muted: false,
-        }],
-        master_gain_db: 0.0,
     }
 }
 
@@ -1517,68 +1537,219 @@ fn gain_db(command: &str, field: &str, value: f32) -> Result<f32, CommandError> 
     }
 }
 
+/// What a channel plays, as `add_channel` and `set_channel_input` take it.
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MixerStripParams {
-    /// Mixer strip index (from get_mixer).
-    index: usize,
-    /// Gain in dB, -96 to 24.
-    gain_db: Option<f32>,
-    /// Mute this strip.
-    mute: Option<bool>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ChannelInputParams {
+    /// A capture device.
+    Device {
+        /// Audio input name from list_audio_inputs; null or absent for the system default.
+        #[serde(default)]
+        device: Option<String>,
+    },
+    /// A test tone.
+    Tone {
+        /// Frequency in Hz (below 24000).
+        frequency_hz: f64,
+        /// Level in dBFS, -96 to 0 (default -12).
+        level_dbfs: Option<f64>,
+    },
 }
 
-fn decode_mixer_strip(command: &str, params: Option<&Value>) -> Result<StripChange, CommandError> {
-    let params: MixerStripParams = decode_params(command, params)?;
-    if params.gain_db.is_none() && params.mute.is_none() {
-        return Err(invalid_params(command, "give `gain_db`, `mute` or both"));
+fn channel_input(command: &str, input: ChannelInputParams) -> Result<ChannelInput, CommandError> {
+    match input {
+        ChannelInputParams::Device { device } => {
+            if device.as_deref().is_some_and(str::is_empty) {
+                return Err(invalid_params(command, "`device` must not be empty"));
+            }
+            Ok(ChannelInput::Device { device })
+        }
+        ChannelInputParams::Tone {
+            frequency_hz,
+            level_dbfs,
+        } => Ok(ChannelInput::Tone {
+            frequency_hz: tone_frequency(command, frequency_hz)?,
+            level_dbfs: tone_level(command, level_dbfs)?,
+        }),
     }
-    Ok(StripChange {
-        index: params.index,
+}
+
+fn balance(command: &str, value: f32) -> Result<f32, CommandError> {
+    if value.is_finite() && (-1.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(invalid_params(
+            command,
+            "`balance` must be between -1 and 1",
+        ))
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddChannelParams {
+    /// Channel name, unique among the channels.
+    name: String,
+    /// What the channel plays.
+    input: ChannelInputParams,
+    /// Fader in dB, -96 to 24 (default 0).
+    gain_db: Option<f32>,
+    /// Mute the channel in every mix (default false).
+    mute: Option<bool>,
+    /// Balance from -1 (left only) to 1 (right only); default 0.
+    balance: Option<f32>,
+}
+
+fn decode_add_channel(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<AddChannelRequest, CommandError> {
+    let params: AddChannelParams = decode_params(command, params)?;
+    Ok(AddChannelRequest {
+        name: valid_name(command, "name", params.name)?,
+        input: channel_input(command, params.input)?,
+        gain_db: gain_db(command, "gain_db", params.gain_db.unwrap_or(0.0))?,
+        muted: params.mute.unwrap_or(false),
+        balance: balance(command, params.balance.unwrap_or(0.0))?,
+    })
+}
+
+/// A channel named by `id`, or by `name`, or both.
+fn channel_ref(
+    command: &str,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<ChannelRef, CommandError> {
+    let id = id
+        .map(|id| valid_id(command, "id", CHANNEL_ID_PREFIX, id))
+        .transpose()?;
+    let name = name
+        .map(|name| valid_name(command, "name", name))
+        .transpose()?;
+    if id.is_none() && name.is_none() {
+        return Err(invalid_params(command, "give the channel's `id` or `name`"));
+    }
+    Ok(ChannelRef { id, name })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ChannelParams {
+    /// Channel id from get_mixer (or give name).
+    id: Option<String>,
+    /// Channel name.
+    name: Option<String>,
+}
+
+fn decode_remove_channel(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<ChannelRef, CommandError> {
+    let params: ChannelParams = decode_params(command, params)?;
+    channel_ref(command, params.id, params.name)
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdateChannelParams {
+    /// Channel id from get_mixer (or give name).
+    id: Option<String>,
+    /// Channel name.
+    name: Option<String>,
+    /// Fader in dB, -96 to 24.
+    gain_db: Option<f32>,
+    /// Mute the channel in every mix.
+    mute: Option<bool>,
+    /// Balance from -1 (left only) to 1 (right only).
+    balance: Option<f32>,
+}
+
+fn decode_update_channel(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<UpdateChannelRequest, CommandError> {
+    let params: UpdateChannelParams = decode_params(command, params)?;
+    if params.gain_db.is_none() && params.mute.is_none() && params.balance.is_none() {
+        return Err(invalid_params(
+            command,
+            "give `gain_db`, `mute` or `balance`",
+        ));
+    }
+    Ok(UpdateChannelRequest {
+        channel: channel_ref(command, params.id, params.name)?,
         gain_db: params
             .gain_db
             .map(|value| gain_db(command, "gain_db", value))
             .transpose()?,
         muted: params.mute,
+        balance: params
+            .balance
+            .map(|value| balance(command, value))
+            .transpose()?,
     })
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct MasterGainParams {
-    /// Gain in dB, -96 to 24.
-    gain_db: f32,
+struct SetChannelInputParams {
+    /// Channel id from get_mixer (or give name).
+    id: Option<String>,
+    /// Channel name.
+    name: Option<String>,
+    /// What the channel plays from now on.
+    input: ChannelInputParams,
 }
 
-fn decode_master_gain(command: &str, params: Option<&Value>) -> Result<f32, CommandError> {
-    let params: MasterGainParams = decode_params(command, params)?;
-    gain_db(command, "gain_db", params.gain_db)
+fn decode_set_channel_input(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<SetChannelInputRequest, CommandError> {
+    let params: SetChannelInputParams = decode_params(command, params)?;
+    Ok(SetChannelInputRequest {
+        channel: channel_ref(command, params.id, params.name)?,
+        input: channel_input(command, params.input)?,
+    })
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct AudioSourcesParams {
-    /// Live audio inputs (names from list_audio_inputs).
-    #[serde(default)]
-    inputs: Vec<LiveInputParams>,
-    /// Test tones.
-    tones: Option<Vec<ToneParams>>,
-    /// Master gain in dB, -96 to 24.
-    master_gain_db: Option<f32>,
+struct UpdateBusParams {
+    /// Bus id from get_mixer, e.g. bus_program (or give name).
+    id: Option<String>,
+    /// Bus name, e.g. Program.
+    name: Option<String>,
+    /// Fader in dB, -96 to 24.
+    gain_db: Option<f32>,
+    /// Mute the bus.
+    mute: Option<bool>,
 }
 
-fn decode_audio_sources(command: &str, params: Option<&Value>) -> Result<AudioSetup, CommandError> {
-    let params: AudioSourcesParams = decode_params(command, params)?;
-    let tones = match params.tones {
-        Some(tones) => tones,
-        None if params.inputs.is_empty() => vec![default_tone()],
-        None => Vec::new(),
-    };
-    let sources = mix_sources(command, params.inputs, tones, params.master_gain_db)?;
-    Ok(AudioSetup {
-        inputs: sources.inputs,
-        tones: sources.tones,
-        master_gain_db: sources.master_gain_db,
+fn decode_update_bus(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<UpdateBusRequest, CommandError> {
+    let params: UpdateBusParams = decode_params(command, params)?;
+    if params.gain_db.is_none() && params.mute.is_none() {
+        return Err(invalid_params(command, "give `gain_db`, `mute` or both"));
+    }
+    let id = params
+        .id
+        .map(|id| valid_id(command, "id", BUS_ID_PREFIX, id))
+        .transpose()?;
+    let name = params
+        .name
+        .map(|name| valid_name(command, "name", name))
+        .transpose()?;
+    if id.is_none() && name.is_none() {
+        return Err(invalid_params(command, "give the bus's `id` or `name`"));
+    }
+    Ok(UpdateBusRequest {
+        bus: BusRef { id, name },
+        gain_db: params
+            .gain_db
+            .map(|value| gain_db(command, "gain_db", value))
+            .transpose()?,
+        muted: params.mute,
     })
 }
 
@@ -1855,9 +2026,11 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "set_screen_source" => of::<SetScreenSourceParams>(),
         "save_project" => of::<SaveProjectParams>(),
         "load_project" | "validate_project" => of::<ProjectFileParams>(),
-        "set_mixer_strip" => of::<MixerStripParams>(),
-        "set_master_gain" => of::<MasterGainParams>(),
-        "set_audio_sources" => of::<AudioSourcesParams>(),
+        "add_channel" => of::<AddChannelParams>(),
+        "remove_channel" => of::<ChannelParams>(),
+        "update_channel" => of::<UpdateChannelParams>(),
+        "set_channel_input" => of::<SetChannelInputParams>(),
+        "update_bus" => of::<UpdateBusParams>(),
         "set_preview" => of::<PreviewParams>(),
         // Listed explicitly so a new command without a mapping has no schema
         // (and fails the registry test) instead of an empty one.
@@ -1965,8 +2138,12 @@ mod tests {
             "add_source" => Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"})),
             "update_source" => Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5})),
             "remove_source" | "restart_source" => Some(json!({"scene": "Scene", "name": "bars"})),
-            "set_mixer_strip" => Some(json!({"index": 0, "mute": true})),
-            "set_master_gain" => Some(json!({"gain_db": -3.0})),
+            "add_channel" => Some(json!({"name": "Mic", "input": {"kind": "device"}})),
+            "remove_channel" => Some(json!({"name": "Mic"})),
+            "update_channel" => Some(json!({"id": "ch_a1", "mute": true})),
+            "set_channel_input" => Some(json!({"name": "Mic", "input": {"kind": "device",
+                "device": "alsa_input.usb"}})),
+            "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
             "set_preview" => Some(json!({"enabled": false})),
             "set_screen_source" => Some(json!({"id": "src_a1", "source_id": "monitor:1"})),
             "save_project" | "load_project" | "validate_project" => {
@@ -2254,10 +2431,100 @@ mod tests {
             ),
             ("set_active_scene", json!({"scene_id": "src_abc"})),
             ("set_active_scene", json!({"scene_id": 7})),
-            ("set_mixer_strip", json!({"index": 0})),
-            ("set_mixer_strip", json!({"index": 0, "gain_db": 99})),
-            ("set_master_gain", json!({"gain_db": -200})),
             ("set_preview", json!({})),
+        ] {
+            let err = Command::decode(command, Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{command} {params}");
+        }
+    }
+
+    #[test]
+    fn audio_commands_decode_with_defaults_and_their_rules() {
+        let Command::AddChannel(added) = Command::decode(
+            "add_channel",
+            Some(&json!({"name": "Music", "input": {"kind": "tone", "frequency_hz": 440}})),
+        )
+        .expect("decode") else {
+            panic!("add_channel");
+        };
+        assert_eq!(
+            added,
+            AddChannelRequest {
+                name: "Music".to_owned(),
+                input: ChannelInput::Tone {
+                    frequency_hz: 440.0,
+                    level_dbfs: DEFAULT_TONE_LEVEL_DBFS,
+                },
+                gain_db: 0.0,
+                muted: false,
+                balance: 0.0,
+            }
+        );
+        let Command::SetChannelInput(input) = Command::decode(
+            "set_channel_input",
+            Some(&json!({"id": "ch_a1", "input": {"kind": "device", "device": null}})),
+        )
+        .expect("decode") else {
+            panic!("set_channel_input");
+        };
+        assert_eq!(input.channel, ChannelRef::id("ch_a1"));
+        assert_eq!(input.input, ChannelInput::Device { device: None });
+        let Command::UpdateBus(bus) = Command::decode(
+            "update_bus",
+            Some(&json!({"name": "Program", "mute": true})),
+        )
+        .expect("decode") else {
+            panic!("update_bus");
+        };
+        assert_eq!(
+            (bus.bus.name.as_deref(), bus.muted),
+            (Some("Program"), Some(true))
+        );
+        for (command, params) in [
+            ("add_channel", json!({"name": "Mic"})),
+            (
+                "add_channel",
+                json!({"name": "", "input": {"kind": "device"}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "file"}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "device", "device": ""}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "device", "frequency_hz": 1}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "T", "input": {"kind": "tone", "frequency_hz": 24000}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "T", "input": {"kind": "tone", "frequency_hz": 1,
+                       "level_dbfs": 3}}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "device"}, "gain_db": 99}),
+            ),
+            (
+                "add_channel",
+                json!({"name": "Mic", "input": {"kind": "device"}, "balance": 1.5}),
+            ),
+            ("remove_channel", json!({})),
+            ("remove_channel", json!({"id": "src_mic"})),
+            ("update_channel", json!({"name": "Mic"})),
+            ("update_channel", json!({"gain_db": 0})),
+            ("update_channel", json!({"name": "Mic", "balance": -2})),
+            ("set_channel_input", json!({"name": "Mic"})),
+            ("update_bus", json!({"id": "bus_program"})),
+            ("update_bus", json!({"gain_db": 0})),
+            ("update_bus", json!({"id": "ch_program", "gain_db": 0})),
+            ("update_bus", json!({"id": "bus_program", "gain_db": -200})),
         ] {
             let err = Command::decode(command, Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{command} {params}");
@@ -2637,9 +2904,6 @@ mod tests {
             panic!("decode");
         };
         assert_eq!(no_sources.sources, None);
-        let defaults = default_sources();
-        assert_eq!(defaults.tones.len(), 1);
-        assert_eq!(defaults.tones[0].level_dbfs, -20.0);
         // Any source field counts: here only the master gain, so one tone.
         let Ok(Command::StartRecording(gain_only)) = Command::decode(
             "start_recording",

@@ -14,12 +14,19 @@ pub use stream::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Most audio tracks in a recording (ADR 0017).
+pub const MAX_AUDIO_TRACKS: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecorderConfig {
     /// Output file; the container is chosen from the extension (`.mkv` → Matroska).
     pub path: PathBuf,
     pub video: VideoSettings,
+    /// The settings of every audio track.
     pub audio: AudioSettings,
+    /// The audio tracks' names in the file, track 1 first; empty: one
+    /// unnamed track. At most [`MAX_AUDIO_TRACKS`].
+    pub audio_tracks: Vec<String>,
 }
 
 /// Which H.264 encoders an output tries (ADR 0011).
@@ -163,6 +170,8 @@ pub struct VideoTrackStats {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AudioTrackStats {
+    /// The track's name in the file, if it has one.
+    pub name: Option<String>,
     pub encoder: String,
     pub rate: u32,
     pub channels: u32,
@@ -196,7 +205,10 @@ pub struct RecordingStats {
     pub duration_ms: f64,
     pub file_bytes: Option<u64>,
     pub video: VideoTrackStats,
+    /// Audio track 1.
     pub audio: AudioTrackStats,
+    /// Audio tracks 2 and on, in order.
+    pub extra_audio: Vec<AudioTrackStats>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -113,6 +113,7 @@ fn project() -> Project {
         outputs: OutputProfiles {
             recording: RecordingProfile {
                 mix: "bus_voice00000a".to_owned(),
+                tracks: vec!["bus_program".to_owned()],
                 video_encoder: EncoderPreference::Software,
             },
             ..OutputProfiles::default()
@@ -218,7 +219,8 @@ fn the_file_reads_like_the_command_results() {
     );
     assert_eq!(
         value["outputs"],
-        json!({"recording": {"mix": "bus_voice00000a", "video_encoder": "software"},
+        json!({"recording": {"mix": "bus_voice00000a", "tracks": ["bus_program"],
+                             "video_encoder": "software"},
                "stream": {"mix": "bus_program", "video_bitrate_kbps": 6000,
                           "video_encoder": "auto"}})
     );
@@ -607,6 +609,31 @@ fn output_profiles_name_existing_buses_and_follow_their_rules() {
     let mut value = file();
     value["outputs"]["recording"]["video_encoder"] = json!("quantum");
     assert_eq!(only(&value, "unknown variant"), "outputs.recording");
+    // Tracks name buses of the file, once each, not the mix again.
+    let mut value = file();
+    value["outputs"]["recording"]["tracks"] = json!(["bus_gone"]);
+    assert_eq!(only(&value, "no bus"), "outputs.recording.tracks[0]");
+    let mut value = file();
+    value["outputs"]["recording"]["tracks"] = json!(["bus_program", "bus_program"]);
+    assert_eq!(
+        only(&value, "already a track"),
+        "outputs.recording.tracks[1]"
+    );
+    let mut value = file();
+    value["outputs"]["recording"]["tracks"] = json!(["bus_voice00000a"]);
+    assert_eq!(
+        only(&value, "already a track"),
+        "outputs.recording.tracks[0]"
+    );
+    let mut value = file();
+    value["outputs"]["recording"]["tracks"] = json!(["Voice"]);
+    assert_eq!(only(&value, "by id"), "outputs.recording.tracks[0]");
+    let mut value = file();
+    value["outputs"]["stream"]["tracks"] = json!([]);
+    assert_eq!(
+        only(&value, "unknown field `tracks`"),
+        "outputs.stream.tracks"
+    );
     let mut value = file();
     value["outputs"]["monitor"] = json!({});
     assert_eq!(only(&value, "unknown field `monitor`"), "outputs.monitor");

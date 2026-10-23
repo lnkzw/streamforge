@@ -1235,6 +1235,7 @@ mod tests {
         let typed = Command::SetOutputProfile(command_api::SetOutputProfileRequest {
             output: command_api::OutputKind::Recording,
             mix: None,
+            tracks: None,
             video_encoder: None,
             video_bitrate_kbps: Some(1_000),
         });
@@ -1265,6 +1266,53 @@ mod tests {
         let state = mixer(run(&mut engine, "get_mixer", json!({})));
         assert_eq!(state.outputs[0].bus, voice);
         assert!(!state.outputs[0].running);
+        // Tracks: existing buses, each once, not the mix again.
+        for tracks in [
+            json!(["Voice"]),
+            json!(["Program", "Program"]),
+            json!(["Gone"]),
+        ] {
+            let command = Command::decode(
+                "set_output_profile",
+                Some(&json!({"output": "recording", "tracks": tracks})),
+            )
+            .expect("decode");
+            let error = engine.handle(command).unwrap_err();
+            assert!(
+                matches!(error.code, ErrorCode::InvalidParams | ErrorCode::NotFound),
+                "{tracks}: {error:?}"
+            );
+        }
+        let CommandOutput::OutputProfileSet(set) = run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "tracks": ["Program"]}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert_eq!(set.profiles.recording.tracks, ["bus_program"]);
+        // A refused request changes nothing, not even its valid parts.
+        let before = run(&mut engine, "get_output_profiles", json!({}));
+        let mixed = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "recording", "mix_bus": "Program", "tracks": ["Gone"]})),
+        )
+        .expect("decode");
+        assert_eq!(engine.handle(mixed).unwrap_err().code, ErrorCode::NotFound);
+        assert_eq!(run(&mut engine, "get_output_profiles", json!({})), before);
+        // A mix that is already a track is refused, as a file would be.
+        let onto_track = Command::decode(
+            "set_output_profile",
+            Some(&json!({"output": "recording", "mix_bus": "Program"})),
+        )
+        .expect("decode");
+        let error = engine.handle(onto_track).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.details, Some(json!({"path": "recording.tracks[0]"})));
+        assert_eq!(
+            mixer(run(&mut engine, "get_mixer", json!({}))).outputs[0].tracks,
+            ["bus_program"]
+        );
         // The profile keeps its bus.
         let remove =
             Command::decode("remove_bus", Some(&json!({"name": "Voice"}))).expect("decode");
@@ -1274,7 +1322,7 @@ mod tests {
         run(
             &mut engine,
             "set_output_profile",
-            json!({"output": "recording", "mix_bus_id": "bus_program"}),
+            json!({"output": "recording", "mix_bus_id": "bus_program", "tracks": []}),
         );
         run(&mut engine, "remove_bus", json!({"name": "Voice"}));
     }

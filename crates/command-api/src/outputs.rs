@@ -20,7 +20,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use video_compositor::RenderStats;
 
-use crate::{BusRef, CaptureOutcome, ErrorSummary, LiveInputSpec, PROGRAM_BUS_ID, ToneSpec};
+use crate::{
+    AudioGraphSpec, BusRef, CaptureOutcome, ErrorSummary, GraphProblem, LiveInputSpec,
+    PROGRAM_BUS_ID, ToneSpec,
+};
 
 /// A stream's video bitrate when nothing else says.
 pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
@@ -45,11 +48,17 @@ impl OutputKind {
     }
 }
 
+/// Most audio tracks after the first (the mix) in a recording.
+pub const MAX_EXTRA_TRACKS: usize = encoder_api::MAX_AUDIO_TRACKS - 1;
+
 /// How the recording starts.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordingProfile {
-    /// The id of the bus the recording takes as its mix.
+    /// The id of the bus the recording takes as its mix: audio track 1.
     pub mix: String,
+    /// The ids of the buses recorded as further audio tracks, in order;
+    /// each track is named after its bus. Fixed when a recording starts.
+    pub tracks: Vec<String>,
     pub video_encoder: EncoderPreference,
 }
 
@@ -77,6 +86,7 @@ impl Default for OutputProfiles {
         Self {
             recording: RecordingProfile {
                 mix: PROGRAM_BUS_ID.to_owned(),
+                tracks: Vec::new(),
                 video_encoder: EncoderPreference::default(),
             },
             stream: StreamProfile {
@@ -110,6 +120,47 @@ impl OutputProfiles {
             OutputKind::Stream => &mut self.stream.video_encoder,
         }
     }
+
+    /// The rules across the profiles and `graph` that no single
+    /// parameter shows: every mix and track names a bus of the graph, and
+    /// a bus is a recording track once and not its mix as well. Paths are
+    /// below the profiles (e.g. `recording.tracks[1]`). The engine checks a
+    /// changed profile with them before it applies it; a project file is
+    /// checked by them.
+    pub fn problems(&self, graph: &AudioGraphSpec) -> Vec<GraphProblem> {
+        let exists = |id: &str| id == PROGRAM_BUS_ID || graph.buses.iter().any(|bus| bus.id == id);
+        let mut problems = Vec::new();
+        for output in OutputKind::ALL {
+            let mix = self.mix(output);
+            if !exists(mix) {
+                problems.push(GraphProblem {
+                    path: format!("{}.mix", output.as_str()),
+                    message: format!("no bus has the id `{mix}`"),
+                });
+            }
+        }
+        let tracks = &self.recording.tracks;
+        if tracks.len() > MAX_EXTRA_TRACKS {
+            problems.push(GraphProblem {
+                path: "recording.tracks".to_owned(),
+                message: format!("at most {MAX_EXTRA_TRACKS} tracks besides the mix"),
+            });
+        }
+        for (index, id) in tracks.iter().enumerate() {
+            let message = if !exists(id) {
+                format!("no bus has the id `{id}`")
+            } else if *id == self.recording.mix || tracks[..index].contains(id) {
+                format!("bus `{id}` is already a track of the recording (track 1 is the mix)")
+            } else {
+                continue;
+            };
+            problems.push(GraphProblem {
+                path: format!("recording.tracks[{index}]"),
+                message,
+            });
+        }
+        problems
+    }
 }
 
 /// Change an output's profile; at least one field is given, and the
@@ -119,6 +170,8 @@ pub struct SetOutputProfileRequest {
     pub output: OutputKind,
     /// The bus to take as the mix.
     pub mix: Option<BusRef>,
+    /// The recording's further audio tracks (replacing the list).
+    pub tracks: Option<Vec<BusRef>>,
     pub video_encoder: Option<EncoderPreference>,
     pub video_bitrate_kbps: Option<u32>,
 }
@@ -238,4 +291,53 @@ pub struct StreamingReport {
     #[serde(flatten)]
     pub pipeline: PipelineReport,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BusSpec, ProgramBusSpec};
+
+    #[test]
+    fn profiles_name_existing_buses_and_each_track_once() {
+        let graph = AudioGraphSpec {
+            channels: Vec::new(),
+            buses: vec![BusSpec {
+                id: "bus_voice".to_owned(),
+                name: "Voice".to_owned(),
+                gain_db: 0.0,
+                muted: false,
+                assign_db: None,
+            }],
+            program: ProgramBusSpec {
+                gain_db: 0.0,
+                muted: false,
+            },
+        };
+        let mut profiles = OutputProfiles::default();
+        assert!(profiles.problems(&graph).is_empty());
+        profiles.recording.tracks = vec!["bus_voice".to_owned()];
+        assert!(profiles.problems(&graph).is_empty());
+        profiles.stream.mix = "bus_gone".to_owned();
+        profiles.recording.tracks = vec![
+            "bus_voice".to_owned(),
+            "bus_voice".to_owned(),
+            "bus_program".to_owned(),
+            "bus_gone".to_owned(),
+        ];
+        let paths: Vec<String> = profiles
+            .problems(&graph)
+            .into_iter()
+            .map(|problem| problem.path)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "stream.mix",
+                "recording.tracks[1]",
+                "recording.tracks[2]",
+                "recording.tracks[3]"
+            ]
+        );
+    }
 }

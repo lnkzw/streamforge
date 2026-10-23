@@ -207,6 +207,17 @@ impl Engine {
                 return Err(error);
             }
         };
+        let Some((mix, tracks, names, mut warnings)) = self
+            .pipeline
+            .as_ref()
+            .map(|pipeline| recording_tracks(pipeline, &self.profiles))
+        else {
+            let _ = fs::remove_file(&path);
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                "media pipeline missing",
+            ));
+        };
         let recorder = Recorder::start(RecorderConfig {
             path: path.clone(),
             video: VideoSettings::h264(CANVAS_WIDTH, CANVAS_HEIGHT, FPS).with_encoders(
@@ -215,6 +226,7 @@ impl Engine {
                     .unwrap_or(self.profiles.recording.video_encoder),
             ),
             audio: AudioSettings::aac(RATE, CHANNELS),
+            audio_tracks: names,
         });
         let recorder = match recorder {
             Ok(recorder) => recorder,
@@ -233,8 +245,7 @@ impl Engine {
                 "media pipeline missing",
             ));
         };
-        let (mix, mut warnings) = mix_column(pipeline, &self.profiles, OutputKind::Recording);
-        let t0 = pipeline.attach(OutputId::Recording, recorder.input(), mix);
+        let t0 = pipeline.attach(OutputId::Recording, recorder.input(), mix, tracks);
         warnings.extend(pipeline.audio_warnings());
         let started = RecordingStarted {
             path: display_path(&path),
@@ -335,7 +346,7 @@ impl Engine {
             ));
         };
         let (mix, mut warnings) = mix_column(pipeline, &self.profiles, OutputKind::Stream);
-        let t0 = pipeline.attach(OutputId::Streaming, streamer.input(), mix);
+        let t0 = pipeline.attach(OutputId::Streaming, streamer.input(), mix, Vec::new());
         warnings.extend(pipeline.audio_warnings());
         let started = StreamingStarted {
             target: streamer.target().to_owned(),
@@ -509,6 +520,37 @@ fn display_path(path: &Path) -> String {
 
 fn to_value(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or_else(|err| Value::String(err.to_string()))
+}
+
+/// The recording's audio in `pipeline`'s run: the mix's column, the
+/// further tracks' columns, every track's name (after its bus), and
+/// warnings for buses the run does not have (a run with an output's own
+/// sources has no aux buses), which it leaves out. A bus is recorded once,
+/// also where a missing mix falls back to the program bus.
+pub(crate) fn recording_tracks(
+    pipeline: &Pipeline,
+    profiles: &OutputProfiles,
+) -> (usize, Vec<usize>, Vec<String>, Vec<String>) {
+    let (mix, mut warnings) = mix_column(pipeline, profiles, OutputKind::Recording);
+    let mut columns = Vec::with_capacity(profiles.recording.tracks.len());
+    for bus in &profiles.recording.tracks {
+        match pipeline.mix_column(bus) {
+            Some(column) if column != mix && !columns.contains(&column) => columns.push(column),
+            Some(_) => warnings.push(format!(
+                "the track bus `{bus}` is already the recording's mix in this run; the \
+                 recording has it once"
+            )),
+            None => warnings.push(format!(
+                "the track bus `{bus}` is not in this run, which mixes an output's own sources \
+                 into the program bus only; the recording leaves it out"
+            )),
+        }
+    }
+    let names = std::iter::once(mix)
+        .chain(columns.iter().copied())
+        .map(|column| pipeline.bus_name(column))
+        .collect();
+    (mix, columns, names, warnings)
 }
 
 /// The pipeline's id of an output that has a profile.

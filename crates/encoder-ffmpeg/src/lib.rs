@@ -18,7 +18,7 @@ mod ffmpeg;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,8 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 pub use audio_fifo::{AudioFifo, FifoStats, MAX_GAP_FILL};
 pub use encoder_api::{
-    AudioSettings, AudioTrackStats, EncoderPreference, LiveOutputStats, RateControl,
-    ReconnectPolicy, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
+    AudioSettings, AudioTrackStats, EncoderPreference, LiveOutputStats, MAX_AUDIO_TRACKS,
+    RateControl, ReconnectPolicy, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
     SkippedEncoder, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
     VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
@@ -36,6 +36,9 @@ pub use encoder_api::{
 pub const MAX_AUDIO_BLOCK_SAMPLES: usize = 2048;
 /// About 1 s of 60 FPS video plus audio blocks; preallocated.
 const QUEUE_CAPACITY: usize = 256;
+/// Blocks for the tracks after the first: as many audio items as the queue
+/// holds at its usual mix of video and audio (about 1.6 s).
+const TRACK_POOL_BLOCKS: usize = 160;
 /// How long a stopping stream may spend flushing and closing a healthy
 /// connection before blocked network I/O is interrupted.
 pub const STOP_GRACE: Duration = Duration::from_secs(2);
@@ -56,10 +59,13 @@ pub(crate) enum Item {
         pts: MediaTimestamp,
     },
     Audio {
+        /// Track 1.
         samples: [f32; MAX_AUDIO_BLOCK_SAMPLES],
         len: usize,
         /// Timestamp of the first frame.
         pts: MediaTimestamp,
+        /// The other tracks' samples, if the output has more than one track.
+        extra: Option<TrackBlock>,
     },
     Stop,
 }
@@ -157,11 +163,81 @@ impl Shared {
     }
 }
 
+/// Preallocated buffers for an output's audio tracks after the first
+/// (which travels inline in the item). The producer takes a buffer, fills
+/// it and sends it in the item as a [`TrackBlock`]; dropping the block,
+/// wherever that happens, returns the buffer. So queue slots stay small,
+/// nothing is allocated after start, no lock is held while encoding, and
+/// no buffer can leak.
+pub(crate) struct TrackPool {
+    /// Free buffers; each holds the extra tracks one after the other. Its
+    /// lock is held only to push or pop one.
+    free: Mutex<Vec<Vec<f32>>>,
+    tracks: usize,
+}
+
+impl TrackPool {
+    fn new(tracks: usize, blocks: usize) -> Self {
+        Self {
+            free: Mutex::new(
+                (0..blocks)
+                    .map(|_| vec![0.0; tracks * MAX_AUDIO_BLOCK_SAMPLES])
+                    .collect(),
+            ),
+            tracks,
+        }
+    }
+
+    fn free(&self) -> std::sync::MutexGuard<'_, Vec<Vec<f32>>> {
+        self.free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A free buffer, if any; never waits for one.
+    fn take(self: &Arc<Self>) -> Option<TrackBlock> {
+        let buffer = self.free().pop()?;
+        Some(TrackBlock {
+            buffer,
+            len: 0,
+            pool: Arc::clone(self),
+        })
+    }
+}
+
+/// One block of an output's audio tracks after the first, in a pooled
+/// buffer that goes back to its pool on drop.
+pub(crate) struct TrackBlock {
+    buffer: Vec<f32>,
+    len: usize,
+    pool: Arc<TrackPool>,
+}
+
+impl TrackBlock {
+    /// Each extra track's samples, in order.
+    pub(crate) fn tracks(&self) -> impl Iterator<Item = &[f32]> {
+        self.buffer
+            .chunks(MAX_AUDIO_BLOCK_SAMPLES)
+            .map(|chunk| &chunk[..self.len])
+    }
+}
+
+impl Drop for TrackBlock {
+    fn drop(&mut self) {
+        // The free list holds every buffer at most once, within the
+        // capacity it started with: this does not allocate.
+        let buffer = std::mem::take(&mut self.buffer);
+        self.pool.free().push(buffer);
+    }
+}
+
 /// Non-blocking producer handle; clone it for each producer.
 #[derive(Clone)]
 pub struct OutputInput {
     tx: SyncSender<Item>,
     shared: Arc<Shared>,
+    /// For an output with more than one audio track.
+    pool: Option<Arc<TrackPool>>,
 }
 
 impl OutputInput {
@@ -209,17 +285,16 @@ impl OutputInput {
     /// Copies into a fixed-size message; does not allocate. Blocks larger
     /// than [`MAX_AUDIO_BLOCK_SAMPLES`] are dropped and counted.
     pub fn send_audio(&self, samples: &[f32], pts: MediaTimestamp) -> bool {
-        let sent = samples.len() <= MAX_AUDIO_BLOCK_SAMPLES && {
-            let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
-            block[..samples.len()].copy_from_slice(samples);
-            self.tx
-                .try_send(Item::Audio {
-                    samples: block,
-                    len: samples.len(),
-                    pts,
-                })
-                .is_ok()
-        };
+        self.send_audio_tracks(&[samples], pts)
+    }
+
+    /// Queue one block of every audio track (track 1 first; each the same
+    /// length, at most [`MAX_AUDIO_BLOCK_SAMPLES`]) as one item, so the
+    /// tracks share the queue's depth and are dropped together. Does not
+    /// allocate. A block whose track count does not match the output's, or
+    /// that finds the queue or the track pool full, is dropped and counted.
+    pub fn send_audio_tracks(&self, tracks: &[&[f32]], pts: MediaTimestamp) -> bool {
+        let sent = self.queue_audio(tracks, pts, false);
         if sent {
             self.shared.sent();
         } else {
@@ -228,25 +303,69 @@ impl OutputInput {
         sent
     }
 
+    /// With `wait`, wait for a free track block and queue space instead of
+    /// giving up (offline producers); no lock is held while waiting.
+    fn queue_audio(&self, tracks: &[&[f32]], pts: MediaTimestamp, wait: bool) -> bool {
+        let Some((first, rest)) = tracks.split_first() else {
+            return false;
+        };
+        let len = first.len();
+        let extra_tracks = self.pool.as_ref().map_or(0, |pool| pool.tracks);
+        if len > MAX_AUDIO_BLOCK_SAMPLES
+            || rest.len() != extra_tracks
+            || rest.iter().any(|track| track.len() != len)
+        {
+            return false;
+        }
+        let extra = match &self.pool {
+            Some(pool) if !rest.is_empty() => {
+                let mut block = loop {
+                    match pool.take() {
+                        Some(block) => break block,
+                        // Buffers come back as the output thread encodes,
+                        // or when its queue is dropped.
+                        None if wait => thread::sleep(Duration::from_millis(1)),
+                        None => return false,
+                    }
+                };
+                for (chunk, track) in block.buffer.chunks_mut(MAX_AUDIO_BLOCK_SAMPLES).zip(rest) {
+                    chunk[..len].copy_from_slice(track);
+                }
+                block.len = len;
+                Some(block)
+            }
+            _ => None,
+        };
+        let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
+        block[..len].copy_from_slice(first);
+        let item = Item::Audio {
+            samples: block,
+            len,
+            pts,
+            extra,
+        };
+        // A refused item is dropped here, which returns its track buffer.
+        if wait {
+            self.tx.send(item).is_ok()
+        } else {
+            self.tx.try_send(item).is_ok()
+        }
+    }
+
     /// Like [`Self::send_audio`] but waits for queue space; see
     /// [`Self::send_video_blocking`].
     pub fn send_audio_blocking(&self, samples: &[f32], pts: MediaTimestamp) -> bool {
-        if samples.len() > MAX_AUDIO_BLOCK_SAMPLES {
-            self.shared.audio_dropped.fetch_add(1, Ordering::Relaxed);
-            return false;
-        }
-        let mut block = [0.0; MAX_AUDIO_BLOCK_SAMPLES];
-        block[..samples.len()].copy_from_slice(samples);
-        let sent = self
-            .tx
-            .send(Item::Audio {
-                samples: block,
-                len: samples.len(),
-                pts,
-            })
-            .is_ok();
+        self.send_audio_tracks_blocking(&[samples], pts)
+    }
+
+    /// Like [`Self::send_audio_tracks`] but waits for room; see
+    /// [`Self::send_video_blocking`].
+    pub fn send_audio_tracks_blocking(&self, tracks: &[&[f32]], pts: MediaTimestamp) -> bool {
+        let sent = self.queue_audio(tracks, pts, true);
         if sent {
             self.shared.sent();
+        } else {
+            self.shared.audio_dropped.fetch_add(1, Ordering::Relaxed);
         }
         sent
     }
@@ -265,13 +384,16 @@ struct Worker<T> {
 impl<T: Send + 'static> Worker<T> {
     /// Spawn `run` on a thread named `name` and wait until it reports that
     /// the output is open (or why it is not).
-    fn start<F>(name: &str, run: F) -> Result<Self, RecorderError>
+    /// `extra_tracks` audio tracks after the first get a [`TrackPool`].
+    fn start<F>(name: &str, extra_tracks: usize, run: F) -> Result<Self, RecorderError>
     where
         F: FnOnce(Receiver<Item>, Ready, Arc<Shared>) -> Result<T, RecorderError> + Send + 'static,
     {
         let (tx, rx) = sync_channel(QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = sync_channel(1);
         let shared = Arc::new(Shared::default());
+        let pool =
+            (extra_tracks > 0).then(|| Arc::new(TrackPool::new(extra_tracks, TRACK_POOL_BLOCKS)));
         let thread = thread::Builder::new()
             .name(name.to_owned())
             .spawn({
@@ -286,7 +408,7 @@ impl<T: Send + 'static> Worker<T> {
             })?;
         match ready_rx.recv() {
             Ok(Ok(encoder)) => Ok(Self {
-                input: OutputInput { tx, shared },
+                input: OutputInput { tx, shared, pool },
                 encoder,
                 thread: Some(thread),
             }),
@@ -366,7 +488,17 @@ impl Recorder {
     /// Open the output and the encoders on the `recorder` thread. Returns
     /// once the file header is written, or with the setup error.
     pub fn start(config: RecorderConfig) -> Result<Self, RecorderError> {
-        Worker::start("recorder", move |rx, ready, shared| {
+        if config.audio_tracks.len() > MAX_AUDIO_TRACKS {
+            return Err(RecorderError::new(
+                RecorderErrorKind::Unsupported,
+                format!(
+                    "at most {MAX_AUDIO_TRACKS} audio tracks, got {}",
+                    config.audio_tracks.len()
+                ),
+            ));
+        }
+        let extra_tracks = config.audio_tracks.len().saturating_sub(1);
+        Worker::start("recorder", extra_tracks, move |rx, ready, shared| {
             run_recorder(config, rx, ready, shared)
         })
         .map(|worker| Self { worker })
@@ -417,7 +549,7 @@ impl Streamer {
     /// the first connection is established, or with its error (no retry).
     pub fn start(config: StreamConfig) -> Result<Self, RecorderError> {
         let target = config.target.redacted();
-        Worker::start("streamer", move |rx, ready, shared| {
+        Worker::start("streamer", 0, move |rx, ready, shared| {
             run_streamer(config, rx, ready, shared)
         })
         .map(|worker| Self { worker, target })
@@ -507,4 +639,60 @@ fn run_streamer(
     shared: Arc<Shared>,
 ) -> Result<StreamStats, RecorderError> {
     ffmpeg::stream::run(config, rx, ready, shared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_buffers_go_back_to_their_pool_when_dropped() {
+        let pool = Arc::new(TrackPool::new(2, 3));
+        let taken: Vec<TrackBlock> = (0..3).map(|_| pool.take().expect("free")).collect();
+        assert!(pool.take().is_none(), "three buffers, all taken");
+        assert!(
+            taken
+                .iter()
+                .all(|block| block.buffer.len() == 2 * MAX_AUDIO_BLOCK_SAMPLES)
+        );
+        drop(taken);
+        // All back, none duplicated: three again, then none.
+        let again: Vec<TrackBlock> = (0..3).map(|_| pool.take().expect("free")).collect();
+        assert!(pool.take().is_none());
+        drop(again);
+        assert_eq!(pool.free().len(), 3);
+    }
+
+    #[test]
+    fn a_refused_item_returns_its_buffer() {
+        let (tx, rx) = sync_channel(1);
+        let pool = Arc::new(TrackPool::new(1, 2));
+        let input = OutputInput {
+            tx,
+            shared: Arc::new(Shared::default()),
+            pool: Some(Arc::clone(&pool)),
+        };
+        let pts = MediaTimestamp::new(0, 1, 48_000).expect("pts");
+        let block = [0.25f32; 960];
+        assert!(input.send_audio_tracks(&[&block, &block], pts));
+        // The queue is full: refused, counted, and the buffer is back.
+        assert!(!input.send_audio_tracks(&[&block, &block], pts));
+        assert_eq!(input.shared.audio_dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(pool.free().len(), 1);
+        // The queued item carries the second track; dropping it returns it.
+        let Ok(Item::Audio {
+            extra: Some(extra),
+            len,
+            ..
+        }) = rx.try_recv()
+        else {
+            panic!("an audio item with its track block");
+        };
+        assert_eq!(len, 960);
+        assert!(extra.tracks().all(|track| track == block));
+        drop(extra);
+        assert_eq!(pool.free().len(), 2);
+        // A block without its second track does not fit this output.
+        assert!(!input.send_audio(&block, pts));
+    }
 }

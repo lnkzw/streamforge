@@ -60,6 +60,7 @@ fn config(path: &TempFile) -> RecorderConfig {
         path: path.0.clone(),
         video: VideoSettings::h264(WIDTH, HEIGHT, FPS),
         audio: AudioSettings::aac(RATE, 2),
+        audio_tracks: Vec::new(),
     }
 }
 
@@ -422,4 +423,119 @@ fn live_counters_track_the_recording() {
     let stats = recorder.stop().expect("stop");
     assert_eq!(stats.video.frames_encoded, live.frames_encoded);
     assert!(stats.audio.samples_encoded >= live.samples_encoded);
+}
+
+/// Each track's RMS level (dBFS) over its whole length and its name.
+fn track_levels(path: &std::path::Path) -> Vec<(Option<String>, f64)> {
+    ff::init().expect("init");
+    let mut input = ff::format::input(&path).expect("open");
+    let streams: Vec<(usize, Option<String>, ff::decoder::Audio)> = input
+        .streams()
+        .filter(|stream| stream.parameters().medium() == ff::media::Type::Audio)
+        .map(|stream| {
+            let name = stream.metadata().get("title").map(str::to_owned);
+            let decoder = ff::codec::context::Context::from_parameters(stream.parameters())
+                .expect("ctx")
+                .decoder()
+                .audio()
+                .expect("decoder");
+            (stream.index(), name, decoder)
+        })
+        .collect();
+    let mut sums = vec![(0f64, 0u64); streams.len()];
+    let mut decoders: Vec<_> = streams.into_iter().collect();
+    let mut frame = ff::frame::Audio::empty();
+    for (stream, packet) in input.packets() {
+        let Some(position) = decoders
+            .iter()
+            .position(|(index, _, _)| *index == stream.index())
+        else {
+            continue;
+        };
+        let decoder = &mut decoders[position].2;
+        decoder.send_packet(&packet).expect("send");
+        while decoder.receive_frame(&mut frame).is_ok() {
+            for sample in &frame.plane::<f32>(0)[..frame.samples()] {
+                sums[position].0 += f64::from(*sample) * f64::from(*sample);
+                sums[position].1 += 1;
+            }
+        }
+    }
+    decoders
+        .into_iter()
+        .zip(sums)
+        .map(|((_, name, _), (sum, count))| (name, 10.0 * (sum / count as f64).log10()))
+        .collect()
+}
+
+#[test]
+fn a_recording_carries_every_audio_track_by_name() {
+    let file = TempFile::new("tracks");
+    let recorder = Recorder::start(RecorderConfig {
+        audio_tracks: vec!["Program".to_owned(), "Voice".to_owned(), "Music".to_owned()],
+        ..config(&file)
+    })
+    .expect("start");
+    let input = recorder.input();
+    // One tone per track, 6 dB apart, as one item per block.
+    let levels = [-12.0f64, -18.0, -24.0];
+    let mut blocks = [[0.0f32; 960]; 3];
+    let mut phase = 0.0f64;
+    for block in 0..u32::from(SECONDS as u16) * 100 {
+        for (track, level) in blocks.iter_mut().zip(levels) {
+            let amplitude = 10f64.powf(level / 20.0);
+            for (index, frame) in track.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let t = (phase + index as f64 * 1000.0 / f64::from(RATE)).fract();
+                let sample = (amplitude * (std::f64::consts::TAU * t).sin()) as f32;
+                *frame = [sample, sample];
+            }
+        }
+        phase = (phase + 480.0 * 1000.0 / f64::from(RATE)).fract();
+        let pts = MediaTimestamp::new(i64::from(block) * 480, 1, RATE).expect("pts");
+        let tracks: Vec<&[f32]> = blocks.iter().map(|block| block.as_slice()).collect();
+        assert!(input.send_audio_tracks_blocking(&tracks, pts));
+        if block % 10 == 0 {
+            let frame_pts = i64::from(block / 10) * 100_000;
+            assert!(input.send_video_blocking(picture(), micros(frame_pts)));
+        }
+    }
+    // A block with the wrong number of tracks is refused and counted.
+    assert!(!input.send_audio(&blocks[0], MediaTimestamp::new(0, 1, RATE).expect("pts")));
+    let stats = recorder.stop().expect("stop");
+    assert_eq!(stats.audio.name.as_deref(), Some("Program"));
+    let extra: Vec<_> = stats
+        .extra_audio
+        .iter()
+        .map(|track| (track.name.as_deref(), track.samples_encoded))
+        .collect();
+    let samples = u64::from(SECONDS * RATE);
+    assert_eq!(extra, [(Some("Voice"), samples), (Some("Music"), samples)]);
+    assert_eq!(stats.audio.samples_encoded, samples);
+    // One drop, for the refused block, on every track.
+    assert_eq!(stats.audio.blocks_dropped, 1);
+    let found = track_levels(&file.0);
+    assert_eq!(found.len(), 3, "{found:?}");
+    for ((name, rms), (wanted, peak)) in
+        found
+            .iter()
+            .zip([("Program", -12.0), ("Voice", -18.0), ("Music", -24.0)])
+    {
+        assert_eq!(name.as_deref(), Some(wanted));
+        // A sine's RMS is 3 dB under its peak.
+        assert!((rms - (peak - 3.01)).abs() < 0.5, "{wanted}: {rms:.2} dBFS");
+    }
+}
+
+#[test]
+fn too_many_audio_tracks_are_refused() {
+    let file = TempFile::new("too-many");
+    let error = Recorder::start(RecorderConfig {
+        audio_tracks: (0..=encoder_ffmpeg::MAX_AUDIO_TRACKS)
+            .map(|index| format!("Track {index}"))
+            .collect(),
+        ..config(&file)
+    })
+    .err()
+    .expect("refused");
+    assert_eq!(error.kind, RecorderErrorKind::Unsupported);
 }

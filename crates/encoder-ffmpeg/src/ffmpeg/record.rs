@@ -51,7 +51,7 @@ pub(crate) fn run(
         }
     }
 
-    let (mut video, mut audio, finished) = session.finish();
+    let (mut video, mut audio, mut extra, finished) = session.finish();
     // Flushing encoded what the encoders still held.
     shared.publish(counts_of(&video, &audio));
     if failure.is_some() {
@@ -61,7 +61,12 @@ pub(crate) fn run(
             shared.received(&item);
             match item {
                 Item::Video { .. } => video.frames_dropped += 1,
-                Item::Audio { .. } => audio.blocks_dropped += 1,
+                Item::Audio { .. } => {
+                    audio.blocks_dropped += 1;
+                    for track in &mut extra {
+                        track.blocks_dropped += 1;
+                    }
+                }
                 Item::Stop => break,
             }
             shared.publish(counts_of(&video, &audio));
@@ -76,6 +81,11 @@ pub(crate) fn run(
         file_bytes: std::fs::metadata(&config.path).ok().map(|m| m.len()),
         video: video.stats(shared.video_dropped.load(Ordering::Relaxed)),
         audio: audio.stats(shared.audio_dropped.load(Ordering::Relaxed)),
+        // Queue drops take every track's block at once.
+        extra_audio: extra
+            .iter()
+            .map(|track| track.stats(shared.audio_dropped.load(Ordering::Relaxed)))
+            .collect(),
     };
     match failure.or(finished.err()) {
         None => Ok(stats),
@@ -107,7 +117,7 @@ fn open(config: &RecorderConfig, shared: &Arc<Shared>) -> Result<Session, Record
         RecorderErrorKind::Output,
         &config.video,
         &mut EncoderChoice::new(&config.video),
-        &config.audio,
+        (&config.audio, &config.audio_tracks),
         // File I/O is never interrupted: the recorder has no stop deadline.
         Arc::clone(shared),
     )

@@ -25,10 +25,11 @@ use capture_api::{
 };
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
-    ErrorSummary, MixerState, PROGRAM_BUS_ID, PipelineReport, SceneCaptureOutcome, SceneSpec,
-    SetSendRequest, SourceKind, SourceSpec, UpdateBusRequest, UpdateChannelRequest,
+    ErrorSummary, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, PipelineReport,
+    SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec, UpdateBusRequest,
+    UpdateChannelRequest,
 };
-use encoder_ffmpeg::OutputInput;
+use encoder_ffmpeg::{MAX_AUDIO_TRACKS, OutputInput};
 use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
 use video_compositor::{
     Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats, downscale,
@@ -447,7 +448,16 @@ impl Pipeline {
     /// Feed `input` from now on; returns the output's epoch (media time 0).
     /// Hand the output the frames and the mix of bus `mix` (see
     /// [`Pipeline::mix_column`]) from now on; returns its time zero.
-    pub fn attach(&self, id: OutputId, input: OutputInput, mix: usize) -> Instant {
+    /// `tracks` are the columns of further audio tracks (a recording's).
+    pub fn attach(
+        &self,
+        id: OutputId,
+        input: OutputInput,
+        mix: usize,
+        mut tracks: Vec<usize>,
+    ) -> Instant {
+        // The recorder takes at most this many; the tap relies on it.
+        tracks.truncate(MAX_AUDIO_TRACKS - 1);
         let t0 = Instant::now();
         let progress = Arc::new(Progress::default());
         lock(&self.fanout.video).push(VideoOut {
@@ -463,10 +473,43 @@ impl Pipeline {
             t0,
             progress,
             mix,
+            tracks,
             fading_from: None,
             faded: vec![0.0; BLOCK_FRAMES * CHANNELS as usize],
         });
         t0
+    }
+
+    /// The id of the bus in `column`.
+    fn bus_id(&self, column: usize) -> String {
+        match column {
+            0 => PROGRAM_BUS_ID.to_owned(),
+            column => self.audio.buses[column - 1].id.clone(),
+        }
+    }
+
+    /// The name of the bus in `column`.
+    pub fn bus_name(&self, column: usize) -> String {
+        match column {
+            0 => PROGRAM_BUS_NAME.to_owned(),
+            column => self.audio.buses[column - 1].name.clone(),
+        }
+    }
+
+    /// The ids of output `id`'s further audio tracks.
+    pub fn output_tracks(&self, id: OutputId) -> Vec<String> {
+        // Only the columns are copied under the lock the mixer takes.
+        let columns = lock(&self.fanout.audio)
+            .iter()
+            .find(|out| out.id == id)
+            .map(|out| out.tracks.clone())
+            .unwrap_or_default();
+        self.bus_ids(&columns)
+    }
+
+    /// The ids of the buses in `columns`.
+    pub fn bus_ids(&self, columns: &[usize]) -> Vec<String> {
+        columns.iter().map(|column| self.bus_id(*column)).collect()
     }
 
     /// The column of the bus with id `bus` in this run's mixer (the program
@@ -489,10 +532,7 @@ impl Pipeline {
             .iter()
             .find(|out| out.id == id)?
             .mix;
-        Some(match column {
-            0 => PROGRAM_BUS_ID.to_owned(),
-            column => self.audio.buses[column - 1].id.clone(),
-        })
+        Some(self.bus_id(column))
     }
 
     /// Let output `id` take bus `mix` from the next block on, fading over
@@ -781,6 +821,8 @@ struct AudioOut {
     progress: Arc<Progress>,
     /// The column of the bus it takes (program first).
     mix: usize,
+    /// The columns of its further audio tracks; fixed.
+    tracks: Vec<usize>,
     /// For one block after the mix changed: the bus it fades from.
     fading_from: Option<usize>,
     /// Preallocated block for that fade.
@@ -919,7 +961,14 @@ impl BlockSink for AudioTap {
                 }
                 None => mix,
             };
-            out.input.send_audio(samples, pts);
+            // Track 1 is the mix; one item carries every track.
+            let mut tracks: [&[f32]; MAX_AUDIO_TRACKS] = [&[]; MAX_AUDIO_TRACKS];
+            tracks[0] = samples;
+            for (slot, column) in tracks[1..].iter_mut().zip(&out.tracks) {
+                *slot = buses.column(*column).unwrap_or(buses.program());
+            }
+            out.input
+                .send_audio_tracks(&tracks[..1 + out.tracks.len()], pts);
             out.progress.audio.store(pts.ticks, Ordering::Release);
         }
     }

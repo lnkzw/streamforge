@@ -13,7 +13,7 @@ use command_api::{
 use media_core::FrameMailbox;
 
 use crate::composite::FPS;
-use crate::outputs::output_id;
+use crate::outputs::{output_id, recording_tracks};
 use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH};
 use crate::scenes::SceneCollection;
 use crate::{Engine, audio};
@@ -190,6 +190,15 @@ impl Engine {
             .map(|output| {
                 let running = self.output_open(output);
                 let profile = self.profiles.mix(output);
+                let tracks = match (&self.pipeline, output) {
+                    (Some(pipeline), _) if running => pipeline.output_tracks(output_id(output)),
+                    // Started now, it would join this run with these.
+                    (Some(pipeline), OutputKind::Recording) => {
+                        pipeline.bus_ids(&recording_tracks(pipeline, &self.profiles).1)
+                    }
+                    (None, OutputKind::Recording) => self.profiles.recording.tracks.clone(),
+                    (_, OutputKind::Stream) => Vec::new(),
+                };
                 let bus = match &self.pipeline {
                     Some(pipeline) if running => pipeline.output_mix(output_id(output)),
                     // Started now, it would join this run: a run with an
@@ -202,6 +211,7 @@ impl Engine {
                 OutputMix {
                     output,
                     bus: bus.unwrap_or_else(|| profile.to_owned()),
+                    tracks,
                     running,
                 }
             })
@@ -216,8 +226,10 @@ impl Engine {
         }
     }
 
-    /// Change an output's profile. A running output fades to a new mix now
-    /// (if its run has that bus); encoder settings wait for its next start.
+    /// Change an output's profile. The whole new profile is checked
+    /// first, so a refused request changes nothing. A running output then
+    /// fades to a new mix now (if its run has that bus); tracks and encoder
+    /// settings wait for its next start.
     pub(crate) fn set_output_profile(
         &mut self,
         request: SetOutputProfileRequest,
@@ -229,24 +241,55 @@ impl Engine {
                 "`video_bitrate_kbps` is for the stream; a recording's quality is not a bitrate",
             ));
         }
+        if output != OutputKind::Recording && request.tracks.is_some() {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                "`tracks` is for the recording; a stream carries one audio track",
+            ));
+        }
+        let bus_id = |bus, fields| -> Result<String, CommandError> {
+            Ok(match audio::bus_position(&self.audio, bus, fields)? {
+                GraphBus::Program => PROGRAM_BUS_ID.to_owned(),
+                GraphBus::Aux(index) => self.audio.buses[index].id.clone(),
+            })
+        };
+        let mut next = self.profiles.clone();
+        let mix = request
+            .mix
+            .as_ref()
+            .map(|bus| bus_id(bus, ("mix_bus_id", "mix_bus")))
+            .transpose()?;
+        if let Some(mix) = &mix {
+            *next.mix_mut(output) = mix.clone();
+        }
+        if let Some(tracks) = &request.tracks {
+            next.recording.tracks = tracks
+                .iter()
+                .map(|bus| bus_id(bus, ("tracks", "tracks")))
+                .collect::<Result<_, _>>()?;
+        }
+        if let Some(encoder) = request.video_encoder {
+            *next.video_encoder_mut(output) = encoder;
+        }
+        if let Some(kbps) = request.video_bitrate_kbps {
+            next.stream.video_bitrate_kbps = kbps;
+        }
+        // The rules across the profiles, as a project file is checked: e.g.
+        // a new mix that is already a track.
+        if let Some(found) = next.problems(&self.audio).into_iter().next() {
+            return Err(CommandError::new(ErrorCode::InvalidParams, found.message)
+                .with_details(serde_json::json!({ "path": found.path })));
+        }
+
         let running = self.output_open(output);
         let mut applied_now = Vec::new();
         let mut next_start = Vec::new();
-        let mix = match &request.mix {
-            Some(bus) => Some(
-                match audio::bus_position(&self.audio, bus, ("mix_bus_id", "mix_bus"))? {
-                    GraphBus::Program => PROGRAM_BUS_ID.to_owned(),
-                    GraphBus::Aux(index) => self.audio.buses[index].id.clone(),
-                },
-            ),
-            None => None,
-        };
-        if let Some(mix) = mix {
-            if running {
+        if running {
+            if let Some(mix) = &mix {
                 match self
                     .pipeline
                     .as_ref()
-                    .and_then(|pipeline| Some((pipeline, pipeline.mix_column(&mix)?)))
+                    .and_then(|pipeline| Some((pipeline, pipeline.mix_column(mix)?)))
                 {
                     Some((pipeline, column)) => {
                         pipeline.set_output_mix(output_id(output), column);
@@ -256,20 +299,17 @@ impl Engine {
                     None => next_start.push("mix"),
                 }
             }
-            *self.profiles.mix_mut(output) = mix;
-        }
-        if let Some(encoder) = request.video_encoder {
-            *self.profiles.video_encoder_mut(output) = encoder;
-            if running {
-                next_start.push("video_encoder");
+            for (field, given) in [
+                ("tracks", request.tracks.is_some()),
+                ("video_encoder", request.video_encoder.is_some()),
+                ("video_bitrate_kbps", request.video_bitrate_kbps.is_some()),
+            ] {
+                if given {
+                    next_start.push(field);
+                }
             }
         }
-        if let Some(kbps) = request.video_bitrate_kbps {
-            self.profiles.stream.video_bitrate_kbps = kbps;
-            if running {
-                next_start.push("video_bitrate_kbps");
-            }
-        }
+        self.profiles = next;
         Ok(OutputProfileSet {
             profiles: self.profiles.clone(),
             applied_now,
@@ -352,14 +392,18 @@ impl Engine {
             let id = &self.audio.buses[index].id;
             let users: Vec<&str> = OutputKind::ALL
                 .into_iter()
-                .filter(|output| self.profiles.mix(*output) == id)
+                .filter(|output| {
+                    self.profiles.mix(*output) == id
+                        || (*output == OutputKind::Recording
+                            && self.profiles.recording.tracks.contains(id))
+                })
                 .map(OutputKind::as_str)
                 .collect();
             if !users.is_empty() {
                 return Err(CommandError::new(
                     ErrorCode::InvalidState,
                     format!(
-                        "bus `{}` is the {} profile's mix; give it another with \
+                        "bus `{}` is in the {} profile (its mix or a track); change it with \
                          set_output_profile first",
                         self.audio.buses[index].name,
                         users.join(" and ")

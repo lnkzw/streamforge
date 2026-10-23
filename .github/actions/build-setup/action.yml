@@ -11,6 +11,24 @@ runs:
       run: |
         rustup toolchain install stable --profile minimal --component clippy
         rustup default stable
+    - name: Key for the Linux package cache
+      if: runner.os == 'Linux'
+      id: apt-key
+      shell: bash
+      run: |
+        . /etc/os-release
+        echo "prefix=apt-$VERSION_ID-$(dpkg --print-architecture)-${{ hashFiles('.github/actions/build-setup/action.yml') }}-" >> "$GITHUB_OUTPUT"
+        echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+    - name: Cache Linux packages
+      if: runner.os == 'Linux'
+      # The runners' Ubuntu mirror is at times very slow (on 2026-10-23,
+      # 66 MB took 29 minutes, past the job timeout). The downloaded packages
+      # are kept per Ubuntu release and week; apt fetches only what changed.
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/apt-archives
+        key: ${{ steps.apt-key.outputs.prefix }}${{ steps.apt-key.outputs.week }}
+        restore-keys: ${{ steps.apt-key.outputs.prefix }}
     - name: Install Linux capture and encoder build dependencies
       if: runner.os == 'Linux'
       # capture-linux links libpipewire-0.3 (>= 0.3.44); encoder-ffmpeg links
@@ -18,10 +36,16 @@ runs:
       # bindgen needs libclang.
       shell: bash
       run: |
+        archives="$HOME/apt-archives"
+        mkdir -p "$archives/partial"
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
+          -o Dir::Cache::Archives="$archives" -o Acquire::Retries=3 \
           libpipewire-0.3-dev libclang-dev pkg-config \
           libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+        # apt writes as root; the cache step saves the files as the runner user.
+        sudo chown -R "$(id -u):$(id -g)" "$archives"
+        du -sh "$archives"
         pkg-config --modversion libpipewire-0.3 libavcodec libavformat libswscale
     - name: Select Xcode (macOS)
       if: runner.os == 'macOS'

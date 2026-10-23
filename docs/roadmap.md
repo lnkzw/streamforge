@@ -235,7 +235,7 @@ Acceptance:
 
 No release pressure: the audio model is designed and built before the protocol is frozen, so the API is designed once and the mixer UI shows the real model (`docs/architecture/ARCHITECTURE_VISION.md` §6; assessment §10.2, question 4). Inputs, channels, buses, sends, outputs and recording tracks are separate concepts in the model, the protocol and the UI; separate tracks alone are not a routing system.
 
-- [ ] ADR: the audio graph and output profiles, reviewed with the project owner before code.
+- [x] ADR 0017: the audio graph and output profiles, reviewed with the project owner before code.
 - [ ] Stable channel ids; the master becomes the program bus.
 - [ ] Buses (submixes with gain, mute, meters).
 - [ ] Sends from channels to buses, pre- or post-fader, with a level.

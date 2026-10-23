@@ -1,13 +1,29 @@
-//! M4 acceptance: deterministic offline mixing of test tones.
+//! M4 acceptance: deterministic offline mixing of test tones, through the
+//! audio graph with its channels going straight to the program bus.
 
-use audio_engine::{BLOCK_FRAMES, CHANNELS, Meter, Mixer, RATE, StripConfig, Tone};
+use audio_engine::{
+    AudioGraph, BLOCK_FRAMES, BusRef, CHANNELS, ChannelConfig, GraphConfig, Meter, RATE, Tone,
+    limit_into,
+};
 
 const CH: usize = CHANNELS as usize;
 /// One second; both test frequencies complete whole cycles.
 const BLOCKS: usize = RATE as usize / BLOCK_FRAMES;
 
-fn strip(gain_db: f32, muted: bool) -> StripConfig {
-    StripConfig { gain_db, muted }
+fn strip(gain_db: f32, muted: bool) -> ChannelConfig {
+    ChannelConfig {
+        gain_db,
+        muted,
+        ..ChannelConfig::UNITY
+    }
+}
+
+fn graph(channels: &[ChannelConfig], program_gain_db: f32) -> AudioGraph {
+    AudioGraph::new(
+        CH,
+        BLOCK_FRAMES,
+        &GraphConfig::plain(channels.to_vec(), program_gain_db),
+    )
 }
 
 /// Render `blocks` blocks of each tone separately.
@@ -25,17 +41,21 @@ fn tones(specs: &[(f64, f64)], blocks: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
-fn mix(mixer: &mut Mixer, inputs: &[Vec<f32>]) -> Vec<f32> {
+/// The program output, limited as it leaves the graph, and how many
+/// samples the limit changed.
+fn mix(graph: &mut AudioGraph, inputs: &[Vec<f32>]) -> (Vec<f32>, u64) {
     let block = BLOCK_FRAMES * CH;
     let mut out = vec![0.0; inputs[0].len()];
+    let mut clipped = 0;
     for (index, chunk) in out.chunks_exact_mut(block).enumerate() {
         let views: Vec<&[f32]> = inputs
             .iter()
             .map(|input| &input[index * block..(index + 1) * block])
             .collect();
-        mixer.mix(&views, chunk);
+        graph.process(&views);
+        clipped += limit_into(graph.program(), chunk);
     }
-    out
+    (out, clipped)
 }
 
 fn rms_dbfs(samples: &[f32]) -> f64 {
@@ -47,8 +67,8 @@ fn rms_dbfs(samples: &[f32]) -> f64 {
 #[test]
 fn two_tones_mix_to_their_exact_sum() {
     let inputs = tones(&[(440.0, -6.0), (1000.0, -12.0)], BLOCKS);
-    let mut mixer = Mixer::new(CH, &[strip(0.0, false), strip(0.0, false)], 0.0);
-    let out = mix(&mut mixer, &inputs);
+    let mut graph = graph(&[strip(0.0, false), strip(0.0, false)], 0.0);
+    let (out, clipped) = mix(&mut graph, &inputs);
 
     // Unity gains: bit-exact sum.
     for (i, sample) in out.iter().enumerate() {
@@ -64,10 +84,10 @@ fn two_tones_mix_to_their_exact_sum() {
     );
     let peak = out.iter().fold(0f32, |m, s| m.max(s.abs()));
     assert!(f64::from(peak) <= a + b + 1e-6);
-    assert_eq!(mixer.clipped_samples(), 0);
+    assert_eq!(clipped, 0);
     assert!(
-        (mixer
-            .input_meter(0)
+        (graph
+            .channel_meter(0)
             .and_then(|m| m.peak_dbfs)
             .expect("peak")
             + 6.0)
@@ -80,8 +100,8 @@ fn two_tones_mix_to_their_exact_sum() {
 fn mixing_is_deterministic() {
     let inputs = tones(&[(440.0, -6.0), (1000.0, -12.0)], BLOCKS);
     let config = [strip(-3.0, false), strip(2.5, false)];
-    let first = mix(&mut Mixer::new(CH, &config, -1.0), &inputs);
-    let second = mix(&mut Mixer::new(CH, &config, -1.0), &inputs);
+    let (first, _) = mix(&mut graph(&config, -1.0), &inputs);
+    let (second, _) = mix(&mut graph(&config, -1.0), &inputs);
     assert!(
         first
             .iter()
@@ -94,8 +114,8 @@ fn mixing_is_deterministic() {
 fn gain_halves_the_level_and_mute_removes_the_input() {
     let inputs = tones(&[(440.0, -6.0), (1000.0, -6.0)], BLOCKS);
     let half = -20.0 * 2f32.log10();
-    let mut mixer = Mixer::new(CH, &[strip(0.0, true), strip(half, false)], 0.0);
-    let out = mix(&mut mixer, &inputs);
+    let mut graph = graph(&[strip(0.0, true), strip(half, false)], 0.0);
+    let (out, _) = mix(&mut graph, &inputs);
     // Input 0 is muted from the start; input 1 is exactly halved.
     let gain = audio_engine::db_to_linear(half);
     for (i, sample) in out.iter().enumerate() {
@@ -105,10 +125,10 @@ fn gain_halves_the_level_and_mute_removes_the_input() {
 }
 
 #[test]
-fn full_scale_tones_clip_on_the_master_bus() {
+fn full_scale_tones_are_limited_where_the_program_bus_leaves_the_graph() {
     let inputs = tones(&[(440.0, 0.0), (1000.0, 0.0)], BLOCKS);
-    let mut mixer = Mixer::new(CH, &[strip(0.0, false), strip(0.0, false)], 0.0);
-    let out = mix(&mut mixer, &inputs);
+    let mut graph = graph(&[strip(0.0, false), strip(0.0, false)], 0.0);
+    let (out, clipped) = mix(&mut graph, &inputs);
     assert!(out.iter().all(|s| s.abs() <= 1.0));
     let over = inputs[0]
         .iter()
@@ -116,5 +136,11 @@ fn full_scale_tones_clip_on_the_master_bus() {
         .filter(|(a, b)| (*a + *b).abs() > 1.0)
         .count() as u64;
     assert!(over > 0);
-    assert_eq!(mixer.clipped_samples(), over);
+    assert_eq!(clipped, over);
+    // The bus meter shows the overload the limit removed.
+    let peak = graph
+        .bus_meter(BusRef::Program)
+        .and_then(|meter| meter.peak_dbfs)
+        .expect("peak");
+    assert!(peak > 0.0, "{peak}");
 }

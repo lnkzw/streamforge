@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use audio_engine::{
-    CHANNELS, InputSource, MAX_CORRECTION, MixerConfig, MixerInput, MixerThread, RATE, StripConfig,
-    Tone,
+    CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput, MixerThread,
+    RATE, Tone,
 };
 use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend};
 use command_api::{
@@ -26,12 +26,12 @@ pub(crate) fn probe(
     let streams = start_live_inputs(capture, &request.inputs)?;
     let inputs = mixer_inputs(&request.inputs, &streams, &request.tones);
 
-    let mixer = MixerThread::spawn(MixerConfig {
+    let mixer = MixerThread::spawn(MixerConfig::plain(
         inputs,
-        master_gain_db: request.master_gain_db,
-        expected_duration: request.duration,
-        sink: None,
-    })
+        request.master_gain_db,
+        request.duration,
+        None,
+    ))
     .map_err(internal)?;
     let deadline = Instant::now() + request.duration;
     while !mixer.is_finished() {
@@ -88,6 +88,15 @@ pub(crate) fn input_name(spec: &LiveInputSpec) -> String {
     spec.input.clone().unwrap_or_else(|| "default".to_owned())
 }
 
+/// Today's strips are channels at centre balance, straight into program.
+pub(crate) fn channel(gain_db: f32, muted: bool) -> ChannelConfig {
+    ChannelConfig {
+        gain_db,
+        muted,
+        ..ChannelConfig::UNITY
+    }
+}
+
 pub(crate) fn mixer_inputs(
     specs: &[LiveInputSpec],
     streams: &[Box<dyn AudioStream>],
@@ -96,18 +105,12 @@ pub(crate) fn mixer_inputs(
     let live = specs.iter().zip(streams).map(|(spec, stream)| MixerInput {
         name: input_name(spec),
         source: InputSource::Live(stream.samples()),
-        strip: StripConfig {
-            gain_db: spec.gain_db,
-            muted: spec.muted,
-        },
+        channel: channel(spec.gain_db, spec.muted),
     });
     let generated = tones.iter().map(|tone| MixerInput {
         name: format!("tone {} Hz", tone.frequency_hz),
         source: InputSource::Tone(Tone::new(tone.frequency_hz, tone.level_dbfs, RATE)),
-        strip: StripConfig {
-            gain_db: tone.gain_db,
-            muted: tone.muted,
-        },
+        channel: channel(tone.gain_db, tone.muted),
     });
     live.chain(generated).collect()
 }

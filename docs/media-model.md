@@ -54,8 +54,9 @@ Current implementation (M4, `audio-engine`):
   - **Trim:** fill far above target (target + 4 blocks + push peak) is trimmed back (`trimmed_frames`).
 
   Latency per input is therefore bounded, and the report shows its trend per 10 s window.
-- **Clipping policy:** inputs are summed in `f32` without intermediate clipping. The master bus is hard-limited to [-1, 1] after the master gain; every limited sample is counted (`clipped_samples`). Non-finite samples become silence and are counted (`invalid_samples`). There is no limiter yet.
-- **Gain and mute:** gain is set in dB from −96 to +24. Gain and mute changes ramp linearly over one block to avoid clicks. Meters measure each input after gain and the master after limiting (peak and RMS in dBFS; `null` = digital silence).
+- **Routing graph (ADR 0017):** each input is a channel (processing slots, mute, fader, balance) with sends to buses, tapped before or after the fader; mute comes before both taps. Aux buses (slots, mute, fader) can be assigned to the program bus, nothing else, so the graph is acyclic. Its shape is fixed for a run (at most 8 channels and 8 aux buses); parameters change live. Until the engine exposes buses (M11 step 2), every channel sends post-fader at 0 dB to the program bus only, which sounds exactly like the former single mix.
+- **Clipping policy:** channels and buses are summed in `f32` without intermediate clipping. A bus is hard-limited to [-1, 1] where it leaves the graph for an output; every limited sample is counted (`clipped_samples`). Non-finite input samples become silence at the channel input, before any bus, and are counted (`invalid_samples`). There is no limiter yet.
+- **Gain, mute and balance:** gain is set in dB from −96 to +24. Balance runs from −1 (left) to 1 (right): unity at the centre, the other side attenuated along a cosine to silence. Gain, mute, balance, send and assign changes ramp linearly over one block to avoid clicks; a send's tap change fades out on the old tap, then in on the new one. Meters measure each channel after fader and balance, and each bus after its fader, before the output limit, so a bus meter shows an overload the limit removes (peak and RMS in dBFS; `null` = digital silence).
 
 ## Synchronization
 

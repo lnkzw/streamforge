@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use audio_engine::{BlockSink, LiveMixStats, MixerConfig, MixerControl, MixerThread, StripConfig};
+use audio_engine::{
+    BlockSink, BusConfig, BusRef, ChannelConfig, LiveMixStats, MixerConfig, MixerControl,
+    MixerThread,
+};
 use capture_api::{AudioStream, CaptureBackend, ScreenSelection, VideoStream};
 use command_api::{
     AudioSetup, CaptureHealth, CaptureKind, CommandError, ErrorCode, ErrorSummary, MixerState,
@@ -127,12 +130,12 @@ impl Pipeline {
             })),
         })
         .map_err(internal)?;
-        let mixer = MixerThread::spawn(MixerConfig {
-            inputs: mix::mixer_inputs(&audio.inputs, &audio_streams, &audio.tones),
-            master_gain_db: audio.master_gain_db,
-            expected_duration: EXPECTED_MAX_DURATION,
-            sink: Some(Box::new(AudioTap(Arc::clone(&fanout)))),
-        })
+        let mixer = MixerThread::spawn(MixerConfig::plain(
+            mix::mixer_inputs(&audio.inputs, &audio_streams, &audio.tones),
+            audio.master_gain_db,
+            EXPECTED_MAX_DURATION,
+            Some(Box::new(AudioTap(Arc::clone(&fanout)))),
+        ))
         .map_err(internal)?;
         let control = mixer.control();
         Ok(Self {
@@ -427,23 +430,29 @@ impl Pipeline {
         let levels = self.control.levels();
         let mut state = idle_mixer_state(&self.audio);
         state.running = true;
-        for (strip, peak) in state.strips.iter_mut().zip(levels.inputs) {
+        for (strip, peak) in state.strips.iter_mut().zip(levels.channels) {
             strip.peak_dbfs = peak;
         }
-        state.master_peak_dbfs = levels.master;
+        state.master_peak_dbfs = levels.program;
         state
     }
 
     /// Apply a strip change live; returns the strip's new configuration.
-    pub fn set_strip(&mut self, change: StripChange) -> Result<StripConfig, CommandError> {
+    pub fn set_strip(&mut self, change: StripChange) -> Result<ChannelConfig, CommandError> {
         let config = apply_strip(&mut self.audio, change)?;
-        self.control.set_input(change.index, config);
+        self.control.set_channel(change.index, config);
         Ok(config)
     }
 
     pub fn set_master_gain(&mut self, gain_db: f32) {
         self.audio.master_gain_db = gain_db;
-        self.control.set_master_gain(gain_db);
+        self.control.set_bus(
+            BusRef::Program,
+            BusConfig {
+                gain_db,
+                ..BusConfig::UNITY
+            },
+        );
     }
 
     /// Stop producers, then captures; report everything.
@@ -616,7 +625,7 @@ pub(crate) fn idle_mixer_state(audio: &AudioSetup) -> MixerState {
 pub(crate) fn apply_strip(
     audio: &mut AudioSetup,
     change: StripChange,
-) -> Result<StripConfig, CommandError> {
+) -> Result<ChannelConfig, CommandError> {
     let inputs = audio.inputs.len();
     let (gain_db, muted) = if change.index < inputs {
         let input = &mut audio.inputs[change.index];
@@ -635,10 +644,7 @@ pub(crate) fn apply_strip(
     };
     *gain_db = change.gain_db.unwrap_or(*gain_db);
     *muted = change.muted.unwrap_or(*muted);
-    Ok(StripConfig {
-        gain_db: *gain_db,
-        muted: *muted,
-    })
+    Ok(mix::channel(*gain_db, *muted))
 }
 
 /// The attached consumers. The compositor and mixer threads lock their list

@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
+use capture_api::ScreenSelection;
 use command_api::{
-    CommandError, ErrorCode, HealthReport, MediaSources, OutputHealth, OutputKind, OutputProfiles,
+    CommandError, ErrorCode, HealthReport, OutputHealth, OutputKind, OutputProfiles,
     PipelineReport, RecordingReport, RecordingRequest, RecordingStarted, StreamingReport,
     StreamingRequest, StreamingStarted,
 };
@@ -130,14 +131,14 @@ impl Engine {
     }
 
     /// Make sure the pipeline runs; returns whether this call started it.
-    /// It renders the active scene and mixes the configured audio, unless
-    /// `sources` (an output's own) replace the audio and add a screen layer.
+    /// It renders the active scene, with `screen` on top if given, and
+    /// mixes the configured audio (ADR 0017).
     pub(crate) fn ensure_pipeline(
         &mut self,
-        sources: Option<&MediaSources>,
+        screen: Option<&ScreenSelection>,
     ) -> Result<bool, CommandError> {
         match &self.pipeline {
-            Some(_) if sources.is_some() => Err(CommandError::new(
+            Some(_) if screen.is_some() => Err(CommandError::new(
                 ErrorCode::InvalidState,
                 "the media pipeline already runs (for the preview or another output); omit the \
                  screen layer parameters (screen, source_id, source_types, cursor) to join it, \
@@ -155,7 +156,7 @@ impl Engine {
                     self.capture.as_mut(),
                     self.scenes.active(),
                     self.audio.clone(),
-                    sources.and_then(|sources| sources.screen.as_ref()),
+                    screen,
                 )?);
                 Ok(true)
             }
@@ -188,14 +189,14 @@ impl Engine {
                 .with_details(json!({ "recording": open.path.display().to_string() })));
         }
         let path = reserve(&self.output_dir.join(&request.file_name))?;
-        let started_pipeline = match self.ensure_pipeline(request.sources.as_ref()) {
+        let started_pipeline = match self.ensure_pipeline(request.screen.as_ref()) {
             Ok(started) => started,
             Err(error) => {
                 let _ = fs::remove_file(&path);
                 return Err(error);
             }
         };
-        let Some((mix, tracks, names, mut warnings)) = self
+        let Some((mix, tracks, names)) = self
             .pipeline
             .as_ref()
             .map(|pipeline| recording_tracks(pipeline, &self.profiles))
@@ -234,7 +235,7 @@ impl Engine {
             ));
         };
         let t0 = pipeline.attach(OutputId::Recording, recorder.input(), mix, tracks);
-        warnings.extend(pipeline.audio_warnings());
+        let warnings = pipeline.audio_warnings();
         let started = RecordingStarted {
             path: display_path(&path),
             width: CANVAS_WIDTH,
@@ -301,7 +302,7 @@ impl Engine {
                 "a stream is already open; stop it first",
             ));
         }
-        let started_pipeline = self.ensure_pipeline(request.sources.as_ref())?;
+        let started_pipeline = self.ensure_pipeline(request.screen.as_ref())?;
         let video_bitrate_kbps = request
             .video_bitrate_kbps
             .unwrap_or(self.profiles.stream.video_bitrate_kbps);
@@ -333,9 +334,9 @@ impl Engine {
                 "media pipeline missing",
             ));
         };
-        let (mix, mut warnings) = mix_column(pipeline, &self.profiles, OutputKind::Stream);
+        let mix = mix_column(pipeline, &self.profiles, OutputKind::Stream);
         let t0 = pipeline.attach(OutputId::Streaming, streamer.input(), mix, Vec::new());
-        warnings.extend(pipeline.audio_warnings());
+        let warnings = pipeline.audio_warnings();
         let started = StreamingStarted {
             target: streamer.target().to_owned(),
             width: CANVAS_WIDTH,
@@ -511,32 +512,32 @@ fn to_value(value: &impl serde::Serialize) -> Value {
 }
 
 /// The recording's audio in `pipeline`'s run: the mix's column, the
-/// further tracks' columns, every track's name (after its bus), and
-/// warnings for buses the run does not have, which it leaves out. A bus is
-/// recorded once, also where a missing mix falls back to the program bus.
+/// further tracks' columns, and every track's name (after its bus).
 pub(crate) fn recording_tracks(
     pipeline: &Pipeline,
     profiles: &OutputProfiles,
-) -> (usize, Vec<usize>, Vec<String>, Vec<String>) {
-    let (mix, mut warnings) = mix_column(pipeline, profiles, OutputKind::Recording);
+) -> (usize, Vec<usize>, Vec<String>) {
+    let mix = mix_column(pipeline, profiles, OutputKind::Recording);
     let mut columns = Vec::with_capacity(profiles.recording.tracks.len());
     for bus in &profiles.recording.tracks {
-        match pipeline.mix_column(bus) {
-            Some(column) if column != mix && !columns.contains(&column) => columns.push(column),
-            Some(_) => warnings.push(format!(
-                "the track bus `{bus}` is already the recording's mix in this run; the \
-                 recording has it once"
-            )),
-            None => warnings.push(format!(
-                "the track bus `{bus}` is not in this run; the recording leaves it out"
-            )),
+        let column = pipeline.mix_column(bus);
+        // OutputProfiles::problems keeps a bus once in the recording.
+        debug_assert!(
+            column.is_some_and(|column| column != mix && !columns.contains(&column)),
+            "the track bus `{bus}` is missing from this run or already recorded"
+        );
+        if let Some(column) = column
+            && column != mix
+            && !columns.contains(&column)
+        {
+            columns.push(column);
         }
     }
     let names = std::iter::once(mix)
         .chain(columns.iter().copied())
         .map(|column| pipeline.bus_name(column))
         .collect();
-    (mix, columns, names, warnings)
+    (mix, columns, names)
 }
 
 /// The pipeline's id of an output that has a profile.
@@ -547,23 +548,17 @@ pub(crate) fn output_id(output: OutputKind) -> OutputId {
     }
 }
 
-/// The column of the bus `output`'s profile takes, in `pipeline`'s run;
-/// the program bus, with a warning, if the run has no such bus.
-fn mix_column(
-    pipeline: &Pipeline,
-    profiles: &OutputProfiles,
-    output: OutputKind,
-) -> (usize, Vec<String>) {
+/// The column of the bus `output`'s profile takes, in `pipeline`'s run.
+/// A run mixes the configured graph, and a profile names configured buses
+/// only (`set_output_profile`, `remove_bus` and the project file keep it
+/// so), so the bus is there; were it not, a release build takes the
+/// program bus rather than fail the output.
+fn mix_column(pipeline: &Pipeline, profiles: &OutputProfiles, output: OutputKind) -> usize {
     let bus = profiles.mix(output);
-    match pipeline.mix_column(bus) {
-        Some(column) => (column, Vec::new()),
-        // Profiles name configured buses, and a run mixes the configured
-        // graph; this is only a safety net.
-        None => (
-            0,
-            vec![format!(
-                "the profile's mix `{bus}` is not in this run; it takes the program bus"
-            )],
-        ),
-    }
+    let column = pipeline.mix_column(bus);
+    debug_assert!(
+        column.is_some(),
+        "the profile's mix `{bus}` is not in this run"
+    );
+    column.unwrap_or(0)
 }

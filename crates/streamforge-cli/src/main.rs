@@ -357,6 +357,53 @@ fn validate_project(file: &Path) -> Result<ExitCode> {
     }
 }
 
+/// A finite number from `text`. Non-finite values would serialize as JSON
+/// null and silently become defaults, so they are rejected here.
+fn finite(text: &str, what: &str) -> Result<f64, String> {
+    text.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("invalid {what} `{text}`: expected a finite number"))
+}
+
+/// A live input argument, `NAME[=GAIN_DB]`. Only a numeric suffix is a
+/// gain; node names may contain '='.
+fn input_spec(spec: &str) -> Result<(&str, Option<f64>), String> {
+    match spec.rsplit_once('=') {
+        Some((name, gain)) if !name.is_empty() && gain.parse::<f64>().is_ok() => {
+            Ok((name, Some(finite(gain, "gain")?)))
+        }
+        _ => Ok((spec, None)),
+    }
+}
+
+/// A test tone argument, `FREQ_HZ[@LEVEL_DBFS]`, as protocol fields.
+fn tone_spec(spec: &str) -> Result<Map<String, Value>, String> {
+    let (frequency, level) = match spec.split_once('@') {
+        Some((frequency, level)) => (frequency, Some(finite(level, "level")?)),
+        None => (spec, None),
+    };
+    let mut tone = Map::new();
+    tone.insert(
+        "frequency_hz".into(),
+        finite(frequency, "frequency")?.into(),
+    );
+    if let Some(level) = level {
+        tone.insert("level_dbfs".into(), level.into());
+    }
+    Ok(tone)
+}
+
+/// A finite master gain as a protocol value.
+fn master_gain(gain: Option<f32>) -> Result<Option<Value>, String> {
+    match gain {
+        Some(gain) if !gain.is_finite() => Err(format!(
+            "invalid master gain `{gain}`: expected a finite number"
+        )),
+        gain => Ok(gain.map(Value::from)),
+    }
+}
+
 /// Build `probe_audio_mix` params from `NAME[=GAIN_DB]` and `FREQ[@LEVEL]`
 /// arguments; value validation is left to `Command::decode`.
 fn mix_params(
@@ -365,24 +412,10 @@ fn mix_params(
     master_gain_db: Option<f32>,
     duration_ms: Option<u64>,
 ) -> Result<Map<String, Value>, String> {
-    // Non-finite values would serialize as JSON null and silently become
-    // defaults, so they are rejected here.
-    let number = |text: &str, what: &str| -> Result<f64, String> {
-        text.parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| format!("invalid {what} `{text}`: expected a finite number"))
-    };
     let mut params = Map::new();
     let mut input_list = Vec::new();
     for spec in inputs {
-        // Only a numeric suffix is a gain; node names may contain '='.
-        let (name, gain) = match spec.rsplit_once('=') {
-            Some((name, gain)) if !name.is_empty() && gain.parse::<f64>().is_ok() => {
-                (name, Some(number(gain, "gain")?))
-            }
-            _ => (spec.as_str(), None),
-        };
+        let (name, gain) = input_spec(spec)?;
         let mut input = Map::new();
         input.insert("input".into(), name.into());
         if let Some(gain) = gain {
@@ -390,35 +423,18 @@ fn mix_params(
         }
         input_list.push(Value::Object(input));
     }
-    let mut tone_list = Vec::new();
-    for spec in tones {
-        let (frequency, level) = match spec.split_once('@') {
-            Some((frequency, level)) => (frequency, Some(number(level, "level")?)),
-            None => (spec.as_str(), None),
-        };
-        let mut tone = Map::new();
-        tone.insert(
-            "frequency_hz".into(),
-            number(frequency, "frequency")?.into(),
-        );
-        if let Some(level) = level {
-            tone.insert("level_dbfs".into(), level.into());
-        }
-        tone_list.push(Value::Object(tone));
-    }
+    let tone_list = tones
+        .iter()
+        .map(|spec| tone_spec(spec).map(Value::Object))
+        .collect::<Result<Vec<_>, _>>()?;
     if !input_list.is_empty() {
         params.insert("inputs".into(), input_list.into());
     }
     if !tone_list.is_empty() {
         params.insert("tones".into(), tone_list.into());
     }
-    if let Some(gain) = master_gain_db {
-        if !gain.is_finite() {
-            return Err(format!(
-                "invalid master gain `{gain}`: expected a finite number"
-            ));
-        }
-        params.insert("master_gain_db".into(), gain.into());
+    if let Some(gain) = master_gain(master_gain_db)? {
+        params.insert("master_gain_db".into(), gain);
     }
     if let Some(duration_ms) = duration_ms {
         params.insert("duration_ms".into(), duration_ms.into());
@@ -517,38 +533,39 @@ impl SourceArgs {
     /// Inputs, then tones, become channels named `Input 1`, `Tone 1`, ...
     /// (as a version 1 project's sources do).
     fn mixer_setup(&self) -> Result<MixerSetup, String> {
-        let mut params = mix_params(&self.inputs, &self.tones, self.master_gain_db, None)?;
-        let master_gain_db = params.remove("master_gain_db");
+        let master_gain_db = master_gain(self.master_gain_db)?;
         if self.inputs.is_empty() && self.tones.is_empty() && !self.no_tone {
             return Ok(MixerSetup {
                 channels: None,
                 master_gain_db,
             });
         }
-        let mut channels = Vec::new();
-        let list = |params: &mut Map<String, Value>, key: &str| match params.remove(key) {
-            Some(Value::Array(list)) => list,
-            _ => Vec::new(),
-        };
-        for (mut input, number) in list(&mut params, "inputs").into_iter().zip(1..) {
+        // Checked before the mixer changes, so nothing is left half set up.
+        let count = self.inputs.len() + self.tones.len();
+        if count > command_api::MAX_CHANNELS {
+            return Err(format!(
+                "at most {} channels from --input and --tone, got {count}",
+                command_api::MAX_CHANNELS
+            ));
+        }
+        let mut channels = Vec::with_capacity(count);
+        for (spec, number) in self.inputs.iter().zip(1..) {
+            let (device, gain) = input_spec(spec)?;
             let mut channel = Map::new();
             channel.insert("name".into(), format!("Input {number}").into());
-            let device = input.get_mut("input").map(Value::take);
             channel.insert(
                 "input".into(),
                 serde_json::json!({"kind": "device", "device": device}),
             );
-            if let Some(gain) = input.get_mut("gain_db").map(Value::take) {
-                channel.insert("gain_db".into(), gain);
+            if let Some(gain) = gain {
+                channel.insert("gain_db".into(), gain.into());
             }
             channels.push(channel);
         }
-        for (tone, number) in list(&mut params, "tones").into_iter().zip(1..) {
+        for (spec, number) in self.tones.iter().zip(1..) {
             let mut input = Map::new();
             input.insert("kind".into(), "tone".into());
-            if let Value::Object(tone) = tone {
-                input.extend(tone);
-            }
+            input.extend(tone_spec(spec)?);
             let mut channel = Map::new();
             channel.insert("name".into(), format!("Tone {number}").into());
             channel.insert("input".into(), Value::Object(input));
@@ -966,6 +983,12 @@ mod tests {
                 "{channel}"
             );
         }
+        // Too many channels fail before the mixer changes.
+        let nine: Vec<String> = (0..9).map(|index| format!("in{index}")).collect();
+        let nine: Vec<&str> = nine.iter().map(String::as_str).collect();
+        let error = source_args(&nine, &[], false).mixer_setup().unwrap_err();
+        assert!(error.contains("at most 8 channels"), "{error}");
+        assert!(source_args(&[], &["loud"], false).mixer_setup().is_err());
     }
 
     #[test]

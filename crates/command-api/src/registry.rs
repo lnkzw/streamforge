@@ -19,9 +19,9 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
     ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
-    MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MediaSources, MixRequest,
-    OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest,
-    SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
+    MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest, OutputKind,
+    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
+    SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
     SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
     UpdateSourceRequest,
 };
@@ -851,39 +851,6 @@ fn tone_level(command: &str, dbfs: Option<f64>) -> Result<f64, CommandError> {
     }
 }
 
-/// Pipeline source fields shared by the output commands: a screen layer.
-/// The audio is always the configured mixer (ADR 0017).
-struct SourceParams {
-    screen: Option<bool>,
-    source_id: Option<String>,
-    source_types: Option<Vec<VideoSourceKind>>,
-    cursor: Option<CursorMode>,
-}
-
-/// `None` if no source field is present: the output joins the running
-/// pipeline, or the engine starts one with the active scene.
-fn output_sources(
-    command: &str,
-    params: SourceParams,
-) -> Result<Option<MediaSources>, CommandError> {
-    let given = params.screen.is_some()
-        || params.source_id.is_some()
-        || params.source_types.is_some()
-        || params.cursor.is_some();
-    if !given {
-        return Ok(None);
-    }
-    Ok(Some(MediaSources {
-        screen: optional_screen(
-            command,
-            params.screen,
-            params.source_id,
-            params.source_types,
-            params.cursor,
-        )?,
-    }))
-}
-
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StartRecordingParams {
@@ -909,14 +876,12 @@ fn decode_start_recording(
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
         video_encoder: params.video_encoder,
-        sources: output_sources(
+        screen: optional_screen(
             command,
-            SourceParams {
-                screen: params.screen,
-                source_id: params.source_id,
-                source_types: params.source_types,
-                cursor: params.cursor,
-            },
+            params.screen,
+            params.source_id,
+            params.source_types,
+            params.cursor,
         )?,
     })
 }
@@ -1035,14 +1000,12 @@ fn decode_start_streaming(
             initial_delay,
             max_delay: defaults.max_delay.max(initial_delay),
         },
-        sources: output_sources(
+        screen: optional_screen(
             command,
-            SourceParams {
-                screen: params.screen,
-                source_id: params.source_id,
-                source_types: params.source_types,
-                cursor: params.cursor,
-            },
+            params.screen,
+            params.source_id,
+            params.source_types,
+            params.cursor,
         )?,
     })
 }
@@ -3032,9 +2995,8 @@ mod tests {
         let Ok(Command::StartRecording(request)) = recording else {
             panic!("{recording:?}");
         };
-        let screen = request.sources.and_then(|sources| sources.screen);
         assert_eq!(
-            screen.and_then(|screen| screen.source).as_deref(),
+            request.screen.and_then(|screen| screen.source).as_deref(),
             Some("window:0x2a")
         );
 
@@ -3262,16 +3224,20 @@ mod tests {
             panic!("decode");
         };
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
-        let sources = request.sources.expect("sources given");
-        assert!(sources.screen.is_some());
-        // No source field at all: join the pipeline or start it with the
-        // active scene.
-        let Ok(Command::StartRecording(no_sources)) =
-            Command::decode("start_recording", Some(&json!({"file_name": "a.mkv"})))
-        else {
-            panic!("decode");
-        };
-        assert_eq!(no_sources.sources, None);
+        assert!(request.screen.is_some());
+        // No screen layer, also with `screen: false`: join the pipeline or
+        // start it with the active scene.
+        for params in [
+            json!({"file_name": "a.mkv"}),
+            json!({"file_name": "a.mkv", "screen": false}),
+        ] {
+            let Ok(Command::StartRecording(no_screen)) =
+                Command::decode("start_recording", Some(&params))
+            else {
+                panic!("decode");
+            };
+            assert_eq!(no_screen.screen, None, "{params}");
+        }
         // The audio is the configured mixer's (ADR 0017): per-run audio
         // parameters are unknown fields.
         for field in ["inputs", "tones", "master_gain_db"] {
@@ -3304,7 +3270,7 @@ mod tests {
         assert_eq!(request.video_bitrate_kbps, Some(4500));
         assert_eq!(request.reconnect.max_attempts, 0);
         assert_eq!(request.reconnect.initial_delay, Duration::from_millis(250));
-        assert_eq!(request.sources, None);
+        assert_eq!(request.screen, None);
         assert_eq!(
             request.target.redacted(),
             "rtmp://live.example.com/app/<stream key>"

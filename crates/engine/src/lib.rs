@@ -876,13 +876,13 @@ mod tests {
         let mut engine = engine().with_output_dir(&dir.0);
         start(&mut engine, json!({"file_name": "keep.mkv"})).expect("start recording");
         // Outputs share the running pipeline; they cannot add a screen layer.
-        let own_sources = Command::decode(
+        let screen_layer = Command::decode(
             "start_streaming",
             Some(&json!({"url": server.url(), "screen": true})),
         )
         .expect("decode");
         assert_eq!(
-            engine.handle(own_sources).unwrap_err().code,
+            engine.handle(screen_layer).unwrap_err().code,
             ErrorCode::InvalidState
         );
         start_streaming(

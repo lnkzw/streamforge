@@ -13,7 +13,7 @@ use command_api::{
 use media_core::FrameMailbox;
 
 use crate::composite::FPS;
-use crate::outputs::{output_id, recording_tracks};
+use crate::outputs::output_id;
 use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH};
 use crate::scenes::SceneCollection;
 use crate::{Engine, audio};
@@ -190,23 +190,15 @@ impl Engine {
             .map(|output| {
                 let running = self.output_open(output);
                 let profile = self.profiles.mix(output);
+                // Not running: what it starts with, also when it joins a
+                // run (which mixes the configured graph).
                 let tracks = match (&self.pipeline, output) {
                     (Some(pipeline), _) if running => pipeline.output_tracks(output_id(output)),
-                    // Started now, it would join this run with these.
-                    (Some(pipeline), OutputKind::Recording) => {
-                        pipeline.bus_ids(&recording_tracks(pipeline, &self.profiles).1)
-                    }
-                    (None, OutputKind::Recording) => self.profiles.recording.tracks.clone(),
+                    (_, OutputKind::Recording) => self.profiles.recording.tracks.clone(),
                     (_, OutputKind::Stream) => Vec::new(),
                 };
                 let bus = match &self.pipeline {
                     Some(pipeline) if running => pipeline.output_mix(output_id(output)),
-                    // Started now, it would join this run, which takes the
-                    // program bus for a bus it lacks (a safety net: a run
-                    // mixes the configured graph).
-                    Some(pipeline) if pipeline.mix_column(profile).is_none() => {
-                        Some(PROGRAM_BUS_ID.to_owned())
-                    }
                     _ => None,
                 };
                 OutputMix {
@@ -296,9 +288,11 @@ impl Engine {
                         pipeline.set_output_mix(output_id(output), column);
                         applied_now.push("mix");
                     }
-                    // Not in this run (a safety net: a run mixes the
-                    // configured graph).
-                    None => next_start.push("mix"),
+                    // The run mixes the configured graph, which has the bus.
+                    None => {
+                        debug_assert!(false, "the mix `{mix}` is not in this run");
+                        next_start.push("mix");
+                    }
                 }
             }
             for (field, given) in [

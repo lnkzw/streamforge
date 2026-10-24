@@ -54,31 +54,6 @@ pub(crate) fn verify_output(name: &str, outputs: &[AudioOutput]) -> Result<(), C
     ))
 }
 
-/// Whether PipeWire can play `feed` as requested; checked before anything
-/// else, as it costs nothing.
-pub(crate) fn check_request(
-    request: &PlaybackRequest,
-    feed: &SampleReader,
-) -> Result<(), CaptureError> {
-    if !(1..=2).contains(&request.channels) || request.rate == 0 {
-        return Err(CaptureError::unsupported(format!(
-            "playback supports 1 or 2 channels at a non-zero rate, got {} Hz / {}",
-            request.rate, request.channels
-        )));
-    }
-    if feed.channels() != request.channels as usize {
-        return Err(CaptureError::new(
-            CaptureErrorKind::InvalidRequest,
-            format!(
-                "the feed carries {} channel(s), the request {}",
-                feed.channels(),
-                request.channels
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Play `feed` on the requested output (named outputs are checked by the
 /// caller) and return once it plays. A device that does not play within
 /// [`QUERY_TIMEOUT`] is an error. On any error the feed is dropped.
@@ -86,7 +61,7 @@ pub(crate) fn start(
     request: &PlaybackRequest,
     feed: SampleReader,
 ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
-    check_request(request, &feed)?;
+    request.check(&feed)?;
     let (stop, stop_receiver) = pw::channel::channel();
     let (started, playing) = mpsc::sync_channel(1);
     let ended = Arc::new(CaptureEnd::new());

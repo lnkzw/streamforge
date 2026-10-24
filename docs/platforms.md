@@ -8,7 +8,7 @@ What each operating system supports, how it is built, and how it is verified. Ca
 |------------|-------|---------|-------|
 | Screen capture | XDG ScreenCast portal + PipeWire (monitor, window, virtual; picker only) | Windows.Graphics.Capture (monitors and windows by id from `list_screen_sources`; no picker yet) | ScreenCaptureKit (displays and windows by id from `list_screen_sources`; no picker yet; needs the screen-recording permission) |
 | Audio input | PipeWire (format converted by PipeWire); each sink's monitor is an input too (desktop audio) | WASAPI through `cpal` (converted to 48 kHz stereo in the callback) | CoreAudio through `cpal` (same conversion) |
-| Monitor playback (ADR 0017) | PipeWire output stream (sinks and duplex devices) | not yet (step 5c, `cpal`) | not yet (step 5c, `cpal`) |
+| Monitor playback (ADR 0017) | PipeWire output stream (sinks and duplex devices) | WASAPI through `cpal` (48 kHz; Windows converts the rate) | CoreAudio through `cpal` (at the device's current rate, resampled in the callback) |
 | Compositor, mixer, preview | yes | yes | yes |
 | Recording (H.264 + AAC in Matroska) | FFmpeg (system packages) | FFmpeg (prebuilt shared build) | FFmpeg (Homebrew) |
 | Streaming (RTMP) | FFmpeg | FFmpeg | FFmpeg |
@@ -22,6 +22,13 @@ Notes:
   - Unless that rate is 48 kHz, it resamples linearly, with the same quality note as the mixer's drift correction (ADR 0004).
   - Mono is duplicated to both channels; with more than two channels, the first two are used.
   - Each report warns about these conversions.
+- **Monitor playback (Windows, macOS):** outputs are listed by `list_audio_outputs` with the host's device id and selected by it or by their display name, as inputs are.
+  - Windows asks for the feed's 48 kHz, preferring `f32`, in the device's channel count (the only one cpal offers in shared mode); WASAPI's resampler converts the rate (cpal opens outputs with `AUTOCONVERTPCM`).
+  - macOS plays at the device's current rate (never switching it), preferring `f32` and stereo. Unless that rate is 48 kHz, the callback resamples linearly, at the exact rate ratio, so no drift builds up there (the feed follows the device clock).
+  - On both, stereo goes to the first two channels, silence to the others; a mono device gets their average.
+  - The callback reads the feed into the device's buffer and does not lock, wait or allocate; formats other than `f32` go through a buffer allocated before the stream starts.
+  - The system default output is resolved to its device when the monitor starts. cpal's default device follows the system default, which would move the monitor to the speakers when headphones are unplugged; as on Linux, the monitor stays on its device, and a device that goes away ends the monitor (`state: ended`, the reason names the output) within about 0.6 s, which closes the feed. A device that does not open and pull within 3 s is an error, as on Linux.
+  - On macOS, a change of the device's rate also ends the monitor (cpal pauses the stream): another app or Audio MIDI Setup switching it, or Bluetooth headphones switching to their headset mode when their microphone is captured. Switch the monitor on again to play at the new rate. Captures from that device end the same way. Restarting on the same device by itself is left for the Windows and macOS work after the Linux release.
 - **macOS microphone access:** it needs permission for the app that runs StreamForge (System Settings → Privacy & Security → Microphone). Without it, CoreAudio delivers silence, which the capture report flags.
 - **Device names:** audio inputs are selected by the host's device id (as listed by `list_audio_inputs`) or by their display name.
 - **Choosing a screen source:** `get_capture_capabilities` says how (ADR 0010). With `picker` (Linux) the user picks in the system dialog. With `source_list` (Windows) `list_screen_sources` returns ids such as `monitor:\\.\DISPLAY1` or `window:4242:0x2a0b6` (process id and window handle), and screen commands take one as `source_id`; the desktop UI shows that list.
@@ -51,6 +58,7 @@ CI (`.github/workflows/ci.yml`) builds and tests every push and pull request on 
 | Engine, desktop-model and MCP acceptance tests | CI | CI | CI |
 | Audio input | manual (dev machine); CI runners have no session | CI: the runner has no input, so the structured `not_found` path; live capture still needs a manual check | CI: the runner's devices if any, else the structured error; microphone permission cannot be granted on runners |
 | Hardware encoding | manual: VAAPI on the development machine (RX 6800, Mesa); NVENC untested. CI: no GPU; NVENC and VAAPI fail to open, and `auto` falls back to libx264 | CI: no GPU; NVENC, Quick Sync and AMF fail to open, fallback to libx264 | CI: VideoToolbox does not open on the VM, fallback to libx264 |
+| Monitor playback | manual: live tests play into a null sink they create, and the engine end to end (`docs/capture-linux.md`) | CI: plays silence on the default output if the runner has one, else the structured error; unknown outputs and refused formats. Manual: a tone test (`--ignored`) on hardware | CI: as on Windows. Manual: the same tone test |
 | Screen capture | manual (needs a human in the picker) | CI: lists sources, captures the runner's monitor (frames of its size), probes it, and records it from a scene through the engine process | CI: lists the runner's display, captures and probes it, and records it from a scene through the engine process (the runner image allows screen recording) |
 
 At the first complete CI run (ADR 0009), every test passed on Windows. On macOS, every test passed except a throughput floor, which on macOS is now only a guard against total failure: the macOS VM skips some compositor ticks at 1080p60, and those skips are counted.

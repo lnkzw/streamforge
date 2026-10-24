@@ -148,7 +148,7 @@ impl CaptureBackend for LinuxCapture {
         request: &PlaybackRequest,
         feed: SampleReader,
     ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
-        playback::check_request(request, &feed)?;
+        request.check(&feed)?;
         if let Some(name) = request.output.as_deref() {
             playback::verify_output(name, &self.recent_nodes()?.outputs)?;
         }

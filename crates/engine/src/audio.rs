@@ -17,7 +17,7 @@ use command_api::{
     CHANNEL_ID_PREFIX, ChannelInput, ChannelRef, ChannelSpec, ChannelState, CommandError,
     DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ, ErrorCode, MAX_AUX_BUSES, MAX_CHANNELS, MixerState,
     PROGRAM_BUS_ID, PROGRAM_BUS_NAME, ProgramBusSpec, SendSpec, SendTap, SetChannelInputRequest,
-    SetSendRequest, UpdateBusRequest, UpdateChannelRequest,
+    SetSendRequest, UpdateBusRequest, UpdateChannelRequest, program_paths,
 };
 
 use crate::ids::new_id;
@@ -358,24 +358,21 @@ pub(crate) fn devices(
         })
 }
 
-/// Channels that reach the program bus more than once: directly, and
-/// through each aux bus assigned to it. Allowed (ADR 0017), but it is
-/// +6 dB at equal levels, and rarely meant. It is about the routing, so
-/// mutes and levels, which change live, do not count.
+/// Channels that reach the program bus more than once ([`program_paths`]).
 fn double_routing(graph: &AudioGraphSpec) -> Vec<String> {
     graph
         .channels
         .iter()
         .filter_map(|channel| {
-            let direct = channel.sends[0].enabled.then(|| "directly".to_owned());
-            let through = graph
-                .buses
-                .iter()
-                .zip(&channel.sends[1..])
-                .filter(|(bus, send)| send.enabled && bus.assign_db.is_some())
-                .map(|(bus, _)| format!("through `{}`", bus.name));
-            let paths: Vec<String> = direct.into_iter().chain(through).collect();
+            let paths = program_paths(
+                &channel.sends,
+                graph
+                    .buses
+                    .iter()
+                    .map(|bus| (bus.name.as_str(), bus.assign_db)),
+            );
             (paths.len() > 1).then(|| {
+                let paths: Vec<String> = paths.iter().map(ToString::to_string).collect();
                 format!(
                     "channel `{}` reaches the program bus {} times: {}; turn off a send if \
                      that is not meant",

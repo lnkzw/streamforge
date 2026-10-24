@@ -21,9 +21,9 @@ pub use access::{AccessPolicy, Gated, label as access_label};
 pub use audio::{
     AddBusRequest, AddChannelRequest, AudioGraphSpec, BUS_ID_PREFIX, BusRef, BusSpec, BusState,
     CHANNEL_ID_PREFIX, ChannelInput, ChannelRef, ChannelSpec, ChannelState, GraphProblem,
-    MAX_AUX_BUSES, MAX_CHANNELS, MixerState, OutputMix, PROGRAM_BUS_ID, PROGRAM_BUS_NAME,
-    ProgramBusSpec, SendSpec, SendTap, SetChannelInputRequest, SetSendRequest, UpdateBusRequest,
-    UpdateChannelRequest, id_rule,
+    MAX_AUX_BUSES, MAX_CHANNELS, MAX_GAIN_DB, MIN_GAIN_DB, MixerState, OutputMix, PROGRAM_BUS_ID,
+    PROGRAM_BUS_NAME, ProgramBusSpec, ProgramPath, SendSpec, SendTap, SetChannelInputRequest,
+    SetSendRequest, UpdateBusRequest, UpdateChannelRequest, id_rule, program_paths,
 };
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};

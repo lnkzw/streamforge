@@ -79,10 +79,11 @@ enum Refresh {
     Health,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Pending {
     Refresh(Refresh),
-    Action,
+    /// A command the user asked for, by name.
+    Action(String),
     /// `list_screen_sources`; failing is normal where there is only a picker.
     ScreenSources,
 }
@@ -106,6 +107,9 @@ pub struct Model {
     /// platform only has a picker); `None` until asked for.
     pub screen_sources: Option<Result<Vec<ScreenSource>, String>>,
     pub log: VecDeque<LogEntry>,
+    /// Entries ever pushed to the log, including those it no longer
+    /// keeps: the UI tells new entries from seen ones by it.
+    log_total: u64,
 }
 
 impl Model {
@@ -124,6 +128,7 @@ impl Model {
             streaming: None,
             screen_sources: None,
             log: VecDeque::new(),
+            log_total: 0,
         };
         model.refresh_all();
         model
@@ -137,7 +142,20 @@ impl Model {
     pub fn busy(&self) -> bool {
         self.pending
             .values()
-            .any(|pending| matches!(pending, Pending::Action))
+            .any(|pending| matches!(pending, Pending::Action(_)))
+    }
+
+    /// Whether command `name` (e.g. `start_recording`) waits for the
+    /// engine.
+    pub fn pending(&self, name: &str) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Action(action) if action == name))
+    }
+
+    /// How many entries were ever pushed to the log.
+    pub fn log_total(&self) -> u64 {
+        self.log_total
     }
 
     fn submit(&mut self, name: &str, params: Value, pending: Pending) {
@@ -153,7 +171,7 @@ impl Model {
     }
 
     fn act(&mut self, name: &str, params: Value) {
-        self.submit(name, params, Pending::Action);
+        self.submit(name, params, Pending::Action(name.to_owned()));
     }
 
     fn refresh(&mut self, what: Refresh) {
@@ -257,9 +275,10 @@ impl Model {
         self.act("set_active_scene", json!({ "scene_id": id, "name": name }));
     }
 
-    pub fn add_source(&mut self, scene: &str, form: &SourceForm) {
+    /// Add a source to the scene with id `scene_id`.
+    pub fn add_source(&mut self, scene_id: &str, form: &SourceForm) {
         let mut params = Map::new();
-        params.insert("scene".into(), scene.into());
+        params.insert("scene_id".into(), scene_id.into());
         params.insert("name".into(), form.name.clone().into());
         let kind = match form.kind {
             SourceType::ColorBars => "color_bars",
@@ -288,9 +307,21 @@ impl Model {
         self.act("add_source", Value::Object(params));
     }
 
-    /// Sources are named by their stable `id` from `list_scenes`.
-    pub fn set_source_opacity(&mut self, id: &str, opacity: f32) {
-        self.act("update_source", json!({ "id": id, "opacity": opacity }));
+    /// Change a source's rectangle (x, y, width, height) and opacity;
+    /// `None` keeps it. Sources are named by their stable `id` from
+    /// `list_scenes`.
+    pub fn update_source(&mut self, id: &str, rect: Option<[f32; 4]>, opacity: Option<f32>) {
+        let mut params = Map::new();
+        params.insert("id".into(), id.into());
+        if let Some([x, y, width, height]) = rect {
+            for (key, value) in [("x", x), ("y", y), ("width", width), ("height", height)] {
+                params.insert(key.into(), value.into());
+            }
+        }
+        if let Some(opacity) = opacity {
+            params.insert("opacity".into(), opacity.into());
+        }
+        self.act("update_source", Value::Object(params));
     }
 
     pub fn remove_source(&mut self, id: &str) {
@@ -351,6 +382,7 @@ impl Model {
             self.log.pop_front();
         }
         self.log.push_back(LogEntry { level, text });
+        self.log_total += 1;
     }
 
     /// Apply the responses that arrived; returns whether anything changed.
@@ -372,7 +404,7 @@ impl Model {
                 Err(error) => self.failed(&response.name, &error),
             }
             // Actions change what status, mixer and health show.
-            if matches!(pending, Some(Pending::Action)) {
+            if matches!(pending, Some(Pending::Action(_))) {
                 self.refresh_live();
                 self.refresh_health();
             }

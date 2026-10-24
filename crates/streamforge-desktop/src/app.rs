@@ -1,17 +1,21 @@
-//! The egui front end: draws the [`Model`] and calls its actions. Panels:
-//! status and preview toggle (top), scenes (left), mixer (right), preview
-//! and sources with their capture state (center), outputs, health and
-//! activity log (bottom).
+//! The egui front end: the production workspace of the design system
+//! (`docs/ui/design-system.md`). It draws the [`Model`] and calls its
+//! actions. The docks are drawn in [`crate::views`]; what they show is
+//! computed in [`crate::workspace`].
+//!
+//! Top bar: transport and health. Left: scenes over the sources of the
+//! selected scene. Centre: the program monitor. Right: the inspector of the
+//! selected source (a drawer in narrow windows). Bottom: mixer and outputs.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use egui::{Color32, RichText};
 
-use command_api::{SceneList, SourceKind};
-
-use crate::model::{Level, Model, SourceForm, SourceHealth, SourceType};
+use crate::model::{Model, SourceForm};
+use crate::ui::theme::{self, color, size};
+use crate::views;
+use crate::workspace::{Ballistics, DRAWER_BELOW};
 
 /// Status and meters are polled this often.
 const LIVE_REFRESH: Duration = Duration::from_millis(100);
@@ -19,56 +23,107 @@ const LIVE_REFRESH: Duration = Duration::from_millis(100);
 /// counters refresh every 250 ms.
 const HEALTH_REFRESH: Duration = Duration::from_millis(250);
 /// A health reading older than this is marked as such.
-const HEALTH_STALE: Duration = Duration::from_millis(1500);
+pub(crate) const HEALTH_STALE: Duration = Duration::from_millis(1500);
 /// Scenes are re-read this often (changes also arrive with each edit).
 const SCENE_REFRESH: Duration = Duration::from_secs(2);
-/// Meter fall-off per second, in dB.
-const METER_DECAY_DB: f32 = 24.0;
-const METER_FLOOR_DB: f32 = -60.0;
 
 pub struct DesktopApp {
-    model: Model,
-    selected_scene: Option<String>,
-    new_scene: String,
-    source_form: SourceForm,
-    record_file: String,
-    stream_url: String,
+    pub(crate) model: Model,
+    /// The scene being edited, by id. The program scene is the model's.
+    pub(crate) selected_scene: Option<String>,
+    /// The source in the inspector, by id.
+    pub(crate) selected_source: Option<String>,
+    /// The name typed for a new scene while its field is open.
+    pub(crate) new_scene: Option<String>,
+    pub(crate) dialog: Option<Dialog>,
+    pub(crate) record_file: String,
+    pub(crate) stream_url: String,
     /// Typed into a password field; handed to the engine on start only.
-    stream_key: String,
-    /// Id and name of the scene a deletion asks about.
-    confirm_delete: Option<(String, String)>,
-    /// Source whose working capture the user asked to restart.
-    confirm_restart: Option<String>,
+    pub(crate) stream_key: String,
     /// Chosen source to restart an ended named source on (`None`: same).
-    restart_targets: HashMap<String, Option<String>>,
-    preview: Option<egui::TextureHandle>,
+    pub(crate) restart_targets: HashMap<String, Option<String>>,
+    /// In narrow windows the inspector is a drawer; whether it is open.
+    pub(crate) drawer_open: bool,
+    /// Log entries the operator has seen (by opening the health details).
+    pub(crate) log_seen: u64,
+    /// Where the scenes dock ends and the sources dock begins, as a
+    /// fraction of the left column.
+    browser_split: f32,
+    /// Meters by channel id, and the program bus's.
+    pub(crate) meters: HashMap<String, Ballistics>,
+    pub(crate) program_meter: Ballistics,
+    pub(crate) preview: Option<egui::TextureHandle>,
     rgba: Vec<u8>,
-    meters: Vec<f32>,
-    master_meter: f32,
     last_live: Instant,
     last_health: Instant,
     last_scenes: Instant,
     last_frame: Instant,
 }
 
+/// The one modal dialog that can be open.
+pub(crate) enum Dialog {
+    AddSource {
+        scene_id: String,
+        scene_name: String,
+        form: SourceForm,
+    },
+    /// Edits a draft; Done applies it, cancelling drops it.
+    RecordSettings {
+        file_name: String,
+    },
+    /// Edits a draft of the target. `go_live`: opened from the LIVE button
+    /// without a target; its action starts the stream.
+    StreamSettings {
+        url: String,
+        key: String,
+        go_live: bool,
+    },
+    Confirm(Confirm),
+}
+
+/// A consequential action that asks first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Confirm {
+    DeleteScene {
+        id: String,
+        name: String,
+    },
+    RemoveSource {
+        id: String,
+        name: String,
+    },
+    /// Restart a capture that still works.
+    RestartSource {
+        id: String,
+        name: String,
+    },
+    StopRecording,
+    StopStreaming,
+}
+
 impl DesktopApp {
-    pub fn new(model: Model) -> Self {
+    /// Installs the design system on `ctx`; call it from the eframe
+    /// creation closure, before the first frame.
+    pub fn new(ctx: &egui::Context, model: Model) -> Self {
+        theme::apply(ctx);
         let now = Instant::now();
         Self {
             model,
             selected_scene: None,
-            new_scene: String::new(),
-            source_form: SourceForm::default(),
+            selected_source: None,
+            new_scene: None,
+            dialog: None,
             record_file: "recording.mkv".to_owned(),
             stream_url: String::new(),
             stream_key: String::new(),
-            confirm_delete: None,
-            confirm_restart: None,
             restart_targets: HashMap::new(),
+            drawer_open: false,
+            log_seen: 0,
+            browser_split: 0.4,
+            meters: HashMap::new(),
+            program_meter: Ballistics::default(),
             preview: None,
             rgba: Vec::new(),
-            meters: Vec::new(),
-            master_meter: METER_FLOOR_DB,
             last_live: now,
             last_health: now,
             last_scenes: now,
@@ -91,24 +146,19 @@ impl DesktopApp {
             self.model.refresh_all();
             self.last_scenes = now;
         }
-        // Meters: jump up to new peaks, fall off slowly.
-        let elapsed = (now - self.last_frame).as_secs_f32();
+        let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
-        let decay = |value: &mut f32, peak: Option<f64>| {
-            let peak = peak.map_or(METER_FLOOR_DB, |db| db as f32);
-            *value = (*value - METER_DECAY_DB * elapsed)
-                .max(peak)
-                .max(METER_FLOOR_DB);
-        };
         if let Some(mixer) = &self.model.mixer {
-            self.meters.resize(mixer.channels.len(), METER_FLOOR_DB);
-            for (meter, channel) in self.meters.iter_mut().zip(&mixer.channels) {
-                decay(meter, channel.peak_dbfs);
+            self.meters
+                .retain(|id, _| mixer.channels.iter().any(|channel| &channel.spec.id == id));
+            for channel in &mixer.channels {
+                self.meters
+                    .entry(channel.spec.id.clone())
+                    .or_default()
+                    .update(channel.peak_dbfs, dt);
             }
-            decay(
-                &mut self.master_meter,
-                mixer.buses.first().and_then(|program| program.peak_dbfs),
-            );
+            let program = mixer.buses.first().and_then(|program| program.peak_dbfs);
+            self.program_meter.update(program, dt);
         }
     }
 
@@ -135,491 +185,180 @@ impl DesktopApp {
         }
     }
 
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("StreamForge");
-            ui.separator();
-            let mut preview = self.model.preview_enabled;
-            if ui.checkbox(&mut preview, "Preview").changed() {
-                self.model.set_preview(preview);
-            }
-            ui.separator();
-            if let Some(status) = &self.model.status {
-                let recording = match (status.recording_active, status.recording_failed) {
-                    (true, _) => RichText::new("● REC").color(Color32::RED),
-                    (_, true) => RichText::new("REC failed").color(Color32::ORANGE),
-                    _ => RichText::new("not recording").weak(),
-                };
-                ui.label(recording);
-                let streaming = match status.streaming_state {
-                    Some(state) => RichText::new(format!("stream: {state:?}")).color(
-                        if status.streaming_active {
-                            Color32::LIGHT_GREEN
-                        } else {
-                            Color32::ORANGE
-                        },
-                    ),
-                    None => RichText::new("not streaming").weak(),
-                };
-                ui.label(streaming);
-            }
-            if self.model.busy() {
-                ui.spinner();
-            }
-        });
-    }
-
-    fn scenes_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Scenes");
-        let Some(scenes) = self.model.scenes.clone() else {
-            ui.spinner();
-            return;
-        };
-        let shown = selection(self.selected_scene.as_deref(), None, &scenes);
-        let mut clicked = None;
-        for scene in &scenes.scenes {
-            let label = if scene.name == scenes.active {
-                format!("▶ {}", scene.name)
-            } else {
-                scene.name.clone()
-            };
-            if ui.selectable_label(scene.name == shown, label).clicked() {
-                clicked = Some(scene.name.clone());
-            }
-        }
-        let selected = selection(self.selected_scene.as_deref(), clicked.as_deref(), &scenes);
-        self.selected_scene = Some(selected.clone());
-        // Scene actions send the listed id with the name: if the scene was
-        // replaced meanwhile, the engine refuses instead of acting on the
-        // new one.
-        let selected_id = scenes
-            .scenes
-            .iter()
-            .find(|scene| scene.name == selected)
-            .map_or_else(String::new, |scene| scene.id.clone());
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(selected != scenes.active, egui::Button::new("Activate"))
-                .clicked()
-            {
-                self.model.activate_scene(&selected_id, &selected);
-            }
-            if ui
-                .add_enabled(selected != scenes.active, egui::Button::new("Delete…"))
-                .clicked()
-            {
-                self.confirm_delete = Some((selected_id.clone(), selected.clone()));
-            }
-        });
-        if let Some((id, name)) = self.confirm_delete.clone() {
-            ui.label(RichText::new(format!("Delete scene `{name}`?")).color(Color32::ORANGE));
-            ui.horizontal(|ui| {
-                if ui.button("Yes, delete").clicked() {
-                    self.model.delete_scene_confirmed(&id, &name);
-                    self.confirm_delete = None;
-                }
-                if ui.button("Cancel").clicked() {
-                    self.confirm_delete = None;
-                }
-            });
-        }
-        ui.separator();
-        ui.label("New scene");
-        ui.text_edit_singleline(&mut self.new_scene);
-        if ui
-            .add_enabled(!self.new_scene.is_empty(), egui::Button::new("Create"))
-            .clicked()
+    /// The left column: scenes over the sources of the selected scene,
+    /// split by a divider that can be dragged.
+    fn browser(&mut self, ui: &mut egui::Ui) {
+        const MIN_DOCK: f32 = 120.0;
+        let column = ui.max_rect();
+        let split = (column.top() + column.height() * self.browser_split)
+            .clamp(column.top() + MIN_DOCK, column.bottom() - MIN_DOCK)
+            .round();
+        let scenes = egui::Rect::from_min_max(column.min, egui::pos2(column.right(), split));
+        let sources = egui::Rect::from_min_max(egui::pos2(column.left(), split + 1.0), column.max);
+        dock_in(ui, "scenes", scenes, |ui| self.scenes_dock(ui));
+        dock_in(ui, "sources", sources, |ui| self.sources_dock(ui));
+        // The docks are children; the column still takes its whole width.
+        ui.expand_to_include_rect(column);
+        // The divider, registered last so it wins over the docks' edges.
+        let handle = egui::Rect::from_center_size(
+            egui::pos2(column.center().x, split),
+            egui::vec2(column.width(), 7.0),
+        );
+        let drag = ui.interact(handle, ui.id().with("browser split"), egui::Sense::drag());
+        if drag.dragged()
+            && let Some(pointer) = drag.interact_pointer_pos()
         {
-            self.model.create_scene(&self.new_scene);
-            self.new_scene.clear();
+            self.browser_split = ((pointer.y - column.top()) / column.height()).clamp(0.15, 0.85);
         }
+        let active = drag.hovered() || drag.dragged();
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        ui.painter().hline(
+            column.x_range(),
+            split + 0.5,
+            egui::Stroke::new(
+                size::STROKE,
+                if active {
+                    color::LINE_STRONG
+                } else {
+                    color::LINE_SUBTLE
+                },
+            ),
+        );
     }
 
-    fn mixer_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Mixer");
-        let Some(mixer) = self.model.mixer.clone() else {
-            ui.spinner();
-            return;
-        };
-        if !mixer.running {
-            ui.label(RichText::new("idle — levels show while previewing or live").weak());
-        }
-        for (channel, meter) in mixer.channels.iter().zip(&self.meters) {
-            let channel = &channel.spec;
-            ui.group(|ui| {
-                ui.label(&channel.name);
-                meter_bar(ui, *meter);
-                let mut gain = channel.gain_db;
-                let mut muted = channel.muted;
-                let gain_changed =
-                    committed(&ui.add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB")));
-                let mute_changed = ui.checkbox(&mut muted, "Mute").changed();
-                if gain_changed || mute_changed {
-                    self.model.update_channel(&channel.id, gain, muted);
-                }
-            });
-        }
-        ui.separator();
-        let Some(program) = mixer.buses.first() else {
-            return;
-        };
-        ui.label(&program.name);
-        meter_bar(ui, self.master_meter);
-        let mut gain = program.gain_db;
-        if committed(&ui.add(egui::Slider::new(&mut gain, -60.0..=12.0).suffix(" dB"))) {
-            self.model.update_bus(&program.id, gain);
-        }
-    }
-
-    fn center_panel(&mut self, ui: &mut egui::Ui) {
-        // Preview, 16:9, as wide as the panel allows.
-        let width = ui.available_width().min(960.0);
-        let size = egui::vec2(width, width * 9.0 / 16.0);
-        match (&self.preview, self.model.preview_enabled) {
-            (Some(texture), true) => {
-                ui.image((texture.id(), size));
-            }
-            _ => {
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                ui.painter().rect_filled(rect, 4.0, Color32::from_gray(24));
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Preview off",
-                    egui::FontId::proportional(18.0),
-                    Color32::GRAY,
-                );
-            }
-        }
-        ui.separator();
-        let Some(scene_name) = self.selected_scene.clone() else {
-            return;
-        };
-        let Some(scene) = self
-            .model
-            .scenes
-            .as_ref()
-            .and_then(|list| list.scenes.iter().find(|scene| scene.name == scene_name))
-            .cloned()
-        else {
-            return;
-        };
-        ui.heading(format!("Sources of `{}`", scene.name));
-        for source in scene.sources.iter().rev() {
-            ui.horizontal(|ui| {
-                let kind = match source.kind {
-                    SourceKind::ColorBars => "color bars",
-                    SourceKind::Solid { .. } => "solid",
-                    SourceKind::Screen { .. } => "screen",
-                };
-                ui.label(format!("{} ({kind})", source.name));
-                if let SourceKind::Screen { source_id, .. } = &source.kind {
-                    let picker = source_id.is_none();
-                    self.capture_state(ui, &source.id, picker);
-                }
-                let mut opacity = source.opacity;
-                if committed(&ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("opacity"))) {
-                    self.model.set_source_opacity(&source.id, opacity);
-                }
-                if ui.button("Remove").clicked() {
-                    self.model.remove_source(&source.id);
-                }
-            });
-        }
-        ui.collapsing("Add source", |ui| {
-            let form = &mut self.source_form;
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut form.name);
-            });
-            egui::ComboBox::from_label("Kind")
-                .selected_text(match form.kind {
-                    SourceType::ColorBars => "Color bars",
-                    SourceType::Solid => "Solid color",
-                    SourceType::Screen => "Screen capture",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut form.kind, SourceType::ColorBars, "Color bars");
-                    ui.selectable_value(&mut form.kind, SourceType::Solid, "Solid color");
-                    ui.selectable_value(&mut form.kind, SourceType::Screen, "Screen capture");
-                });
-            if form.kind == SourceType::Solid {
-                ui.horizontal(|ui| {
-                    ui.label("Color");
-                    ui.color_edit_button_srgba_unmultiplied(&mut form.color);
-                });
-            }
-            if form.kind == SourceType::Screen {
-                screen_source_picker(ui, &mut self.model, form);
-            }
-            let mut whole = form.rect.is_none();
-            if ui.checkbox(&mut whole, "Whole canvas").changed() {
-                form.rect = (!whole).then_some([0.0, 0.0, 960.0, 540.0]);
-            }
-            if let Some(rect) = &mut form.rect {
-                ui.horizontal(|ui| {
-                    for (label, value) in ["x", "y", "w", "h"].iter().zip(rect.iter_mut()) {
-                        ui.label(*label);
-                        ui.add(egui::DragValue::new(value).range(-4096.0..=4096.0));
-                    }
-                });
-            }
-            ui.add(egui::Slider::new(&mut form.opacity, 0.0..=1.0).text("opacity"));
-            if ui
-                .add_enabled(!form.name.is_empty(), egui::Button::new("Add"))
-                .clicked()
-            {
-                let form = form.clone();
-                self.model.add_source(&scene.name, &form);
-                self.source_form.name.clear();
-            }
+    pub(crate) fn open_record_settings(&mut self) {
+        self.dialog = Some(Dialog::RecordSettings {
+            file_name: self.record_file.clone(),
         });
     }
 
-    /// A screen source's capture state, and a restart button while it has
-    /// a capture (running or ended; also kept captures of other scenes).
-    /// Restarting ends the running capture, so a working one asks first.
-    /// An ended named source can restart on another listed source: a
-    /// closed window's id does not come back.
-    fn capture_state(&mut self, ui: &mut egui::Ui, id: &str, picker: bool) {
-        let ended = match self.model.source_health(id) {
-            SourceHealth::NotCapturing => {
-                ui.label(RichText::new("not capturing").weak());
-                return;
-            }
-            SourceHealth::Capturing {
-                last_frame_age_ms,
-                frames_consumed,
-            } => {
-                // Screens may deliver only on change: an age, not an error.
-                let seconds = last_frame_age_ms.unwrap_or(0) / 1000;
-                let text = match (frames_consumed, seconds) {
-                    (0, 0) => "capturing, no frame yet".to_owned(),
-                    (0, seconds) => format!("capturing, no frame yet ({seconds} s)"),
-                    (_, 0) => "capturing".to_owned(),
-                    (_, seconds) => format!("capturing, last frame {seconds} s ago"),
-                };
-                ui.label(RichText::new(text).color(Color32::LIGHT_GREEN));
-                false
-            }
-            SourceHealth::Ended { reason } => {
-                ui.label(RichText::new(format!("ended: {reason}")).color(Color32::RED));
-                true
-            }
-        };
-        if self.confirm_restart.as_deref() == Some(id) {
-            ui.label("End the working capture and start it again?");
-            if ui.button("Yes, restart").clicked() {
-                self.confirm_restart = None;
-                self.model.restart_source(id, None);
-            }
-            if ui.button("Cancel").clicked() {
-                self.confirm_restart = None;
-            }
-            return;
-        }
-        let target = if ended && !picker {
-            self.restart_target(ui, id)
-        } else {
-            None
-        };
-        // The engine refuses a picker restart too; disabling says why
-        // before a click. While a command is pending (e.g. a picker is
-        // open), a second restart would end the capture just chosen.
-        let outputs_open = self.model.recording.is_some() || self.model.streaming.is_some();
-        let busy = self.model.busy();
-        let button = ui
-            .add_enabled(
-                !busy && !(picker && outputs_open),
-                egui::Button::new("Restart"),
-            )
-            .on_hover_text("Start the capture again; outputs keep running")
-            .on_disabled_hover_text(if busy {
-                "Waiting for the engine"
-            } else {
-                "A picker source asks again: restart it while nothing records or streams"
-            });
-        if button.clicked() {
-            if ended {
-                self.restart_targets.remove(id);
-                self.model.restart_source(id, target.as_deref());
-            } else {
-                self.confirm_restart = Some(id.to_owned());
-            }
-        }
-    }
-
-    /// For an ended named source: restart on the same id, or on another
-    /// listed source.
-    fn restart_target(&mut self, ui: &mut egui::Ui, id: &str) -> Option<String> {
-        const SAME: &str = "same source";
-        let selected = self.restart_targets.entry(id.to_owned()).or_default();
-        match &self.model.screen_sources {
-            Some(Ok(sources)) if !sources.is_empty() => {
-                // An id that is no longer listed is not sent.
-                if selected
-                    .as_ref()
-                    .is_some_and(|chosen| !sources.iter().any(|source| &source.id == chosen))
-                {
-                    *selected = None;
-                }
-                let text = selected
-                    .as_ref()
-                    .and_then(|chosen| sources.iter().find(|source| &source.id == chosen))
-                    .map_or(SAME, |source| source.name.as_str());
-                egui::ComboBox::from_id_salt(("restart target", id))
-                    .selected_text(text)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(selected, None, SAME);
-                        for source in sources {
-                            let label = format!("{} ({})", source.name, source.kind.as_str());
-                            ui.selectable_value(selected, Some(source.id.clone()), label);
-                        }
-                    });
-            }
-            _ => {
-                if ui
-                    .button("Find sources")
-                    .on_hover_text("Choose another source to restart on")
-                    .clicked()
-                {
-                    self.model.find_screen_sources();
-                }
-            }
-        }
-        selected.clone()
-    }
-
-    fn outputs_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Record to");
-            ui.add_enabled(
-                self.model.recording.is_none(),
-                egui::TextEdit::singleline(&mut self.record_file).desired_width(160.0),
-            );
-            if self.model.recording.is_none() {
-                if ui.button("Start recording").clicked() {
-                    self.model.start_recording(&self.record_file);
-                }
-            } else if ui.button("Stop recording").clicked() {
-                self.model.stop_recording();
-            }
-            ui.separator();
-            ui.label("RTMP URL");
-            ui.add_enabled(
-                self.model.streaming.is_none(),
-                egui::TextEdit::singleline(&mut self.stream_url)
-                    .hint_text("rtmp://host/app")
-                    .desired_width(200.0),
-            );
-            ui.label("Key");
-            ui.add_enabled(
-                self.model.streaming.is_none(),
-                egui::TextEdit::singleline(&mut self.stream_key)
-                    .password(true)
-                    .desired_width(120.0),
-            );
-            if self.model.streaming.is_none() {
-                if ui
-                    .add_enabled(!self.stream_url.is_empty(), egui::Button::new("Go live"))
-                    .clicked()
-                {
-                    self.model
-                        .start_streaming(&self.stream_url, &self.stream_key);
-                }
-            } else if ui.button("End stream").clicked() {
-                self.model.stop_streaming();
-            }
+    pub(crate) fn open_stream_settings(&mut self, go_live: bool) {
+        self.dialog = Some(Dialog::StreamSettings {
+            url: self.stream_url.clone(),
+            key: self.stream_key.clone(),
+            go_live,
         });
-        let stale = self.model.health_age().filter(|age| *age >= HEALTH_STALE);
-        if !self.model.health_items.is_empty() || stale.is_some() {
-            ui.horizontal_wrapped(|ui| {
-                if let Some(age) = stale {
-                    ui.label(
-                        RichText::new(format!(
-                            "health from {} s ago (the engine is busy)",
-                            age.as_secs()
-                        ))
-                        .weak(),
-                    );
-                    ui.separator();
-                }
-                for item in &self.model.health_items {
-                    ui.label(colored(RichText::new(&item.text), item.level));
-                    ui.separator();
-                }
-            });
+    }
+
+    /// The canvas size from the scene list; the engine's default until
+    /// the list arrives.
+    pub(crate) fn canvas(&self) -> (u32, u32) {
+        self.model.scenes.as_ref().map_or((1920, 1080), |scenes| {
+            (scenes.canvas_width, scenes.canvas_height)
+        })
+    }
+
+    /// Drop a selected source that no longer exists (e.g. another client
+    /// removed it), so the inspector and its drawer do not stay on it.
+    fn prune_selection(&mut self) {
+        let (Some(scenes), Some(id)) = (&self.model.scenes, &self.selected_source) else {
+            return;
+        };
+        let exists = self
+            .selected_scene
+            .as_deref()
+            .and_then(|scene| views::scene(scenes, scene))
+            .is_some_and(|scene| views::source(scene, id).is_some());
+        if !exists {
+            self.select_source(None);
         }
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .max_height(110.0)
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for entry in &self.model.log {
-                    ui.label(colored(RichText::new(&entry.text), entry.level));
-                }
-            });
+    }
+
+    /// Select a source for the inspector; in a narrow window this opens
+    /// the drawer.
+    pub(crate) fn select_source(&mut self, id: Option<String>) {
+        self.drawer_open = id.is_some();
+        self.selected_source = id;
     }
 }
 
-/// The scene to show: a click wins, then the previous selection if it still
-/// exists, then the active scene.
-fn selection(previous: Option<&str>, clicked: Option<&str>, scenes: &SceneList) -> String {
-    let exists = |name: &&str| scenes.scenes.iter().any(|scene| scene.name == *name);
-    clicked
-        .filter(exists)
-        .or(previous.filter(exists))
-        .unwrap_or(&scenes.active)
-        .to_owned()
-}
-
-/// A slider edit is sent when a drag ends, or right away for keyboard and
-/// typed input (which change the value without dragging). Mid-drag values
-/// are not sent, so a drag is one command, not one per frame.
-fn committed(response: &egui::Response) -> bool {
-    response.drag_stopped() || (response.changed() && !response.dragged())
-}
-
-fn colored(text: RichText, level: Level) -> RichText {
-    match level {
-        Level::Info => text,
-        Level::Warning => text.color(Color32::ORANGE),
-        Level::Error => text.color(Color32::RED),
-    }
-}
-
-fn meter_bar(ui: &mut egui::Ui, db: f32) {
-    let fraction = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
-    let color = if db > -3.0 {
-        Color32::RED
-    } else if db > -12.0 {
-        Color32::YELLOW
-    } else {
-        Color32::GREEN
-    };
-    ui.add(
-        egui::ProgressBar::new(fraction)
-            .fill(color)
-            .text(format!("{db:.0} dB")),
+/// Draw a dock (`id` keeps its widgets apart from its siblings') into
+/// `rect` with the dock's padding, clipped to it: what does not fit is
+/// cut, so a dock never pushes its neighbours.
+fn dock_in(ui: &mut egui::Ui, id: &str, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
+    let mut dock = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id)
+            .max_rect(rect.shrink(size::SPACE_8))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
     );
+    dock.set_clip_rect(rect.intersect(ui.clip_rect()));
+    add(&mut dock);
+}
+
+/// The frame of a dock: panel surface, 8 px padding.
+pub(crate) fn dock_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(color::BG_PANEL)
+        .inner_margin(size::SPACE_8)
 }
 
 impl eframe::App for DesktopApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        self.prune_selection();
         let ctx = ui.ctx().clone();
         self.update_preview(&ctx);
-        egui::Panel::top("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::bottom("outputs").show(ui, |ui| self.outputs_panel(ui));
-        egui::Panel::left("scenes")
-            .default_size(200.0)
-            .show(ui, |ui| self.scenes_panel(ui));
-        egui::Panel::right("mixer")
-            .default_size(220.0)
-            .show(ui, |ui| self.mixer_panel(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.center_panel(ui));
-        });
+        let narrow = ui.max_rect().width() < DRAWER_BELOW;
+        // Taken before anything is drawn: a field or popup that has focus
+        // now gets this frame's Escape, and the drawer must not take it too.
+        let escape_free = self.dialog.is_none()
+            && ctx.memory(|memory| memory.focused().is_none())
+            && !egui::Popup::is_any_open(&ctx);
+
+        egui::Panel::top("top_bar")
+            .exact_size(48.0)
+            .frame(dock_frame().inner_margin(egui::Margin::symmetric(12, 8)))
+            .show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("console")
+            .resizable(true)
+            .default_size(232.0)
+            .size_range(168.0..=420.0)
+            .frame(egui::Frame::new())
+            .show(ui, |ui| {
+                egui::Panel::right("outputs")
+                    .resizable(true)
+                    .default_size(400.0)
+                    .size_range(300.0..=560.0)
+                    .frame(dock_frame())
+                    .show(ui, |ui| self.outputs_dock(ui));
+                egui::CentralPanel::default()
+                    .frame(dock_frame())
+                    .show(ui, |ui| self.mixer_dock(ui));
+            });
+        egui::Panel::left("browser")
+            .resizable(true)
+            .default_size(260.0)
+            .size_range(200.0..=420.0)
+            .frame(egui::Frame::new().fill(color::BG_PANEL))
+            .show(ui, |ui| self.browser(ui));
+        if !narrow {
+            egui::Panel::right("inspector")
+                .resizable(true)
+                .default_size(300.0)
+                .size_range(260.0..=440.0)
+                .frame(dock_frame())
+                .show(ui, |ui| self.inspector_dock(ui));
+        }
+        let program = egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(color::BG_APP)
+                    .inner_margin(size::SPACE_12),
+            )
+            .show(ui, |ui| self.program_dock(ui));
+        if narrow && self.drawer_open && self.selected_source.is_some() {
+            let area = program.response.rect;
+            let below_header = egui::Rect::from_min_max(
+                egui::pos2(area.left(), program.inner + size::SPACE_6),
+                area.max,
+            );
+            self.inspector_drawer(&ctx, below_header, escape_free);
+        }
+        self.dialogs(&ctx);
+
         // Smooth preview and meters while something is live; otherwise just
         // often enough to pick up status changes (responses also repaint).
         let live = self.model.preview_enabled
@@ -630,97 +369,5 @@ impl eframe::App for DesktopApp {
         } else {
             Duration::from_millis(250)
         });
-    }
-}
-
-/// Choose a listed screen source, or leave it to the system picker.
-fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceForm) {
-    if ui.button("Find screen sources").clicked() {
-        model.find_screen_sources();
-    }
-    // An id that is no longer listed (e.g. its window closed) is not sent.
-    let listed = |id: &String| matches!(&model.screen_sources, Some(Ok(sources)) if sources.iter().any(|source| &source.id == id));
-    if form.screen_source.as_ref().is_some_and(|id| !listed(id)) {
-        form.screen_source = None;
-    }
-    const PICKER: &str = "System picker (if the platform has one)";
-    match &model.screen_sources {
-        Some(Ok(sources)) if !sources.is_empty() => {
-            let selected = form
-                .screen_source
-                .as_ref()
-                .and_then(|id| sources.iter().find(|source| &source.id == id))
-                .map_or(PICKER, |source| source.name.as_str());
-            egui::ComboBox::from_label("Source")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut form.screen_source, None, PICKER);
-                    for source in sources {
-                        let label = format!("{} ({})", source.name, source.kind.as_str());
-                        ui.selectable_value(
-                            &mut form.screen_source,
-                            Some(source.id.clone()),
-                            label,
-                        );
-                    }
-                });
-        }
-        Some(Ok(_)) => {
-            ui.label(RichText::new("No screen sources found.").weak());
-        }
-        Some(Err(reason)) => {
-            ui.label(RichText::new(reason.as_str()).weak());
-        }
-        None => {
-            ui.label(
-                RichText::new(
-                    "Find screen sources to choose one; otherwise the system picker opens \
-                     when the source starts, where the platform has one.",
-                )
-                .weak(),
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use command_api::SceneSpec;
-
-    use super::*;
-
-    fn fixture_id(name: &str) -> String {
-        format!("scene_{}", name.to_lowercase().replace(' ', "_"))
-    }
-
-    fn scenes(names: &[&str], active: &str) -> SceneList {
-        SceneList {
-            canvas_width: 1920,
-            canvas_height: 1080,
-            active: active.to_owned(),
-            active_id: fixture_id(active),
-            scenes: names
-                .iter()
-                .map(|name| SceneSpec {
-                    id: fixture_id(name),
-                    name: (*name).to_owned(),
-                    sources: Vec::new(),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn a_click_selects_and_the_selection_sticks() {
-        let list = scenes(&["Test pattern", "Show"], "Test pattern");
-        // Nothing chosen yet: the active scene.
-        assert_eq!(selection(None, None, &list), "Test pattern");
-        // A click selects, and the next frame keeps it.
-        let clicked = selection(Some("Test pattern"), Some("Show"), &list);
-        assert_eq!(clicked, "Show");
-        assert_eq!(selection(Some(&clicked), None, &list), "Show");
-        // A deleted selection falls back to the active scene.
-        let fewer = scenes(&["Test pattern"], "Test pattern");
-        assert_eq!(selection(Some("Show"), None, &fewer), "Test pattern");
     }
 }

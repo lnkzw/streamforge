@@ -83,8 +83,15 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
             .as_ref()
             .is_some_and(|list| list.scenes.iter().any(|scene| scene.name == "Show"))
     });
+    // Scenes and sources are named by their ids from the scene list.
+    let scene_id = model
+        .scenes
+        .as_ref()
+        .and_then(|list| list.scenes.iter().find(|scene| scene.name == "Show"))
+        .map(|scene| scene.id.clone())
+        .expect("Show");
     model.add_source(
-        "Show",
+        &scene_id,
         &SourceForm {
             name: "red".to_owned(),
             kind: SourceType::Solid,
@@ -101,7 +108,6 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
                 .any(|scene| scene.name == "Show" && scene.sources.len() == 1)
         })
     });
-    // Source actions name the source by its id from the scene list.
     let show = |m: &Model| {
         m.scenes
             .as_ref()
@@ -110,12 +116,13 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
             .expect("Show")
     };
     let red = show(&model).sources[0].id.clone();
-    model.set_source_opacity(&red, 0.5);
-    wait(&mut model, "the new opacity", |m| {
-        show(m).sources[0].opacity == 0.5
+    model.update_source(&red, Some([10.0, 20.0, 640.0, 360.0]), Some(0.5));
+    wait(&mut model, "the new rectangle and opacity", |m| {
+        let red = &show(m).sources[0];
+        red.opacity == 0.5 && (red.rect.x, red.rect.width) == (10.0, 640.0)
     });
     model.add_source(
-        "Show",
+        &scene_id,
         &SourceForm {
             name: "spare".to_owned(),
             kind: SourceType::ColorBars,
@@ -134,8 +141,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
         show(m).sources.iter().all(|source| source.id != spare)
     });
     assert!(errors(&model).is_empty(), "{:?}", model.log);
-    let show_id = show(&model).id;
-    model.activate_scene(&show_id, "Show");
+    model.activate_scene(&scene_id, "Show");
     wait(&mut model, "the scene to be active", |m| {
         m.scenes.as_ref().is_some_and(|list| list.active == "Show")
     });

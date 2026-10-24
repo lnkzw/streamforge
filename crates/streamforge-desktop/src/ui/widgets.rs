@@ -194,6 +194,82 @@ impl Widget for Button<'_> {
     }
 }
 
+/// A square ghost button showing only `icon`. `label` says what it does:
+/// it is the tooltip and the name for assistive technology.
+pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size::CONTROL), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, enabled);
+        let (fill, _, tint) = button_colors(ButtonKind::Ghost, state);
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(size::RADIUS_CONTROL), fill);
+        icon.paint(painter, icon_rect(rect.center(), size::ICON), tint);
+        if response.has_focus() {
+            focus_ring(painter, rect, size::RADIUS_CONTROL);
+        }
+    }
+    response.on_hover_text(label)
+}
+
+/// A ghost button that shows a state: the level's icon in its colour and
+/// a line of text (cut to fit `max_width`). Used for the health summary,
+/// which opens its details.
+pub fn status_button(ui: &mut Ui, level: StatusLevel, text: &str, max_width: f32) -> Response {
+    let (icon, tint) = status_icon(level);
+    let mut job = LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(TextRole::Body.font(), color::TEXT_PRIMARY),
+    );
+    let text_width = (max_width - size::ICON - size::SPACE_6 - 2.0 * size::SPACE_8).max(0.0);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(text_width);
+    let galley = ui.painter().layout_job(job);
+    let width = galley.size().x + size::ICON + size::SPACE_6 + 2.0 * size::SPACE_8;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, size::CONTROL), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, text));
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, true);
+        let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(size::RADIUS_CONTROL), fill);
+        let icon_center = pos2(
+            rect.left() + size::SPACE_8 + size::ICON / 2.0,
+            rect.center().y,
+        );
+        icon.paint(painter, icon_rect(icon_center, 14.0), tint);
+        let text_color = if level == StatusLevel::Info {
+            color::TEXT_SECONDARY
+        } else {
+            color::TEXT_PRIMARY
+        };
+        painter.galley(
+            pos2(
+                rect.left() + size::SPACE_8 + size::ICON + size::SPACE_6,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            text_color,
+        );
+        if response.has_focus() {
+            focus_ring(painter, rect, size::RADIUS_CONTROL);
+        }
+    }
+    response
+}
+
+/// Where a dock has nothing to show: an icon and one line saying what is
+/// missing, centred. The caller adds the action that fixes it below.
+pub fn empty_state(ui: &mut Ui, icon: Icon, text: &str) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(size::SPACE_12);
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+        icon.paint(ui.painter(), rect, color::TEXT_TERTIARY);
+        ui.add_space(size::SPACE_4);
+        ui.label(TextRole::Meta.text(text));
+    });
+}
+
 fn button_colors(kind: ButtonKind, state: VisualState) -> (Color32, Stroke, Color32) {
     use VisualState::*;
     let none = Stroke::NONE;
@@ -341,11 +417,15 @@ impl Widget for TransportButton {
             self.state,
             TransportState::Running(_) | TransportState::Starting
         );
-        let action = match (self.transport, active) {
-            (Transport::Record, true) => "Stop recording",
-            (Transport::Record, false) => "Start recording",
-            (Transport::Live, true) => "End the stream",
-            (Transport::Live, false) => "Go live",
+        // A failed output is finished first; the next click starts anew.
+        let failed = self.state == TransportState::Failed;
+        let action = match (self.transport, active, failed) {
+            (Transport::Record, _, true) => "Finish the failed recording",
+            (Transport::Live, _, true) => "End the failed stream",
+            (Transport::Record, true, _) => "Stop recording",
+            (Transport::Record, false, _) => "Start recording",
+            (Transport::Live, true, _) => "End the stream",
+            (Transport::Live, false, _) => "Go live",
         };
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, self.enabled, action));
         if !ui.is_rect_visible(rect) {
@@ -661,7 +741,9 @@ pub fn fader(
         let on_thumb = offset.abs() <= 6.0;
         ui.data_mut(|data| data.insert_temp(grab_id, if on_thumb { offset } else { 0.0 }));
     }
-    if response.dragged()
+    // Also on the release frame: a caller that rebuilds the value from its
+    // model each frame commits there, and must get the dragged value.
+    if (response.dragged() || response.drag_stopped())
         && let Some(pointer) = response.interact_pointer_pos()
     {
         let offset: f32 = ui.data(|data| data.get_temp(grab_id)).unwrap_or(0.0);
@@ -949,12 +1031,7 @@ pub enum StatusLevel {
 
 /// An icon and a line of text; the icon says the level, not only the colour.
 pub fn status_line(ui: &mut Ui, level: StatusLevel, text: &str) -> Response {
-    let (icon, tint) = match level {
-        StatusLevel::Ok => (Icon::Check, color::STATE_OK),
-        StatusLevel::Info => (Icon::ChevronRight, color::TEXT_TERTIARY),
-        StatusLevel::Warn => (Icon::Warning, color::STATE_WARN),
-        StatusLevel::Error => (Icon::Error, color::STATE_ERROR),
-    };
+    let (icon, tint) = status_icon(level);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = size::SPACE_6;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
@@ -964,9 +1041,19 @@ pub fn status_line(ui: &mut Ui, level: StatusLevel, text: &str) -> Response {
         } else {
             tint
         };
-        ui.label(TextRole::Body.text(text).color(color));
+        ui.add(egui::Label::new(TextRole::Body.text(text).color(color)).wrap());
     })
     .response
+}
+
+/// The icon and colour that say a status level.
+fn status_icon(level: StatusLevel) -> (Icon, Color32) {
+    match level {
+        StatusLevel::Ok => (Icon::Check, color::STATE_OK),
+        StatusLevel::Info => (Icon::ChevronRight, color::TEXT_TERTIARY),
+        StatusLevel::Warn => (Icon::Warning, color::STATE_WARN),
+        StatusLevel::Error => (Icon::Error, color::STATE_ERROR),
+    }
 }
 
 /// An on/off switch for binary settings (the preview, mute).

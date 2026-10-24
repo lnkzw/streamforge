@@ -43,9 +43,9 @@ pub use registry::{
     NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, registry,
 };
 pub use scenes::{
-    AddSourceRequest, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, PreviewState,
-    Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind,
-    SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
+    AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
+    PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec,
+    SourceKind, SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
@@ -60,8 +60,11 @@ use capture_api::{
 /// Capture types in results, for adapters that do not use `capture-api`.
 pub use capture_api::{CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
+/// `StreamTarget` lets a client check a stream URL and show its redacted
+/// form before `start_streaming`, with the engine's own rules.
 pub use encoder_api::{
-    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamState, VideoEncoderInfo,
+    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamKey, StreamState, StreamTarget,
+    VideoEncoderInfo,
 };
 use serde::{Deserialize, Serialize};
 /// Live render snapshot types in [`HealthReport`], for adapters that do not

@@ -18,6 +18,9 @@ pub const MAX_SCENES: usize = 16;
 pub const MAX_SCENE_SOURCES: usize = 16;
 /// Longest scene or source name, in characters.
 pub const MAX_NAME_CHARS: usize = 64;
+/// Positions and sizes of sources, in canvas pixels, stay within this
+/// magnitude; sizes are also greater than 0.
+pub const MAX_COORDINATE: f32 = 16_384.0;
 /// Scene ids start with this; the rest is opaque.
 pub const SCENE_ID_PREFIX: &str = "scene_";
 /// Source ids start with this; the rest is opaque.

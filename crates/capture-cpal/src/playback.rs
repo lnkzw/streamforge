@@ -39,7 +39,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use media_core::SampleReader;
 
-use crate::backend::{best_config, capture_error, device_name, host, is_named};
+use crate::backend::{best_config, capture_error, description, device_name, host, is_named};
 use crate::convert::PlaybackConverter;
 use crate::liveness::Liveness;
 
@@ -51,8 +51,8 @@ const SCRATCH_FRAMES: usize = 16_384;
 /// How often the playback thread checks whether the stream has ended.
 const POLL: Duration = Duration::from_millis(100);
 /// How long an output may take to open and pull for the first time (as on
-/// Linux).
-const START_TIMEOUT: Duration = Duration::from_secs(3);
+/// Linux), and an input to open.
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
     let devices = host()
@@ -61,10 +61,7 @@ pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
     Ok(devices
         .map(|device| AudioOutput {
             name: device_name(&device),
-            description: device
-                .description()
-                .ok()
-                .map(|description| description.name().to_owned()),
+            description: description(&device),
             media_class: "Audio/Sink".to_owned(),
         })
         .collect())

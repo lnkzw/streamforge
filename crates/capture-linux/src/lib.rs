@@ -42,7 +42,9 @@ const NODE_CACHE_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct LinuxCapture {
-    node_cache: Option<(Instant, pw::AudioNodes)>,
+    /// The last listing of audio devices, and when it was made.
+    nodes: pw::AudioNodes,
+    scanned_at: Option<Instant>,
 }
 
 impl LinuxCapture {
@@ -146,9 +148,9 @@ impl CaptureBackend for LinuxCapture {
         request: &PlaybackRequest,
         feed: SampleReader,
     ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        playback::check_request(request, &feed)?;
         if let Some(name) = request.output.as_deref() {
-            self.refresh_nodes()?;
-            playback::verify_output(name, self.cached_nodes().map_or(&[], |n| &n.outputs))?;
+            playback::verify_output(name, &self.recent_nodes()?.outputs)?;
         }
         playback::start(request, feed)
     }
@@ -156,24 +158,20 @@ impl CaptureBackend for LinuxCapture {
 
 impl LinuxCapture {
     fn scan_nodes(&mut self) -> Result<&pw::AudioNodes, CaptureError> {
-        let nodes = pw::audio_nodes(QUERY_TIMEOUT)?;
-        Ok(&self.node_cache.insert((Instant::now(), nodes)).1)
+        self.nodes = pw::audio_nodes(QUERY_TIMEOUT)?;
+        self.scanned_at = Some(Instant::now());
+        Ok(&self.nodes)
     }
 
-    /// Rescan unless the last listing is recent.
-    fn refresh_nodes(&mut self) -> Result<(), CaptureError> {
-        let fresh = self
-            .node_cache
-            .as_ref()
-            .is_some_and(|(at, _)| at.elapsed() < NODE_CACHE_TTL);
-        if !fresh {
+    /// The last listing if it is recent, else a new one.
+    fn recent_nodes(&mut self) -> Result<&pw::AudioNodes, CaptureError> {
+        let recent = self
+            .scanned_at
+            .is_some_and(|at| at.elapsed() < NODE_CACHE_TTL);
+        if !recent {
             self.scan_nodes()?;
         }
-        Ok(())
-    }
-
-    fn cached_nodes(&self) -> Option<&pw::AudioNodes> {
-        self.node_cache.as_ref().map(|(_, nodes)| nodes)
+        Ok(&self.nodes)
     }
 
     /// PipeWire falls back to the default device for an unknown target, so
@@ -183,7 +181,6 @@ impl LinuxCapture {
         let Some(name) = name else {
             return Ok(None);
         };
-        self.refresh_nodes()?;
-        audio::resolve_input(name, self.cached_nodes().map_or(&[], |n| &n.inputs)).map(Some)
+        audio::resolve_input(name, &self.recent_nodes()?.inputs).map(Some)
     }
 }

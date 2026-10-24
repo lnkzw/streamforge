@@ -22,44 +22,44 @@ use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
 use pw::stream::{StreamBox, StreamFlags, StreamState};
-use serde_json::json;
 use spa::pod::Pod;
 
 use crate::QUERY_TIMEOUT;
 use crate::formats;
-use crate::pw::{Connection, RunUntil, StreamWatch};
+use crate::pw::{Connection, RunUntil, StreamWatch, unlisted};
 
 const BYTES_PER_SAMPLE: usize = size_of::<f32>();
-/// The device period asked for (`node.latency`), about 5 ms at 48 kHz.
-/// PipeWire may run the graph with a larger one; the engine's feed sizes
-/// its buffering by the pulls it sees.
-const PERIOD_FRAMES: u32 = 256;
-/// Frames converted per read of the feed: PipeWire's default largest
-/// quantum, so a pull is one read, and the feed sees its true size.
-const SCRATCH_FRAMES: usize = 8192;
+/// The device period asked for (`node.latency`), about 11 ms at 48 kHz.
+/// It sets the quantum of the whole PipeWire graph for as long as the
+/// monitor's device is open, so it is not lower than it needs to be: the
+/// engine's feed holds at least two 10 ms mixer blocks anyway, and pulls up
+/// to one block add nothing to that. PipeWire may run a larger quantum;
+/// the feed sizes its buffering by the pulls it sees.
+const PERIOD_FRAMES: u32 = 512;
+/// Frames converted per read of the feed. A pull this large is one read,
+/// so the feed sees its true size: twice PipeWire's default largest
+/// quantum, which covers that quantum on a 44.1 kHz sink (about 8916 frames
+/// at 48 kHz). A larger pull is read in steps.
+const SCRATCH_FRAMES: usize = 16_384;
 
 /// `NotFound` with the available names unless `name` is in `outputs`.
 pub(crate) fn verify_output(name: &str, outputs: &[AudioOutput]) -> Result<(), CaptureError> {
     if outputs.iter().any(|output| output.name == name) {
         return Ok(());
     }
-    Err(CaptureError::new(
-        CaptureErrorKind::NotFound,
-        format!("audio output `{name}` not found; see list_audio_outputs"),
-    )
-    .with_details(json!({
-        "output": name,
-        "available": outputs.iter().map(|output| &output.name).collect::<Vec<_>>(),
-    })))
+    Err(unlisted(
+        "output",
+        name,
+        outputs.iter().map(|output| &output.name),
+    ))
 }
 
-/// Play `feed` on the requested output (named outputs are checked by the
-/// caller) and return once it plays. A device that does not play within
-/// [`QUERY_TIMEOUT`] is an error. On any error the feed is dropped.
-pub(crate) fn start(
+/// Whether PipeWire can play `feed` as requested; checked before anything
+/// else, as it costs nothing.
+pub(crate) fn check_request(
     request: &PlaybackRequest,
-    feed: SampleReader,
-) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+    feed: &SampleReader,
+) -> Result<(), CaptureError> {
     if !(1..=2).contains(&request.channels) || request.rate == 0 {
         return Err(CaptureError::unsupported(format!(
             "playback supports 1 or 2 channels at a non-zero rate, got {} Hz / {}",
@@ -76,6 +76,17 @@ pub(crate) fn start(
             ),
         ));
     }
+    Ok(())
+}
+
+/// Play `feed` on the requested output (named outputs are checked by the
+/// caller) and return once it plays. A device that does not play within
+/// [`QUERY_TIMEOUT`] is an error. On any error the feed is dropped.
+pub(crate) fn start(
+    request: &PlaybackRequest,
+    feed: SampleReader,
+) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+    check_request(request, &feed)?;
     let (stop, stop_receiver) = pw::channel::channel();
     let (started, playing) = mpsc::sync_channel(1);
     let ended = Arc::new(CaptureEnd::new());
@@ -87,9 +98,10 @@ pub(crate) fn start(
             move || {
                 let run = play(&request, feed, stop_receiver, started);
                 // Before a stop, this is why the playback ended on its own.
-                ended.end(|| match &run {
-                    Ok(()) => "the PipeWire stream ended (the output went away)".to_owned(),
-                    Err(error) => error.message.clone(),
+                ended.end(|| match (&run, &request.output) {
+                    (Ok(()), Some(name)) => format!("audio output `{name}` went away"),
+                    (Ok(()), None) => "the default audio output went away".to_owned(),
+                    (Err(error), _) => error.message.clone(),
                 });
                 run
             }
@@ -132,12 +144,18 @@ fn play(
         *pw::keys::NODE_LATENCY,
         format!("{PERIOD_FRAMES}/{}", request.rate),
     );
+    // An output that goes away (headphones unplugged) ends the playback;
+    // the session manager must not move the monitor to the speakers, where
+    // the microphones would pick it up. That holds for the default output
+    // too: the monitor stays on the device that was the default when it
+    // started.
+    props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
     if let Some(output) = &request.output {
         props.insert(*pw::keys::TARGET_OBJECT, output.as_str());
-        // An output that goes away (headphones unplugged) ends the
-        // playback; the session manager must not move the monitor to the
-        // speakers, where the microphones would pick it up.
-        props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
+        // Nor may a named output that is gone by the time the stream
+        // connects fall back to the default (the name check uses a
+        // listing up to 2 s old).
+        props.insert("node.dont-fallback", "true");
     }
     let stream = StreamBox::new(&connection.core, "streamforge-monitor", props)
         .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
@@ -306,6 +324,7 @@ impl Drop for LinuxPlayback {
 #[cfg(test)]
 mod tests {
     use media_core::sample_ring;
+    use serde_json::json;
 
     use super::*;
 

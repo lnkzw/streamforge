@@ -16,12 +16,11 @@ use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
 use pw::stream::{StreamBox, StreamFlags};
-use serde_json::json;
 use spa::param::ParamType;
 use spa::pod::Pod;
 
 use crate::formats;
-use crate::pw::{BACKEND, Connection, RunUntil, StreamWatch};
+use crate::pw::{BACKEND, Connection, RunUntil, StreamWatch, unlisted};
 
 const BYTES_PER_SAMPLE: usize = std::mem::size_of::<f32>();
 /// Ring capacity of a continuous stream, in seconds of audio.
@@ -85,8 +84,11 @@ pub(crate) fn capture(
         }
         // A named input that goes away ends the stream; the session manager
         // must not move it to another source, which would record a
-        // different microphone under this input's name.
+        // different microphone under this input's name. Nor may it fall
+        // back to the default when the input is gone by the time the
+        // stream connects (the name check uses a listing up to 2 s old).
         props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
+        props.insert("node.dont-fallback", "true");
     }
     let stream = StreamBox::new(&connection.core, "streamforge-audio", props)
         .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
@@ -275,14 +277,11 @@ pub(crate) fn resolve_input(name: &str, inputs: &[AudioInput]) -> Result<Target,
             },
         });
     }
-    Err(CaptureError::new(
-        CaptureErrorKind::NotFound,
-        format!("audio input `{name}` not found; see list_audio_inputs"),
-    )
-    .with_details(json!({
-        "input": name,
-        "available": inputs.iter().map(|input| &input.name).collect::<Vec<_>>(),
-    })))
+    Err(unlisted(
+        "input",
+        name,
+        inputs.iter().map(|input| &input.name),
+    ))
 }
 
 fn report(input: Option<String>, run: AudioRun) -> AudioCaptureReport {

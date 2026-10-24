@@ -314,8 +314,47 @@ fn playback_plays_on_a_sink_and_ends_with_it() {
             != CaptureState::Running),
         "the playback did not end with its sink"
     );
-    eprintln!("after the sink went away: {:?}", playback.state());
+    let state = playback.state();
+    eprintln!("after the sink went away: {state:?}");
+    // WirePlumber reports the missing target (`... is gone`), or the stream
+    // just disconnects (`... went away`); either names the output.
+    let CaptureState::Ended { reason } = state else {
+        unreachable!()
+    };
+    assert!(reason.contains(&sink.name), "{reason}");
     assert!(writer.is_closed());
     playback.stop().expect("stop after the end");
     let _ = capture.stop();
+}
+
+#[test]
+#[ignore = "creates and removes a temporary PipeWire null sink; nothing is audible"]
+fn an_output_gone_since_the_listing_does_not_fall_back_to_the_default() {
+    if !session_available() {
+        return;
+    }
+    let mut sink = TestSink::create();
+    let mut backend = LinuxCapture::new();
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            let outputs = backend.audio_outputs().expect("list outputs");
+            outputs.iter().any(|output| output.name == sink.name)
+        }),
+        "the test sink was not listed"
+    );
+    // The listing is still fresh enough for the name check; PipeWire must
+    // not play on the default sink instead.
+    sink.remove();
+    let (writer, reader) = sample_ring(2, 4_800);
+    let request = PlaybackRequest {
+        output: Some(sink.name.clone()),
+        rate: 48_000,
+        channels: 2,
+    };
+    let Err(err) = backend.start_playback(&request, reader) else {
+        panic!("played although the output is gone");
+    };
+    eprintln!("{err:?}");
+    assert_eq!(err.kind, CaptureErrorKind::NotFound, "{err:?}");
+    assert!(writer.is_closed());
 }

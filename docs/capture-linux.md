@@ -15,9 +15,10 @@ Since M4, a continuous audio stream (`CaptureBackend::start_audio_stream`) feeds
 
 Since M11 (step 5b), playback (`CaptureBackend::start_playback`) plays the monitor's feed:
 - An `audio-playback` thread runs the PipeWire loop of an output stream in 48 kHz stereo F32. PipeWire converts to the sink's format.
-- The stream asks for a 256-frame period (`node.latency`, about 5 ms). PipeWire may run the graph with a larger one. The engine's feed sizes its buffering by the pulls it sees.
+- The stream asks for a 512-frame period (`node.latency`, about 11 ms). That sets the quantum of the whole PipeWire graph while the monitor's device is open, so it is not lower than needed: the engine's feed holds at least two 10 ms mixer blocks anyway, and a smaller period would barely lower the delay. PipeWire may run a larger quantum. The feed sizes its buffering by the pulls it sees.
 - The process callback runs on PipeWire's real-time thread (`RT_PROCESS`). It reads exactly the frames PipeWire asks for (`pw_buffer.requested`) from the lock-free `SampleReader`, through a buffer allocated before the stream starts. It does not lock, wait or allocate. The reader plays silence when the feed runs short and counts it.
-- A named output is checked against the registry first, so it cannot silently fall back to the default. Its stream has `node.dont-reconnect`, so when the device goes away (headphones unplugged), the playback ends. WirePlumber never moves it to the speakers, where the microphones would pick it up. The end closes the feed and is reported as `not_found: audio output … is gone`.
+- A named output is checked against the registry first, and its stream has `node.dont-fallback`, so it cannot fall back to the default device, even when it went away after the listing (which is cached for 2 s). Named inputs get the same property.
+- The stream has `node.dont-reconnect`, so when its device goes away (headphones unplugged), the playback ends. WirePlumber never moves it to the speakers, where the microphones would pick it up. This holds for the default output too: the monitor stays on the device that was the default when it started. The end closes the feed and is reported as `not_found: audio output … is gone` (WirePlumber's error), or as `audio output … went away` when the stream is just disconnected.
 - `start_playback` returns once the stream plays, or fails with the cause (at most 3 s).
 
 ## Requirements
@@ -84,7 +85,7 @@ Audio probe of `alsa_input.pci-<address>.analog-stereo`, 2 s:
 
 Monitor playback, verified 2026-10-24 on the same machine (PipeWire 1.6.9 / WirePlumber 0.5.18) through the engine, with a null sink (`pactl load-module module-null-sink sink_name=sf-e2e`):
 - a −20 dBFS tone on an aux bus played as the monitor on `sf-e2e`; a second channel capturing `sf-e2e.monitor` measured −20.0 dBFS, silence with the monitor off, and −20.0 dBFS again when switched back on
-- the device pulled 256 frames at a time; feed target 960 frames, `latency_ms` 37, drift −142 ppm, 0 underrun, overrun or trimmed frames
+- the device pulled 512 frames at a time; feed target 992 frames, `latency_ms` 37, 0 underrun, overrun or trimmed frames (with a 256-frame period: target 960 frames, also 37 ms)
 - the feedback warning named the channel that captures `sf-e2e.monitor`
 
 ## Manual acceptance test
@@ -133,10 +134,9 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 - One stream per probe. No restore tokens, so the picker appears every time. No DMA-BUF import. No cursor metadata.
 - Drops are counted from gaps in the source sequence number in `spa_meta_header`. Frames the compositor never rendered, e.g. on a static screen, are not drops.
 - Audio `frame_deficit` is estimated from arrival times and is accurate to about one buffer.
-- The audio default-source hint, and the missing-output message for playback, rely on WirePlumber's error text ("no target node", "target not found"). Other failures are reported as `backend_error` with the original message.
+- The audio default-source hint, and the missing-output message for playback, rely on WirePlumber's error text ("no target node", "target not found"). `node.dont-fallback` is verified with WirePlumber 0.5.18; a session manager that ignores it leaves only the name check against the listing. Other failures are reported as `backend_error` with the original message.
 - Playback has no report of its own: the engine's feed counts underruns, overruns and padding. A buffer PipeWire does not hand out in time is the sink's underrun, which the stream does not see.
 - The monitor of the system default sink has no name of its own; capture a sink's monitor by the sink's name. The default output's name is not known to the engine, so the feedback warning does not cover it.
-- An audio input selected by name is checked against the registry before connecting. A device removed in between may still make PipeWire fall back to the default source.
 - The portal session is closed on every failure path: cancellation, a selection timeout, errors after `Start`, and capture errors. Because ashpd shares one D-Bus connection per process, an unclosed session would keep the compositor sharing until the process exits. One case remains: if *creating* the session itself times out, there is no handle to close.
 - Microphone access is not consent-gated on the desktop (outside Flatpak). Both probes are classified `sensitive`; enforcement arrives with M8.
 - ScreenCast portals older than interface version 2 cannot select a cursor mode. The request's `cursor` is then ignored with a warning instead of failing.

@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use capture_api::{AudioInput, AudioOutput, CaptureError};
+use capture_api::{AudioInput, AudioOutput, CaptureError, CaptureErrorKind};
 use pipewire as pw;
 use pw::context::ContextRc;
 use pw::core::CoreRc;
@@ -423,6 +423,26 @@ fn classify(nodes: Vec<Node>) -> AudioNodes {
     found.inputs.dedup_by(|later, kept| later.name == kept.name);
     found.outputs.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// `NotFound` for an audio `kind` (`input` or `output`) named `name` that
+/// is not listed, with the names that are.
+pub(crate) fn unlisted<'a>(
+    kind: &str,
+    name: &str,
+    available: impl Iterator<Item = &'a String>,
+) -> CaptureError {
+    let mut details = serde_json::Map::new();
+    details.insert(kind.to_owned(), name.into());
+    details.insert(
+        "available".to_owned(),
+        available.cloned().collect::<Vec<_>>().into(),
+    );
+    CaptureError::new(
+        CaptureErrorKind::NotFound,
+        format!("audio {kind} `{name}` not found; see list_audio_{kind}s"),
+    )
+    .with_details(details.into())
 }
 
 /// Capture-capable audio nodes: hardware and virtual sources, duplex devices.

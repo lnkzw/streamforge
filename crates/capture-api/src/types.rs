@@ -149,6 +149,30 @@ pub struct AudioInput {
     pub description: Option<String>,
     /// Backend-specific class, e.g. `Audio/Source`.
     pub media_class: String,
+    /// The [`AudioOutput::name`] whose playback this input captures (e.g.
+    /// the monitor of a PipeWire sink), if the backend knows: playing the
+    /// monitor there would feed back (ADR 0017).
+    pub loopback_of: Option<String>,
+}
+
+/// An audio output device, e.g. for the monitor (ADR 0017).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioOutput {
+    /// Stable identifier used to select this output (PipeWire `node.name`).
+    pub name: String,
+    pub description: Option<String>,
+    /// Backend-specific class, e.g. `Audio/Sink`.
+    pub media_class: String,
+}
+
+/// Play interleaved `f32` samples on an output, converted by the platform
+/// from `rate` Hz with `channels` channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaybackRequest {
+    /// [`AudioOutput::name`]; `None` uses the system default output.
+    pub output: Option<String>,
+    pub rate: u32,
+    pub channels: u32,
 }
 
 /// Which screen source to capture and how the cursor is captured: a

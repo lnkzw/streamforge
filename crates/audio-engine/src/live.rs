@@ -39,15 +39,15 @@ const CHANNELS: usize = 2;
 /// Source frames pulled from the ring at once into the local read-ahead.
 const READ_AHEAD_FRAMES: usize = 128;
 /// EMA weight of a new fill sample per block (time constant about 2 s at 10 ms).
-const FILL_SMOOTHING: f64 = 0.005;
+pub(crate) const FILL_SMOOTHING: f64 = 0.005;
 /// Ratio change per frame of fill error.
-const KP: f64 = 1e-6;
+pub(crate) const KP: f64 = 1e-6;
 /// Largest resampling correction (±2000 ppm, about 3.5 cents).
 pub const MAX_CORRECTION: f64 = 0.002;
 /// Blocks per window for the recent push peak (1 s at 10 ms).
 const PEAK_WINDOW_BLOCKS: u32 = 100;
 /// Trim when the fill exceeds target + this many blocks + the push peak.
-const TRIM_MARGIN_BLOCKS: usize = 4;
+pub(crate) const TRIM_MARGIN_BLOCKS: usize = 4;
 
 /// Frames produced by one `read_block` call, by category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

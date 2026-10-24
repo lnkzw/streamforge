@@ -18,19 +18,20 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{
     BLOCK_FRAMES, BlockSink, BusBlocks, CHANNELS, LiveMixStats, MixerConfig, MixerControl,
-    MixerThread,
+    MixerThread, PlaybackFeed, RATE,
 };
 use capture_api::{
-    AudioStream, CaptureBackend, CaptureErrorKind, CaptureState, ScreenSelection, VideoStream,
+    AudioStream, CaptureBackend, CaptureErrorKind, CaptureState, PlaybackRequest, PlaybackStream,
+    ScreenSelection, VideoStream,
 };
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
-    ErrorSummary, MixerState, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, PipelineReport,
+    ErrorSummary, MixerState, MonitorHealth, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, PipelineReport,
     SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec, UpdateBusRequest,
     UpdateChannelRequest,
 };
 use encoder_ffmpeg::{MAX_AUDIO_TRACKS, OutputInput};
-use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame};
+use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame, sample_ring};
 use video_compositor::{
     Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats, downscale,
 };
@@ -57,6 +58,9 @@ const PREVIEW_BUFFERS: usize = 3;
 const MAX_RETIRED_CAPTURES: usize = 64;
 /// How long finishing an output waits for producers running late.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// The monitor feed's ring: half a second, far above any device quantum
+/// (PipeWire's largest is 8192 frames, 170 ms) plus the trim margin.
+const MONITOR_RING_FRAMES: usize = RATE as usize / 2;
 /// Frames and mixer blocks per second (both exact integers).
 const FRAMES_PER_SECOND: i128 = FPS as i128;
 const BLOCKS_PER_SECOND: i128 = (audio_engine::RATE as usize / audio_engine::BLOCK_FRAMES) as i128;
@@ -134,12 +138,53 @@ impl DeviceCapture {
     }
 }
 
-/// `device`'s name in a message.
-fn device_label(device: &Option<String>) -> String {
-    device.as_deref().map_or_else(
-        || "the default input".to_owned(),
-        |name| format!("`{name}`"),
-    )
+/// `` `name` ``, or `default` (e.g. "the default input"), for messages.
+fn label(device: &Option<String>, default: &str) -> String {
+    device
+        .as_deref()
+        .map_or_else(|| default.to_owned(), |name| format!("`{name}`"))
+}
+
+/// One warning per device channel that captures what `device` plays (a
+/// backend that knows says so in `loopback_of`): the monitor would feed
+/// back into the mix. The default output is not compared, as its name is
+/// not known here. Lists the inputs only when a channel captures a device.
+fn feedback_warnings(
+    capture: &mut dyn CaptureBackend,
+    audio: &AudioGraphSpec,
+    device: &Option<String>,
+) -> Vec<String> {
+    let Some(device) = device else {
+        return Vec::new();
+    };
+    if audio::devices(audio).next().is_none() {
+        return Vec::new();
+    }
+    let inputs = match capture.audio_inputs() {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return vec![format!(
+                "the monitor could not check for feedback, as the audio inputs did not list \
+                 ({}); make sure no channel captures what `{device}` plays",
+                error.message
+            )];
+        }
+    };
+    audio::devices(audio)
+        .filter(|(_, input)| {
+            inputs.iter().any(|known| {
+                Some(&known.name) == input.as_ref() && known.loopback_of.as_ref() == Some(device)
+            })
+        })
+        .map(|(channel, _)| {
+            format!(
+                "channel `{}` captures what the monitor plays on `{device}`: if the monitor's \
+                 bus has that channel, it feeds back; play the monitor elsewhere or take the \
+                 channel out of its bus",
+                channel.name
+            )
+        })
+        .collect()
 }
 
 /// Field order is drop order: producers stop before the captures end.
@@ -152,11 +197,42 @@ pub(crate) struct Pipeline {
     retired_omitted: u64,
     extra_screen: Option<Box<dyn VideoStream>>,
     audio_streams: Vec<DeviceCapture>,
+    /// The monitor's device, once it was switched on in this run; after the
+    /// mixer, which feeds it.
+    monitor: Option<MonitorPlayback>,
     /// What this run mixes; fader, mute and balance follow live changes.
     /// `audio_streams` are its device channels' captures, in order.
     audio: AudioGraphSpec,
     cache: FrameCache,
     fanout: Arc<Fanout>,
+}
+
+/// The monitor's playback in one run (ADR 0017).
+struct MonitorPlayback {
+    device: Option<String>,
+    /// `Err`: the device did not open, and the monitor is silent.
+    stream: Result<Box<dyn PlaybackStream>, ErrorSummary>,
+    enabled: bool,
+    /// Why it is silent, or that it may feed back; repeated by the run's
+    /// audio warnings while it is on.
+    warnings: Vec<String>,
+}
+
+impl MonitorPlayback {
+    /// Whether its device plays (the bus or, off, silence).
+    fn device_running(&self) -> bool {
+        matches!(&self.stream, Ok(stream) if stream.state() == CaptureState::Running)
+    }
+
+    /// The device's state; one that did not open ended before it started.
+    fn state(&self) -> CaptureState {
+        match &self.stream {
+            Ok(stream) => stream.state(),
+            Err(error) => CaptureState::Ended {
+                reason: format!("could not start: {}", error.message),
+            },
+        }
+    }
 }
 
 impl Pipeline {
@@ -222,9 +298,147 @@ impl Pipeline {
             retired_omitted: 0,
             extra_screen,
             audio_streams,
+            monitor: None,
             audio,
             cache,
             fanout,
+        })
+    }
+
+    /// Play bus `mix` on `device` from now on, ramped in. A monitor that
+    /// plays (or played) in this run is switched on again; one whose device
+    /// did not open or ended is opened anew. Returns warnings: a device
+    /// that did not open (the monitor stays silent; nothing else is
+    /// affected), or channels that capture the device's own playback.
+    pub fn monitor_on(
+        &mut self,
+        capture: &mut dyn CaptureBackend,
+        device: &Option<String>,
+        mix: usize,
+    ) -> Vec<String> {
+        if let Some(monitor) = &mut self.monitor
+            && monitor.device == *device
+            && monitor.device_running()
+        {
+            monitor.enabled = true;
+            if let Some(out) = lock(&self.fanout.monitor).as_mut() {
+                switch_mix(&mut out.mix, &mut out.fading_from, mix);
+                out.feed.set_enabled(true);
+            }
+            return monitor.warnings.clone();
+        }
+        // A fresh start: the old feed and device go first.
+        drop(lock(&self.fanout.monitor).take());
+        let mut warnings = Vec::new();
+        if let Some(MonitorPlayback {
+            stream: Ok(stream), ..
+        }) = self.monitor.take()
+            && let Err(error) = stream.stop()
+        {
+            warnings.push(format!(
+                "the monitor's previous device did not stop cleanly: {error}"
+            ));
+        }
+        let (writer, reader) = sample_ring(CHANNELS, MONITOR_RING_FRAMES);
+        let request = PlaybackRequest {
+            output: device.clone(),
+            rate: RATE,
+            channels: CHANNELS,
+        };
+        let stream = match capture.start_playback(&request, reader) {
+            Ok(stream) => {
+                let mut feed = PlaybackFeed::new(writer, false);
+                feed.set_enabled(true);
+                *lock(&self.fanout.monitor) = Some(MonitorOut {
+                    feed,
+                    mix,
+                    fading_from: None,
+                    faded: vec![0.0; BLOCK_FRAMES * CHANNELS as usize],
+                });
+                warnings.extend(feedback_warnings(capture, &self.audio, device));
+                Ok(stream)
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "the monitor is silent: {} did not open ({}); connect it, or choose \
+                     another with set_monitor_device while the pipeline is idle, then switch \
+                     the monitor on again",
+                    label(device, "the default output"),
+                    error.message
+                ));
+                Err(ErrorSummary::from(error))
+            }
+        };
+        self.monitor = Some(MonitorPlayback {
+            device: device.clone(),
+            stream,
+            enabled: true,
+            warnings: warnings.clone(),
+        });
+        warnings
+    }
+
+    /// Play silence on the monitor (ramped out); the device stays open.
+    pub fn monitor_off(&mut self) {
+        if let Some(monitor) = &mut self.monitor {
+            monitor.enabled = false;
+        }
+        if let Some(out) = lock(&self.fanout.monitor).as_mut() {
+            out.feed.set_enabled(false);
+        }
+    }
+
+    /// Let the monitor play bus `mix`, faded over one block.
+    pub fn set_monitor_mix(&self, mix: usize) {
+        if let Some(out) = lock(&self.fanout.monitor).as_mut() {
+            switch_mix(&mut out.mix, &mut out.fading_from, mix);
+        }
+    }
+
+    /// The id of the bus the monitor plays, while its device is open.
+    pub fn monitor_mix(&self) -> Option<String> {
+        let column = lock(&self.fanout.monitor).as_ref()?.mix;
+        Some(self.bus_id(column))
+    }
+
+    /// Whether the monitor plays its bus now.
+    pub fn monitor_playing(&self) -> bool {
+        self.monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.enabled && monitor.device_running())
+    }
+
+    /// Whether the monitor's device plays, its bus or (off) silence.
+    pub fn monitor_device_running(&self) -> bool {
+        self.monitor
+            .as_ref()
+            .is_some_and(MonitorPlayback::device_running)
+    }
+
+    /// The monitor's state and feed, once it was switched on in this run.
+    /// The feed's counters are copied under the lock the mixer takes per
+    /// block.
+    pub fn monitor_health(&self) -> Option<MonitorHealth> {
+        let monitor = self.monitor.as_ref()?;
+        let state = monitor.state();
+        let feed = lock(&self.fanout.monitor)
+            .as_ref()
+            .map(|out| out.feed.stats());
+        // Only a device that plays has a delay: what is buffered plus its
+        // recent pull.
+        let latency_ms = feed
+            .as_ref()
+            .filter(|_| state == CaptureState::Running)
+            .map(|feed| {
+                let frames = feed.fill_frames + feed.pull_frames;
+                frames as f64 * 1000.0 / f64::from(RATE)
+            });
+        Some(MonitorHealth {
+            device: monitor.device.clone(),
+            enabled: monitor.enabled,
+            state,
+            latency_ms,
+            feed,
         })
     }
 
@@ -580,8 +794,13 @@ impl Pipeline {
     }
 
     /// One warning per device channel that is silent because its device
-    /// was not found.
+    /// was not found, and the monitor's.
     pub fn audio_warnings(&self) -> Vec<String> {
+        let monitor = self
+            .monitor
+            .iter()
+            .filter(|monitor| monitor.enabled)
+            .flat_map(|monitor| monitor.warnings.clone());
         audio::devices(&self.audio)
             .zip(&self.audio_streams)
             .filter_map(|((channel, device), capture)| {
@@ -590,10 +809,11 @@ impl Pipeline {
                     "channel `{}` is silent: {} was not found ({}); connect the device, or stop \
                      the outputs and preview and choose another input with set_channel_input",
                     channel.name,
-                    device_label(device),
+                    label(device, "the default input"),
                     error.message
                 ))
             })
+            .chain(monitor)
             .collect()
     }
 
@@ -632,9 +852,10 @@ impl Pipeline {
             retired_omitted,
             extra_screen,
             audio_streams,
+            monitor,
             audio,
             cache: _,
-            fanout: _,
+            fanout,
         } = self;
         let mut warnings = Vec::new();
         let render = compositor
@@ -646,6 +867,36 @@ impl Pipeline {
             .stop()
             .map_err(|err| warnings.push(format!("mixer failed: {err}")))
             .ok();
+        // The mixer fed the monitor; now its device stops.
+        let monitor = monitor.map(|monitor| {
+            let feed = lock(&fanout.monitor).take().map(|out| out.feed.stats());
+            let state = monitor.state();
+            if let Ok(stream) = monitor.stream
+                && let Err(error) = stream.stop()
+            {
+                warnings.push(format!("the monitor did not stop cleanly: {error}"));
+            }
+            if let Some(feed) = &feed {
+                let ring = &feed.ring;
+                if ring.underrun_frames + ring.overrun_frames + feed.trimmed_frames > 0 {
+                    warnings.push(format!(
+                        "the monitor ran short or over: {} underrun, {} overrun and {} trimmed \
+                         frame(s)",
+                        ring.underrun_frames, ring.overrun_frames, feed.trimmed_frames
+                    ));
+                }
+            }
+            if let CaptureState::Ended { reason } = &state {
+                warnings.push(format!("the monitor ended: {reason}"));
+            }
+            MonitorHealth {
+                device: monitor.device,
+                enabled: monitor.enabled,
+                state,
+                latency_ms: None,
+                feed,
+            }
+        });
         let (screen_capture, screen_capture_error) = match extra_screen.map(|stream| stream.stop())
         {
             Some(Ok(report)) => (Some(report), None),
@@ -661,7 +912,7 @@ impl Pipeline {
                 format!(
                     "channel `{}` was silent for the whole run: {} was not found ({})",
                     channel.name,
-                    device_label(device),
+                    label(device, "the default input"),
                     error.message
                 )
             });
@@ -707,6 +958,7 @@ impl Pipeline {
             audio_captures,
             scene_captures: retired_screens,
             scene_captures_omitted: retired_omitted,
+            monitor,
         };
         (report, warnings)
     }
@@ -781,6 +1033,7 @@ struct Fanout {
     video: Mutex<Vec<VideoOut>>,
     audio: Mutex<Vec<AudioOut>>,
     preview: Mutex<Option<PreviewOut>>,
+    monitor: Mutex<Option<MonitorOut>>,
 }
 
 impl Default for Fanout {
@@ -789,8 +1042,19 @@ impl Default for Fanout {
             video: Mutex::new(Vec::with_capacity(MAX_OUTPUTS)),
             audio: Mutex::new(Vec::with_capacity(MAX_OUTPUTS)),
             preview: Mutex::new(None),
+            monitor: Mutex::new(None),
         }
     }
+}
+
+/// The monitor's feed: the mixer writes the bus it plays into the device's
+/// ring, which the device reads without locks.
+struct MonitorOut {
+    feed: PlaybackFeed,
+    /// The column of the bus it plays.
+    mix: usize,
+    fading_from: Option<usize>,
+    faded: Vec<f32>,
 }
 
 struct VideoOut {
@@ -931,7 +1195,8 @@ impl FrameSink for VideoTap {
     }
 }
 
-/// Forwards each mixed block to every output; does not allocate.
+/// Forwards each mixed block to every output and the monitor; does not
+/// allocate.
 struct AudioTap(Arc<Fanout>);
 
 impl BlockSink for AudioTap {
@@ -940,14 +1205,7 @@ impl BlockSink for AudioTap {
             let Some(pts) = since(out.t0, at) else {
                 continue;
             };
-            let mix = buses.column(out.mix).unwrap_or(buses.program());
-            let samples = match out.fading_from.take().and_then(|from| buses.column(from)) {
-                Some(from) => {
-                    crossfade(from, mix, &mut out.faded);
-                    out.faded.as_slice()
-                }
-                None => mix,
-            };
+            let samples = faded_mix(buses, out.mix, &mut out.fading_from, &mut out.faded);
             // Track 1 is the mix; one item carries every track.
             let mut tracks: [&[f32]; MAX_AUDIO_TRACKS] = [&[]; MAX_AUDIO_TRACKS];
             tracks[0] = samples;
@@ -958,6 +1216,33 @@ impl BlockSink for AudioTap {
                 .send_audio_tracks(&tracks[..1 + out.tracks.len()], pts);
             out.progress.audio.store(pts.ticks, Ordering::Release);
         }
+        if let Some(MonitorOut {
+            feed,
+            mix,
+            fading_from,
+            faded,
+        }) = lock(&self.0.monitor).as_mut()
+        {
+            feed.write_block(faded_mix(buses, *mix, fading_from, faded));
+        }
+    }
+}
+
+/// The block of bus `mix`, or for one block after a switch, the crossfade
+/// from the bus played before (into `faded`).
+fn faded_mix<'a>(
+    buses: &'a BusBlocks<'_>,
+    mix: usize,
+    fading_from: &mut Option<usize>,
+    faded: &'a mut [f32],
+) -> &'a [f32] {
+    let to = buses.column(mix).unwrap_or(buses.program());
+    match fading_from.take().and_then(|from| buses.column(from)) {
+        Some(from) => {
+            crossfade(from, to, faded);
+            faded
+        }
+        None => to,
     }
 }
 

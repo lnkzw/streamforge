@@ -242,6 +242,9 @@ No release pressure: the audio model is designed and built before the protocol i
 - [x] Output profiles: per output its mix, its recording tracks and its encoder settings (step 3a: mix and encoder settings, with a live mix switch; step 4: tracks).
 - [x] Multitrack recording with a defined track mapping: track 1 is the mix, then up to 7 listed buses, each an AAC stream named after its bus (step 4).
 - [ ] A monitor output to an audio device, separate from the program outputs.
+  - [x] Step 5a: the monitor in the engine and the protocol (profile with bus, on/off and device; `set_monitor_device`, `list_audio_outputs`; lock-free feed with drift resampling; health and reports; feedback warning), tested with a fake device.
+  - [ ] Step 5b: PipeWire playback on Linux, tested natively.
+  - [ ] Step 5c: playback on Windows and macOS through `cpal`.
 - [x] Processing slots in the graph for later effects (no effects yet): 4 per channel and bus, before mute and both taps on a channel, before mute and fader on a bus (step 1).
 
 Acceptance:

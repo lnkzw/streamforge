@@ -23,8 +23,8 @@ use std::collections::HashSet;
 
 use command_api::{
     AudioGraphSpec, BUS_ID_PREFIX, BusSpec, ChannelInput, ChannelSpec, Command,
-    DEFAULT_VIDEO_BITRATE_KBPS, MAX_SCENE_SOURCES, MAX_SCENES, NAME_RULE, OutputKind,
-    OutputProfiles, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem, RecordingProfile,
+    DEFAULT_VIDEO_BITRATE_KBPS, MAX_SCENE_SOURCES, MAX_SCENES, MonitorProfile, NAME_RULE,
+    OutputKind, OutputProfiles, PROGRAM_BUS_ID, ProgramBusSpec, ProjectProblem, RecordingProfile,
     SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneSpec, SendSpec, SendTap, SourceKind, SourceRect,
     SourceSpec, StreamProfile, id_rule, is_valid_id, is_valid_name,
 };
@@ -113,6 +113,8 @@ struct FileOutputs {
     recording: Option<FileRecordingProfile>,
     #[serde(default)]
     stream: Option<FileStreamProfile>,
+    #[serde(default)]
+    monitor: Option<FileMonitorProfile>,
 }
 
 #[derive(Deserialize)]
@@ -133,6 +135,17 @@ struct FileStreamProfile {
     mix: String,
     video_bitrate_kbps: Value,
     video_encoder: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // checked for its structure
+struct FileMonitorProfile {
+    mix: String,
+    enabled: Value,
+    /// Absent or `null`: the system default.
+    #[serde(default)]
+    device: Value,
 }
 
 #[derive(Deserialize)]
@@ -710,8 +723,9 @@ fn channel_sends(
     sends
 }
 
-/// The output profiles: each checked by the `set_output_profile` rules,
-/// with its mix naming a bus of `audio` (when the audio is valid).
+/// The output profiles: each checked by the `set_output_profile` rules
+/// (the monitor's device by `set_monitor_device`'s), with its mix naming a
+/// bus of `audio` (when the audio is valid).
 fn outputs(
     value: Value,
     audio: Option<&AudioGraphSpec>,
@@ -735,6 +749,7 @@ fn outputs(
         let Some(Value::String(mix)) = params.remove("mix") else {
             unreachable!("the structure has a string mix");
         };
+        let device = params.remove("device");
         params.insert("output".to_owned(), json!(output));
         params.insert("mix_bus_id".to_owned(), json!(mix));
         match Command::decode("set_output_profile", Some(&Value::Object(params))) {
@@ -770,6 +785,22 @@ fn outputs(
                                 .video_bitrate_kbps
                                 .unwrap_or(DEFAULT_VIDEO_BITRATE_KBPS),
                             video_encoder: encoder,
+                        };
+                    }
+                    OutputKind::Monitor => {
+                        let params = json!({ "device": device.unwrap_or(Value::Null) });
+                        let device = match Command::decode("set_monitor_device", Some(&params)) {
+                            Ok(Command::SetMonitorDevice { device }) => device,
+                            Ok(_) => unreachable!("set_monitor_device decodes to SetMonitorDevice"),
+                            Err(error) => {
+                                problems.push(problem(&format!("{at}.device"), error.message));
+                                None
+                            }
+                        };
+                        profiles.monitor = MonitorProfile {
+                            mix,
+                            enabled: request.enabled.unwrap_or(false),
+                            device,
                         };
                     }
                 }

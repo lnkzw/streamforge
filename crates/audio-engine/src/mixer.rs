@@ -44,6 +44,11 @@ impl GainRamp {
         }
     }
 
+    /// The gain at the end of the last block.
+    pub(crate) fn current(&self) -> f32 {
+        self.current
+    }
+
     pub(crate) fn finish_block(&mut self) {
         self.current = self.target;
     }

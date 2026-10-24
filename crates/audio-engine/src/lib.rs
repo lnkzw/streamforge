@@ -21,6 +21,7 @@
 pub mod graph;
 mod live;
 pub mod mixer;
+pub mod playback;
 pub mod runner;
 pub mod tone;
 
@@ -31,6 +32,7 @@ pub use graph::{
 };
 pub use live::MAX_CORRECTION;
 pub use mixer::{GainRamp, MAX_GAIN_DB, MIN_GAIN_DB, Meter, MeterReading, db_to_linear};
+pub use playback::{PlaybackFeed, PlaybackFeedStats};
 pub use runner::{
     BLOCK_FRAMES, BlockSink, BufferLatency, BusBlocks, BusStats, CHANNELS, InputSource, InputStats,
     LEVEL_WINDOW_BLOCKS, LIVE_PUBLISH_BLOCKS, LevelReading, LiveBusStats, LiveInputStats,

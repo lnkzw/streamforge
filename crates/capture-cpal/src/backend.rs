@@ -100,6 +100,7 @@ impl CaptureBackend for CpalCapture {
                     .ok()
                     .map(|description| description.name().to_owned()),
                 media_class: "Audio/Source".to_owned(),
+                loopback_of: None,
             })
             .collect())
     }

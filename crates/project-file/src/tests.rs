@@ -116,6 +116,11 @@ fn project() -> Project {
                 tracks: vec!["bus_program".to_owned()],
                 video_encoder: EncoderPreference::Software,
             },
+            monitor: MonitorProfile {
+                mix: "bus_voice00000a".to_owned(),
+                enabled: true,
+                device: Some("alsa_output.usb-headset".to_owned()),
+            },
             ..OutputProfiles::default()
         },
     }
@@ -222,7 +227,9 @@ fn the_file_reads_like_the_command_results() {
         json!({"recording": {"mix": "bus_voice00000a", "tracks": ["bus_program"],
                              "video_encoder": "software"},
                "stream": {"mix": "bus_program", "video_bitrate_kbps": 6000,
-                          "video_encoder": "auto"}})
+                          "video_encoder": "auto"},
+               "monitor": {"mix": "bus_voice00000a", "enabled": true,
+                           "device": "alsa_output.usb-headset"}})
     );
     assert_eq!(
         value["audio"]["buses"],
@@ -635,8 +642,32 @@ fn output_profiles_name_existing_buses_and_follow_their_rules() {
         "outputs.stream.tracks"
     );
     let mut value = file();
-    value["outputs"]["monitor"] = json!({});
-    assert_eq!(only(&value, "unknown field `monitor`"), "outputs.monitor");
+    value["outputs"]["speakers"] = json!({});
+    assert_eq!(only(&value, "unknown field `speakers`"), "outputs.speakers");
+    // The monitor: a bus of the file, on or off, a device or the default.
+    let mut value = file();
+    value["outputs"]["monitor"]["mix"] = json!("bus_gone");
+    assert_eq!(only(&value, "no bus"), "outputs.monitor.mix");
+    let mut value = file();
+    value["outputs"]["monitor"]["enabled"] = json!("yes");
+    assert_eq!(only(&value, "invalid type"), "outputs.monitor");
+    let mut value = file();
+    value["outputs"]["monitor"]["device"] = json!("");
+    assert_eq!(only(&value, "must not be empty"), "outputs.monitor.device");
+    let mut value = file();
+    value["outputs"]["monitor"]["video_encoder"] = json!("auto");
+    assert_eq!(
+        only(&value, "unknown field `video_encoder`"),
+        "outputs.monitor.video_encoder"
+    );
+    let mut value = file();
+    value["outputs"]["monitor"]
+        .as_object_mut()
+        .expect("monitor")
+        .remove("device");
+    let bytes = serde_json::to_vec(&value).expect("bytes");
+    let loaded = parse(&bytes, CANVAS).expect("valid");
+    assert_eq!(loaded.project.outputs.monitor.device, None);
 }
 
 #[test]

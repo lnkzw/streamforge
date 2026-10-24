@@ -1,7 +1,7 @@
 //! Live health of a running engine (`get_health`, ADR 0012): what the final
 //! reports count, while it happens.
 
-use audio_engine::LiveMixStats;
+use audio_engine::{LiveMixStats, PlaybackFeedStats};
 use capture_api::CaptureState;
 use encoder_api::{LiveOutputStats, StreamState, VideoEncoderInfo};
 use serde::Serialize;
@@ -20,6 +20,8 @@ pub struct HealthReport {
     pub mix: Option<LiveMixStats>,
     pub recording: Option<OutputHealth>,
     pub streaming: Option<OutputHealth>,
+    /// The monitor, once it was switched on in this run.
+    pub monitor: Option<MonitorHealth>,
     /// Every running capture: screen sources of the scenes, the legacy
     /// screen layer and live audio inputs. An `ended` capture delivers
     /// nothing more. Scene screen sources (those with an `id`) can be
@@ -55,6 +57,27 @@ pub struct CaptureHealth {
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
     #[serde(flatten)]
     pub state: CaptureState,
+}
+
+/// The monitor's playback (ADR 0017).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MonitorHealth {
+    /// The output device; `None`: the system default.
+    pub device: Option<String>,
+    /// Whether it plays its bus now; off, it plays silence.
+    pub enabled: bool,
+    /// `{"state": "running"}`, or `{"state": "ended", "reason": ...}` when
+    /// the device ended or did not open (`could not start: ...`).
+    #[serde(flatten)]
+    pub state: CaptureState,
+    /// Buffered audio plus the device's largest pull, the delay the feed
+    /// adds; `None` if the device did not open.
+    pub latency_ms: Option<f64>,
+    /// The feed's buffering (`fill_frames`, `target_frames`, `drift_ppm`,
+    /// `padded_frames`, `trimmed_frames`) and its ring's counters
+    /// (`ring.underrun_frames`, `ring.overrun_frames`, ...), at 48 kHz;
+    /// `None` if the device did not open.
+    pub feed: Option<PlaybackFeedStats>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -94,6 +117,7 @@ mod tests {
             render: None,
             mix: None,
             recording: None,
+            monitor: None,
             captures: vec![CaptureHealth {
                 kind: CaptureKind::Screen,
                 id: Some("src_desk".to_owned()),

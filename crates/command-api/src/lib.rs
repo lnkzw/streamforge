@@ -27,13 +27,13 @@ pub use audio::{
 };
 pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
 pub use error::{CommandError, ErrorCode};
-pub use health::{CaptureHealth, CaptureKind, HealthReport, OutputHealth};
+pub use health::{CaptureHealth, CaptureKind, HealthReport, MonitorHealth, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
-    DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, OutputKind, OutputProfileSet, OutputProfiles,
-    PipelineReport, RecordingProfile, RecordingReport, RecordingRequest, RecordingStarted,
-    SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport, StreamingRequest,
-    StreamingStarted,
+    DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, MonitorProfile, OutputKind, OutputProfileSet,
+    OutputProfiles, PipelineReport, RecordingProfile, RecordingReport, RecordingRequest,
+    RecordingStarted, SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport,
+    StreamingRequest, StreamingStarted,
 };
 pub use project::{
     ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
@@ -50,12 +50,12 @@ pub use scenes::{
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
 /// use `audio-engine`.
-pub use audio_engine::{LiveInputStats, LiveMixStats};
+pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats};
 use std::path::PathBuf;
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioInput, CaptureCapabilities, ScreenCaptureRequest,
-    VideoCaptureReport,
+    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput, CaptureCapabilities,
+    ScreenCaptureRequest, VideoCaptureReport,
 };
 /// Capture types in results, for adapters that do not use `capture-api`.
 pub use capture_api::{CaptureState, ScreenSource};
@@ -84,6 +84,8 @@ pub enum Command {
     GetHealth,
     /// List audio input devices.
     ListAudioInputs,
+    /// List audio output devices, for the monitor.
+    ListAudioOutputs,
     /// List screen sources that can be captured by id (no picker).
     ListScreenSources,
     /// Capture a screen source (named or user-picked) briefly and report diagnostics.
@@ -161,6 +163,11 @@ pub enum Command {
     /// Change an output's profile; a running output fades to a new mix now
     /// and takes encoder settings at its next start.
     SetOutputProfile(SetOutputProfileRequest),
+    /// Choose the monitor's output device (`None`: the system default; only
+    /// while the pipeline is idle).
+    SetMonitorDevice {
+        device: Option<String>,
+    },
     /// Run the pipeline for a preview (frames go to the in-process
     /// preview mailbox) or stop doing so.
     SetPreview {
@@ -180,6 +187,7 @@ pub enum CommandOutput {
     Commands(CommandList),
     CaptureCapabilities(CaptureCapabilities),
     AudioInputs(AudioInputList),
+    AudioOutputs(AudioOutputList),
     ScreenSources(ScreenSourceList),
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
@@ -203,6 +211,12 @@ pub enum CommandOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioInputList {
     pub inputs: Vec<AudioInput>,
+}
+
+/// Result of `list_audio_outputs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AudioOutputList {
+    pub outputs: Vec<AudioOutput>,
 }
 
 /// Result of `list_screen_sources`.

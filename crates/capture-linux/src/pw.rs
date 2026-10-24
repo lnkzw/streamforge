@@ -341,6 +341,8 @@ pub(crate) fn audio_inputs(timeout: Duration) -> Result<Vec<AudioInput>, Capture
                         name: name.to_owned(),
                         description: props.get(*pw::keys::NODE_DESCRIPTION).map(str::to_owned),
                         media_class: class.to_owned(),
+                        // Sources only: no sink monitors listed.
+                        loopback_of: None,
                     });
                 }
             }

@@ -4,10 +4,12 @@
 
 pub mod audio;
 pub mod metrics;
+pub mod sample_ring;
 pub mod video;
 
 pub use audio::{AudioRing, AudioRingStats};
 pub use metrics::{LatencyHistogram, LatencySummary, duration_millis};
+pub use sample_ring::{SampleReader, SampleRingStats, SampleWriter, sample_ring};
 pub use video::{
     FrameBuffer, FrameMailbox, FramePool, MailboxStats, PixelFormat, VideoFrame, VideoFrameError,
 };

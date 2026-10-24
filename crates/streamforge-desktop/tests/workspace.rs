@@ -355,6 +355,8 @@ fn output_mixes_tracks_and_the_monitor_reach_the_engine() {
     step_until(&mut harness, "the monitor mix", |h| {
         is_on(h, "Monitor takes Headphones") && !is_on(h, "Monitor takes Program")
     });
+    // A bus in a profile cannot be removed; the engine would refuse.
+    assert!(!clickable(&harness, "Remove bus Headphones…"));
     harness.get_by_label("Monitor on").click();
     step_until(&mut harness, "the monitor", |h| is_on(h, "Monitor on"));
 

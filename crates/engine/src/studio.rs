@@ -314,6 +314,23 @@ impl Engine {
         }
 
         let running = self.output_open(output);
+        // A running recording keeps its tracks until it stops; a mix that is
+        // one of them would put the same bus in the file twice.
+        if running
+            && let (Some(mix), Some(id), Some(pipeline)) = (&mix, output_id(output), &self.pipeline)
+            && pipeline.output_tracks(id).contains(mix)
+            && let Some(column) = pipeline.mix_column(mix)
+        {
+            return Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "the running recording records bus `{}` as a track until it stops; choose \
+                     another mix, or stop the recording first",
+                    pipeline.bus_name(column)
+                ),
+            )
+            .with_details(serde_json::json!({ "bus": mix })));
+        }
         let mut applied_now = Vec::new();
         let mut next_start = Vec::new();
         let mut warnings = Vec::new();

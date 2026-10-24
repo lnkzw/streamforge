@@ -409,11 +409,7 @@ impl Model {
             params.insert("level_db".into(), level_db.into());
         }
         if let Some(tap) = tap {
-            let tap = match tap {
-                SendTap::PreFader => "pre_fader",
-                SendTap::PostFader => "post_fader",
-            };
-            params.insert("tap".into(), tap.into());
+            params.insert("tap".into(), json!(tap));
         }
         self.act("set_send", Value::Object(params));
     }
@@ -443,22 +439,25 @@ impl Model {
         let mut params = Map::new();
         params.insert("output".into(), output.as_str().into());
         params.insert("mix_bus_id".into(), bus_id.into());
-        if output == OutputKind::Recording
-            && let Some(profiles) = &self.profiles
-            && profiles
-                .recording
-                .tracks
-                .iter()
-                .any(|track| track == bus_id)
-        {
-            let tracks: Vec<&str> = profiles
-                .recording
-                .tracks
-                .iter()
-                .map(String::as_str)
-                .filter(|track| *track != bus_id)
-                .collect();
-            params.insert("tracks".into(), tracks.into());
+        if let Some(profiles) = &mut self.profiles {
+            if output == OutputKind::Recording
+                && profiles
+                    .recording
+                    .tracks
+                    .iter()
+                    .any(|track| track == bus_id)
+            {
+                profiles.recording.tracks.retain(|track| track != bus_id);
+                params.insert("tracks".into(), json!(profiles.recording.tracks));
+            }
+            // Shown at once, so a second click builds on this one; the
+            // engine's answer replaces it.
+            let mix = match output {
+                OutputKind::Recording => &mut profiles.recording.mix,
+                OutputKind::Stream => &mut profiles.stream.mix,
+                OutputKind::Monitor => &mut profiles.monitor.mix,
+            };
+            *mix = bus_id.to_owned();
         }
         self.act("set_output_profile", Value::Object(params));
     }
@@ -466,6 +465,10 @@ impl Model {
     /// The recording's further tracks (bus ids, in order); a running
     /// recording keeps its tracks until it stops.
     pub fn set_recording_tracks(&mut self, tracks: &[String]) {
+        // Shown at once, as for the mix.
+        if let Some(profiles) = &mut self.profiles {
+            profiles.recording.tracks = tracks.to_vec();
+        }
         self.act(
             "set_output_profile",
             json!({ "output": "recording", "tracks": tracks }),
@@ -542,7 +545,14 @@ impl Model {
             CommandOutput::Status(status) => self.status = Some(status),
             CommandOutput::SceneList(scenes) => self.scenes = Some(scenes),
             CommandOutput::MixerState(mixer) => self.mixer = Some(mixer),
-            CommandOutput::OutputProfiles(profiles) => self.profiles = Some(profiles),
+            // A reading asked for before a change that is still on its way
+            // would undo what the matrix shows; that change's answer
+            // carries the profiles anyway.
+            CommandOutput::OutputProfiles(profiles) => {
+                if !self.pending("set_output_profile") {
+                    self.profiles = Some(profiles);
+                }
+            }
             CommandOutput::OutputProfileSet(set) => {
                 if !set.next_start.is_empty() {
                     self.push(
@@ -641,6 +651,8 @@ impl Model {
         match name {
             "stop_recording" => self.recording = None,
             "stop_streaming" => self.streaming = None,
+            // Undo what the matrix showed before the answer.
+            "set_output_profile" => self.refresh(Refresh::Profiles),
             _ => {}
         }
         self.push(Level::Error, format!("{name}: {}", error.message));

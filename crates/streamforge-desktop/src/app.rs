@@ -169,17 +169,18 @@ impl DesktopApp {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         if let Some(mixer) = &self.model.mixer {
+            self.meters.retain(|id, _| {
+                mixer.channels.iter().any(|channel| &channel.spec.id == id)
+                    || mixer.buses.iter().any(|bus| &bus.id == id)
+            });
             let readings = mixer
                 .channels
                 .iter()
                 .map(|channel| (&channel.spec.id, channel.peak_dbfs))
                 .chain(mixer.buses.iter().map(|bus| (&bus.id, bus.peak_dbfs)));
-            let mut seen = Vec::with_capacity(mixer.channels.len() + mixer.buses.len());
             for (id, peak) in readings {
                 self.meters.entry(id.clone()).or_default().update(peak, dt);
-                seen.push(id);
             }
-            self.meters.retain(|id, _| seen.contains(&id));
         }
     }
 

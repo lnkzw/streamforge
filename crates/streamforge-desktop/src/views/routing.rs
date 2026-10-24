@@ -65,7 +65,14 @@ impl DesktopApp {
                     .show(ui, |ui| {
                         ui.label(TextRole::Section.text("Channels"));
                         for bus in &mixer.buses {
-                            if column_header(ui, bus, idle) {
+                            let blocked = if !idle {
+                                Some(IDLE_ONLY.to_owned())
+                            } else {
+                                profiles
+                                    .as_ref()
+                                    .and_then(|profiles| in_use(profiles, &bus.id))
+                            };
+                            if column_header(ui, bus, blocked) {
                                 remove = Some((bus.id.clone(), bus.name.clone()));
                             }
                         }
@@ -86,22 +93,22 @@ impl DesktopApp {
                         for channel in &mixer.channels {
                             let spec = &channel.spec;
                             let paths = mixer.program_paths(spec);
-                            let header = row_header(ui, &spec.name);
-                            if groups.is_empty() {
-                                groups.push(header.rect.top());
-                            }
-                            if paths.len() > 1 {
+                            let warning = (paths.len() > 1).then(|| {
                                 let ways: Vec<String> =
                                     paths.iter().map(ToString::to_string).collect();
-                                warning_mark(
-                                    ui,
-                                    header.rect,
-                                    &format!(
-                                        "Reaches the program bus {} times: {}",
-                                        paths.len(),
-                                        ways.join(", ")
-                                    ),
-                                );
+                                format!(
+                                    "Reaches the program bus {} times: {}",
+                                    paths.len(),
+                                    ways.join(", ")
+                                )
+                            });
+                            let header = ui
+                                .push_id(&spec.id, |ui| {
+                                    channel_header(ui, &spec.name, warning.as_deref())
+                                })
+                                .inner;
+                            if groups.is_empty() {
+                                groups.push(header.top());
                             }
                             for (bus, send) in mixer.buses.iter().zip(&spec.sends) {
                                 // Ids by channel and bus, so a field being dragged keeps
@@ -211,22 +218,40 @@ impl DesktopApp {
                 }
             });
             let recording = output == OutputKind::Recording;
-            if recording && self.model.recording.is_some() {
-                header.response.on_hover_text(
-                    "A running recording keeps its tracks; a change applies to the next one.",
-                );
+            // A running recording keeps its tracks until it stops: it shows
+            // them, and they cannot change or become its mix meanwhile.
+            let live_tracks = mixer
+                .outputs
+                .iter()
+                .find(|mix| recording && mix.output == output && mix.running)
+                .map(|mix| mix.tracks.as_slice());
+            if live_tracks.is_some() {
+                header
+                    .response
+                    .on_hover_text("The running recording keeps its tracks until it stops.");
             }
             for bus in &mixer.buses {
                 let selected = bus.id == mix;
+                let live_track = live_tracks.is_some_and(|tracks| tracks.contains(&bus.id));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = size::SPACE_6;
-                    let choice =
-                        widgets::radio(ui, selected, &format!("{label} takes {}", bus.name));
+                    let choice = ui
+                        .add_enabled_ui(!live_track, |ui| {
+                            widgets::radio(ui, selected, &format!("{label} takes {}", bus.name))
+                        })
+                        .inner
+                        .on_disabled_hover_text(format!(
+                            "{} is a track of the running recording until it stops",
+                            bus.name
+                        ));
                     if choice.clicked() && !selected {
                         self.model.set_output_mix(output, &bus.id);
                     }
                     if recording {
-                        self.track_chip(ui, bus, selected, &profiles.recording.tracks);
+                        let tracks = live_tracks.unwrap_or(&profiles.recording.tracks);
+                        ui.add_enabled_ui(live_tracks.is_none(), |ui| {
+                            self.track_chip(ui, bus, selected, tracks);
+                        });
                     }
                 });
             }
@@ -258,12 +283,17 @@ impl DesktopApp {
                 format!("Record {} as a further track", bus.name),
             ),
         };
+        let reason = if !ui.is_enabled() {
+            "The running recording keeps its tracks; stop it to change them".to_owned()
+        } else {
+            format!("At most {MAX_EXTRA_TRACKS} tracks besides the mix")
+        };
         let clicked = ui
             .add_enabled_ui(index.is_some() || !full, |ui| {
                 widgets::chip(ui, &text, index.is_some(), &label)
             })
             .inner
-            .on_disabled_hover_text(format!("At most {MAX_EXTRA_TRACKS} tracks besides the mix"))
+            .on_disabled_hover_text(reason)
             .clicked();
         if clicked {
             let mut tracks = tracks.to_vec();
@@ -278,9 +308,10 @@ impl DesktopApp {
     }
 }
 
-/// A bus's name over its column, with removal for aux buses. Returns
-/// whether removal was asked for.
-fn column_header(ui: &mut egui::Ui, bus: &BusState, idle: bool) -> bool {
+/// A bus's name over its column, with removal for aux buses; `blocked`
+/// says why removal is not possible now. Returns whether removal was asked
+/// for.
+fn column_header(ui: &mut egui::Ui, bus: &BusState, blocked: Option<String>) -> bool {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = size::SPACE_4;
         ui.add(
@@ -289,33 +320,75 @@ fn column_header(ui: &mut egui::Ui, bus: &BusState, idle: bool) -> bool {
         if bus.id == PROGRAM_BUS_ID {
             return false;
         }
-        ui.add_enabled_ui(idle, |ui| {
-            widgets::icon_button(ui, Icon::Trash, &format!("Remove bus {}…", bus.name))
-        })
-        .inner
-        .on_disabled_hover_text(IDLE_ONLY)
-        .clicked()
+        let response = ui
+            .add_enabled_ui(blocked.is_none(), |ui| {
+                widgets::icon_button(ui, Icon::Trash, &format!("Remove bus {}…", bus.name))
+            })
+            .inner;
+        match blocked {
+            Some(reason) => {
+                response.on_disabled_hover_text(reason);
+                false
+            }
+            None => response.clicked(),
+        }
     })
     .inner
+}
+
+/// Why a bus cannot be removed while output profiles use it (the engine
+/// refuses, so a profile never names a missing bus), or `None`.
+fn in_use(profiles: &OutputProfiles, bus_id: &str) -> Option<String> {
+    let mut users = Vec::new();
+    if profiles.recording.mix == bus_id {
+        users.push("the recording's mix");
+    }
+    if profiles
+        .recording
+        .tracks
+        .iter()
+        .any(|track| track == bus_id)
+    {
+        users.push("a recording track");
+    }
+    if profiles.stream.mix == bus_id {
+        users.push("the stream's mix");
+    }
+    if profiles.monitor.mix == bus_id {
+        users.push("the monitor's mix");
+    }
+    (!users.is_empty()).then(|| {
+        format!(
+            "It is {}; choose another bus there before removing it",
+            users.join(" and ")
+        )
+    })
 }
 
 fn row_header(ui: &mut egui::Ui, name: &str) -> egui::Response {
     ui.add(egui::Label::new(TextRole::Body.text(name)).truncate())
 }
 
-/// A warning icon after a row's name, with the reason as its tooltip.
-fn warning_mark(ui: &mut egui::Ui, name: egui::Rect, reason: &str) {
-    let rect = egui::Rect::from_center_size(
-        egui::pos2(name.right() + size::SPACE_4 + 7.0, name.center().y),
-        egui::Vec2::splat(14.0),
-    );
-    Icon::Warning.paint(ui.painter(), rect, color::STATE_WARN);
-    ui.interact(
-        rect,
-        ui.id().with(("double routing", reason)),
-        egui::Sense::hover(),
+/// A channel's name in the first column, cut to fit, after a warning icon
+/// (with the reason as its tooltip) when there is one. Returns its rect.
+fn channel_header(ui: &mut egui::Ui, name: &str, warning: Option<&str>) -> egui::Rect {
+    ui.allocate_ui_with_layout(
+        egui::vec2(COLUMN, ROW),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(COLUMN);
+            ui.spacing_mut().item_spacing.x = size::SPACE_4;
+            if let Some(reason) = warning {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
+                Icon::Warning.paint(ui.painter(), rect, color::STATE_WARN);
+                response.on_hover_text(reason);
+            }
+            ui.add(egui::Label::new(TextRole::Body.text(name)).truncate());
+        },
     )
-    .on_hover_text(reason);
+    .response
+    .rect
 }
 
 /// A send's level, or a bus's into the program bus, in dB, with the
@@ -388,4 +461,40 @@ fn assign_cell(ui: &mut egui::Ui, bus: &BusState) -> Option<Option<f32>> {
         commit(ui, &field, level).map(Some)
     })
     .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use command_api::{EncoderPreference, MonitorProfile, RecordingProfile, StreamProfile};
+
+    use super::*;
+
+    #[test]
+    fn a_bus_in_a_profile_says_where_it_is_used() {
+        let profiles = OutputProfiles {
+            recording: RecordingProfile {
+                mix: PROGRAM_BUS_ID.to_owned(),
+                tracks: vec!["bus_voice".to_owned()],
+                video_encoder: EncoderPreference::Auto,
+            },
+            stream: StreamProfile {
+                mix: PROGRAM_BUS_ID.to_owned(),
+                video_bitrate_kbps: 6_000,
+                video_encoder: EncoderPreference::Auto,
+            },
+            monitor: MonitorProfile {
+                mix: "bus_voice".to_owned(),
+                enabled: false,
+                device: None,
+            },
+        };
+        assert_eq!(
+            in_use(&profiles, "bus_voice").as_deref(),
+            Some(
+                "It is a recording track and the monitor's mix; choose another bus there \
+                 before removing it"
+            )
+        );
+        assert_eq!(in_use(&profiles, "bus_music"), None);
+    }
 }

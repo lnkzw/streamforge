@@ -7,7 +7,8 @@ What each operating system supports, how it is built, and how it is verified. Ca
 | Capability | Linux | Windows | macOS |
 |------------|-------|---------|-------|
 | Screen capture | XDG ScreenCast portal + PipeWire (monitor, window, virtual; picker only) | Windows.Graphics.Capture (monitors and windows by id from `list_screen_sources`; no picker yet) | ScreenCaptureKit (displays and windows by id from `list_screen_sources`; no picker yet; needs the screen-recording permission) |
-| Audio input | PipeWire (format converted by PipeWire) | WASAPI through `cpal` (converted to 48 kHz stereo in the callback) | CoreAudio through `cpal` (same conversion) |
+| Audio input | PipeWire (format converted by PipeWire); each sink's monitor is an input too (desktop audio) | WASAPI through `cpal` (converted to 48 kHz stereo in the callback) | CoreAudio through `cpal` (same conversion) |
+| Monitor playback (ADR 0017) | PipeWire output stream (sinks and duplex devices) | not yet (step 5c, `cpal`) | not yet (step 5c, `cpal`) |
 | Compositor, mixer, preview | yes | yes | yes |
 | Recording (H.264 + AAC in Matroska) | FFmpeg (system packages) | FFmpeg (prebuilt shared build) | FFmpeg (Homebrew) |
 | Streaming (RTMP) | FFmpeg | FFmpeg | FFmpeg |

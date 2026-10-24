@@ -259,7 +259,7 @@ From the project owner's brief: a professional production studio with its own id
 
 - [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
 - [x] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health (step 2). The mixer dock shows channel strips and the program bus until the console replaces it. The preview is 480×270, so a large monitor shows it soft; a sharper preview is an engine change, not yet planned.
-- [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model.
+- [x] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model (step 3): sends with level and tap, aux bus assignment, buses added and removed while idle, each output's mix, the recording's tracks and the monitor switch, and the double-routing mark. Choosing devices for channels and the monitor comes with the audio sources (next step).
 - [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
 - [ ] Rollout to the remaining views; keyboard operation as specified.
 

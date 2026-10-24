@@ -154,8 +154,19 @@ fn a_recording_carries_its_tracks_named_after_their_buses() {
         r#"{"id":7,"command":"set_output_profile","params":{"output":"recording","tracks":[]}}"#,
     ));
     assert_eq!(set["next_start"], serde_json::json!(["tracks"]), "{set}");
+    // Its running track cannot become its mix as well, although the next
+    // profile no longer has it as a track.
+    let refused = engine.request(
+        r#"{"id":8,"command":"set_output_profile","params":{"output":"recording","mix_bus":"Quiet"}}"#,
+    );
+    assert_eq!(refused["error"]["code"], "invalid_state", "{refused}");
+    assert_eq!(
+        refused["error"]["details"]["bus"],
+        quiet.as_str(),
+        "{refused}"
+    );
     std::thread::sleep(SPAN);
-    let stopped = ok(engine.request(r#"{"id":8,"command":"stop_recording"}"#));
+    let stopped = ok(engine.request(r#"{"id":9,"command":"stop_recording"}"#));
     assert!(engine.finish().success());
     let recording = &stopped["recording"];
     assert_eq!(recording["audio"]["name"], "Program", "{recording}");

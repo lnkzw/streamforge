@@ -14,12 +14,17 @@
 //! name them by id or by name.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{MAX_ID_LEN, OutputKind, is_valid_id};
 
+/// The lowest gain, send or assign level a command takes, in dB.
+pub const MIN_GAIN_DB: f32 = audio_engine::MIN_GAIN_DB;
+/// The highest gain, send or assign level a command takes, in dB.
+pub const MAX_GAIN_DB: f32 = audio_engine::MAX_GAIN_DB;
 /// Most channels; the mixer's fixed capacity.
 pub const MAX_CHANNELS: usize = audio_engine::MAX_CHANNELS;
 /// Most aux buses (the program bus comes on top).
@@ -399,6 +404,61 @@ pub struct MixerState {
     pub warnings: Vec<String>,
 }
 
+impl MixerState {
+    /// The ways `channel` (one of [`MixerState::channels`]) reaches the
+    /// program bus; see [`program_paths`].
+    pub fn program_paths<'a>(&'a self, channel: &ChannelSpec) -> Vec<ProgramPath<'a>> {
+        program_paths(
+            &channel.sends,
+            self.buses
+                .iter()
+                .filter(|bus| bus.id != PROGRAM_BUS_ID)
+                .map(|bus| (bus.name.as_str(), bus.assign_db)),
+        )
+    }
+}
+
+/// One way a channel reaches the program bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramPath<'a> {
+    /// Its own send to the program bus.
+    Direct,
+    /// Its send to an aux bus (by name) that is assigned to the program bus.
+    Through(&'a str),
+}
+
+impl fmt::Display for ProgramPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct => f.write_str("directly"),
+            Self::Through(bus) => write!(f, "through `{bus}`"),
+        }
+    }
+}
+
+/// The ways a channel with `sends` (one per bus in bus order, the program
+/// bus first) reaches the program bus: directly, and through each aux bus
+/// assigned to it. `aux` are the aux buses' names and assignments, in bus
+/// order. More than one is double routing: allowed (ADR 0017), but +6 dB at
+/// equal levels and rarely meant, so `get_mixer` warns and the desktop
+/// console marks it. It is about the routing, so mutes and levels, which
+/// change live, do not count.
+pub fn program_paths<'a>(
+    sends: &[SendSpec],
+    aux: impl IntoIterator<Item = (&'a str, Option<f32>)>,
+) -> Vec<ProgramPath<'a>> {
+    let direct = sends
+        .first()
+        .is_some_and(|send| send.enabled)
+        .then_some(ProgramPath::Direct);
+    let through = aux
+        .into_iter()
+        .zip(sends.iter().skip(1))
+        .filter(|((_, assign_db), send)| send.enabled && assign_db.is_some())
+        .map(|((name, _), _)| ProgramPath::Through(name));
+    direct.into_iter().chain(through).collect()
+}
+
 /// An output's mix in `get_mixer`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OutputMix {
@@ -408,4 +468,34 @@ pub struct OutputMix {
     /// The recording's further audio tracks (bus ids); fixed while it runs.
     pub tracks: Vec<String>,
     pub running: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn send(bus: &str, enabled: bool) -> SendSpec {
+        SendSpec {
+            enabled,
+            ..SendSpec::off(bus)
+        }
+    }
+
+    #[test]
+    fn program_paths_count_the_direct_send_and_assigned_buses() {
+        let aux = [("Voice", Some(-3.0)), ("Monitor", None)];
+        let sends = [
+            send(PROGRAM_BUS_ID, true),
+            send("bus_voice", true),
+            send("bus_monitor", true),
+        ];
+        let paths = program_paths(&sends, aux);
+        // A separate mix (Monitor) does not reach program.
+        assert_eq!(paths, [ProgramPath::Direct, ProgramPath::Through("Voice")]);
+        assert_eq!(paths[1].to_string(), "through `Voice`");
+        // Through the submix only: one path; no sends at all: none.
+        let sends = [send(PROGRAM_BUS_ID, false), send("bus_voice", true)];
+        assert_eq!(program_paths(&sends, aux), [ProgramPath::Through("Voice")]);
+        assert!(program_paths(&[], aux).is_empty());
+    }
 }

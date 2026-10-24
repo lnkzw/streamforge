@@ -1056,38 +1056,185 @@ fn status_icon(level: StatusLevel) -> (Icon, Color32) {
     }
 }
 
-/// An on/off switch for binary settings (the preview, mute).
+/// An on/off switch for binary settings (the preview, mute). Disabled
+/// with the `Ui`.
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
     let (rect, mut response) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
-    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, *on, label));
+    response.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, *on, label));
     let t = ui
         .ctx()
         .animate_bool_with_time(response.id, *on, motion::HOVER);
     let painter = ui.painter();
-    let track = if *on {
-        color::ACCENT
-    } else {
-        color::LINE_STRONG
+    let (track, knob) = match (enabled, *on) {
+        (true, true) => (color::ACCENT, color::BG_APP),
+        (true, false) => (color::LINE_STRONG, color::TEXT_SECONDARY),
+        (false, true) => (color::ACCENT.gamma_multiply(0.35), color::BG_APP),
+        (false, false) => (color::LINE_SUBTLE, color::TEXT_DISABLED),
     };
     painter.rect_filled(rect, CornerRadius::same(8), track);
     let x = egui::lerp((rect.left() + 8.0)..=(rect.right() - 8.0), t);
-    painter.circle_filled(
-        pos2(x, rect.center().y),
-        6.0,
-        if *on {
-            color::BG_APP
-        } else {
-            color::TEXT_SECONDARY
-        },
-    );
+    painter.circle_filled(pos2(x, rect.center().y), 6.0, knob);
     if response.has_focus() {
         focus_ring(painter, rect, 8);
     }
     response
+}
+
+/// One choice of several, e.g. the bus an output takes as its mix: a ring,
+/// filled in the accent when selected. `label` names the choice for
+/// assistive technology and the tooltip. Disabled with the `Ui`.
+pub fn radio(ui: &mut Ui, selected: bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, enabled, selected, label));
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, enabled);
+        let painter = ui.painter();
+        let center = rect.center();
+        let ring = match (state, selected) {
+            (VisualState::Disabled, _) => color::LINE_SUBTLE,
+            (_, true) => color::ACCENT,
+            (VisualState::Hovered | VisualState::Pressed, false) => color::TEXT_SECONDARY,
+            (_, false) => color::LINE_STRONG,
+        };
+        painter.circle(
+            center,
+            6.5,
+            color::BG_INSET,
+            Stroke::new(size::STROKE_HEAVY, ring),
+        );
+        if selected {
+            let dot = if enabled {
+                color::ACCENT
+            } else {
+                color::TEXT_DISABLED
+            };
+            painter.circle_filled(center, 3.0, dot);
+        }
+        if response.has_focus() {
+            focus_ring(painter, rect, 9);
+        }
+    }
+    response.on_hover_text(label)
+}
+
+/// A segmented switch between the views of one dock (Console, Routing):
+/// the selected segment has primary text and an accent bar under it.
+/// Returns the segment clicked this frame, if any.
+pub fn tabs(ui: &mut Ui, selected: usize, labels: &[&str]) -> Option<usize> {
+    let galleys: Vec<_> = labels
+        .iter()
+        .map(|label| {
+            ui.painter().layout_no_wrap(
+                (*label).to_owned(),
+                TextRole::Label.font(),
+                Color32::PLACEHOLDER,
+            )
+        })
+        .collect();
+    let widths: Vec<f32> = galleys
+        .iter()
+        .map(|galley| galley.size().x + 2.0 * size::SPACE_8)
+        .collect();
+    let gap = size::SPACE_2;
+    let total = widths.iter().sum::<f32>() + gap * labels.len().saturating_sub(1) as f32;
+    let mut clicked = None;
+    // Left to right also inside a right-to-left header.
+    ui.allocate_ui_with_layout(
+        vec2(total, size::CONTROL),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (index, (label, galley)) in labels.iter().zip(galleys).enumerate() {
+                let on = index == selected;
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(widths[index], size::CONTROL), Sense::click());
+                response.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::SelectableLabel, true, on, *label)
+                });
+                if response.clicked() && !on {
+                    clicked = Some(index);
+                }
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let state = VisualState::of(&response, true);
+                let painter = ui.painter();
+                if matches!(state, VisualState::Hovered | VisualState::Pressed) {
+                    let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+                    painter.rect_filled(rect, CornerRadius::same(size::RADIUS_CONTROL), fill);
+                }
+                let text = if on {
+                    color::TEXT_PRIMARY
+                } else {
+                    color::TEXT_SECONDARY
+                };
+                painter.galley(rect.center() - galley.size() / 2.0, galley, text);
+                if on {
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            pos2(
+                                rect.left() + size::SPACE_4,
+                                rect.bottom() - size::STROKE_HEAVY,
+                            ),
+                            pos2(rect.right() - size::SPACE_4, rect.bottom()),
+                        ),
+                        0.0,
+                        color::ACCENT,
+                    );
+                }
+                if response.has_focus() {
+                    focus_ring(painter, rect, size::RADIUS_CONTROL);
+                }
+            }
+        },
+    );
+    clicked
+}
+
+/// A small button that shows a mode by its text, e.g. a send's tap (PRE or
+/// POST). `marked` draws it in the accent, for the less usual mode, so it
+/// stands out in a table. `label` says what it is and what a click does:
+/// it is the tooltip and the name for assistive technology. Disabled with
+/// the `Ui`.
+pub fn chip(ui: &mut Ui, text: &str, marked: bool, label: &str) -> Response {
+    let enabled = ui.is_enabled();
+    let galley = ui.painter().layout_no_wrap(
+        text.to_uppercase(),
+        egui::FontId::new(10.0, TextRole::Label.font().family),
+        Color32::PLACEHOLDER,
+    );
+    let size_px = vec2((galley.size().x + 10.0).max(36.0), 18.0);
+    let (rect, response) = ui.allocate_exact_size(size_px, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, enabled);
+        let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+        let (stroke, text_color) = match (state, marked) {
+            (VisualState::Disabled, _) => (color::LINE_SUBTLE, color::TEXT_DISABLED),
+            (_, true) => (color::ACCENT.gamma_multiply(0.7), color::ACCENT),
+            (_, false) => (color::LINE_STRONG, color::TEXT_SECONDARY),
+        };
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            CornerRadius::same(2),
+            fill,
+            Stroke::new(size::STROKE, stroke),
+            StrokeKind::Inside,
+        );
+        painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
+        if response.has_focus() {
+            focus_ring(painter, rect, 2);
+        }
+    }
+    response.on_hover_text(label)
 }
 
 /// A 1 px divider across the available width.

@@ -1,5 +1,5 @@
 //! Modal dialogs: confirmations for consequential actions, adding a
-//! source, and the output targets. One is open at a time; Escape or a
+//! source or a bus, and the output targets. One is open at a time; Escape or a
 //! click outside cancels.
 
 use command_api::{StreamKey, StreamTarget};
@@ -51,6 +51,9 @@ impl DesktopApp {
                     Dialog::StreamSettings { url, key, go_live } => {
                         self.stream_settings(ui, url, key, *go_live)
                     }
+                    Dialog::AddBus { name, assigned } => {
+                        add_bus(ui, &mut self.model, name, assigned)
+                    }
                 }
             });
         let keep = match modal.inner {
@@ -80,6 +83,11 @@ impl DesktopApp {
                 "The working capture ends and starts again; outputs keep running.".to_owned(),
                 "Restart capture",
             ),
+            Confirm::RemoveBus { name, .. } => (
+                format!("Remove bus “{name}”?"),
+                "Every send to it is removed with it.".to_owned(),
+                "Remove bus",
+            ),
             Confirm::StopRecording => (
                 "Stop recording?".to_owned(),
                 "The file is finalized; a new recording starts a new file.".to_owned(),
@@ -107,6 +115,7 @@ impl DesktopApp {
                         self.model.remove_source(id);
                     }
                     Confirm::RestartSource { id, .. } => self.model.restart_source(id, None),
+                    Confirm::RemoveBus { id, name } => self.model.remove_bus_confirmed(id, name),
                     Confirm::StopRecording => self.model.stop_recording(),
                     Confirm::StopStreaming => self.model.stop_streaming(),
                 }
@@ -275,6 +284,40 @@ fn add_source(
         Some(true) => {
             form.name = form.name.trim().to_owned();
             model.add_source(scene_id, form);
+            Outcome::Done
+        }
+        Some(false) => Outcome::Cancel,
+        None => Outcome::Open,
+    }
+}
+
+fn add_bus(
+    ui: &mut egui::Ui,
+    model: &mut Model,
+    name: &mut String,
+    assigned: &mut bool,
+) -> Outcome {
+    ui.label(TextRole::Title.text("New bus"));
+    ui.label(TextRole::Label.text("Name"));
+    ui.add(
+        egui::TextEdit::singleline(name)
+            .hint_text("e.g. Voice")
+            .desired_width(f32::INFINITY),
+    );
+    ui.horizontal(|ui| {
+        widgets::toggle(ui, assigned, "Feed the program bus");
+        ui.label(TextRole::Body.text("Feed the program bus"));
+    });
+    let note = if *assigned {
+        "A submix: what channels send to it reaches program through it."
+    } else {
+        "A separate mix, e.g. for the monitor or a recording track."
+    };
+    ui.label(TextRole::Meta.text(note));
+    ui.add_space(size::SPACE_8);
+    match buttons(ui, ButtonKind::Primary, "Add bus", !name.trim().is_empty()) {
+        Some(true) => {
+            model.add_bus(name.trim(), *assigned);
             Outcome::Done
         }
         Some(false) => Outcome::Cancel,

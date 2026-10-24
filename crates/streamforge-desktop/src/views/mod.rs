@@ -7,11 +7,14 @@ mod inspector;
 mod mixer;
 mod outputs;
 mod program;
+mod routing;
 mod scenes;
 mod sources;
 mod top_bar;
 
-use command_api::{MAX_COORDINATE, SceneList, SceneSpec, SourceKind, SourceSpec};
+use command_api::{
+    BusState, MAX_COORDINATE, PROGRAM_BUS_ID, SceneList, SceneSpec, SourceKind, SourceSpec,
+};
 use eframe::egui;
 
 use crate::ui::icons::Icon;
@@ -38,6 +41,23 @@ fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
         }
     } else {
         response.changed().then_some(value)
+    }
+}
+
+/// Name a widget that has no label of its own (a number field in a
+/// table) for assistive technology and the tooltip.
+fn labelled(ui: &egui::Ui, response: egui::Response, label: &str) -> egui::Response {
+    ui.ctx()
+        .accesskit_node_builder(response.id, |builder| builder.set_label(label));
+    response.on_hover_text(label)
+}
+
+/// A bus's name where room is short: `PGM` for the program bus.
+fn bus_short_name(bus: &BusState) -> &str {
+    if bus.id == PROGRAM_BUS_ID {
+        "PGM"
+    } else {
+        &bus.name
     }
 }
 

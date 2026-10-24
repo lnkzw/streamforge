@@ -49,15 +49,25 @@ pub struct DesktopApp {
     /// Where the scenes dock ends and the sources dock begins, as a
     /// fraction of the left column.
     browser_split: f32,
-    /// Meters by channel id, and the program bus's.
+    /// Meters by channel or bus id.
     pub(crate) meters: HashMap<String, Ballistics>,
-    pub(crate) program_meter: Ballistics,
+    pub(crate) mixer_view: MixerView,
     pub(crate) preview: Option<egui::TextureHandle>,
     rgba: Vec<u8>,
     last_live: Instant,
     last_health: Instant,
     last_scenes: Instant,
     last_frame: Instant,
+}
+
+/// What the mixer dock shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MixerView {
+    /// The strips: faders, meters and mutes, for operating live.
+    Console,
+    /// The routing matrix: sends, assignments, output mixes, and buses
+    /// added or removed.
+    Routing,
 }
 
 /// The one modal dialog that can be open.
@@ -78,6 +88,12 @@ pub(crate) enum Dialog {
         key: String,
         go_live: bool,
     },
+    /// `assigned`: the new bus feeds the program bus (a submix);
+    /// otherwise it is a separate mix.
+    AddBus {
+        name: String,
+        assigned: bool,
+    },
     Confirm(Confirm),
 }
 
@@ -94,6 +110,10 @@ pub(crate) enum Confirm {
     },
     /// Restart a capture that still works.
     RestartSource {
+        id: String,
+        name: String,
+    },
+    RemoveBus {
         id: String,
         name: String,
     },
@@ -121,7 +141,7 @@ impl DesktopApp {
             log_seen: 0,
             browser_split: 0.4,
             meters: HashMap::new(),
-            program_meter: Ballistics::default(),
+            mixer_view: MixerView::Console,
             preview: None,
             rgba: Vec::new(),
             last_live: now,
@@ -149,16 +169,18 @@ impl DesktopApp {
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         if let Some(mixer) = &self.model.mixer {
-            self.meters
-                .retain(|id, _| mixer.channels.iter().any(|channel| &channel.spec.id == id));
-            for channel in &mixer.channels {
-                self.meters
-                    .entry(channel.spec.id.clone())
-                    .or_default()
-                    .update(channel.peak_dbfs, dt);
+            self.meters.retain(|id, _| {
+                mixer.channels.iter().any(|channel| &channel.spec.id == id)
+                    || mixer.buses.iter().any(|bus| &bus.id == id)
+            });
+            let readings = mixer
+                .channels
+                .iter()
+                .map(|channel| (&channel.spec.id, channel.peak_dbfs))
+                .chain(mixer.buses.iter().map(|bus| (&bus.id, bus.peak_dbfs)));
+            for (id, peak) in readings {
+                self.meters.entry(id.clone()).or_default().update(peak, dt);
             }
-            let program = mixer.buses.first().and_then(|program| program.peak_dbfs);
-            self.program_meter.update(program, dt);
         }
     }
 

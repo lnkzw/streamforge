@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use command_api::{
     CaptureKind, CaptureState, CommandError, CommandOutput, EngineStatus, HealthReport, MixerState,
-    OutputHealth, RecordingStarted, SceneList, ScreenSource, StreamState, StreamingStarted,
-    VideoEncoderInfo,
+    OutputHealth, OutputKind, OutputProfiles, RecordingStarted, SceneList, ScreenSource, SendTap,
+    StreamState, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -77,6 +77,7 @@ enum Refresh {
     Scenes,
     Mixer,
     Health,
+    Profiles,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,9 @@ pub struct Model {
     pub status: Option<EngineStatus>,
     pub scenes: Option<SceneList>,
     pub mixer: Option<MixerState>,
+    /// What each output starts with: its mix, the recording's tracks, the
+    /// monitor's switch.
+    pub profiles: Option<OutputProfiles>,
     /// Live counters and capture states (`get_health`), while a pipeline
     /// may run.
     pub health: Option<HealthReport>,
@@ -120,6 +124,7 @@ impl Model {
             status: None,
             scenes: None,
             mixer: None,
+            profiles: None,
             health: None,
             health_items: Vec::new(),
             health_received: None,
@@ -188,14 +193,16 @@ impl Model {
             Refresh::Scenes => "list_scenes",
             Refresh::Mixer => "get_mixer",
             Refresh::Health => "get_health",
+            Refresh::Profiles => "get_output_profiles",
         };
         self.submit(name, json!({}), Pending::Refresh(what));
     }
 
-    /// Ask for status, scenes, mixer and health (skips what is already
-    /// pending).
+    /// Ask for status, scenes, mixer, output profiles and health (skips
+    /// what is already pending).
     pub fn refresh_all(&mut self) {
         self.refresh(Refresh::Scenes);
+        self.refresh(Refresh::Profiles);
         self.refresh_live();
         self.refresh_health();
     }
@@ -344,15 +351,136 @@ impl Model {
         self.act("set_preview", json!({ "enabled": enabled }));
     }
 
-    pub fn update_channel(&mut self, id: &str, gain_db: f32, muted: bool) {
+    /// Change a channel's fader or mute; `None` keeps it.
+    pub fn update_channel(&mut self, id: &str, gain_db: Option<f32>, muted: Option<bool>) {
+        let mut params = Map::new();
+        params.insert("id".into(), id.into());
+        if let Some(gain_db) = gain_db {
+            params.insert("gain_db".into(), gain_db.into());
+        }
+        if let Some(muted) = muted {
+            params.insert("mute".into(), muted.into());
+        }
+        self.act("update_channel", Value::Object(params));
+    }
+
+    /// Change a bus's fader, mute or assignment to the program bus
+    /// (`Some(None)`: a separate mix); `None` keeps it.
+    pub fn update_bus(
+        &mut self,
+        id: &str,
+        gain_db: Option<f32>,
+        muted: Option<bool>,
+        assign_db: Option<Option<f32>>,
+    ) {
+        let mut params = Map::new();
+        params.insert("id".into(), id.into());
+        if let Some(gain_db) = gain_db {
+            params.insert("gain_db".into(), gain_db.into());
+        }
+        if let Some(muted) = muted {
+            params.insert("mute".into(), muted.into());
+        }
+        if let Some(assign_db) = assign_db {
+            params.insert(
+                "assign_db".into(),
+                assign_db.map_or(Value::Null, Value::from),
+            );
+        }
+        self.act("update_bus", Value::Object(params));
+    }
+
+    /// Change a channel's send to a bus, both by id; `None` keeps it.
+    pub fn set_send(
+        &mut self,
+        channel_id: &str,
+        bus_id: &str,
+        enabled: Option<bool>,
+        level_db: Option<f32>,
+        tap: Option<SendTap>,
+    ) {
+        let mut params = Map::new();
+        params.insert("channel_id".into(), channel_id.into());
+        params.insert("bus_id".into(), bus_id.into());
+        if let Some(enabled) = enabled {
+            params.insert("enabled".into(), enabled.into());
+        }
+        if let Some(level_db) = level_db {
+            params.insert("level_db".into(), level_db.into());
+        }
+        if let Some(tap) = tap {
+            params.insert("tap".into(), json!(tap));
+        }
+        self.act("set_send", Value::Object(params));
+    }
+
+    /// Add an aux bus: assigned to the program bus at 0 dB, or a separate
+    /// mix. Needs an idle pipeline.
+    pub fn add_bus(&mut self, name: &str, assigned: bool) {
+        let mut params = Map::new();
+        params.insert("name".into(), name.into());
+        if assigned {
+            params.insert("assign_db".into(), 0.0.into());
+        }
+        self.act("add_bus", Value::Object(params));
+    }
+
+    /// Removing a bus drops every send to it; the UI asks first. Its id
+    /// and name from the mixer it showed must still agree, so a bus
+    /// replaced meanwhile is not removed.
+    pub fn remove_bus_confirmed(&mut self, id: &str, name: &str) {
+        self.act("remove_bus", json!({ "id": id, "name": name }));
+    }
+
+    /// Take bus `bus_id` as `output`'s mix. A recording track on that bus
+    /// is dropped in the same change, since a bus is the mix or a track,
+    /// not both.
+    pub fn set_output_mix(&mut self, output: OutputKind, bus_id: &str) {
+        let mut params = Map::new();
+        params.insert("output".into(), output.as_str().into());
+        params.insert("mix_bus_id".into(), bus_id.into());
+        if let Some(profiles) = &mut self.profiles {
+            if output == OutputKind::Recording
+                && profiles
+                    .recording
+                    .tracks
+                    .iter()
+                    .any(|track| track == bus_id)
+            {
+                profiles.recording.tracks.retain(|track| track != bus_id);
+                params.insert("tracks".into(), json!(profiles.recording.tracks));
+            }
+            // Shown at once, so a second click builds on this one; the
+            // engine's answer replaces it.
+            let mix = match output {
+                OutputKind::Recording => &mut profiles.recording.mix,
+                OutputKind::Stream => &mut profiles.stream.mix,
+                OutputKind::Monitor => &mut profiles.monitor.mix,
+            };
+            *mix = bus_id.to_owned();
+        }
+        self.act("set_output_profile", Value::Object(params));
+    }
+
+    /// The recording's further tracks (bus ids, in order); a running
+    /// recording keeps its tracks until it stops.
+    pub fn set_recording_tracks(&mut self, tracks: &[String]) {
+        // Shown at once, as for the mix.
+        if let Some(profiles) = &mut self.profiles {
+            profiles.recording.tracks = tracks.to_vec();
+        }
         self.act(
-            "update_channel",
-            json!({ "id": id, "gain_db": gain_db, "mute": muted }),
+            "set_output_profile",
+            json!({ "output": "recording", "tracks": tracks }),
         );
     }
 
-    pub fn update_bus(&mut self, id: &str, gain_db: f32) {
-        self.act("update_bus", json!({ "id": id, "gain_db": gain_db }));
+    /// Switch the monitor on or off (live while a pipeline runs).
+    pub fn set_monitor(&mut self, enabled: bool) {
+        self.act(
+            "set_output_profile",
+            json!({ "output": "monitor", "enabled": enabled }),
+        );
     }
 
     pub fn start_recording(&mut self, file_name: &str) {
@@ -417,6 +545,29 @@ impl Model {
             CommandOutput::Status(status) => self.status = Some(status),
             CommandOutput::SceneList(scenes) => self.scenes = Some(scenes),
             CommandOutput::MixerState(mixer) => self.mixer = Some(mixer),
+            // A reading asked for before a change that is still on its way
+            // would undo what the matrix shows; that change's answer
+            // carries the profiles anyway.
+            CommandOutput::OutputProfiles(profiles) => {
+                if !self.pending("set_output_profile") {
+                    self.profiles = Some(profiles);
+                }
+            }
+            CommandOutput::OutputProfileSet(set) => {
+                if !set.next_start.is_empty() {
+                    self.push(
+                        Level::Info,
+                        format!(
+                            "Output settings saved; {} apply at the next start",
+                            set.next_start.join(", ")
+                        ),
+                    );
+                }
+                for warning in set.warnings {
+                    self.push(Level::Warning, warning);
+                }
+                self.profiles = Some(set.profiles);
+            }
             CommandOutput::Health(health) => self.set_health(Some(*health)),
             CommandOutput::PreviewState(preview) => {
                 self.preview_enabled = preview.enabled;
@@ -500,6 +651,8 @@ impl Model {
         match name {
             "stop_recording" => self.recording = None,
             "stop_streaming" => self.streaming = None,
+            // Undo what the matrix showed before the answer.
+            "set_output_profile" => self.refresh(Refresh::Profiles),
             _ => {}
         }
         self.push(Level::Error, format!("{name}: {}", error.message));

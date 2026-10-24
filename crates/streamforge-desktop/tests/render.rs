@@ -14,10 +14,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use command_api::{Command, CommandHandler};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use engine::Engine;
+use serde_json::json;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
@@ -59,20 +61,83 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
 enum Situation {
     /// Fresh start: the built-in scene, nothing running.
     Idle,
-    /// A second scene with sources on program, the default tone in the
-    /// mixer, the preview on, a recording running and a source selected.
+    /// A second scene with sources on program, two channels, a submix and
+    /// a monitor mix in the mixer, the preview on, a recording running and
+    /// a source selected.
     Live,
     /// Live, with the dialog for adding a source open.
     Dialog,
+    /// Live, with the routing matrix instead of the console.
+    Routing,
+}
+
+/// An engine whose mixer has a second channel, a submix assigned to
+/// program and a separate monitor mix, so the console and the matrix show
+/// every zone, both taps and a double-routing warning.
+fn routed_engine(dir: PathBuf) -> Engine {
+    let mut engine = Engine::new().with_output_dir(dir);
+    let tone = |hz: f64| json!({"kind": "tone", "frequency_hz": hz, "level_dbfs": -18.0});
+    for (name, params) in [
+        (
+            "add_channel",
+            json!({"name": "Guest", "input": tone(330.0)}),
+        ),
+        ("add_bus", json!({"name": "Voice", "assign_db": -3.0})),
+        ("add_bus", json!({"name": "Headphones"})),
+        (
+            "set_send",
+            json!({"channel": "Guest", "bus": "Program", "enabled": false}),
+        ),
+        (
+            "set_send",
+            json!({"channel": "Guest", "bus": "Voice", "enabled": true}),
+        ),
+        (
+            "set_send",
+            json!({"channel": "Tone", "bus": "Voice", "enabled": true, "level_db": -6.0}),
+        ),
+        (
+            "set_send",
+            json!({"channel": "Guest", "bus": "Headphones", "enabled": true, "tap": "pre_fader"}),
+        ),
+        (
+            "set_send",
+            json!({"channel": "Tone", "bus": "Headphones", "enabled": true}),
+        ),
+        (
+            "set_output_profile",
+            json!({"output": "monitor", "mix_bus": "Headphones"}),
+        ),
+        (
+            "set_output_profile",
+            json!({"output": "recording", "tracks": ["Voice"]}),
+        ),
+    ] {
+        let command = Command::decode(name, Some(&params)).expect(name);
+        if let Err(error) = engine.handle(command) {
+            panic!("{name}: {error:?}");
+        }
+    }
+    engine
 }
 
 fn model(dir: &Path, situation: Situation) -> Model {
     let dir = dir.to_owned();
-    let worker =
-        EngineWorker::spawn(move || Engine::new().with_output_dir(dir), || {}).expect("worker");
+    let live = !matches!(situation, Situation::Idle);
+    let worker = EngineWorker::spawn(
+        move || {
+            if live {
+                routed_engine(dir)
+            } else {
+                Engine::new().with_output_dir(dir)
+            }
+        },
+        || {},
+    )
+    .expect("worker");
     let mut model = Model::new(worker);
     wait(&mut model, "the scene list", |m| m.scenes.is_some());
-    if let Situation::Live | Situation::Dialog = situation {
+    if live {
         model.create_scene("Interview");
         wait(&mut model, "the new scene", |m| {
             m.scenes.as_ref().is_some_and(|list| list.scenes.len() == 2)
@@ -147,6 +212,7 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
         // Open a source in the inspector (a drawer in narrow windows).
         Situation::Live => Some("lower third"),
         Situation::Dialog => Some("Add a source to this scene"),
+        Situation::Routing => Some("Routing"),
     };
     if let Some(label) = action {
         harness.get_by_label(label).click();
@@ -176,6 +242,7 @@ fn render_the_workspace() {
     ] {
         render(&out, &format!("idle-{label}"), Situation::Idle, size);
         render(&out, &format!("live-{label}"), Situation::Live, size);
+        render(&out, &format!("routing-{label}"), Situation::Routing, size);
     }
     render(&out, "dialog-1400x900", Situation::Dialog, [1400.0, 900.0]);
 }
@@ -337,7 +404,22 @@ fn specimen(ui: &mut egui::Ui) {
                     let mut off = false;
                     widgets::toggle(ui, &mut off, "mute");
                     ui.label(TextRole::Body.text("Mute"));
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::toggle(ui, &mut on, "disabled on");
+                        widgets::toggle(ui, &mut off, "disabled off");
+                    });
                 });
+                // A send cell's parts, the mix choice and the view switch.
+                ui.horizontal(|ui| {
+                    widgets::radio(ui, true, "takes Program");
+                    widgets::radio(ui, false, "takes Voice");
+                    ui.add_enabled_ui(false, |ui| widgets::radio(ui, true, "disabled"));
+                    widgets::chip(ui, "post", false, "after the fader");
+                    widgets::chip(ui, "pre", true, "before the fader");
+                    widgets::chip(ui, "T2", true, "track 2");
+                    ui.add_enabled_ui(false, |ui| widgets::chip(ui, "track", false, "full"));
+                });
+                widgets::tabs(ui, 0, &["Console", "Routing"]);
                 let mut text = "recording.mkv".to_owned();
                 ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
 

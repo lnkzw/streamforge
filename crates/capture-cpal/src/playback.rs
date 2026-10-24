@@ -39,7 +39,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use media_core::SampleReader;
 
-use crate::backend::{best_config, capture_error, device_name, host, is_named};
+use crate::backend::{best_config, capture_error, description, device_name, host, is_named};
 use crate::convert::PlaybackConverter;
 use crate::liveness::Liveness;
 
@@ -61,10 +61,7 @@ pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
     Ok(devices
         .map(|device| AudioOutput {
             name: device_name(&device),
-            description: device
-                .description()
-                .ok()
-                .map(|description| description.name().to_owned()),
+            description: description(&device),
             media_class: "Audio/Sink".to_owned(),
         })
         .collect())
@@ -144,10 +141,7 @@ fn output_label(device: &cpal::Device, request: &PlaybackRequest) -> String {
     match &request.output {
         Some(name) => format!("audio output `{name}`"),
         None => {
-            let name = device
-                .description()
-                .map(|description| description.name().to_owned())
-                .unwrap_or_else(|_| device_name(device));
+            let name = description(device).unwrap_or_else(|| device_name(device));
             format!("the default audio output (`{name}`)")
         }
     }

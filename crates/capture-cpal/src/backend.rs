@@ -10,6 +10,19 @@
 //!   pending buffer for the next callback; only if that fills are frames
 //!   dropped, counted as ring overrun;
 //! - statistics are try-locked too; frames left out of them are counted.
+//!
+//! An input named `<output>.monitor` captures what the output plays
+//! (desktop audio): cpal opens an input stream on the output device, which
+//! is WASAPI loopback on Windows and a process tap of all apps on macOS
+//! (14.6 or later, with the permission to record system audio). It records
+//! in the output's current format (on Windows, its mix format), converted
+//! like any input; so with more than two channels, only the first two.
+//! - WASAPI's loopback delivers nothing while nothing plays, so the input
+//!   would sit in warm-up and the mixer would count underruns. As OBS does,
+//!   the capture plays silence on the output for as long as it runs.
+//! - On macOS, cpal opens an output that is an input too (a duplex device,
+//!   e.g. many USB interfaces) as that input, so such outputs have no
+//!   monitor. WASAPI endpoints are never both.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -30,6 +43,7 @@ use media_core::{AudioRing, SampleReader};
 
 use crate::convert::Converter;
 use crate::liveness::Liveness;
+use crate::loopback;
 use crate::playback;
 
 /// Seconds of audio the ring holds (as on Linux).
@@ -64,11 +78,13 @@ impl CaptureBackend for CpalCapture {
     fn capabilities(&mut self) -> CaptureCapabilities {
         let host = host();
         let backend = backend_name(&host);
-        let inputs = host
+        let any_input = host
             .input_devices()
-            .map(|devices| devices.count())
-            .unwrap_or(0);
-        let audio = if inputs > 0 {
+            .is_ok_and(|mut devices| devices.next().is_some())
+            || host
+                .output_devices()
+                .is_ok_and(|mut devices| devices.any(|device| is_loopback_output(&device)));
+        let audio = if any_input {
             AudioCaptureCapability {
                 backend: Some(backend.clone()),
                 available: true,
@@ -78,7 +94,8 @@ impl CaptureBackend for CpalCapture {
         } else {
             AudioCaptureCapability::unavailable(
                 Some(&backend),
-                "no audio input device found; connect a microphone or enable an input device",
+                "no audio input found (no input device, and no output whose playback can be \
+                 captured); connect a microphone or enable a device",
             )
         };
         CaptureCapabilities {
@@ -92,20 +109,23 @@ impl CaptureBackend for CpalCapture {
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
         let host = host();
-        let devices = host
+        let inputs = host
             .input_devices()
-            .map_err(|err| capture_error(&err, "cannot list audio inputs"))?;
-        Ok(devices
+            .map_err(|err| capture_error(&err, "cannot list audio inputs"))?
             .map(|device| AudioInput {
                 name: device_name(&device),
-                description: device
-                    .description()
-                    .ok()
-                    .map(|description| description.name().to_owned()),
+                description: description(&device),
                 media_class: "Audio/Source".to_owned(),
                 loopback_of: None,
             })
-            .collect())
+            .collect();
+        let outputs = loopback_outputs(&host)?;
+        Ok(loopback::with_monitors(
+            inputs,
+            outputs
+                .iter()
+                .map(|device| (device_name(device), description(device))),
+        ))
     }
 
     fn probe_screen(
@@ -250,6 +270,14 @@ pub(crate) fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| device.to_string())
 }
 
+/// The device's description, for listings.
+pub(crate) fn description(device: &cpal::Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_owned())
+}
+
 /// Whether `wanted` selects `device`: its [`device_name`] or its
 /// description's name.
 pub(crate) fn is_named(device: &cpal::Device, wanted: &str) -> bool {
@@ -259,37 +287,106 @@ pub(crate) fn is_named(device: &cpal::Device, wanted: &str) -> bool {
             .is_ok_and(|description| description.name() == wanted)
 }
 
-fn find_device(host: &cpal::Host, input: Option<&str>) -> Result<cpal::Device, CaptureError> {
+/// Whether an output's playback can be captured: unless it is an input
+/// too (see the module docs).
+fn is_loopback_output(device: &cpal::Device) -> bool {
+    !device
+        .supported_input_configs()
+        .is_ok_and(|mut configs| configs.next().is_some())
+}
+
+/// The outputs whose playback can be captured.
+fn loopback_outputs(host: &cpal::Host) -> Result<Vec<cpal::Device>, CaptureError> {
+    Ok(host
+        .output_devices()
+        .map_err(|err| capture_error(&err, "cannot list audio outputs"))?
+        .filter(is_loopback_output)
+        .collect())
+}
+
+/// What a capture records: an input device, or what an output plays.
+struct Source {
+    device: cpal::Device,
+    loopback: bool,
+}
+
+/// The default input, or the one `input` names, in the order that keeps
+/// the listing's names unique (see [`loopback::with_monitors`]): an input's
+/// listed name, a monitor's listed name, an input's description. A monitor
+/// is selected by its listed name only, which is what the engine compares
+/// with the monitor's device to warn of feedback.
+fn find_source(host: &cpal::Host, input: Option<&str>) -> Result<Source, CaptureError> {
     let Some(wanted) = input else {
-        return host.default_input_device().ok_or_else(|| {
+        let device = host.default_input_device().ok_or_else(|| {
             CaptureError::new(
                 CaptureErrorKind::NotFound,
                 "there is no default audio input; name one from list_audio_inputs",
             )
+        })?;
+        return Ok(Source {
+            device,
+            loopback: false,
         });
     };
-    let devices: Vec<cpal::Device> = host
+    let devices = host
         .input_devices()
-        .map_err(|err| capture_error(&err, "cannot list audio inputs"))?
-        .collect();
-    match devices.iter().position(|device| is_named(device, wanted)) {
-        Some(index) => Ok(devices.into_iter().nth(index).expect("index from position")),
-        None => {
-            let available: Vec<String> = devices.iter().map(device_name).collect();
-            Err(CaptureError::new(
-                CaptureErrorKind::NotFound,
-                format!("no audio input named `{wanted}`"),
-            )
-            .with_detail("available", available))
+        .map_err(|err| capture_error(&err, "cannot list audio inputs"))?;
+    let mut inputs: Vec<cpal::Device> = Vec::new();
+    for device in devices {
+        if device_name(&device) == wanted {
+            return Ok(Source {
+                device,
+                loopback: false,
+            });
         }
+        inputs.push(device);
     }
+    let mut outputs = loopback_outputs(host)?;
+    if let Some(output) = loopback::monitored(wanted)
+        && let Some(index) = outputs
+            .iter()
+            .position(|device| device_name(device) == output)
+    {
+        return Ok(Source {
+            device: outputs.swap_remove(index),
+            loopback: true,
+        });
+    }
+    if let Some(index) = inputs.iter().position(|device| is_named(device, wanted)) {
+        return Ok(Source {
+            device: inputs.swap_remove(index),
+            loopback: false,
+        });
+    }
+    let available: Vec<String> = inputs
+        .iter()
+        .map(device_name)
+        .chain(
+            outputs
+                .iter()
+                .map(|device| loopback::monitor_name(&device_name(device))),
+        )
+        .collect();
+    Err(CaptureError::new(
+        CaptureErrorKind::NotFound,
+        format!("no audio input named `{wanted}`"),
+    )
+    .with_detail("available", available))
 }
 
 /// The device config to capture with: at the rate the device runs at now
 /// (its default config), preferring f32 and stereo at that rate. Asking
 /// for another rate would make CoreAudio switch the device's rate for every
 /// app, or fail while another app uses it; the converter resamples instead.
-fn choose_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+/// A loopback records in its output's current format as it is: WASAPI
+/// opens it without conversion, so only the mix format works there.
+fn choose_config(source: &Source) -> Result<cpal::SupportedStreamConfig, CaptureError> {
+    let device = &source.device;
+    if source.loopback {
+        return device
+            .default_output_config()
+            .map_err(|err| capture_error(&err, "the output has no usable format"));
+    }
     let default = device
         .default_input_config()
         .map_err(|err| capture_error(&err, "the input has no usable format"))?;
@@ -424,12 +521,29 @@ impl Drop for Sink {
     }
 }
 
+/// A stream's error callback. Errors are rare and not in the data path;
+/// it keeps the first few messages, each after `prefix`.
+fn on_error(
+    prefix: &'static str,
+    errors: &Arc<Mutex<Vec<String>>>,
+    liveness: &Arc<Liveness>,
+) -> impl FnMut(cpal::Error) + Send + 'static {
+    let (errors, liveness) = (Arc::clone(errors), Arc::clone(liveness));
+    move |err| {
+        let message = format!("{prefix}{err}");
+        liveness.error(&message);
+        let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
+        if errors.len() < 8 {
+            errors.push(message);
+        }
+    }
+}
+
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut callback: Callback,
-    errors: Arc<Mutex<Vec<String>>>,
-    liveness: Arc<Liveness>,
+    on_error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
@@ -438,18 +552,44 @@ where
     device.build_input_stream::<T, _, _>(
         *config,
         move |data: &[T], _info| callback.on_data(data),
-        // Rare and not in the data path; keep the first few messages.
-        move |err| {
-            let message = err.to_string();
-            liveness.error(&message);
-            let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
-            if errors.len() < 8 {
-                errors.push(message);
-            }
-        },
+        on_error,
         None,
     )
 }
+
+/// Silence played on a loopback's output while it is captured, on Windows
+/// (see the module docs); `None` elsewhere. WASAPI opens outputs with
+/// `AUTOCONVERTPCM`, so `f32` works in any mix format. Its errors count as
+/// the capture's: without it, the loopback may stall.
+fn keep_playing(
+    source: &Source,
+    config: &cpal::StreamConfig,
+    on_error: impl FnMut(cpal::Error) + Send + 'static,
+) -> Result<Option<cpal::Stream>, CaptureError> {
+    if !source.loopback || cfg!(not(target_os = "windows")) {
+        return Ok(None);
+    }
+    let stream = source
+        .device
+        .build_output_stream::<f32, _, _>(
+            *config,
+            |data: &mut [f32], _info| data.fill(0.0),
+            on_error,
+            None,
+        )
+        .map_err(|err| capture_error(&err, "cannot play silence on the output for its loopback"))?;
+    stream
+        .play()
+        .map_err(|err| capture_error(&err, "cannot play silence on the output for its loopback"))?;
+    Ok(Some(stream))
+}
+
+/// The context of an error opening a loopback.
+const LOOPBACK_OPEN: &str = if cfg!(target_os = "macos") {
+    "cannot capture what the output plays (this needs macOS 14.6 or later)"
+} else {
+    "cannot capture what the output plays"
+};
 
 fn run(
     request: &AudioStreamRequest,
@@ -463,8 +603,8 @@ fn run(
     let unobserved_frames = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(Mutex::new(Vec::new()));
     let setup = (|| {
-        let device = find_device(&host, request.input.as_deref())?;
-        let supported = choose_config(&device)?;
+        let source = find_source(&host, request.input.as_deref())?;
+        let supported = choose_config(&source)?;
         let format = supported.sample_format();
         let config = supported.config();
         // The statistics describe the converted stream.
@@ -488,28 +628,42 @@ fn run(
             start: Instant::now(),
             liveness: Arc::clone(liveness),
         };
-        let (errors, liveness) = (Arc::clone(&errors), Arc::clone(liveness));
+        // Started first, so the loopback has data from its first period.
+        let silence = keep_playing(
+            &source,
+            &config,
+            on_error("silence on the output: ", &errors, liveness),
+        )?;
+        let device = &source.device;
+        let on_error = on_error("", &errors, liveness);
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&device, &config, callback, errors, liveness),
-            SampleFormat::F64 => build::<f64>(&device, &config, callback, errors, liveness),
-            SampleFormat::I16 => build::<i16>(&device, &config, callback, errors, liveness),
-            SampleFormat::I32 => build::<i32>(&device, &config, callback, errors, liveness),
-            SampleFormat::U16 => build::<u16>(&device, &config, callback, errors, liveness),
-            SampleFormat::I8 => build::<i8>(&device, &config, callback, errors, liveness),
-            SampleFormat::U8 => build::<u8>(&device, &config, callback, errors, liveness),
+            SampleFormat::F32 => build::<f32>(device, &config, callback, on_error),
+            SampleFormat::F64 => build::<f64>(device, &config, callback, on_error),
+            SampleFormat::I16 => build::<i16>(device, &config, callback, on_error),
+            SampleFormat::I32 => build::<i32>(device, &config, callback, on_error),
+            SampleFormat::U16 => build::<u16>(device, &config, callback, on_error),
+            SampleFormat::I8 => build::<i8>(device, &config, callback, on_error),
+            SampleFormat::U8 => build::<u8>(device, &config, callback, on_error),
             other => {
                 return Err(CaptureError::unsupported(format!(
                     "sample format {other:?} is not supported"
                 )));
             }
         }
-        .map_err(|err| capture_error(&err, "cannot open the audio input"))?;
+        .map_err(|err| {
+            let context = if source.loopback {
+                LOOPBACK_OPEN
+            } else {
+                "cannot open the audio input"
+            };
+            capture_error(&err, context)
+        })?;
         stream
             .play()
             .map_err(|err| capture_error(&err, "cannot start the audio input"))?;
-        Ok((stream, format, config))
+        Ok((stream, silence, source.loopback, format, config))
     })();
-    let (stream, format, config) = match setup {
+    let (stream, silence, loopback, format, config) = match setup {
         Ok(setup) => {
             let _ = ready.send(Ok(()));
             setup
@@ -523,6 +677,7 @@ fn run(
     // Until `stop` (or the stream handle is dropped).
     let _ = stop.recv();
     drop(stream);
+    drop(silence);
     let mut stats = stats
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -561,9 +716,15 @@ fn run(
     }
     if stats.frames > 0 && stats.peak_dbfs.is_none() {
         warnings.push(
-            "the input delivered only digital silence; on macOS, allow microphone access \
-             (System Settings, Privacy & Security, Microphone) for the app that runs StreamForge"
-                .to_owned(),
+            if loopback {
+                "the loopback delivered only digital silence: nothing played on the output; on \
+                 macOS, also allow the app that runs StreamForge to record system audio (System \
+                 Settings, Privacy & Security, Screen & System Audio Recording)"
+            } else {
+                "the input delivered only digital silence; on macOS, allow microphone access \
+                 (System Settings, Privacy & Security, Microphone) for the app that runs StreamForge"
+            }
+            .to_owned(),
         );
     }
     Ok(AudioCaptureReport {

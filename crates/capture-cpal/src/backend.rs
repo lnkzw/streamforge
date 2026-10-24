@@ -15,7 +15,8 @@
 //! (desktop audio): cpal opens an input stream on the output device, which
 //! is WASAPI loopback on Windows and a process tap of all apps on macOS
 //! (14.6 or later, with the permission to record system audio). It records
-//! in the output's format, at its current rate.
+//! in the output's current format (on Windows, its mix format), converted
+//! like any input; so with more than two channels, only the first two.
 //! - WASAPI's loopback delivers nothing while nothing plays, so the input
 //!   would sit in warm-up and the mixer would count underruns. As OBS does,
 //!   the capture plays silence on the output for as long as it runs.
@@ -24,7 +25,7 @@
 //!   monitor. WASAPI endpoints are never both.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -43,7 +44,7 @@ use media_core::{AudioRing, SampleReader};
 use crate::convert::Converter;
 use crate::liveness::Liveness;
 use crate::loopback;
-use crate::playback::{self, START_TIMEOUT};
+use crate::playback;
 
 /// Seconds of audio the ring holds (as on Linux).
 const RING_SECONDS: usize = 1;
@@ -75,9 +76,15 @@ fn screen_unsupported() -> String {
 
 impl CaptureBackend for CpalCapture {
     fn capabilities(&mut self) -> CaptureCapabilities {
-        let backend = backend_name(&host());
-        let inputs = self.audio_inputs().map_or(0, |inputs| inputs.len());
-        let audio = if inputs > 0 {
+        let host = host();
+        let backend = backend_name(&host);
+        let any_input = host
+            .input_devices()
+            .is_ok_and(|mut devices| devices.next().is_some())
+            || host
+                .output_devices()
+                .is_ok_and(|mut devices| devices.any(|device| is_loopback_output(&device)));
+        let audio = if any_input {
             AudioCaptureCapability {
                 backend: Some(backend.clone()),
                 available: true,
@@ -185,7 +192,7 @@ impl CaptureBackend for CpalCapture {
             .map_err(|err| {
                 CaptureError::backend(format!("cannot start the capture thread: {err}"))
             })?;
-        match ready_rx.recv_timeout(START_TIMEOUT) {
+        match ready_rx.recv() {
             Ok(Ok(())) => Ok(Box::new(CpalStream {
                 ring,
                 liveness,
@@ -196,17 +203,11 @@ impl CaptureBackend for CpalCapture {
                 let _ = thread.join();
                 Err(error)
             }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(_) => {
                 Err(thread.join().ok().and_then(Result::err).unwrap_or_else(|| {
                     CaptureError::backend("the capture thread ended during setup")
                 }))
             }
-            // As for playback: the thread finishes on its own and, with the
-            // stop channel gone, drops the stream as soon as it has one.
-            Err(RecvTimeoutError::Timeout) => Err(CaptureError::timeout(format!(
-                "the audio input did not open within {} ms",
-                START_TIMEOUT.as_millis()
-            ))),
         }
     }
 
@@ -286,17 +287,20 @@ pub(crate) fn is_named(device: &cpal::Device, wanted: &str) -> bool {
             .is_ok_and(|description| description.name() == wanted)
 }
 
-/// The outputs whose playback can be captured: all but those that are
-/// inputs too (see the module docs).
+/// Whether an output's playback can be captured: unless it is an input
+/// too (see the module docs).
+fn is_loopback_output(device: &cpal::Device) -> bool {
+    !device
+        .supported_input_configs()
+        .is_ok_and(|mut configs| configs.next().is_some())
+}
+
+/// The outputs whose playback can be captured.
 fn loopback_outputs(host: &cpal::Host) -> Result<Vec<cpal::Device>, CaptureError> {
     Ok(host
         .output_devices()
         .map_err(|err| capture_error(&err, "cannot list audio outputs"))?
-        .filter(|device| {
-            !device
-                .supported_input_configs()
-                .is_ok_and(|mut configs| configs.next().is_some())
-        })
+        .filter(is_loopback_output)
         .collect())
 }
 
@@ -306,8 +310,11 @@ struct Source {
     loopback: bool,
 }
 
-/// The named input, else the output a `<output>.monitor` name selects, or
-/// the default input.
+/// The default input, or the one `input` names, in the order that keeps
+/// the listing's names unique (see [`loopback::with_monitors`]): an input's
+/// listed name, a monitor's listed name, an input's description. A monitor
+/// is selected by its listed name only, which is what the engine compares
+/// with the monitor's device to warn of feedback.
 fn find_source(host: &cpal::Host, input: Option<&str>) -> Result<Source, CaptureError> {
     let Some(wanted) = input else {
         let device = host.default_input_device().ok_or_else(|| {
@@ -324,9 +331,9 @@ fn find_source(host: &cpal::Host, input: Option<&str>) -> Result<Source, Capture
     let devices = host
         .input_devices()
         .map_err(|err| capture_error(&err, "cannot list audio inputs"))?;
-    let mut inputs = Vec::new();
+    let mut inputs: Vec<cpal::Device> = Vec::new();
     for device in devices {
-        if is_named(&device, wanted) {
+        if device_name(&device) == wanted {
             return Ok(Source {
                 device,
                 loopback: false,
@@ -336,11 +343,19 @@ fn find_source(host: &cpal::Host, input: Option<&str>) -> Result<Source, Capture
     }
     let mut outputs = loopback_outputs(host)?;
     if let Some(output) = loopback::monitored(wanted)
-        && let Some(index) = outputs.iter().position(|device| is_named(device, output))
+        && let Some(index) = outputs
+            .iter()
+            .position(|device| device_name(device) == output)
     {
         return Ok(Source {
             device: outputs.swap_remove(index),
             loopback: true,
+        });
+    }
+    if let Some(index) = inputs.iter().position(|device| is_named(device, wanted)) {
+        return Ok(Source {
+            device: inputs.swap_remove(index),
+            loopback: false,
         });
     }
     let available: Vec<String> = inputs
@@ -363,17 +378,14 @@ fn find_source(host: &cpal::Host, input: Option<&str>) -> Result<Source, Capture
 /// (its default config), preferring f32 and stereo at that rate. Asking
 /// for another rate would make CoreAudio switch the device's rate for every
 /// app, or fail while another app uses it; the converter resamples instead.
-/// A loopback records in its output's format.
+/// A loopback records in its output's current format as it is: WASAPI
+/// opens it without conversion, so only the mix format works there.
 fn choose_config(source: &Source) -> Result<cpal::SupportedStreamConfig, CaptureError> {
     let device = &source.device;
     if source.loopback {
-        let default = device
+        return device
             .default_output_config()
-            .map_err(|err| capture_error(&err, "the output has no usable format"))?;
-        let ranges = device
-            .supported_output_configs()
-            .map_err(|err| capture_error(&err, "cannot read the output formats"))?;
-        return Ok(best_config(ranges, default.sample_rate()).unwrap_or(default));
+            .map_err(|err| capture_error(&err, "the output has no usable format"));
     }
     let default = device
         .default_input_config()

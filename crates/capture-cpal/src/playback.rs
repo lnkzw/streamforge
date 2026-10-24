@@ -51,8 +51,8 @@ const SCRATCH_FRAMES: usize = 16_384;
 /// How often the playback thread checks whether the stream has ended.
 const POLL: Duration = Duration::from_millis(100);
 /// How long an output may take to open and pull for the first time (as on
-/// Linux), and an input to open.
-pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(3);
+/// Linux).
+const START_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
     let devices = host()
@@ -141,10 +141,7 @@ fn output_label(device: &cpal::Device, request: &PlaybackRequest) -> String {
     match &request.output {
         Some(name) => format!("audio output `{name}`"),
         None => {
-            let name = device
-                .description()
-                .map(|description| description.name().to_owned())
-                .unwrap_or_else(|_| device_name(device));
+            let name = description(device).unwrap_or_else(|| device_name(device));
             format!("the default audio output (`{name}`)")
         }
     }

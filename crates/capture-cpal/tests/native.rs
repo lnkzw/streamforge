@@ -156,6 +156,12 @@ fn the_default_outputs_monitor_captures_what_it_plays() {
     let id = device.id().expect("its id").id().to_owned();
     let mut capture = CpalCapture::new();
     let monitor = format!("{id}.monitor");
+    let inputs = capture.audio_inputs().expect("list inputs");
+    if !inputs.iter().any(|input| input.name == monitor) {
+        // On macOS, an output that is an input too has no monitor.
+        println!("SKIPPED: the default output `{id}` has no monitor: {inputs:#?}");
+        return;
+    }
     let stream = capture
         .start_audio_stream(&AudioStreamRequest {
             input: Some(monitor.clone()),

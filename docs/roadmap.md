@@ -244,7 +244,7 @@ No release pressure: the audio model is designed and built before the protocol i
 - [ ] A monitor output to an audio device, separate from the program outputs.
   - [x] Step 5a: the monitor in the engine and the protocol (profile with bus, on/off and device; `set_monitor_device`, `list_audio_outputs`; lock-free feed with drift resampling; health and reports; feedback warning), tested with a fake device.
   - [x] Step 5b: PipeWire playback on Linux (a real-time output stream reading the lock-free feed), and each sink's monitor as an input with `loopback_of`, so desktop audio can be captured and the feedback warning works there. Tested natively: a live test plays into a null sink it creates, and the engine was checked end to end (`docs/capture-linux.md`).
-  - [ ] Step 5c: playback on Windows and macOS through `cpal`.
+  - [ ] Step 5c: playback on Windows and macOS through `cpal` (WASAPI converts on Windows; macOS keeps the device's rate and resamples in the callback; the default output is pinned when the monitor starts). Implemented and tested on CI; waiting for the tone test on real Windows and Mac hardware.
 - [x] Processing slots in the graph for later effects (no effects yet): 4 per channel and bus, before mute and both taps on a channel, before mute and fader on a bus (step 1).
 
 Acceptance:

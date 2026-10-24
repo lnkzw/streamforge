@@ -1,13 +1,39 @@
 //! The cpal backend on the machine it runs on (Windows and macOS CI runners
-//! included). Runners usually have no microphone, so each test checks the
-//! outcome for both cases: with an input, audio must arrive; without one,
-//! the backend must say so with a structured error.
+//! included). Runners usually have no microphone or speakers, so each test
+//! checks the outcome for both cases: with a device, audio must arrive (or
+//! be pulled); without one, the backend must say so with a structured
+//! error.
 #![cfg(any(target_os = "windows", target_os = "macos"))]
 
-use std::time::Duration;
+use std::f32::consts::TAU;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use capture_api::{AudioCaptureRequest, AudioStreamRequest, CaptureBackend, CaptureErrorKind};
+use capture_api::{
+    AudioCaptureRequest, AudioStreamRequest, CaptureBackend, CaptureErrorKind, CaptureState,
+    PlaybackRequest,
+};
 use capture_cpal::CpalCapture;
+use media_core::sample_ring;
+
+fn playback(output: Option<&str>, channels: u32) -> PlaybackRequest {
+    PlaybackRequest {
+        output: output.map(str::to_owned),
+        rate: 48_000,
+        channels,
+    }
+}
+
+fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if done() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    done()
+}
 
 #[test]
 fn capabilities_report_the_platform_and_what_is_missing() {
@@ -98,4 +124,119 @@ fn unknown_inputs_and_unsupported_layouts_are_errors() {
         .err()
         .expect("must fail");
     assert_eq!(no_rate.kind, CaptureErrorKind::InvalidRequest);
+}
+
+#[test]
+fn the_default_output_plays_or_reports_that_there_is_none() {
+    let mut capture = CpalCapture::new();
+    let outputs = capture.audio_outputs().expect("list outputs");
+    println!("outputs: {outputs:#?}");
+    assert!(
+        outputs
+            .iter()
+            .all(|output| !output.name.is_empty() && output.media_class == "Audio/Sink"),
+        "{outputs:#?}"
+    );
+    // Nothing is written, so the device plays silence.
+    let (writer, reader) = sample_ring(2, 24_000);
+    match capture.start_playback(&playback(None, 2), reader) {
+        Ok(playback) => {
+            assert_eq!(playback.state(), CaptureState::Running);
+            assert!(
+                wait_until(Duration::from_secs(3), || writer.stats().max_read_frames
+                    > 0),
+                "the device never pulled: {:?}",
+                writer.stats()
+            );
+            println!("feed: {:?}", writer.stats());
+            playback.stop().expect("stop");
+            // The stopped device let go of its feed.
+            assert!(writer.is_closed());
+        }
+        Err(error) => {
+            println!("{error:?}");
+            assert!(
+                matches!(
+                    error.kind,
+                    CaptureErrorKind::NotFound
+                        | CaptureErrorKind::Unavailable
+                        | CaptureErrorKind::PermissionDenied
+                ),
+                "{error:?}"
+            );
+            assert!(
+                outputs.is_empty()
+                    || error.kind != CaptureErrorKind::NotFound
+                    || error.message.contains("no default audio output"),
+                "{error:?}"
+            );
+            assert!(writer.is_closed());
+        }
+    }
+}
+
+#[test]
+fn unknown_outputs_and_unplayable_requests_are_errors() {
+    let mut capture = CpalCapture::new();
+    let (writer, reader) = sample_ring(2, 64);
+    let missing = capture
+        .start_playback(&playback(Some("no-such-output-device"), 2), reader)
+        .err()
+        .expect("must fail");
+    assert_eq!(missing.kind, CaptureErrorKind::NotFound, "{missing:?}");
+    let details = missing.details.expect("details");
+    assert_eq!(details["output"], "no-such-output-device");
+    assert!(details["available"].is_array());
+    // A refused feed is closed.
+    assert!(writer.is_closed());
+
+    let (_writer, reader) = sample_ring(2, 64);
+    let surround = capture
+        .start_playback(&playback(None, 6), reader)
+        .err()
+        .expect("must fail");
+    assert_eq!(surround.kind, CaptureErrorKind::Unsupported);
+    let (_writer, reader) = sample_ring(2, 64);
+    let mismatch = capture
+        .start_playback(&playback(None, 1), reader)
+        .err()
+        .expect("must fail");
+    assert_eq!(mismatch.kind, CaptureErrorKind::InvalidRequest);
+}
+
+#[test]
+#[ignore = "plays a quiet tone (-30 dBFS, 440 Hz) on the default output for 2 s"]
+fn a_tone_plays_on_the_default_output_without_gaps() {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let device = cpal::default_host().default_output_device();
+    let config = device.as_ref().map(DeviceTrait::default_output_config);
+    println!("default output config: {config:?}");
+
+    let (mut writer, reader) = sample_ring(2, 24_000);
+    let playback = CpalCapture::new()
+        .start_playback(&playback(None, 2), reader)
+        .expect("play on the default output");
+    // As the engine's feed does: keep about 100 ms queued, in 10 ms blocks.
+    let mut phase = 0.0_f32;
+    let mut block = vec![0.0; 480 * 2];
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        while writer.fill_frames() < 4_800 {
+            for frame in block.as_chunks_mut::<2>().0 {
+                frame.fill(0.0316 * (phase * TAU).sin());
+                phase = (phase + 440.0 / 48_000.0).fract();
+            }
+            writer.write(&block);
+        }
+        assert_eq!(playback.state(), CaptureState::Running);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let stats = writer.stats();
+    println!("feed after 2 s: {stats:?}");
+    playback.stop().expect("stop");
+    assert!(writer.is_closed());
+    // About 2 s pulled (less the queue and the start), without a gap.
+    assert!(stats.read_frames >= 80_000, "{stats:?}");
+    assert_eq!(stats.underrun_frames, 0, "{stats:?}");
+    assert_eq!(stats.overrun_frames, 0, "{stats:?}");
 }

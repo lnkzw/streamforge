@@ -1,5 +1,6 @@
-//! Whether a cpal stream still delivers, for `AudioStream::state`. Kept
-//! apart from the backend so its tests run on every OS.
+//! Whether a cpal stream still delivers (capture) or pulls (playback), for
+//! `AudioStream::state` and `PlaybackStream::state`. Kept apart from the
+//! backend so its tests run on every OS.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -46,7 +47,8 @@ impl Liveness {
             .saturating_add(1)
     }
 
-    /// From the data callback: no lock, no allocation.
+    /// From the data callback (with data, or pulling it): no lock, no
+    /// allocation.
     pub(crate) fn data(&self) {
         self.last_data.store(self.now(), Ordering::Relaxed);
     }

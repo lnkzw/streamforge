@@ -1,4 +1,5 @@
-//! The cpal capture backend (Windows, macOS).
+//! The cpal capture backend (Windows, macOS); playback for the monitor is
+//! in `playback`.
 //!
 //! Each audio stream owns a thread that builds the cpal stream (not `Send`
 //! on every host), plays it and waits for the stop signal. The cpal
@@ -18,16 +19,18 @@ use std::time::Instant;
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
-    AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureBackend, CaptureCapabilities,
-    CaptureError, CaptureErrorKind, CaptureState, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, VideoCaptureReport, VideoStream,
+    AudioOutput, AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureBackend,
+    CaptureCapabilities, CaptureError, CaptureErrorKind, CaptureState, PlaybackRequest,
+    PlaybackStream, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
+    VideoCaptureReport, VideoStream,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
-use media_core::AudioRing;
+use media_core::{AudioRing, SampleReader};
 
 use crate::convert::Converter;
 use crate::liveness::Liveness;
+use crate::playback;
 
 /// Seconds of audio the ring holds (as on Linux).
 const RING_SECONDS: usize = 1;
@@ -42,7 +45,7 @@ impl CpalCapture {
     }
 }
 
-fn host() -> cpal::Host {
+pub(crate) fn host() -> cpal::Host {
     cpal::default_host()
 }
 
@@ -187,6 +190,18 @@ impl CaptureBackend for CpalCapture {
             }
         }
     }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        playback::outputs()
+    }
+
+    fn start_playback(
+        &mut self,
+        request: &PlaybackRequest,
+        feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        playback::start(request, feed)
+    }
 }
 
 struct CpalStream {
@@ -227,12 +242,21 @@ impl Drop for CpalStream {
 }
 
 /// Stable selection name: the host's device id, else the device name.
-fn device_name(device: &cpal::Device) -> String {
+pub(crate) fn device_name(device: &cpal::Device) -> String {
     device
         .id()
         .map(|id| id.id().to_owned())
         .or_else(|_| device.description().map(|d| d.name().to_owned()))
         .unwrap_or_else(|_| device.to_string())
+}
+
+/// Whether `wanted` selects `device`: its [`device_name`] or its
+/// description's name.
+pub(crate) fn is_named(device: &cpal::Device, wanted: &str) -> bool {
+    device_name(device) == wanted
+        || device
+            .description()
+            .is_ok_and(|description| description.name() == wanted)
 }
 
 fn find_device(host: &cpal::Host, input: Option<&str>) -> Result<cpal::Device, CaptureError> {
@@ -248,13 +272,7 @@ fn find_device(host: &cpal::Host, input: Option<&str>) -> Result<cpal::Device, C
         .input_devices()
         .map_err(|err| capture_error(&err, "cannot list audio inputs"))?
         .collect();
-    let matches = |device: &cpal::Device| {
-        device_name(device) == wanted
-            || device
-                .description()
-                .is_ok_and(|description| description.name() == wanted)
-    };
-    match devices.iter().position(matches) {
+    match devices.iter().position(|device| is_named(device, wanted)) {
         Some(index) => Ok(devices.into_iter().nth(index).expect("index from position")),
         None => {
             let available: Vec<String> = devices.iter().map(device_name).collect();
@@ -552,7 +570,7 @@ fn run(
     })
 }
 
-fn capture_error(error: &cpal::Error, context: &str) -> CaptureError {
+pub(crate) fn capture_error(error: &cpal::Error, context: &str) -> CaptureError {
     use cpal::ErrorKind;
     let kind = match error.kind() {
         ErrorKind::PermissionDenied => CaptureErrorKind::PermissionDenied,

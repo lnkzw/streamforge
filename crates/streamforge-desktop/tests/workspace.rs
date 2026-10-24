@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
@@ -94,6 +94,15 @@ fn settle(harness: &mut Harness<'static, DesktopApp>, frames: usize) {
     }
 }
 
+/// Whether a button with `label` is shown and can be clicked. A transport
+/// button reads "Stop recording" while its start still waits for the
+/// engine, but cannot be clicked until the start is answered.
+fn clickable(harness: &Harness<'static, DesktopApp>, label: &str) -> bool {
+    harness
+        .query_by_label(label)
+        .is_some_and(|node| !node.accesskit_node().is_disabled())
+}
+
 /// Step until `done` holds for the UI (bounded): the engine answers on
 /// its own thread. A few more frames follow, as a person needs: a dialog
 /// is measured in its first frame and placed in the next.
@@ -164,7 +173,7 @@ fn stopping_a_recording_asks_first() {
     let mut harness = harness(model(&dir));
     harness.get_by_label("Start recording").click();
     step_until(&mut harness, "the recording", |h| {
-        h.query_by_label("Stop recording").is_some()
+        clickable(h, "Stop recording")
     });
 
     // The transport asks; cancelling keeps the recording.
@@ -193,7 +202,7 @@ fn stopping_a_recording_asks_first() {
         .expect("the dialog's action")
         .click();
     step_until(&mut harness, "the recording to stop", |h| {
-        h.query_by_label("Start recording").is_some()
+        clickable(h, "Start recording")
     });
     let files: Vec<_> = std::fs::read_dir(&dir.0)
         .expect("output dir")

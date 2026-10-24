@@ -11,25 +11,27 @@ use crate::ui::theme::{TextRole, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow};
 use crate::workspace::selected_scene;
 
-use super::right_to_left;
+use super::{right_to_left, scene};
 
 impl DesktopApp {
     pub(crate) fn scenes_dock(&mut self, ui: &mut egui::Ui) {
-        let Some(scenes) = self.model.scenes.clone() else {
+        let Some(scenes) = &self.model.scenes else {
             widgets::section_header(ui, "Scenes", None);
             ui.spinner();
             return;
         };
         let actions = widgets::section_header(ui, "Scenes", Some(scenes.scenes.len()));
-        right_to_left(ui, actions, |ui| {
-            if widgets::icon_button(ui, Icon::Plus, "New scene").clicked() {
-                self.new_scene.get_or_insert_with(String::new);
-            }
+        let add = right_to_left(ui, actions, |ui| {
+            widgets::icon_button(ui, Icon::Plus, "New scene").clicked()
         });
+        if add {
+            self.new_scene.get_or_insert_with(String::new);
+        }
 
         let mut clicked = None;
         let mut take = None;
         let mut delete = None;
+        let mut create = None;
         // The list takes what the actions under it leave.
         let footer = size::CONTROL + size::SPACE_8 + 2.0 * ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
@@ -37,7 +39,7 @@ impl DesktopApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let shown = selected_scene(self.selected_scene.as_deref(), None, &scenes);
+                let shown = selected_scene(self.selected_scene.as_deref(), None, scenes);
                 for scene in &scenes.scenes {
                     let meta = match scene.sources.len() {
                         1 => "1 source".to_owned(),
@@ -72,23 +74,14 @@ impl DesktopApp {
                         }
                     });
                 }
-                self.new_scene_field(ui);
+                create = new_scene_field(ui, &mut self.new_scene);
             });
 
-        let selected = selected_scene(self.selected_scene.as_deref(), clicked.as_deref(), &scenes);
-        if clicked.is_some() && self.selected_scene.as_deref() != Some(&selected) {
-            // The inspector belongs to the scene that was selected before.
-            self.select_source(None);
-        }
-        self.selected_scene = Some(selected.clone());
-
+        let selected = selected_scene(self.selected_scene.as_deref(), clicked.as_deref(), scenes);
         // Actions on the selected scene. They send the listed id with the
         // name: if the scene was replaced meanwhile, the engine refuses
         // instead of acting on the new one.
-        let name = scenes
-            .scenes
-            .iter()
-            .find(|scene| scene.id == selected)
+        let name = scene(scenes, &selected)
             .map(|scene| scene.name.clone())
             .unwrap_or_default();
         let on_air = selected == scenes.active_id;
@@ -111,6 +104,14 @@ impl DesktopApp {
             });
         });
 
+        if clicked.is_some() && self.selected_scene.as_deref() != Some(&selected) {
+            // The inspector belongs to the scene that was selected before.
+            self.select_source(None);
+        }
+        self.selected_scene = Some(selected);
+        if let Some(name) = create {
+            self.model.create_scene(&name);
+        }
         if let Some((id, name)) = take {
             self.model.activate_scene(&id, &name);
         }
@@ -118,30 +119,28 @@ impl DesktopApp {
             self.dialog = Some(Dialog::Confirm(Confirm::DeleteScene { id, name }));
         }
     }
+}
 
-    /// The field for a new scene's name: Enter creates it, Escape or
-    /// leaving it empty cancels.
-    fn new_scene_field(&mut self, ui: &mut egui::Ui) {
-        let Some(name) = &mut self.new_scene else {
-            return;
-        };
-        ui.add_space(size::SPACE_4);
-        let field = ui.add(
-            egui::TextEdit::singleline(name)
-                .hint_text("Scene name, then Enter")
-                .desired_width(f32::INFINITY),
-        );
-        if !field.has_focus() && !field.lost_focus() && name.is_empty() {
-            field.request_focus();
-        }
-        if field.lost_focus() {
-            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let name = self.new_scene.take().unwrap_or_default();
-            let name = name.trim();
-            if enter && !name.is_empty() {
-                self.model.create_scene(name);
-            }
-        }
-        ui.label(TextRole::Meta.text("Enter creates the scene, Esc cancels."));
+/// The field for a new scene's name. Enter, or leaving the field with a
+/// name in it, creates the scene; Escape or leaving it empty cancels.
+/// Returns the name to create.
+fn new_scene_field(ui: &mut egui::Ui, new_scene: &mut Option<String>) -> Option<String> {
+    let name = new_scene.as_mut()?;
+    ui.add_space(size::SPACE_4);
+    let field = ui.add(
+        egui::TextEdit::singleline(name)
+            .hint_text("Scene name, then Enter")
+            .desired_width(f32::INFINITY),
+    );
+    ui.label(TextRole::Meta.text("Enter creates the scene, Esc cancels."));
+    if !field.has_focus() && !field.lost_focus() && name.is_empty() {
+        field.request_focus();
     }
+    if !field.lost_focus() {
+        return None;
+    }
+    let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    let name = new_scene.take().unwrap_or_default();
+    let name = name.trim();
+    (!escape && !name.is_empty()).then(|| name.to_owned())
 }

@@ -10,7 +10,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, METER_FLOOR_DB};
 use crate::workspace::Ballistics;
 
-use super::{committed, right_to_left};
+use super::{commit, right_to_left};
 
 /// The gain range of the faders, in dB.
 const GAIN_RANGE: std::ops::RangeInclusive<f32> = METER_FLOOR_DB..=12.0;
@@ -144,9 +144,7 @@ fn strip(
                     meter.reset_clip();
                 }
                 let fader = widgets::fader(ui, height, &mut gain, GAIN_RANGE, name);
-                if committed(&fader) {
-                    change.gain = Some(gain);
-                }
+                change.gain = commit(ui, &fader, gain);
             });
             match muted {
                 Some(muted) => {

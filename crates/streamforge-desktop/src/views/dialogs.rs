@@ -10,6 +10,8 @@ use crate::model::{Model, SourceForm, SourceType};
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 
+use super::coordinate_range;
+
 const DIALOG_WIDTH: f32 = 420.0;
 
 /// What the operator did in a dialog this frame.
@@ -241,9 +243,11 @@ fn add_source(
     });
     if let Some(rect) = &mut form.rect {
         ui.horizontal(|ui| {
-            for (label, value) in ["X", "Y", "W", "H"].iter().zip(rect.iter_mut()) {
+            for (index, (label, value)) in
+                ["X", "Y", "W", "H"].iter().zip(rect.iter_mut()).enumerate()
+            {
                 ui.label(TextRole::Label.text(*label));
-                ui.add(egui::DragValue::new(value).range(-8192.0..=8192.0));
+                ui.add(egui::DragValue::new(value).range(coordinate_range(index >= 2)));
             }
         });
     }

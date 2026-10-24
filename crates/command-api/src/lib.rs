@@ -43,9 +43,9 @@ pub use registry::{
     NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, registry,
 };
 pub use scenes::{
-    AddSourceRequest, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, PreviewState,
-    Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind,
-    SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
+    AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
+    PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec,
+    SourceKind, SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not

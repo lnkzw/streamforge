@@ -417,11 +417,15 @@ impl Widget for TransportButton {
             self.state,
             TransportState::Running(_) | TransportState::Starting
         );
-        let action = match (self.transport, active) {
-            (Transport::Record, true) => "Stop recording",
-            (Transport::Record, false) => "Start recording",
-            (Transport::Live, true) => "End the stream",
-            (Transport::Live, false) => "Go live",
+        // A failed output is finished first; the next click starts anew.
+        let failed = self.state == TransportState::Failed;
+        let action = match (self.transport, active, failed) {
+            (Transport::Record, _, true) => "Finish the failed recording",
+            (Transport::Live, _, true) => "End the failed stream",
+            (Transport::Record, true, _) => "Stop recording",
+            (Transport::Record, false, _) => "Start recording",
+            (Transport::Live, true, _) => "End the stream",
+            (Transport::Live, false, _) => "Go live",
         };
         response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, self.enabled, action));
         if !ui.is_rect_visible(rect) {
@@ -737,7 +741,9 @@ pub fn fader(
         let on_thumb = offset.abs() <= 6.0;
         ui.data_mut(|data| data.insert_temp(grab_id, if on_thumb { offset } else { 0.0 }));
     }
-    if response.dragged()
+    // Also on the release frame: a caller that rebuilds the value from its
+    // model each frame commits there, and must get the dragged value.
+    if (response.dragged() || response.drag_stopped())
         && let Some(pointer) = response.interact_pointer_pos()
     {
         let offset: f32 = ui.data(|data| data.get_temp(grab_id)).unwrap_or(0.0);

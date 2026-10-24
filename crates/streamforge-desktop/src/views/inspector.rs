@@ -11,10 +11,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 
-use super::{committed, kind_label, right_to_left, scene, source};
-
-/// Largest position or size accepted in the fields, in canvas pixels.
-const EXTENT: f32 = 8192.0;
+use super::{commit, coordinate_range, kind_label, right_to_left, scene, source};
 
 impl DesktopApp {
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
@@ -23,11 +20,17 @@ impl DesktopApp {
     }
 
     /// The inspector over the right edge of the program area, with a close
-    /// button; Escape closes it too.
-    pub(crate) fn inspector_drawer(&mut self, ctx: &egui::Context, area: egui::Rect) {
+    /// button; Escape closes it too while nothing else takes it
+    /// (`escape_free`).
+    pub(crate) fn inspector_drawer(
+        &mut self,
+        ctx: &egui::Context,
+        area: egui::Rect,
+        escape_free: bool,
+    ) {
         let width = 300.0_f32.min(area.width());
         let rect = egui::Rect::from_min_max(egui::pos2(area.right() - width, area.top()), area.max);
-        if self.dialog.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if escape_free && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.drawer_open = false;
             return;
         }
@@ -69,10 +72,7 @@ impl DesktopApp {
             widgets::empty_state(ui, Icon::Layers, "Select a source to edit it");
             return;
         };
-        let (canvas_width, canvas_height) =
-            self.model.scenes.as_ref().map_or((1920, 1080), |scenes| {
-                (scenes.canvas_width, scenes.canvas_height)
-            });
+        let (canvas_width, canvas_height) = self.canvas();
 
         let (icon, kind) = kind_label(&source.kind);
         ui.horizontal(|ui| {
@@ -99,20 +99,21 @@ impl DesktopApp {
                 for (row, labels) in [["X", "Y"], ["W", "H"]].iter().enumerate() {
                     for (column, label) in labels.iter().enumerate() {
                         let index = row * 2 + column;
-                        let range = if row == 0 {
-                            -EXTENT..=EXTENT
-                        } else {
-                            1.0..=EXTENT
-                        };
                         ui.label(TextRole::Label.text(*label));
                         let field = ui.add(
                             egui::DragValue::new(&mut rect[index])
-                                .range(range)
+                                .range(coordinate_range(row == 1))
+                                // A value set elsewhere stays as it is
+                                // until the operator edits it.
+                                .clamp_existing_to_range(false)
                                 .speed(1.0)
                                 .max_decimals(1)
                                 .update_while_editing(false),
                         );
-                        changed |= committed(&field);
+                        if let Some(value) = commit(ui, &field, rect[index]) {
+                            rect[index] = value;
+                            changed = true;
+                        }
                     }
                     ui.end_row();
                 }
@@ -137,7 +138,7 @@ impl DesktopApp {
                 .suffix(" %")
                 .fixed_decimals(0),
         );
-        if committed(&slider) {
+        if let Some(percent) = commit(ui, &slider, percent) {
             self.model
                 .update_source(&source.id, None, Some((percent / 100.0).clamp(0.0, 1.0)));
         }

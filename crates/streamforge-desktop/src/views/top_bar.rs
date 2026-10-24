@@ -2,6 +2,7 @@
 //! running timers) and the health summary, which opens the details and the
 //! activity log.
 
+use command_api::StreamState;
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog, HEALTH_STALE};
@@ -57,41 +58,57 @@ impl DesktopApp {
     }
 
     pub(crate) fn record_transport(&self) -> TransportState {
-        let model = &self.model;
-        let health = model
-            .health
-            .as_ref()
-            .and_then(|health| health.recording.as_ref())
-            .map(|output| (output, model.health_age().unwrap_or_default()));
-        let failed = model
-            .status
-            .as_ref()
-            .is_some_and(|status| status.recording_failed);
-        transport_state(
-            model.recording.is_some(),
-            model.pending("start_recording"),
-            failed,
-            health,
+        let status = self.model.status.as_ref();
+        self.transport(
+            Transport::Record,
+            self.model.recording.is_some(),
+            status.is_some_and(|status| status.recording_failed),
         )
     }
 
     pub(crate) fn live_transport(&self) -> TransportState {
-        let model = &self.model;
-        let health = model
-            .health
-            .as_ref()
-            .and_then(|health| health.streaming.as_ref())
-            .map(|output| (output, model.health_age().unwrap_or_default()));
-        let failed = model
-            .status
-            .as_ref()
-            .is_some_and(|status| status.streaming_state == Some(command_api::StreamState::Failed));
-        transport_state(
-            model.streaming.is_some(),
-            model.pending("start_streaming"),
-            failed,
-            health,
+        let status = self.model.status.as_ref();
+        self.transport(
+            Transport::Live,
+            self.model.streaming.is_some(),
+            status.is_some_and(|status| status.streaming_state == Some(StreamState::Failed)),
         )
+    }
+
+    /// An output's transport state from whether it is open, its start
+    /// command, the status's failure flag and its health reading.
+    fn transport(&self, output: Transport, open: bool, failed: bool) -> TransportState {
+        let model = &self.model;
+        let (start, health) = match output {
+            Transport::Record => (
+                "start_recording",
+                model.health.as_ref().and_then(|h| h.recording.as_ref()),
+            ),
+            Transport::Live => (
+                "start_streaming",
+                model.health.as_ref().and_then(|h| h.streaming.as_ref()),
+            ),
+        };
+        let age = model.health_age().unwrap_or_default();
+        transport_state(
+            open,
+            model.pending(start),
+            failed,
+            health.map(|output| (output, age)),
+        )
+    }
+
+    /// On air: the output is open and has not failed. A start still
+    /// waiting for the engine is not, so the tally never lies.
+    pub(crate) fn on_air(&self, output: Transport) -> bool {
+        match output {
+            Transport::Record => {
+                self.model.recording.is_some() && self.record_transport() != TransportState::Failed
+            }
+            Transport::Live => {
+                self.model.streaming.is_some() && self.live_transport() != TransportState::Failed
+            }
+        }
     }
 
     fn record_button(&mut self, ui: &mut egui::Ui) {

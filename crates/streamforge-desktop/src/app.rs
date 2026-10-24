@@ -14,6 +14,7 @@ use eframe::egui;
 
 use crate::model::{Model, SourceForm};
 use crate::ui::theme::{self, color, size};
+use crate::views;
 use crate::workspace::{Ballistics, DRAWER_BELOW};
 
 /// Status and meters are polled this often.
@@ -241,6 +242,30 @@ impl DesktopApp {
         });
     }
 
+    /// The canvas size from the scene list; the engine's default until
+    /// the list arrives.
+    pub(crate) fn canvas(&self) -> (u32, u32) {
+        self.model.scenes.as_ref().map_or((1920, 1080), |scenes| {
+            (scenes.canvas_width, scenes.canvas_height)
+        })
+    }
+
+    /// Drop a selected source that no longer exists (e.g. another client
+    /// removed it), so the inspector and its drawer do not stay on it.
+    fn prune_selection(&mut self) {
+        let (Some(scenes), Some(id)) = (&self.model.scenes, &self.selected_source) else {
+            return;
+        };
+        let exists = self
+            .selected_scene
+            .as_deref()
+            .and_then(|scene| views::scene(scenes, scene))
+            .is_some_and(|scene| views::source(scene, id).is_some());
+        if !exists {
+            self.select_source(None);
+        }
+    }
+
     /// Select a source for the inspector; in a narrow window this opens
     /// the drawer.
     pub(crate) fn select_source(&mut self, id: Option<String>) {
@@ -273,9 +298,15 @@ pub(crate) fn dock_frame() -> egui::Frame {
 impl eframe::App for DesktopApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        self.prune_selection();
         let ctx = ui.ctx().clone();
         self.update_preview(&ctx);
         let narrow = ui.max_rect().width() < DRAWER_BELOW;
+        // Taken before anything is drawn: a field or popup that has focus
+        // now gets this frame's Escape, and the drawer must not take it too.
+        let escape_free = self.dialog.is_none()
+            && ctx.memory(|memory| memory.focused().is_none())
+            && !egui::Popup::is_any_open(&ctx);
 
         egui::Panel::top("top_bar")
             .exact_size(48.0)
@@ -324,7 +355,7 @@ impl eframe::App for DesktopApp {
                 egui::pos2(area.left(), program.inner + size::SPACE_6),
                 area.max,
             );
-            self.inspector_drawer(&ctx, below_header);
+            self.inspector_drawer(&ctx, below_header, escape_free);
         }
         self.dialogs(&ctx);
 

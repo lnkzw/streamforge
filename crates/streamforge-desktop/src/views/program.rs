@@ -7,7 +7,7 @@ use eframe::egui;
 use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
-use crate::ui::widgets::{self, BadgeKind, TransportState};
+use crate::ui::widgets::{self, BadgeKind, Transport};
 use crate::workspace::fit;
 
 use super::{right_to_left, scene};
@@ -19,8 +19,8 @@ impl DesktopApp {
     /// Returns where the header ends: a drawer opens below it, so the
     /// on-air marks and the preview switch stay in view.
     pub(crate) fn program_dock(&mut self, ui: &mut egui::Ui) -> f32 {
-        let recording = !matches!(self.record_transport(), TransportState::Idle);
-        let live = !matches!(self.live_transport(), TransportState::Idle);
+        let recording = self.on_air(Transport::Record);
+        let live = self.on_air(Transport::Live);
         let program_name = self
             .model
             .scenes
@@ -60,10 +60,7 @@ impl DesktopApp {
         });
 
         let header_bottom = actions.bottom();
-        let (canvas_width, canvas_height) =
-            self.model.scenes.as_ref().map_or((1920, 1080), |scenes| {
-                (scenes.canvas_width, scenes.canvas_height)
-            });
+        let (canvas_width, canvas_height) = self.canvas();
         let space = ui.available_rect_before_wrap();
         let space = egui::Rect::from_min_max(
             space.min,

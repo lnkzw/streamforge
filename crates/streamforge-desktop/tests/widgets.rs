@@ -28,7 +28,7 @@ fn thumb_y(rect: egui::Rect, gain: f32) -> f32 {
 }
 
 /// Press at `from`, move to `to`, release there.
-fn drag(harness: &mut Harness<'static, f32>, from: egui::Pos2, to: egui::Pos2) {
+fn drag<State>(harness: &mut Harness<'static, State>, from: egui::Pos2, to: egui::Pos2) {
     harness.hover_at(from);
     harness.run();
     harness.drag_at(from);
@@ -101,4 +101,26 @@ fn a_value_outside_the_range_stays_until_the_fader_is_moved() {
     harness.run();
     // The first step starts from the clamped end of the range.
     assert_eq!(*harness.state(), -60.0);
+}
+
+#[test]
+fn a_drag_commits_its_value_when_the_caller_rebuilds_it_each_frame() {
+    // As the mixer does: the gain comes from the model every frame, and the
+    // edit is sent on the frame the drag ends.
+    let mut harness = Harness::new_ui_state(
+        |ui, (model, sent): &mut (f32, Option<f32>)| {
+            let mut gain = *model;
+            let response = widgets::fader(ui, HEIGHT, &mut gain, RANGE, "mic");
+            if response.drag_stopped() {
+                *sent = Some(gain);
+            }
+        },
+        (-12.0, None),
+    );
+    harness.run();
+    let rect = harness.get_by_label("mic").rect();
+    let grab = egui::pos2(rect.center().x, thumb_y(rect, -12.0));
+    drag(&mut harness, grab, egui::pos2(grab.x, thumb_y(rect, -24.0)));
+    let sent = harness.state().1.expect("sent on release");
+    assert!((sent + 24.0).abs() < 0.11, "{sent}");
 }

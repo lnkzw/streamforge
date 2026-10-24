@@ -13,11 +13,11 @@ use crate::ui::widgets::{self, BadgeKind, StatusLevel, TransportState};
 impl DesktopApp {
     pub(crate) fn outputs_dock(&mut self, ui: &mut egui::Ui) {
         widgets::section_header(ui, "Outputs", Some(2));
-        let health = self.model.health.clone();
+        let health = self.model.health.as_ref();
 
         // Recording.
         let state = self.record_transport();
-        let output = health.as_ref().and_then(|health| health.recording.as_ref());
+        let output = health.and_then(|health| health.recording.as_ref());
         // The file name; the full path is in the tooltip and the log.
         let target = match (&self.model.recording, output) {
             (Some(_), Some(output)) => output.target.clone(),
@@ -33,16 +33,14 @@ impl DesktopApp {
             TransportState::Running(_) => (BadgeKind::Tally, "rec"),
             TransportState::Failed => (BadgeKind::Error, "failed"),
         };
-        if output_row(
+        let record_settings = output_row(
             ui,
             Icon::Record,
             "Record",
             badge,
             (&file_name, &target),
             "Recording settings",
-        ) {
-            self.open_record_settings();
-        }
+        );
         output_numbers(
             ui,
             self.model.recording.is_some().then_some(output).flatten(),
@@ -53,7 +51,7 @@ impl DesktopApp {
 
         // Stream.
         let state = self.live_transport();
-        let output = health.as_ref().and_then(|health| health.streaming.as_ref());
+        let output = health.and_then(|health| health.streaming.as_ref());
         let target = match (&self.model.streaming, output) {
             (Some(_), Some(output)) => output.target.clone(),
             (Some(started), None) => started.target.clone(),
@@ -69,16 +67,14 @@ impl DesktopApp {
             (TransportState::Running(_), _) => (BadgeKind::Tally, "live"),
             (TransportState::Failed, _) => (BadgeKind::Error, "failed"),
         };
-        if output_row(
+        let stream_settings = output_row(
             ui,
             Icon::Live,
             "Stream",
             badge,
             (&target, &target),
             "Stream settings",
-        ) {
-            self.open_stream_settings(false);
-        }
+        );
         let streaming = self.model.streaming.is_some().then_some(output).flatten();
         output_numbers(ui, streaming);
         if let Some(output) = streaming
@@ -92,6 +88,12 @@ impl DesktopApp {
                     output.counters.reconnect_attempts
                 ),
             );
+        }
+        if record_settings {
+            self.open_record_settings();
+        }
+        if stream_settings {
+            self.open_stream_settings(false);
         }
     }
 }

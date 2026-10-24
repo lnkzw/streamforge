@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -121,6 +122,39 @@ fn selecting_a_source_opens_it_in_the_inspector() {
     harness.get_by_label("lower third").click();
     step_until(&mut harness, "the inspector", |h| {
         h.query_by_label("Remove source…").is_some()
+    });
+}
+
+#[test]
+fn dragging_a_position_in_the_inspector_moves_the_source() {
+    let dir = TempDir::new("drag");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("lower third").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    // X is the first number field; drag it 50 px to the right.
+    let x = harness
+        .get_all_by_role(Role::SpinButton)
+        .next()
+        .expect("the X field")
+        .rect()
+        .center();
+    harness.hover_at(x);
+    harness.step();
+    harness.drag_at(x);
+    harness.step();
+    for step in 1..=5 {
+        harness.hover_at(x + egui::vec2(10.0 * step as f32, 0.0));
+        harness.step();
+    }
+    harness.drop_at(x + egui::vec2(50.0, 0.0));
+    // The engine takes the dragged value; the field shows its answer.
+    step_until(&mut harness, "the moved source", |h| {
+        h.get_all_by_role(Role::SpinButton)
+            .next()
+            .and_then(|field| field.value())
+            .is_some_and(|value| value.trim() == "130")
     });
 }
 

@@ -19,9 +19,9 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
     ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
-    MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest, OutputKind,
-    RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef,
-    SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
+    MAX_COORDINATE, MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest,
+    OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest,
+    SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
     SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
     UpdateSourceRequest,
 };
@@ -1182,9 +1182,6 @@ fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<SceneRef
     }
     required_scene(command, params.scene_id, "name", params.name)
 }
-
-/// Positions and sizes in canvas pixels stay within this magnitude.
-const MAX_COORDINATE: f32 = 16_384.0;
 
 fn coordinate(command: &str, field: &str, value: f32, size: bool) -> Result<f32, CommandError> {
     let valid = value.is_finite()

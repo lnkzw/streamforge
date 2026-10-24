@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use capture_api::{AudioInput, CaptureError};
+use capture_api::{AudioInput, AudioOutput, CaptureError};
 use pipewire as pw;
 use pw::context::ContextRc;
 use pw::core::CoreRc;
@@ -291,6 +291,19 @@ impl StreamOutcome {
         }
         Ok(self.elapsed)
     }
+
+    /// For a stream that runs until stopped and has no report (playback):
+    /// an error if it failed, never started or did not disconnect. An end
+    /// on its own is not an error here; the stream's owner reports it.
+    pub fn finish_playback(
+        self,
+        map_error: impl FnOnce(String) -> CaptureError,
+    ) -> Result<(), CaptureError> {
+        let disconnect_error = self.disconnect_error.clone();
+        // Errors carry the disconnect failure in their details.
+        self.finish("playback", &mut Vec::new(), map_error)?;
+        disconnect_error.map_or(Ok(()), |message| Err(CaptureError::backend(message)))
+    }
 }
 
 /// Version string reported by the PipeWire server.
@@ -311,18 +324,38 @@ pub(crate) fn server_version(timeout: Duration) -> Result<String, CaptureError> 
         .ok_or_else(|| CaptureError::backend("PipeWire server did not send core info"))
 }
 
-/// Audio source nodes currently known to the PipeWire server, sorted by name.
-pub(crate) fn audio_inputs(timeout: Duration) -> Result<Vec<AudioInput>, CaptureError> {
+/// Suffix of a sink monitor's input name, as pipewire-pulse names them.
+pub(crate) const MONITOR_SUFFIX: &str = ".monitor";
+
+/// Audio nodes known to the PipeWire server, each list sorted by name.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AudioNodes {
+    /// Sources and duplex devices, and the monitor of each sink (what it
+    /// plays), named `<sink>.monitor` with `loopback_of` set.
+    pub inputs: Vec<AudioInput>,
+    /// Sinks and duplex devices.
+    pub outputs: Vec<AudioOutput>,
+}
+
+/// A node as the registry announces it.
+struct Node {
+    name: String,
+    description: Option<String>,
+    class: String,
+}
+
+/// List the audio inputs and outputs.
+pub(crate) fn audio_nodes(timeout: Duration) -> Result<AudioNodes, CaptureError> {
     let connection = Connection::connect()?;
     let registry = connection
         .core
         .get_registry()
         .map_err(|err| CaptureError::backend(format!("cannot get PipeWire registry: {err}")))?;
-    let inputs = Rc::new(RefCell::new(Vec::new()));
+    let nodes = Rc::new(RefCell::new(Vec::new()));
     let _listener = registry
         .add_listener_local()
         .global({
-            let inputs = Rc::clone(&inputs);
+            let nodes = Rc::clone(&nodes);
             move |global| {
                 if global.type_ != ObjectType::Node {
                     return;
@@ -336,27 +369,71 @@ pub(crate) fn audio_inputs(timeout: Duration) -> Result<Vec<AudioInput>, Capture
                 ) else {
                     return;
                 };
-                if is_audio_input_class(class) {
-                    inputs.borrow_mut().push(AudioInput {
+                if class.starts_with("Audio/") {
+                    nodes.borrow_mut().push(Node {
                         name: name.to_owned(),
                         description: props.get(*pw::keys::NODE_DESCRIPTION).map(str::to_owned),
-                        media_class: class.to_owned(),
-                        // Sources only: no sink monitors listed.
-                        loopback_of: None,
+                        class: class.to_owned(),
                     });
                 }
             }
         })
         .register();
     connection.roundtrip(timeout)?;
-    let mut inputs = inputs.take();
-    inputs.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(inputs)
+    Ok(classify(nodes.take()))
+}
+
+fn classify(nodes: Vec<Node>) -> AudioNodes {
+    let mut found = AudioNodes::default();
+    for node in nodes {
+        if is_audio_input_class(&node.class) {
+            found.inputs.push(AudioInput {
+                name: node.name.clone(),
+                description: node.description.clone(),
+                media_class: node.class.clone(),
+                loopback_of: None,
+            });
+        }
+        if is_sink_class(&node.class) {
+            found.inputs.push(AudioInput {
+                name: format!("{}{MONITOR_SUFFIX}", node.name),
+                description: Some(format!(
+                    "Monitor of {}",
+                    node.description.as_deref().unwrap_or(&node.name)
+                )),
+                media_class: node.class.clone(),
+                loopback_of: Some(node.name.clone()),
+            });
+        }
+        if is_sink_class(&node.class) || node.class == "Audio/Duplex" {
+            found.outputs.push(AudioOutput {
+                name: node.name,
+                description: node.description,
+                media_class: node.class,
+            });
+        }
+    }
+    // A name selects one input: a source wins over a sink monitor of the
+    // same name.
+    found.inputs.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(a.loopback_of.is_some().cmp(&b.loopback_of.is_some()))
+    });
+    found.inputs.dedup_by(|later, kept| later.name == kept.name);
+    found.outputs.sort_by(|a, b| a.name.cmp(&b.name));
+    found
 }
 
 /// Capture-capable audio nodes: hardware and virtual sources, duplex devices.
 fn is_audio_input_class(class: &str) -> bool {
     class == "Audio/Source" || class.starts_with("Audio/Source/") || class == "Audio/Duplex"
+}
+
+/// Hardware and virtual sinks; each has a monitor that captures what it
+/// plays.
+fn is_sink_class(class: &str) -> bool {
+    class == "Audio/Sink" || class.starts_with("Audio/Sink/")
 }
 
 #[cfg(test)]
@@ -422,6 +499,33 @@ mod tests {
     }
 
     #[test]
+    fn playback_that_ended_on_its_own_is_no_error() {
+        let ended = StreamOutcome {
+            disconnect_error: None,
+            ..outcome(true, false, None)
+        };
+        ended.finish_playback(CaptureError::backend).expect("ok");
+    }
+
+    #[test]
+    fn playback_errors_name_the_cause() {
+        let err = outcome(true, true, None)
+            .finish_playback(CaptureError::backend)
+            .unwrap_err();
+        assert_eq!(err.message, "disconnect failed");
+        let err = outcome(false, false, None)
+            .finish_playback(CaptureError::backend)
+            .unwrap_err();
+        assert_eq!(err.kind, capture_api::CaptureErrorKind::Timeout);
+        assert!(err.message.contains("playback stream did not start"));
+        assert!(err.details.is_some());
+        let err = outcome(true, false, Some("gone"))
+            .finish_playback(CaptureError::backend)
+            .unwrap_err();
+        assert_eq!(err.message, "gone");
+    }
+
+    #[test]
     fn audio_input_classes() {
         assert!(is_audio_input_class("Audio/Source"));
         assert!(is_audio_input_class("Audio/Source/Virtual"));
@@ -429,5 +533,58 @@ mod tests {
         assert!(!is_audio_input_class("Audio/Sink"));
         assert!(!is_audio_input_class("Stream/Input/Audio"));
         assert!(!is_audio_input_class("Video/Source"));
+    }
+
+    fn node(name: &str, description: Option<&str>, class: &str) -> Node {
+        Node {
+            name: name.to_owned(),
+            description: description.map(str::to_owned),
+            class: class.to_owned(),
+        }
+    }
+
+    #[test]
+    fn sinks_play_and_their_monitors_are_inputs() {
+        let found = classify(vec![
+            node("speakers", Some("Speakers"), "Audio/Sink"),
+            node("mic", None, "Audio/Source"),
+            node("interface", None, "Audio/Duplex"),
+            node("hdmi", None, "Audio/Sink/Virtual"),
+            node("player", None, "Stream/Output/Audio"),
+        ]);
+        let inputs: Vec<_> = found
+            .inputs
+            .iter()
+            .map(|input| (input.name.as_str(), input.loopback_of.as_deref()))
+            .collect();
+        assert_eq!(
+            inputs,
+            [
+                ("hdmi.monitor", Some("hdmi")),
+                ("interface", None),
+                ("mic", None),
+                ("speakers.monitor", Some("speakers")),
+            ]
+        );
+        let monitor = &found.inputs[3];
+        assert_eq!(monitor.description.as_deref(), Some("Monitor of Speakers"));
+        assert_eq!(monitor.media_class, "Audio/Sink");
+        assert_eq!(
+            found.inputs[0].description.as_deref(),
+            Some("Monitor of hdmi")
+        );
+        let outputs: Vec<_> = found.outputs.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(outputs, ["hdmi", "interface", "speakers"]);
+    }
+
+    #[test]
+    fn a_source_wins_over_a_monitor_of_the_same_name() {
+        let found = classify(vec![
+            node("speakers.monitor", None, "Audio/Source"),
+            node("speakers", None, "Audio/Sink"),
+        ]);
+        assert_eq!(found.inputs.len(), 1);
+        assert_eq!(found.inputs[0].loopback_of, None);
+        assert_eq!(found.outputs.len(), 1);
     }
 }

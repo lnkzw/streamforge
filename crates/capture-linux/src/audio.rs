@@ -51,11 +51,20 @@ struct State {
     warnings: Vec<String>,
 }
 
-/// Capture `target` (a `node.name`, or the default input when `None`) until
-/// `until`. With `delivery`, the stream requests the delivery format and
-/// pushes every buffer into its ring.
+/// What a capture stream connects to: a source, or the monitor of a sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Target {
+    /// The `node.name` to connect to.
+    pub node: String,
+    /// Capture what the sink `node` plays (`stream.capture.sink`).
+    pub sink_monitor: bool,
+}
+
+/// Capture `target` (or the default input when `None`) until `until`. With
+/// `delivery`, the stream requests the delivery format and pushes every
+/// buffer into its ring.
 pub(crate) fn capture(
-    target: Option<&str>,
+    target: Option<&Target>,
     until: RunUntil,
     delivery: Option<Delivery>,
 ) -> Result<AudioRun, CaptureError> {
@@ -70,11 +79,14 @@ pub(crate) fn capture(
         *pw::keys::MEDIA_ROLE => "Production",
     };
     if let Some(target) = target {
-        props.insert(*pw::keys::TARGET_OBJECT, target);
+        props.insert(*pw::keys::TARGET_OBJECT, target.node.as_str());
+        if target.sink_monitor {
+            props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
+        }
         // A named input that goes away ends the stream; the session manager
         // must not move it to another source, which would record a
         // different microphone under this input's name.
-        props.insert("node.dont-reconnect", "true");
+        props.insert(*pw::keys::NODE_DONT_RECONNECT, "true");
     }
     let stream = StreamBox::new(&connection.core, "streamforge-audio", props)
         .map_err(|err| CaptureError::backend(format!("cannot create PipeWire stream: {err}")))?;
@@ -232,8 +244,13 @@ pub(crate) fn capture(
             .push("no audio frames received from the input".to_owned());
     } else if stats.peak_dbfs.is_none() {
         state.warnings.push(
-            "the input delivered digital silence; check that the device is connected and unmuted"
-                .to_owned(),
+            if target.is_some_and(|target| target.sink_monitor) {
+                "the sink played digital silence (nothing, or only silence, was playing)"
+            } else {
+                "the input delivered digital silence; check that the device is connected and \
+                 unmuted"
+            }
+            .to_owned(),
         );
     }
     Ok(AudioRun {
@@ -243,10 +260,20 @@ pub(crate) fn capture(
     })
 }
 
-/// `NotFound` with the available names unless `name` is in `inputs`.
-pub(crate) fn verify_input(name: &str, inputs: &[AudioInput]) -> Result<(), CaptureError> {
-    if inputs.iter().any(|input| input.name == name) {
-        return Ok(());
+/// What input `name` captures, or `NotFound` with the available names
+/// unless it is in `inputs`.
+pub(crate) fn resolve_input(name: &str, inputs: &[AudioInput]) -> Result<Target, CaptureError> {
+    if let Some(input) = inputs.iter().find(|input| input.name == name) {
+        return Ok(match &input.loopback_of {
+            Some(sink) => Target {
+                node: sink.clone(),
+                sink_monitor: true,
+            },
+            None => Target {
+                node: input.name.clone(),
+                sink_monitor: false,
+            },
+        });
     }
     Err(CaptureError::new(
         CaptureErrorKind::NotFound,
@@ -268,18 +295,18 @@ fn report(input: Option<String>, run: AudioRun) -> AudioCaptureReport {
     }
 }
 
-/// Callers check named inputs first (see `LinuxCapture::check_input`).
-pub(crate) fn probe(request: &AudioCaptureRequest) -> Result<AudioCaptureReport, CaptureError> {
-    let run = capture(
-        request.input.as_deref(),
-        RunUntil::Elapsed(request.duration),
-        None,
-    )?;
+/// `target` is the resolved `request.input` (see `LinuxCapture::check_input`).
+pub(crate) fn probe(
+    request: &AudioCaptureRequest,
+    target: Option<Target>,
+) -> Result<AudioCaptureReport, CaptureError> {
+    let run = capture(target.as_ref(), RunUntil::Elapsed(request.duration), None)?;
     Ok(report(request.input.clone(), run))
 }
 
 pub(crate) fn start_stream(
     request: &AudioStreamRequest,
+    target: Option<Target>,
 ) -> Result<Box<dyn AudioStream>, CaptureError> {
     if !(1..=2).contains(&request.channels) || request.rate == 0 {
         return Err(CaptureError::unsupported(format!(
@@ -297,7 +324,6 @@ pub(crate) fn start_stream(
         channels: request.channels,
     };
     let (stop, stop_receiver) = pw::channel::channel();
-    let input = request.input.clone();
     let ended = Arc::new(CaptureEnd::new());
     let thread = thread::Builder::new()
         .name("audio-capture".to_owned())
@@ -305,7 +331,7 @@ pub(crate) fn start_stream(
             let ended = Arc::clone(&ended);
             move || {
                 let run = capture(
-                    input.as_deref(),
+                    target.as_ref(),
                     RunUntil::Stopped(stop_receiver),
                     Some(delivery),
                 );

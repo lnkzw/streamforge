@@ -13,30 +13,33 @@
 //!   unplugged, where the microphones pick it up; so the default is
 //!   resolved to its device first. An output that goes away ends the
 //!   playback, as on Linux.
-//! - **Format:** WASAPI converts any rate and layout itself (cpal opens
-//!   outputs with `AUTOCONVERTPCM`), so Windows asks for the feed's rate.
+//! - **Format:** WASAPI converts any rate itself (cpal opens outputs with
+//!   `AUTOCONVERTPCM`), so Windows asks for the feed's rate, in the
+//!   device's channel count (the only one cpal offers there).
 //!   CoreAudio would switch the device's rate for every app, so macOS
 //!   plays at the device's current rate and the converter resamples.
 //!   `f32` goes straight into the device's buffer when nothing needs
 //!   converting; other sample formats go through a buffer allocated before
 //!   the stream starts.
 //! - **End:** a stream that reported an error and has not pulled since has
-//!   ended ([`Liveness`]); the thread notices within [`POLL`] and drops the
-//!   stream, which closes the feed.
+//!   ended ([`Liveness`]); the thread notices within [`POLL`], keeps the
+//!   reason and drops the stream, which closes the feed. On macOS that
+//!   includes a change of the device's rate: cpal pauses the stream.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioOutput, CaptureError, CaptureErrorKind, CaptureState, PlaybackRequest, PlaybackStream,
+    AudioOutput, CaptureEnd, CaptureError, CaptureErrorKind, CaptureState, PlaybackRequest,
+    PlaybackStream,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use media_core::SampleReader;
 
-use crate::backend::{capture_error, device_name, host, is_named};
+use crate::backend::{best_config, capture_error, device_name, host, is_named};
 use crate::convert::PlaybackConverter;
 use crate::liveness::Liveness;
 
@@ -47,6 +50,9 @@ use crate::liveness::Liveness;
 const SCRATCH_FRAMES: usize = 16_384;
 /// How often the playback thread checks whether the stream has ended.
 const POLL: Duration = Duration::from_millis(100);
+/// How long an output may take to open and pull for the first time (as on
+/// Linux).
+const START_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
     let devices = host()
@@ -64,64 +70,91 @@ pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
         .collect())
 }
 
-/// Whether `feed` can be played as requested; checked before anything
-/// else, as it costs nothing.
-fn check_request(request: &PlaybackRequest, feed: &SampleReader) -> Result<(), CaptureError> {
-    if !(1..=2).contains(&request.channels) || request.rate == 0 {
-        return Err(CaptureError::unsupported(format!(
-            "playback supports 1 or 2 channels at a non-zero rate, got {} Hz / {}",
-            request.rate, request.channels
-        )));
-    }
-    if feed.channels() != request.channels as usize {
-        return Err(CaptureError::new(
-            CaptureErrorKind::InvalidRequest,
-            format!(
-                "the feed carries {} channel(s), the request {}",
-                feed.channels(),
-                request.channels
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// Play `feed` on the requested output and return once it plays. On any
-/// error the feed is dropped.
+/// Play `feed` on the requested output and return once the device pulls
+/// from it; an output that does not within [`START_TIMEOUT`] is an error.
+/// On any error the feed is dropped.
 pub(crate) fn start(
     request: &PlaybackRequest,
     feed: SampleReader,
 ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
-    check_request(request, &feed)?;
+    request.check(&feed)?;
+    let deadline = Instant::now() + START_TIMEOUT;
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let (stop_tx, stop_rx) = mpsc::channel();
     let liveness = Arc::new(Liveness::new());
+    let ended = Arc::new(CaptureEnd::new());
     let thread = thread::Builder::new()
         .name("audio-playback".to_owned())
         .spawn({
             let request = request.clone();
-            let liveness = Arc::clone(&liveness);
-            move || play(&request, feed, &liveness, &ready_tx, &stop_rx)
+            let (liveness, ended) = (Arc::clone(&liveness), Arc::clone(&ended));
+            move || play(&request, feed, &liveness, &ended, &ready_tx, &stop_rx)
         })
         .map_err(|err| CaptureError::backend(format!("cannot start the playback thread: {err}")))?;
-    match ready_rx.recv() {
-        Ok(Ok(())) => Ok(Box::new(CpalPlayback {
-            label: match &request.output {
-                Some(name) => format!("audio output `{name}`"),
-                None => "the default audio output".to_owned(),
-            },
-            liveness,
-            stop: Some(stop_tx),
-            thread: Some(thread),
-        })),
+    let label = match ready_rx.recv_timeout(START_TIMEOUT) {
+        Ok(Ok(label)) => label,
         Ok(Err(error)) => {
             let _ = thread.join();
-            Err(error)
+            return Err(error);
         }
-        Err(_) => Err(thread.join().ok().and_then(Result::err).unwrap_or_else(|| {
-            CaptureError::backend("the audio playback thread ended during setup")
-        })),
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(thread.join().ok().and_then(Result::err).unwrap_or_else(|| {
+                CaptureError::backend("the audio playback thread ended during setup")
+            }));
+        }
+        // The system hangs opening the device. The thread is left to finish
+        // on its own: with the stop channel gone, it drops the stream (and
+        // the feed) as soon as it has one.
+        Err(RecvTimeoutError::Timeout) => {
+            return Err(CaptureError::timeout(format!(
+                "the output did not open within {} ms",
+                START_TIMEOUT.as_millis()
+            )));
+        }
+    };
+    let mut playback = CpalPlayback {
+        label,
+        liveness,
+        ended,
+        stop: Some(stop_tx),
+        thread: Some(thread),
+    };
+    // It plays once the device pulls.
+    while !playback.liveness.has_data() {
+        if let CaptureState::Ended { reason } = playback.state() {
+            let _ = playback.shutdown();
+            return Err(CaptureError::backend(reason));
+        }
+        if Instant::now() >= deadline {
+            let _ = playback.shutdown();
+            return Err(CaptureError::timeout(format!(
+                "{} did not start playing within {} ms",
+                playback.label,
+                START_TIMEOUT.as_millis()
+            )));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
+    Ok(Box::new(playback))
+}
+
+/// Names the output in errors and end reasons: the default output by the
+/// device it was when the playback started.
+fn output_label(device: &cpal::Device, request: &PlaybackRequest) -> String {
+    match &request.output {
+        Some(name) => format!("audio output `{name}`"),
+        None => {
+            let name = device
+                .description()
+                .map(|description| description.name().to_owned())
+                .unwrap_or_else(|_| device_name(device));
+            format!("the default audio output (`{name}`)")
+        }
+    }
+}
+
+fn stopped(label: &str, reason: &str) -> String {
+    format!("{label} stopped playing: {reason}")
 }
 
 /// The named output, or the device that is the default output now.
@@ -194,33 +227,10 @@ fn choose_config(
     let default = device
         .default_output_config()
         .map_err(|err| capture_error(&err, "the output has no usable format"))?;
-    let rate = play_rate(feed_rate, default.sample_rate());
-    let usable = |format: SampleFormat| {
-        matches!(
-            format,
-            SampleFormat::F32
-                | SampleFormat::F64
-                | SampleFormat::I16
-                | SampleFormat::I32
-                | SampleFormat::U16
-                | SampleFormat::I8
-                | SampleFormat::U8
-        )
-    };
-    let best = device
+    let ranges = device
         .supported_output_configs()
-        .map_err(|err| capture_error(&err, "cannot read the output formats"))?
-        .filter(|range| usable(range.sample_format()))
-        .filter_map(|range| {
-            let score = u8::from(range.sample_format() == SampleFormat::F32) * 2
-                + u8::from(range.channels() == 2);
-            range
-                .try_with_sample_rate(rate)
-                .map(|config| (score, config))
-        })
-        .max_by_key(|(score, _)| *score)
-        .map(|(_, config)| config);
-    Ok(best.unwrap_or(default))
+        .map_err(|err| capture_error(&err, "cannot read the output formats"))?;
+    Ok(best_config(ranges, play_rate(feed_rate, default.sample_rate())).unwrap_or(default))
 }
 
 /// A sample format the device can be fed in; `f32` is written in place.
@@ -247,9 +257,9 @@ impl DeviceSample for u8 {}
 struct Render {
     converter: PlaybackConverter,
     feed: SampleReader,
-    /// Device-layout `f32` for other sample formats (empty for `f32`).
+    /// Device-layout `f32` for other sample formats (empty for `f32`); a
+    /// whole number of device frames.
     scratch: Vec<f32>,
-    device_channels: usize,
     liveness: Arc<Liveness>,
 }
 
@@ -263,8 +273,7 @@ impl Render {
             self.converter.fill(data, &mut self.feed);
             return;
         }
-        let step = self.scratch.len() / self.device_channels * self.device_channels;
-        for chunk in data.chunks_mut(step) {
+        for chunk in data.chunks_mut(self.scratch.len()) {
             let scratch = &mut self.scratch[..chunk.len()];
             self.converter.fill(scratch, &mut self.feed);
             for (sample, value) in chunk.iter_mut().zip(scratch.iter()) {
@@ -289,15 +298,19 @@ fn build<T: DeviceSample>(
     )
 }
 
+/// Run the output stream until stopped or until it ends; `ready` hears the
+/// output's label once it plays, or why it did not open.
 fn play(
     request: &PlaybackRequest,
     feed: SampleReader,
     liveness: &Arc<Liveness>,
-    ready: &SyncSender<Result<(), CaptureError>>,
+    ended: &CaptureEnd,
+    ready: &SyncSender<Result<String, CaptureError>>,
     stop: &Receiver<()>,
 ) -> Result<(), CaptureError> {
     let setup = (|| {
         let device = find_output(&host(), request.output.as_deref())?;
+        let label = output_label(&device, request);
         let supported = choose_config(&device, request.rate)?;
         let format = supported.sample_format();
         let config = supported.config();
@@ -316,7 +329,6 @@ fn play(
             } else {
                 vec![0.0; SCRATCH_FRAMES * device_channels]
             },
-            device_channels,
             liveness: Arc::clone(liveness),
         };
         let liveness = Arc::clone(liveness);
@@ -338,21 +350,23 @@ fn play(
         stream
             .play()
             .map_err(|err| capture_error(&err, "cannot start the audio output"))?;
-        Ok(stream)
+        Ok((stream, label))
     })();
-    let stream = match setup {
-        Ok(stream) => {
-            let _ = ready.send(Ok(()));
-            stream
+    let (stream, label) = match setup {
+        Ok((stream, label)) => {
+            let _ = ready.send(Ok(label.clone()));
+            (stream, label)
         }
         Err(error) => {
             let _ = ready.send(Err(error.clone()));
             return Err(error);
         }
     };
-    // Until `stop` (or the handle is dropped), or until the stream ends.
+    // Until `stop` (or the handle is dropped), or until the stream ends;
+    // the end is kept, as a late pull would make the stream look alive.
     while let Err(RecvTimeoutError::Timeout) = stop.recv_timeout(POLL) {
-        if liveness.state() != CaptureState::Running {
+        if let CaptureState::Ended { reason } = liveness.state() {
+            ended.end(|| stopped(&label, &reason));
             break;
         }
     }
@@ -365,6 +379,8 @@ struct CpalPlayback {
     /// Names the output in the reason it ended for.
     label: String,
     liveness: Arc<Liveness>,
+    /// Set when the thread saw the stream end.
+    ended: Arc<CaptureEnd>,
     stop: Option<mpsc::Sender<()>>,
     thread: Option<JoinHandle<Result<(), CaptureError>>>,
 }
@@ -385,9 +401,14 @@ impl CpalPlayback {
 
 impl PlaybackStream for CpalPlayback {
     fn state(&self) -> CaptureState {
+        if let Some(reason) = self.ended.reason() {
+            return CaptureState::Ended {
+                reason: reason.to_owned(),
+            };
+        }
         match self.liveness.state() {
             CaptureState::Ended { reason } => CaptureState::Ended {
-                reason: format!("{} stopped playing: {reason}", self.label),
+                reason: stopped(&self.label, &reason),
             },
             // The thread ends on its own only when the stream has ended.
             CaptureState::Running

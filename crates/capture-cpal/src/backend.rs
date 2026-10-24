@@ -293,6 +293,18 @@ fn choose_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, C
     let default = device
         .default_input_config()
         .map_err(|err| capture_error(&err, "the input has no usable format"))?;
+    let ranges = device
+        .supported_input_configs()
+        .map_err(|err| capture_error(&err, "cannot read the input formats"))?;
+    Ok(best_config(ranges, default.sample_rate()).unwrap_or(default))
+}
+
+/// The best of `ranges` at `rate` in a sample format this backend
+/// converts (capture and playback), preferring `f32`, then stereo.
+pub(crate) fn best_config(
+    ranges: impl Iterator<Item = cpal::SupportedStreamConfigRange>,
+    rate: u32,
+) -> Option<cpal::SupportedStreamConfig> {
     let usable = |format: SampleFormat| {
         matches!(
             format,
@@ -305,20 +317,17 @@ fn choose_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, C
                 | SampleFormat::U8
         )
     };
-    let best = device
-        .supported_input_configs()
-        .map_err(|err| capture_error(&err, "cannot read the input formats"))?
+    ranges
         .filter(|range| usable(range.sample_format()))
         .filter_map(|range| {
             let score = u8::from(range.sample_format() == SampleFormat::F32) * 2
                 + u8::from(range.channels() == 2);
             range
-                .try_with_sample_rate(default.sample_rate())
+                .try_with_sample_rate(rate)
                 .map(|config| (score, config))
         })
         .max_by_key(|(score, _)| *score)
-        .map(|(_, config)| config);
-    Ok(best.unwrap_or(default))
+        .map(|(_, config)| config)
 }
 
 /// State moved into the cpal data callback (see the module docs).

@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use media_core::SampleReader;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -173,6 +174,32 @@ pub struct PlaybackRequest {
     pub output: Option<String>,
     pub rate: u32,
     pub channels: u32,
+}
+
+impl PlaybackRequest {
+    /// Whether `feed` can be played as requested: 1 or 2 channels at a
+    /// non-zero rate (else `unsupported`), and the feed carries the
+    /// requested channels (else `invalid_request`). Backends check this
+    /// before anything else, as it costs nothing.
+    pub fn check(&self, feed: &SampleReader) -> Result<(), CaptureError> {
+        if !(1..=2).contains(&self.channels) || self.rate == 0 {
+            return Err(CaptureError::unsupported(format!(
+                "playback supports 1 or 2 channels at a non-zero rate, got {} Hz / {}",
+                self.rate, self.channels
+            )));
+        }
+        if feed.channels() != self.channels as usize {
+            return Err(CaptureError::new(
+                CaptureErrorKind::InvalidRequest,
+                format!(
+                    "the feed carries {} channel(s), the request {}",
+                    feed.channels(),
+                    self.channels
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Which screen source to capture and how the cursor is captured: a
@@ -485,5 +512,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, CaptureErrorKind::Unsupported);
         assert!(err.message.contains("metadata"), "{}", err.message);
+    }
+
+    #[test]
+    fn playback_requests_the_feed_cannot_play_are_refused() {
+        let (_writer, stereo) = media_core::sample_ring(2, 64);
+        let request = |rate, channels| PlaybackRequest {
+            output: None,
+            rate,
+            channels,
+        };
+        request(48_000, 2).check(&stereo).expect("plays");
+        let kind = |request: PlaybackRequest| request.check(&stereo).unwrap_err().kind;
+        assert_eq!(kind(request(48_000, 6)), CaptureErrorKind::Unsupported);
+        assert_eq!(kind(request(0, 2)), CaptureErrorKind::Unsupported);
+        assert_eq!(kind(request(48_000, 1)), CaptureErrorKind::InvalidRequest);
     }
 }

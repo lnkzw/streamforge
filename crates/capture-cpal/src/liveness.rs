@@ -67,6 +67,11 @@ impl Liveness {
         self.last_error_at.store(self.now(), Ordering::Release);
     }
 
+    /// Whether the stream has delivered (or pulled) at all.
+    pub(crate) fn has_data(&self) -> bool {
+        self.last_data.load(Ordering::Relaxed) != 0
+    }
+
     /// Never waits: the message is skipped if the error callback holds it.
     pub(crate) fn state(&self) -> CaptureState {
         let error_at = self.last_error_at.load(Ordering::Acquire);

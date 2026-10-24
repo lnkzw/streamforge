@@ -52,7 +52,7 @@ Acceptance:
 Known limitations, deferred to later milestones:
 - Probes block the engine thread; there is no continuous capture into a media graph yet (M3).
 - No DMA-BUF import, restore tokens, multi-stream capture or cursor metadata.
-- No desktop-audio (sink monitor) capture; only sources are listed.
+- No desktop-audio (sink monitor) capture; only sources are listed. (Linux: since M11 step 5b.)
 - Windows/macOS capture backends: M9.
 
 ## M3 — First video compositor
@@ -98,7 +98,7 @@ Known limitations, deferred:
 - Drift resampling uses linear interpolation, which slightly modulates high frequencies (up to about −2 dB at 10 kHz). Recordings in M5 should use a windowed-sinc or polyphase resampler (ADR 0004).
 - The master bus uses a hard limit with counting, no limiter.
 - The mixer output has no consumer yet; recording comes in M5.
-- Desktop audio (sink monitor) capture is not implemented.
+- Desktop audio (sink monitor) capture is not implemented. (Linux: since M11 step 5b.)
 - The mix probe blocks the engine thread for its duration (up to 15 min).
 
 ## M5 — First recording
@@ -243,7 +243,7 @@ No release pressure: the audio model is designed and built before the protocol i
 - [x] Multitrack recording with a defined track mapping: track 1 is the mix, then up to 7 listed buses, each an AAC stream named after its bus (step 4).
 - [ ] A monitor output to an audio device, separate from the program outputs.
   - [x] Step 5a: the monitor in the engine and the protocol (profile with bus, on/off and device; `set_monitor_device`, `list_audio_outputs`; lock-free feed with drift resampling; health and reports; feedback warning), tested with a fake device.
-  - [ ] Step 5b: PipeWire playback on Linux, tested natively.
+  - [x] Step 5b: PipeWire playback on Linux (a real-time output stream reading the lock-free feed), and each sink's monitor as an input with `loopback_of`, so desktop audio can be captured and the feedback warning works there. Tested natively: a live test plays into a null sink it creates, and the engine was checked end to end (`docs/capture-linux.md`).
   - [ ] Step 5c: playback on Windows and macOS through `cpal`.
 - [x] Processing slots in the graph for later effects (no effects yet): 4 per channel and bus, before mute and both taps on a channel, before mute and fader on a bus (step 1).
 

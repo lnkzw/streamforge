@@ -2,8 +2,11 @@
 //!
 //! - Screen: the portal shows the compositor's picker and hands out a PipeWire
 //!   node; frames arrive as shared-memory buffers with optional header metadata.
-//! - Audio: PipeWire source nodes are enumerated through the registry and
-//!   captured as interleaved F32 at their native rate and channel count.
+//! - Audio: PipeWire source nodes, and the monitor of each sink, are
+//!   enumerated through the registry and captured as interleaved F32 at their
+//!   native rate and channel count.
+//! - Playback (the monitor, ADR 0017): an output stream to a sink, whose
+//!   process callback runs on PipeWire's real-time thread.
 //!
 //! Probes run a PipeWire main loop on the calling thread for a bounded time;
 //! callers must not invoke them from a UI thread. Screen streams run their
@@ -13,6 +16,7 @@
 
 mod audio;
 mod formats;
+mod playback;
 mod portal;
 mod pw;
 mod screen;
@@ -21,22 +25,26 @@ mod video;
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream,
-    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoStream,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput,
+    AudioStream, AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError,
+    PlaybackRequest, PlaybackStream, ScreenCaptureCapability, ScreenCaptureRequest,
+    ScreenSelection, ScreenSource, VideoCaptureReport, VideoStream,
 };
+use media_core::SampleReader;
 
 /// Upper bound for each portal or PipeWire query. Screen and audio
 /// capabilities are queried in parallel, so `capabilities()` (and the first
 /// `get_status`) waits at most this long.
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long a listing of audio inputs is reused for name checks, so starting
-/// several streams does not rescan the PipeWire registry each time.
-const INPUT_CACHE_TTL: Duration = Duration::from_secs(2);
+/// How long a listing of audio devices is reused for name checks, so
+/// starting several streams does not rescan the PipeWire registry each time.
+const NODE_CACHE_TTL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub struct LinuxCapture {
-    input_cache: Option<(Instant, Vec<AudioInput>)>,
+    /// The last listing of audio devices, and when it was made.
+    nodes: pw::AudioNodes,
+    scanned_at: Option<Instant>,
 }
 
 impl LinuxCapture {
@@ -98,9 +106,11 @@ impl CaptureBackend for LinuxCapture {
     }
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        let inputs = pw::audio_inputs(QUERY_TIMEOUT)?;
-        self.input_cache = Some((Instant::now(), inputs.clone()));
-        Ok(inputs)
+        Ok(self.scan_nodes()?.inputs.clone())
+    }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        Ok(self.scan_nodes()?.outputs.clone())
     }
 
     fn probe_screen(
@@ -121,37 +131,56 @@ impl CaptureBackend for LinuxCapture {
         &mut self,
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError> {
-        self.check_input(request.input.as_deref())?;
-        audio::probe(request)
+        let target = self.check_input(request.input.as_deref())?;
+        audio::probe(request, target)
     }
 
     fn start_audio_stream(
         &mut self,
         request: &AudioStreamRequest,
     ) -> Result<Box<dyn AudioStream>, CaptureError> {
-        self.check_input(request.input.as_deref())?;
-        audio::start_stream(request)
+        let target = self.check_input(request.input.as_deref())?;
+        audio::start_stream(request, target)
+    }
+
+    fn start_playback(
+        &mut self,
+        request: &PlaybackRequest,
+        feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+        playback::check_request(request, &feed)?;
+        if let Some(name) = request.output.as_deref() {
+            playback::verify_output(name, &self.recent_nodes()?.outputs)?;
+        }
+        playback::start(request, feed)
     }
 }
 
 impl LinuxCapture {
-    /// PipeWire falls back to the default input for an unknown target, so
-    /// named inputs are checked against a (briefly cached) listing first.
-    fn check_input(&mut self, name: Option<&str>) -> Result<(), CaptureError> {
-        let Some(name) = name else {
-            return Ok(());
-        };
-        let fresh = self
-            .input_cache
-            .as_ref()
-            .is_some_and(|(at, _)| at.elapsed() < INPUT_CACHE_TTL);
-        if !fresh {
-            self.audio_inputs()?;
+    fn scan_nodes(&mut self) -> Result<&pw::AudioNodes, CaptureError> {
+        self.nodes = pw::audio_nodes(QUERY_TIMEOUT)?;
+        self.scanned_at = Some(Instant::now());
+        Ok(&self.nodes)
+    }
+
+    /// The last listing if it is recent, else a new one.
+    fn recent_nodes(&mut self) -> Result<&pw::AudioNodes, CaptureError> {
+        let recent = self
+            .scanned_at
+            .is_some_and(|at| at.elapsed() < NODE_CACHE_TTL);
+        if !recent {
+            self.scan_nodes()?;
         }
-        let inputs = self
-            .input_cache
-            .as_ref()
-            .map_or(&[][..], |(_, inputs)| inputs);
-        audio::verify_input(name, inputs)
+        Ok(&self.nodes)
+    }
+
+    /// PipeWire falls back to the default device for an unknown target, so
+    /// named inputs are checked against a (briefly cached) listing first.
+    /// Returns what a named input captures: a source, or a sink's monitor.
+    fn check_input(&mut self, name: Option<&str>) -> Result<Option<audio::Target>, CaptureError> {
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        audio::resolve_input(name, &self.recent_nodes()?.inputs).map(Some)
     }
 }

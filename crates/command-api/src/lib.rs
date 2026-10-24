@@ -60,8 +60,11 @@ use capture_api::{
 /// Capture types in results, for adapters that do not use `capture-api`.
 pub use capture_api::{CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
+/// `StreamTarget` lets a client check a stream URL and show its redacted
+/// form before `start_streaming`, with the engine's own rules.
 pub use encoder_api::{
-    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamState, VideoEncoderInfo,
+    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamKey, StreamState, StreamTarget,
+    VideoEncoderInfo,
 };
 use serde::{Deserialize, Serialize};
 /// Live render snapshot types in [`HealthReport`], for adapters that do not

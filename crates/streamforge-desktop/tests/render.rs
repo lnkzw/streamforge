@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
@@ -58,9 +59,11 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
 enum Situation {
     /// Fresh start: the built-in scene, nothing running.
     Idle,
-    /// A second scene with sources, the default tone in the mixer, the preview on
-    /// and a recording running.
+    /// A second scene with sources on program, the default tone in the
+    /// mixer, the preview on, a recording running and a source selected.
     Live,
+    /// Live, with the dialog for adding a source open.
+    Dialog,
 }
 
 fn model(dir: &Path, situation: Situation) -> Model {
@@ -69,11 +72,17 @@ fn model(dir: &Path, situation: Situation) -> Model {
         EngineWorker::spawn(move || Engine::new().with_output_dir(dir), || {}).expect("worker");
     let mut model = Model::new(worker);
     wait(&mut model, "the scene list", |m| m.scenes.is_some());
-    if let Situation::Live = situation {
+    if let Situation::Live | Situation::Dialog = situation {
         model.create_scene("Interview");
         wait(&mut model, "the new scene", |m| {
             m.scenes.as_ref().is_some_and(|list| list.scenes.len() == 2)
         });
+        let interview = model
+            .scenes
+            .as_ref()
+            .and_then(|list| list.scenes.iter().find(|scene| scene.name == "Interview"))
+            .map(|scene| scene.id.clone())
+            .expect("Interview");
         for (name, kind, color, rect) in [
             ("backdrop", SourceType::Solid, [24, 32, 48, 255], None),
             (
@@ -90,7 +99,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             ),
         ] {
             model.add_source(
-                "Interview",
+                &interview,
                 &SourceForm {
                     name: name.to_owned(),
                     kind,
@@ -108,6 +117,12 @@ fn model(dir: &Path, situation: Situation) -> Model {
                     .any(|scene| scene.name == "Interview" && scene.sources.len() == 3)
             })
         });
+        model.activate_scene(&interview, "Interview");
+        wait(&mut model, "the scene on program", |m| {
+            m.scenes
+                .as_ref()
+                .is_some_and(|list| list.active == "Interview")
+        });
         model.set_preview(true);
         wait(&mut model, "the preview", |m| m.preview_enabled);
         model.start_recording("render.mkv");
@@ -121,11 +136,24 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
     let model = model(&dir.0, situation);
     let mut harness = Harness::builder()
         .with_size(size)
-        .build_eframe(move |_cc| DesktopApp::new(model));
+        .build_eframe(move |cc| DesktopApp::new(&cc.egui_ctx, model));
     // Let the polls answer and the preview and meters fill in.
-    for _ in 0..90 {
+    for _ in 0..60 {
         harness.step();
         thread::sleep(Duration::from_millis(16));
+    }
+    let action = match situation {
+        Situation::Idle => None,
+        // Open a source in the inspector (a drawer in narrow windows).
+        Situation::Live => Some("lower third"),
+        Situation::Dialog => Some("Add a source to this scene"),
+    };
+    if let Some(label) = action {
+        harness.get_by_label(label).click();
+        for _ in 0..30 {
+            harness.step();
+            thread::sleep(Duration::from_millis(16));
+        }
     }
     let image = harness.render().expect("render");
     let path = out.join(format!("{name}.png"));
@@ -149,6 +177,7 @@ fn render_the_workspace() {
         render(&out, &format!("idle-{label}"), Situation::Idle, size);
         render(&out, &format!("live-{label}"), Situation::Live, size);
     }
+    render(&out, "dialog-1400x900", Situation::Dialog, [1400.0, 900.0]);
 }
 
 /// The design system's specimen: tokens and every component in its states,

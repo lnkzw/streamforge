@@ -38,7 +38,7 @@ fn main() -> ExitCode {
                 },
                 move || ctx.request_repaint(),
             )?;
-            Ok(Box::new(DesktopApp::new(Model::new(worker))))
+            Ok(Box::new(DesktopApp::new(&cc.egui_ctx, Model::new(worker))))
         }),
     );
     match result {

@@ -1,0 +1,274 @@
+//! The inspector: the selected source's position, size and opacity, and a
+//! screen source's capture with its restart. A dock in wide windows, a
+//! drawer over the workspace in narrow ones.
+
+use command_api::{SourceKind, SourceSpec};
+use eframe::egui;
+
+use crate::app::{Confirm, DesktopApp, Dialog};
+use crate::model::SourceHealth;
+use crate::ui::icons::Icon;
+use crate::ui::theme::{TextRole, color, size};
+use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
+
+use super::{committed, kind_label, right_to_left, scene, source};
+
+/// Largest position or size accepted in the fields, in canvas pixels.
+const EXTENT: f32 = 8192.0;
+
+impl DesktopApp {
+    pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
+        widgets::section_header(ui, "Inspector", None);
+        self.inspector(ui);
+    }
+
+    /// The inspector over the right edge of the program area, with a close
+    /// button; Escape closes it too.
+    pub(crate) fn inspector_drawer(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        let width = 300.0_f32.min(area.width());
+        let rect = egui::Rect::from_min_max(egui::pos2(area.right() - width, area.top()), area.max);
+        if self.dialog.is_none() && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.drawer_open = false;
+            return;
+        }
+        egui::Area::new(egui::Id::new("inspector drawer"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(color::BG_PANEL)
+                    .stroke(egui::Stroke::new(size::STROKE, color::LINE_STRONG))
+                    .shadow(ctx.global_style().visuals.popup_shadow)
+                    .inner_margin(size::SPACE_8)
+                    .show(ui, |ui| {
+                        ui.set_min_size(rect.size() - egui::Vec2::splat(2.0 * size::SPACE_8));
+                        ui.set_max_width(rect.width() - 2.0 * size::SPACE_8);
+                        let actions = widgets::section_header(ui, "Inspector", None);
+                        if right_to_left(ui, actions, |ui| {
+                            widgets::icon_button(ui, Icon::Close, "Close the inspector (Esc)")
+                                .clicked()
+                        }) {
+                            self.drawer_open = false;
+                        }
+                        self.inspector(ui);
+                    });
+            });
+    }
+
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let selected = self
+            .model
+            .scenes
+            .as_ref()
+            .zip(self.selected_scene.as_deref())
+            .and_then(|(scenes, id)| scene(scenes, id))
+            .zip(self.selected_source.as_deref())
+            .and_then(|(scene, id)| source(scene, id))
+            .cloned();
+        let Some(source) = selected else {
+            widgets::empty_state(ui, Icon::Layers, "Select a source to edit it");
+            return;
+        };
+        let (canvas_width, canvas_height) =
+            self.model.scenes.as_ref().map_or((1920, 1080), |scenes| {
+                (scenes.canvas_width, scenes.canvas_height)
+            });
+
+        let (icon, kind) = kind_label(&source.kind);
+        ui.horizontal(|ui| {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(size::ICON), egui::Sense::hover());
+            icon.paint(ui.painter(), rect, color::TEXT_SECONDARY);
+            ui.add(egui::Label::new(TextRole::Title.text(&source.name)).truncate());
+        });
+        ui.label(TextRole::Meta.text(format!("{kind} · {}", source.id)));
+        ui.add_space(size::SPACE_8);
+
+        widgets::section_header(ui, "Position and size", None);
+        let mut rect = [
+            source.rect.x,
+            source.rect.y,
+            source.rect.width,
+            source.rect.height,
+        ];
+        let mut changed = false;
+        egui::Grid::new(("transform", &source.id))
+            .num_columns(4)
+            .spacing([size::SPACE_8, size::SPACE_6])
+            .show(ui, |ui| {
+                for (row, labels) in [["X", "Y"], ["W", "H"]].iter().enumerate() {
+                    for (column, label) in labels.iter().enumerate() {
+                        let index = row * 2 + column;
+                        let range = if row == 0 {
+                            -EXTENT..=EXTENT
+                        } else {
+                            1.0..=EXTENT
+                        };
+                        ui.label(TextRole::Label.text(*label));
+                        let field = ui.add(
+                            egui::DragValue::new(&mut rect[index])
+                                .range(range)
+                                .speed(1.0)
+                                .max_decimals(1)
+                                .update_while_editing(false),
+                        );
+                        changed |= committed(&field);
+                    }
+                    ui.end_row();
+                }
+            });
+        let canvas = [0.0, 0.0, canvas_width as f32, canvas_height as f32];
+        if ui
+            .add(Button::new(ButtonKind::Ghost, "Fill the canvas").enabled(rect != canvas))
+            .clicked()
+        {
+            rect = canvas;
+            changed = true;
+        }
+        if changed {
+            self.model.update_source(&source.id, Some(rect), None);
+        }
+
+        ui.add_space(size::SPACE_8);
+        widgets::section_header(ui, "Opacity", None);
+        let mut percent = source.opacity * 100.0;
+        let slider = ui.add(
+            egui::Slider::new(&mut percent, 0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+        if committed(&slider) {
+            self.model
+                .update_source(&source.id, None, Some((percent / 100.0).clamp(0.0, 1.0)));
+        }
+
+        if let SourceKind::Screen { source_id, .. } = &source.kind {
+            ui.add_space(size::SPACE_8);
+            widgets::section_header(ui, "Capture", None);
+            self.capture(ui, &source, source_id.is_none());
+        }
+
+        ui.add_space(size::SPACE_16);
+        if ui
+            .add(Button::new(ButtonKind::Danger, "Remove source…").icon(Icon::Trash))
+            .clicked()
+        {
+            self.dialog = Some(Dialog::Confirm(Confirm::RemoveSource {
+                id: source.id.clone(),
+                name: source.name.clone(),
+            }));
+        }
+    }
+
+    /// A screen source's capture state, and a restart while it has a
+    /// capture (running or ended). Restarting ends a working capture, so
+    /// that asks first. An ended named source can restart on another
+    /// listed source: a closed window's id does not come back.
+    fn capture(&mut self, ui: &mut egui::Ui, source: &SourceSpec, picker: bool) {
+        let id = source.id.as_str();
+        let ended = match self.model.source_health(id) {
+            SourceHealth::NotCapturing => {
+                widgets::status_line(
+                    ui,
+                    StatusLevel::Info,
+                    "Not capturing: captures run while the scene is rendered.",
+                );
+                return;
+            }
+            SourceHealth::Capturing {
+                last_frame_age_ms,
+                frames_consumed,
+            } => {
+                // Screens may deliver only on change: an age, not an error.
+                let seconds = last_frame_age_ms.unwrap_or(0) / 1000;
+                let text = match (frames_consumed, seconds) {
+                    (0, 0) => "Capturing, no frame yet".to_owned(),
+                    (0, seconds) => format!("Capturing, no frame yet ({seconds} s)"),
+                    (_, 0) => "Capturing".to_owned(),
+                    (_, seconds) => format!("Capturing, last frame {seconds} s ago"),
+                };
+                widgets::status_line(ui, StatusLevel::Ok, &text);
+                false
+            }
+            SourceHealth::Ended { reason } => {
+                widgets::status_line(ui, StatusLevel::Error, &format!("Ended: {reason}"));
+                true
+            }
+        };
+        let target = if ended && !picker {
+            self.restart_target(ui, id)
+        } else {
+            None
+        };
+        // The engine refuses a picker restart while outputs run; disabling
+        // says why before a click. While a command is pending (e.g. a picker
+        // is open), a second restart would end the capture just chosen.
+        let outputs_open = self.model.recording.is_some() || self.model.streaming.is_some();
+        let busy = self.model.busy();
+        let restart = ui
+            .add(
+                Button::new(ButtonKind::Secondary, "Restart capture")
+                    .icon(Icon::Restart)
+                    .enabled(!busy && !(picker && outputs_open)),
+            )
+            .on_hover_text("Start the capture again; outputs keep running")
+            .on_disabled_hover_text(if busy {
+                "Waiting for the engine"
+            } else {
+                "A picker source asks again: restart it while nothing records or streams"
+            });
+        if restart.clicked() {
+            if ended {
+                self.restart_targets.remove(id);
+                self.model.restart_source(id, target.as_deref());
+            } else {
+                self.dialog = Some(Dialog::Confirm(Confirm::RestartSource {
+                    id: id.to_owned(),
+                    name: source.name.clone(),
+                }));
+            }
+        }
+    }
+
+    /// For an ended named source: restart on the same id, or on another
+    /// listed source.
+    fn restart_target(&mut self, ui: &mut egui::Ui, id: &str) -> Option<String> {
+        const SAME: &str = "The same source";
+        let selected = self.restart_targets.entry(id.to_owned()).or_default();
+        match &self.model.screen_sources {
+            Some(Ok(sources)) if !sources.is_empty() => {
+                // An id that is no longer listed is not sent.
+                if selected
+                    .as_ref()
+                    .is_some_and(|chosen| !sources.iter().any(|source| &source.id == chosen))
+                {
+                    *selected = None;
+                }
+                let text = selected
+                    .as_ref()
+                    .and_then(|chosen| sources.iter().find(|source| &source.id == chosen))
+                    .map_or(SAME, |source| source.name.as_str());
+                egui::ComboBox::from_id_salt(("restart target", id))
+                    .selected_text(text)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(selected, None, SAME);
+                        for source in sources {
+                            let label = format!("{} ({})", source.name, source.kind.as_str());
+                            ui.selectable_value(selected, Some(source.id.clone()), label);
+                        }
+                    });
+            }
+            _ => {
+                if ui
+                    .add(Button::new(ButtonKind::Ghost, "Find other sources"))
+                    .on_hover_text("Choose another source to restart on")
+                    .clicked()
+                {
+                    self.model.find_screen_sources();
+                }
+            }
+        }
+        selected.clone()
+    }
+}

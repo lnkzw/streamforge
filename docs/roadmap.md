@@ -258,7 +258,7 @@ Acceptance:
 From the project owner's brief: a professional production studio with its own identity. The "Control Room" direction is approved: `docs/ui/design-system.md`, `docs/ui/audit.md`, and ADR 0016 (egui stays, with an own design system).
 
 - [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
-- [ ] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health.
+- [x] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health (step 2). The mixer dock shows channel strips and the program bus until the console replaces it. The preview is 480×270, so a large monitor shows it soft; a sharper preview is an engine change, not yet planned.
 - [ ] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model.
 - [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
 - [ ] Rollout to the remaining views; keyboard operation as specified.

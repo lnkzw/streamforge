@@ -1,0 +1,238 @@
+//! The top bar: the application's mark, the transport (REC and LIVE with
+//! running timers) and the health summary, which opens the details and the
+//! activity log.
+
+use eframe::egui;
+
+use crate::app::{Confirm, DesktopApp, Dialog, HEALTH_STALE};
+use crate::model::Level;
+use crate::ui::icons::Icon;
+use crate::ui::theme::{TextRole, color, size};
+use crate::ui::widgets::{
+    self, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
+};
+use crate::workspace::{health_level, transport_state};
+
+/// The widest the health summary grows before its text is cut.
+const HEALTH_WIDTH: f32 = 360.0;
+
+impl DesktopApp {
+    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let bar = ui.max_rect();
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = size::SPACE_8;
+            let (mark, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(size::ICON), egui::Sense::hover());
+            Icon::Scene.paint(ui.painter(), mark, color::TEXT_PRIMARY);
+            ui.label(TextRole::Title.text("StreamForge"));
+        });
+
+        // The transport sits in the middle of the bar, whatever the sides
+        // hold.
+        let transport = egui::Rect::from_center_size(
+            bar.center(),
+            egui::vec2(2.0 * TRANSPORT_WIDTH + size::SPACE_8, size::CONTROL_LARGE),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(transport)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = size::SPACE_8;
+                self.record_button(ui);
+                self.live_button(ui);
+            },
+        );
+
+        let health = egui::Rect::from_min_max(
+            egui::pos2(transport.right() + size::SPACE_16, bar.top()),
+            bar.max,
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(health)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| self.health_summary(ui),
+        );
+    }
+
+    pub(crate) fn record_transport(&self) -> TransportState {
+        let model = &self.model;
+        let health = model
+            .health
+            .as_ref()
+            .and_then(|health| health.recording.as_ref())
+            .map(|output| (output, model.health_age().unwrap_or_default()));
+        let failed = model
+            .status
+            .as_ref()
+            .is_some_and(|status| status.recording_failed);
+        transport_state(
+            model.recording.is_some(),
+            model.pending("start_recording"),
+            failed,
+            health,
+        )
+    }
+
+    pub(crate) fn live_transport(&self) -> TransportState {
+        let model = &self.model;
+        let health = model
+            .health
+            .as_ref()
+            .and_then(|health| health.streaming.as_ref())
+            .map(|output| (output, model.health_age().unwrap_or_default()));
+        let failed = model
+            .status
+            .as_ref()
+            .is_some_and(|status| status.streaming_state == Some(command_api::StreamState::Failed));
+        transport_state(
+            model.streaming.is_some(),
+            model.pending("start_streaming"),
+            failed,
+            health,
+        )
+    }
+
+    fn record_button(&mut self, ui: &mut egui::Ui) {
+        let state = self.record_transport();
+        let waiting = self.model.pending("start_recording") || self.model.pending("stop_recording");
+        let response = ui
+            .add(TransportButton::new(Transport::Record, state).enabled(!waiting))
+            .on_disabled_hover_text("Waiting for the engine");
+        if response.clicked() {
+            match state {
+                TransportState::Idle => self.model.start_recording(&self.record_file),
+                // A failed recording only needs finalizing.
+                TransportState::Failed => self.model.stop_recording(),
+                TransportState::Starting | TransportState::Running(_) => {
+                    self.dialog = Some(Dialog::Confirm(Confirm::StopRecording));
+                }
+            }
+        }
+    }
+
+    fn live_button(&mut self, ui: &mut egui::Ui) {
+        let state = self.live_transport();
+        let waiting = self.model.pending("start_streaming") || self.model.pending("stop_streaming");
+        let response = ui
+            .add(TransportButton::new(Transport::Live, state).enabled(!waiting))
+            .on_disabled_hover_text("Waiting for the engine");
+        if response.clicked() {
+            match state {
+                // Without a target, ask for one and go live from there.
+                TransportState::Idle if self.stream_url.trim().is_empty() => {
+                    self.open_stream_settings(true);
+                }
+                TransportState::Idle => self
+                    .model
+                    .start_streaming(self.stream_url.trim(), &self.stream_key),
+                TransportState::Failed => self.model.stop_streaming(),
+                TransportState::Starting | TransportState::Running(_) => {
+                    self.dialog = Some(Dialog::Confirm(Confirm::StopStreaming));
+                }
+            }
+        }
+    }
+
+    /// Errors in the log since the operator last opened the details.
+    fn unseen_errors(&self) -> Vec<&str> {
+        let unseen = self.model.log_total().saturating_sub(self.log_seen);
+        let unseen = usize::try_from(unseen).unwrap_or(usize::MAX);
+        let mut errors: Vec<&str> = self
+            .model
+            .log
+            .iter()
+            .rev()
+            .take(unseen)
+            .filter(|entry| entry.level == Level::Error)
+            .map(|entry| entry.text.as_str())
+            .collect();
+        errors.reverse();
+        errors
+    }
+
+    /// One indicator that says the worst state and why; it opens the
+    /// details.
+    fn health_summary(&mut self, ui: &mut egui::Ui) {
+        let stale = self.model.health_age().filter(|age| *age >= HEALTH_STALE);
+        let unseen = self.unseen_errors();
+        let level = health_level(&self.model.health_items, stale.is_some(), unseen.len());
+        let first = |wanted: Level| {
+            self.model
+                .health_items
+                .iter()
+                .find(|item| item.level == wanted)
+                .map(|item| item.text.clone())
+        };
+        let text = match level {
+            StatusLevel::Error => unseen
+                .last()
+                .map(|text| (*text).to_owned())
+                .or_else(|| first(Level::Error))
+                .unwrap_or_default(),
+            StatusLevel::Warn => first(Level::Warning).unwrap_or_else(|| {
+                let seconds = stale.map_or(0, |age| age.as_secs());
+                format!("Health from {seconds} s ago (the engine is busy)")
+            }),
+            StatusLevel::Ok => "All healthy".to_owned(),
+            StatusLevel::Info => "Idle".to_owned(),
+        };
+        let width = ui.available_width().min(HEALTH_WIDTH);
+        let response =
+            widgets::status_button(ui, level, &text, width).on_hover_text("Health and activity");
+        let popup = egui::Popup::from_toggle_button_response(&response)
+            .width(440.0)
+            .align(egui::RectAlign::BOTTOM_END)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| self.health_details(ui, stale));
+        if popup.is_some() {
+            self.log_seen = self.model.log_total();
+        }
+    }
+
+    fn health_details(&self, ui: &mut egui::Ui, stale: Option<std::time::Duration>) {
+        ui.spacing_mut().item_spacing.y = size::SPACE_4;
+        widgets::section_header(ui, "Health", None);
+        if let Some(age) = stale {
+            widgets::status_line(
+                ui,
+                StatusLevel::Info,
+                &format!("Health from {} s ago (the engine is busy)", age.as_secs()),
+            );
+        }
+        if self.model.health_items.is_empty() {
+            widgets::status_line(
+                ui,
+                StatusLevel::Info,
+                "Nothing runs: health shows while the preview or an output is on.",
+            );
+        }
+        for item in &self.model.health_items {
+            widgets::status_line(ui, status(item.level), &item.text);
+        }
+        ui.add_space(size::SPACE_8);
+        widgets::section_header(ui, "Activity", Some(self.model.log.len()));
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .stick_to_bottom(true)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if self.model.log.is_empty() {
+                    ui.label(TextRole::Meta.text("No activity yet."));
+                }
+                for entry in &self.model.log {
+                    widgets::status_line(ui, status(entry.level), &entry.text);
+                }
+            });
+    }
+}
+
+/// How a log or health level reads as a status.
+pub(crate) fn status(level: Level) -> StatusLevel {
+    match level {
+        Level::Info => StatusLevel::Info,
+        Level::Warning => StatusLevel::Warn,
+        Level::Error => StatusLevel::Error,
+    }
+}

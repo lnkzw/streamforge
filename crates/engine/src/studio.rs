@@ -320,10 +320,6 @@ impl Engine {
         if output == OutputKind::Monitor {
             if let Some(pipeline) = &mut self.pipeline {
                 let column = mix_column(pipeline, &next, OutputKind::Monitor);
-                if mix.is_some() && pipeline.monitor_mix().is_some() {
-                    pipeline.set_monitor_mix(column);
-                    applied_now.push("mix");
-                }
                 match request.enabled {
                     Some(true) => {
                         warnings = pipeline.monitor_on(
@@ -338,6 +334,16 @@ impl Engine {
                         applied_now.push("enabled");
                     }
                     None => {}
+                }
+                // On a device that runs (on or off), now; otherwise when it
+                // is switched on next.
+                if mix.is_some() {
+                    if pipeline.monitor_device_running() {
+                        pipeline.set_monitor_mix(column);
+                        applied_now.push("mix");
+                    } else {
+                        next_start.push("mix");
+                    }
                 }
             }
         } else if running && let Some(id) = output_id(output) {

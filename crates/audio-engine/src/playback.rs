@@ -44,6 +44,8 @@ const OUT_FRAMES: usize = BLOCK_FRAMES + BLOCK_FRAMES / 100 + 8;
 pub struct PlaybackFeedStats {
     pub ring: SampleRingStats,
     pub fill_frames: usize,
+    /// The device's largest recent pull, which the target follows.
+    pub pull_frames: usize,
     pub target_frames: usize,
     pub drift_ppm: f64,
     pub padded_frames: u64,
@@ -110,6 +112,7 @@ impl PlaybackFeed {
         PlaybackFeedStats {
             ring: self.writer.stats(),
             fill_frames: self.writer.fill_frames(),
+            pull_frames: self.recent_peak(),
             target_frames: self.target,
             drift_ppm: (1.0 / self.ratio - 1.0) * 1e6,
             padded_frames: self.padded,
@@ -145,8 +148,13 @@ impl PlaybackFeed {
 
         let trim_above = self.target + TRIM_MARGIN_BLOCKS * frames + self.recent_peak();
         if fill > trim_above {
+            // Left out, but the next block goes on from its end, and a
+            // ramp due now plays in the next block that is played.
             self.trimmed += frames as u64;
-            self.gain.finish_block();
+            if let Some(last) = block.as_chunks::<CH>().0.last() {
+                let gain = self.gain.current();
+                self.next = last.map(|sample| sample * gain);
+            }
             return;
         }
 
@@ -306,6 +314,7 @@ mod tests {
                     "{drift} ppm, {quantum}: estimated {}",
                     stats.drift_ppm
                 );
+                assert_eq!(stats.pull_frames, quantum);
                 assert_eq!(
                     stats.target_frames,
                     (quantum + BLOCK_FRAMES).max(2 * BLOCK_FRAMES)
@@ -399,6 +408,26 @@ mod tests {
             .map(|pair| (pair[1][0] - pair[0][0]).abs())
             .fold(0.0, f32::max);
         assert!(max_step < 0.01, "a jump of {max_step}");
+    }
+
+    #[test]
+    fn a_ramp_due_while_blocks_are_trimmed_still_ramps() {
+        let mut sim = Simulation::new(0.0, 1024);
+        // The device stalls from 5 s to 5.5 s; the monitor goes off at 5.2 s,
+        // while blocks are being left out.
+        sim.run(520, |_| 0.5, Some((5.0, 5.5)), None);
+        assert!(sim.feed.stats().trimmed_frames > 0);
+        sim.feed.set_enabled(false);
+        sim.run(500, |_| 0.5, Some((5.0, 5.5)), None);
+        let max_step = sim.played[2 * 48_000..]
+            .as_chunks::<2>()
+            .0
+            .windows(2)
+            .map(|pair| (pair[1][0] - pair[0][0]).abs())
+            .fold(0.0, f32::max);
+        assert!(max_step < 0.01, "a jump of {max_step}");
+        let tail = &sim.played[sim.played.len() - 48_000..];
+        assert!(tail.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

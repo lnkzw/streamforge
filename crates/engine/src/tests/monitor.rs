@@ -298,6 +298,13 @@ fn a_monitor_that_ends_leaves_the_recording_running() {
     );
     assert_eq!(monitor.latency_ms, None);
     assert!(status(&mut engine).recording_active);
+    // No device runs: a new bus waits for the monitor to be switched on.
+    let set = profile_set(
+        &mut engine,
+        json!({"output": "monitor", "mix_bus": "Program"}),
+    );
+    assert!(set.applied_now.is_empty(), "{set:?}");
+    assert_eq!(set.next_start, ["mix"]);
     // Switching on again opens it anew.
     profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
     assert_eq!(monitor_health(&mut engine).state, CaptureState::Running);
@@ -346,7 +353,7 @@ fn a_channel_that_captures_the_monitor_device_is_a_feedback_warning() {
             .any(|w| w.contains("channel `Loop` captures what the monitor plays")),
         "{set:?}"
     );
-    // Off, the warning goes.
+    // Off, the warning goes; on again, it is back.
     profile_set(&mut engine, json!({"output": "monitor", "enabled": false}));
     let CommandOutput::MixerState(mixer) = run(&mut engine, "get_mixer", json!({})) else {
         panic!("mixer");
@@ -354,6 +361,11 @@ fn a_channel_that_captures_the_monitor_device_is_a_feedback_warning() {
     assert!(
         !mixer.warnings.iter().any(|w| w.contains("Loop")),
         "{mixer:?}"
+    );
+    let set = profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
+    assert!(
+        set.warnings.iter().any(|w| w.contains("channel `Loop`")),
+        "{set:?}"
     );
     stop_recording(&mut engine);
 }

@@ -138,19 +138,17 @@ impl DeviceCapture {
     }
 }
 
-/// `device`'s name in a message.
-/// `` `name` `` or "the default output", for messages.
-fn output_label(device: &Option<String>) -> String {
-    device.as_ref().map_or_else(
-        || "the default output".to_owned(),
-        |name| format!("`{name}`"),
-    )
+/// `` `name` ``, or `default` (e.g. "the default input"), for messages.
+fn label(device: &Option<String>, default: &str) -> String {
+    device
+        .as_deref()
+        .map_or_else(|| default.to_owned(), |name| format!("`{name}`"))
 }
 
 /// One warning per device channel that captures what `device` plays (a
 /// backend that knows says so in `loopback_of`): the monitor would feed
 /// back into the mix. The default output is not compared, as its name is
-/// not known here.
+/// not known here. Lists the inputs only when a channel captures a device.
 fn feedback_warnings(
     capture: &mut dyn CaptureBackend,
     audio: &AudioGraphSpec,
@@ -159,8 +157,18 @@ fn feedback_warnings(
     let Some(device) = device else {
         return Vec::new();
     };
-    let Ok(inputs) = capture.audio_inputs() else {
+    if audio::devices(audio).next().is_none() {
         return Vec::new();
+    }
+    let inputs = match capture.audio_inputs() {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return vec![format!(
+                "the monitor could not check for feedback, as the audio inputs did not list \
+                 ({}); make sure no channel captures what `{device}` plays",
+                error.message
+            )];
+        }
     };
     audio::devices(audio)
         .filter(|(_, input)| {
@@ -177,13 +185,6 @@ fn feedback_warnings(
             )
         })
         .collect()
-}
-
-fn device_label(device: &Option<String>) -> String {
-    device.as_deref().map_or_else(
-        || "the default input".to_owned(),
-        |name| format!("`{name}`"),
-    )
 }
 
 /// Field order is drop order: producers stop before the captures end.
@@ -213,8 +214,25 @@ struct MonitorPlayback {
     stream: Result<Box<dyn PlaybackStream>, ErrorSummary>,
     enabled: bool,
     /// Why it is silent, or that it may feed back; repeated by the run's
-    /// audio warnings.
+    /// audio warnings while it is on.
     warnings: Vec<String>,
+}
+
+impl MonitorPlayback {
+    /// Whether its device plays (the bus or, off, silence).
+    fn device_running(&self) -> bool {
+        matches!(&self.stream, Ok(stream) if stream.state() == CaptureState::Running)
+    }
+
+    /// The device's state; one that did not open ended before it started.
+    fn state(&self) -> CaptureState {
+        match &self.stream {
+            Ok(stream) => stream.state(),
+            Err(error) => CaptureState::Ended {
+                reason: format!("could not start: {}", error.message),
+            },
+        }
+    }
 }
 
 impl Pipeline {
@@ -300,7 +318,7 @@ impl Pipeline {
     ) -> Vec<String> {
         if let Some(monitor) = &mut self.monitor
             && monitor.device == *device
-            && matches!(&monitor.stream, Ok(stream) if stream.state() == CaptureState::Running)
+            && monitor.device_running()
         {
             monitor.enabled = true;
             if let Some(out) = lock(&self.fanout.monitor).as_mut() {
@@ -311,11 +329,15 @@ impl Pipeline {
         }
         // A fresh start: the old feed and device go first.
         drop(lock(&self.fanout.monitor).take());
+        let mut warnings = Vec::new();
         if let Some(MonitorPlayback {
             stream: Ok(stream), ..
         }) = self.monitor.take()
+            && let Err(error) = stream.stop()
         {
-            let _ = stream.stop();
+            warnings.push(format!(
+                "the monitor's previous device did not stop cleanly: {error}"
+            ));
         }
         let (writer, reader) = sample_ring(CHANNELS, MONITOR_RING_FRAMES);
         let request = PlaybackRequest {
@@ -323,7 +345,7 @@ impl Pipeline {
             rate: RATE,
             channels: CHANNELS,
         };
-        let (stream, warnings) = match capture.start_playback(&request, reader) {
+        let stream = match capture.start_playback(&request, reader) {
             Ok(stream) => {
                 let mut feed = PlaybackFeed::new(writer, false);
                 feed.set_enabled(true);
@@ -333,17 +355,18 @@ impl Pipeline {
                     fading_from: None,
                     faded: vec![0.0; BLOCK_FRAMES * CHANNELS as usize],
                 });
-                (Ok(stream), feedback_warnings(capture, &self.audio, device))
+                warnings.extend(feedback_warnings(capture, &self.audio, device));
+                Ok(stream)
             }
             Err(error) => {
-                let warning = format!(
+                warnings.push(format!(
                     "the monitor is silent: {} did not open ({}); connect it, or choose \
                      another with set_monitor_device while the pipeline is idle, then switch \
                      the monitor on again",
-                    output_label(device),
+                    label(device, "the default output"),
                     error.message
-                );
-                (Err(ErrorSummary::from(error)), vec![warning])
+                ));
+                Err(ErrorSummary::from(error))
             }
         };
         self.monitor = Some(MonitorPlayback {
@@ -359,7 +382,6 @@ impl Pipeline {
     pub fn monitor_off(&mut self) {
         if let Some(monitor) = &mut self.monitor {
             monitor.enabled = false;
-            monitor.warnings.clear();
         }
         if let Some(out) = lock(&self.fanout.monitor).as_mut() {
             out.feed.set_enabled(false);
@@ -381,10 +403,16 @@ impl Pipeline {
 
     /// Whether the monitor plays its bus now.
     pub fn monitor_playing(&self) -> bool {
-        self.monitor.as_ref().is_some_and(|monitor| {
-            monitor.enabled
-                && matches!(&monitor.stream, Ok(stream) if stream.state() == CaptureState::Running)
-        })
+        self.monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.enabled && monitor.device_running())
+    }
+
+    /// Whether the monitor's device plays, its bus or (off) silence.
+    pub fn monitor_device_running(&self) -> bool {
+        self.monitor
+            .as_ref()
+            .is_some_and(MonitorPlayback::device_running)
     }
 
     /// The monitor's state and feed, once it was switched on in this run.
@@ -392,26 +420,17 @@ impl Pipeline {
     /// block.
     pub fn monitor_health(&self) -> Option<MonitorHealth> {
         let monitor = self.monitor.as_ref()?;
-        let (state, feed) = match &monitor.stream {
-            Ok(stream) => (
-                stream.state(),
-                lock(&self.fanout.monitor)
-                    .as_ref()
-                    .map(|out| out.feed.stats()),
-            ),
-            Err(error) => (
-                CaptureState::Ended {
-                    reason: format!("could not start: {}", error.message),
-                },
-                None,
-            ),
-        };
-        // Only a device that plays has a delay.
+        let state = monitor.state();
+        let feed = lock(&self.fanout.monitor)
+            .as_ref()
+            .map(|out| out.feed.stats());
+        // Only a device that plays has a delay: what is buffered plus its
+        // recent pull.
         let latency_ms = feed
             .as_ref()
             .filter(|_| state == CaptureState::Running)
             .map(|feed| {
-                let frames = feed.fill_frames as u64 + feed.ring.max_read_frames;
+                let frames = feed.fill_frames + feed.pull_frames;
                 frames as f64 * 1000.0 / f64::from(RATE)
             });
         Some(MonitorHealth {
@@ -780,6 +799,7 @@ impl Pipeline {
         let monitor = self
             .monitor
             .iter()
+            .filter(|monitor| monitor.enabled)
             .flat_map(|monitor| monitor.warnings.clone());
         audio::devices(&self.audio)
             .zip(&self.audio_streams)
@@ -789,7 +809,7 @@ impl Pipeline {
                     "channel `{}` is silent: {} was not found ({}); connect the device, or stop \
                      the outputs and preview and choose another input with set_channel_input",
                     channel.name,
-                    device_label(device),
+                    label(device, "the default input"),
                     error.message
                 ))
             })
@@ -850,18 +870,12 @@ impl Pipeline {
         // The mixer fed the monitor; now its device stops.
         let monitor = monitor.map(|monitor| {
             let feed = lock(&fanout.monitor).take().map(|out| out.feed.stats());
-            let state = match monitor.stream {
-                Ok(stream) => {
-                    let state = stream.state();
-                    if let Err(error) = stream.stop() {
-                        warnings.push(format!("the monitor did not stop cleanly: {error}"));
-                    }
-                    state
-                }
-                Err(error) => CaptureState::Ended {
-                    reason: format!("could not start: {}", error.message),
-                },
-            };
+            let state = monitor.state();
+            if let Ok(stream) = monitor.stream
+                && let Err(error) = stream.stop()
+            {
+                warnings.push(format!("the monitor did not stop cleanly: {error}"));
+            }
             if let Some(feed) = &feed {
                 let ring = &feed.ring;
                 if ring.underrun_frames + ring.overrun_frames + feed.trimmed_frames > 0 {
@@ -898,7 +912,7 @@ impl Pipeline {
                 format!(
                     "channel `{}` was silent for the whole run: {} was not found ({})",
                     channel.name,
-                    device_label(device),
+                    label(device, "the default input"),
                     error.message
                 )
             });
@@ -1191,14 +1205,7 @@ impl BlockSink for AudioTap {
             let Some(pts) = since(out.t0, at) else {
                 continue;
             };
-            let mix = buses.column(out.mix).unwrap_or(buses.program());
-            let samples = match out.fading_from.take().and_then(|from| buses.column(from)) {
-                Some(from) => {
-                    crossfade(from, mix, &mut out.faded);
-                    out.faded.as_slice()
-                }
-                None => mix,
-            };
+            let samples = faded_mix(buses, out.mix, &mut out.fading_from, &mut out.faded);
             // Track 1 is the mix; one item carries every track.
             let mut tracks: [&[f32]; MAX_AUDIO_TRACKS] = [&[]; MAX_AUDIO_TRACKS];
             tracks[0] = samples;
@@ -1216,16 +1223,26 @@ impl BlockSink for AudioTap {
             faded,
         }) = lock(&self.0.monitor).as_mut()
         {
-            let to = buses.column(*mix).unwrap_or(buses.program());
-            let samples = match fading_from.take().and_then(|from| buses.column(from)) {
-                Some(from) => {
-                    crossfade(from, to, faded);
-                    faded.as_slice()
-                }
-                None => to,
-            };
-            feed.write_block(samples);
+            feed.write_block(faded_mix(buses, *mix, fading_from, faded));
         }
+    }
+}
+
+/// The block of bus `mix`, or for one block after a switch, the crossfade
+/// from the bus played before (into `faded`).
+fn faded_mix<'a>(
+    buses: &'a BusBlocks<'_>,
+    mix: usize,
+    fading_from: &mut Option<usize>,
+    faded: &'a mut [f32],
+) -> &'a [f32] {
+    let to = buses.column(mix).unwrap_or(buses.program());
+    match fading_from.take().and_then(|from| buses.column(from)) {
+        Some(from) => {
+            crossfade(from, to, faded);
+            faded
+        }
+        None => to,
     }
 }
 

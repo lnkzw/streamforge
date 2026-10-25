@@ -521,6 +521,18 @@ impl Drop for Sink {
     }
 }
 
+/// Whether a stream error can mean that the stream stopped, so that
+/// [`Liveness`] watches for data after it. A glitch never does: an
+/// underrun or overrun (macOS also reports a processor overload so, as soon
+/// as the stream starts on a loaded machine) or real-time scheduling that
+/// was refused. Every host keeps the stream running after one.
+pub(crate) fn may_end(kind: cpal::ErrorKind) -> bool {
+    !matches!(
+        kind,
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+    )
+}
+
 /// A stream's error callback. Errors are rare and not in the data path;
 /// it keeps the first few messages, each after `prefix`.
 fn on_error(
@@ -531,7 +543,9 @@ fn on_error(
     let (errors, liveness) = (Arc::clone(errors), Arc::clone(liveness));
     move |err| {
         let message = format!("{prefix}{err}");
-        liveness.error(&message);
+        if may_end(err.kind()) {
+            liveness.error(&message);
+        }
         let mut errors = errors.lock().unwrap_or_else(PoisonError::into_inner);
         if errors.len() < 8 {
             errors.push(message);
@@ -755,4 +769,18 @@ pub(crate) fn capture_error(error: &cpal::Error, context: &str) -> CaptureError 
         _ => CaptureErrorKind::Backend,
     };
     CaptureError::new(kind, format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glitches_do_not_end_a_stream() {
+        assert!(!may_end(cpal::ErrorKind::Xrun));
+        assert!(!may_end(cpal::ErrorKind::RealtimeDenied));
+        assert!(may_end(cpal::ErrorKind::DeviceNotAvailable));
+        assert!(may_end(cpal::ErrorKind::StreamInvalidated));
+        assert!(may_end(cpal::ErrorKind::BackendError));
+    }
 }

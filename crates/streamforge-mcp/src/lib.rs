@@ -38,7 +38,12 @@ pub struct Config {
     pub projects: bool,
 }
 
-const PROJECT_COMMANDS: [&str; 3] = ["save_project", "load_project", "validate_project"];
+const PROJECT_COMMANDS: [&str; 4] = [
+    "list_projects",
+    "save_project",
+    "load_project",
+    "validate_project",
+];
 
 pub struct StreamforgeMcp {
     engine: EngineHandle,

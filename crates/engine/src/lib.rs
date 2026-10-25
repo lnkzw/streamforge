@@ -264,6 +264,7 @@ impl CommandHandler for Engine {
             Command::SetScreenSource { source, source_id } => self
                 .set_screen_source(&source, &source_id)
                 .map(CommandOutput::SceneList),
+            Command::ListProjects => self.list_projects().map(CommandOutput::ProjectFiles),
             Command::SaveProject(request) => {
                 self.save_project(&request).map(CommandOutput::ProjectSaved)
             }
@@ -1941,6 +1942,47 @@ mod tests {
     }
 
     #[test]
+    fn the_project_directory_lists_the_files_a_load_can_name() {
+        let dir = TempDir::new("project-list");
+        let mut engine = engine().with_project_dir(&dir.0);
+        let CommandOutput::ProjectSaved(saved) = run(
+            &mut engine,
+            "save_project",
+            json!({"file_name": "show.json"}),
+        ) else {
+            panic!("unexpected output");
+        };
+        std::fs::write(dir.0.join("notes.txt"), b"x").expect("txt");
+        // Windows opens the device for this name, so it only exists as a
+        // file elsewhere; no command would accept it.
+        #[cfg(unix)]
+        std::fs::write(dir.0.join("NUL.json"), b"{}").expect("device name");
+        let CommandOutput::ProjectFiles(list) = run(&mut engine, "list_projects", json!({})) else {
+            panic!("unexpected output");
+        };
+        let names: Vec<&str> = list
+            .files
+            .iter()
+            .map(|file| file.file_name.as_str())
+            .collect();
+        assert_eq!(names, ["show.json"]);
+        assert_eq!(list.files[0].bytes, saved.bytes);
+        assert!(list.files[0].modified_unix_ms.is_some());
+        assert_eq!(list.omitted, 0);
+
+        // A bounded answer: the rest is counted.
+        for index in 0..command_api::MAX_LISTED_PROJECTS {
+            std::fs::write(dir.0.join(format!("extra-{index:03}.json")), b"{}").expect("extra");
+        }
+        let CommandOutput::ProjectFiles(list) = run(&mut engine, "list_projects", json!({})) else {
+            panic!("unexpected output");
+        };
+        assert_eq!(list.files.len(), command_api::MAX_LISTED_PROJECTS);
+        assert_eq!(list.omitted, 1);
+        assert_eq!(list.files[0].file_name, "extra-000.json");
+    }
+
+    #[test]
     fn project_commands_need_a_directory_an_idle_pipeline_and_explicit_overwrite() {
         let _media = media_test_lock();
         let unconfigured = try_run(
@@ -1951,6 +1993,9 @@ mod tests {
         .unwrap_err();
         assert_eq!(unconfigured.code, ErrorCode::InvalidState);
         assert!(unconfigured.message.contains("--project-dir"));
+
+        let unlisted = try_run(&mut self::engine(), "list_projects", json!({})).unwrap_err();
+        assert_eq!(unlisted.code, ErrorCode::InvalidState);
 
         let dir = TempDir::new("project-rules");
         let mut engine = engine().with_project_dir(&dir.0);

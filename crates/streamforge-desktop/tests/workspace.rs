@@ -52,8 +52,11 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
 /// A model on a fresh engine whose program scene has one source.
 fn model(dir: &TempDir) -> Model {
     let out = dir.0.clone();
-    let worker =
-        EngineWorker::spawn(move || Engine::new().with_output_dir(out), || {}).expect("worker");
+    let worker = EngineWorker::spawn(
+        move || Engine::new().with_output_dir(&out).with_project_dir(out),
+        || {},
+    )
+    .expect("worker");
     let mut model = Model::new(worker);
     wait(&mut model, "the scene list", |m| m.scenes.is_some());
     let program = model.scenes.as_ref().expect("scenes").active_id.clone();
@@ -403,4 +406,229 @@ fn a_bus_strip_mutes_and_buses_stay_while_the_pipeline_runs() {
     step_until(&mut harness, "the running mixer", |h| {
         !clickable(h, "Add a bus") && !clickable(h, "Remove bus Voice…")
     });
+}
+
+/// The viewport commands of the last frame (title, close, cancel close).
+fn commands(harness: &Harness<'static, DesktopApp>) -> Vec<egui::ViewportCommand> {
+    harness
+        .output()
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|viewport| viewport.commands.clone())
+        .unwrap_or_default()
+}
+
+/// The window's close button.
+fn request_close(harness: &mut Harness<'static, DesktopApp>) {
+    harness
+        .input_mut()
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .events
+        .push(egui::ViewportEvent::Close);
+}
+
+/// Type into the dialog's first text field.
+fn type_into_dialog(harness: &mut Harness<'static, DesktopApp>, text: &str) {
+    harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .expect("the text field")
+        .focus();
+    harness.step();
+    harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .expect("the text field")
+        .type_text(text);
+    harness.step();
+}
+
+#[test]
+fn a_project_is_saved_changed_and_opened_again() {
+    let dir = TempDir::new("project");
+    let mut harness = harness(model(&dir));
+    // Adding the source was a change.
+    harness
+        .get_by_label("Project Untitled, unsaved changes")
+        .click();
+    step_until(&mut harness, "the project menu", |h| {
+        h.query_by_label("Save as…").is_some()
+    });
+    harness.get_by_label("Save as…").click();
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    type_into_dialog(&mut harness, "show");
+    step_until(&mut harness, "the listing", |h| clickable(h, "Save"));
+    harness.get_by_label("Save").click();
+    step_until(&mut harness, "the save", |h| {
+        h.query_by_label("Project show.json").is_some()
+    });
+    assert!(dir.0.join("show.json").is_file());
+
+    // A change marks it again.
+    harness.get_by_label("Mute Tone").click();
+    step_until(&mut harness, "the mute", |h| {
+        is_on(h, "Mute Tone")
+            && h.query_by_label("Project show.json, unsaved changes")
+                .is_some()
+    });
+
+    // Opening the file over the change asks first, then brings the saved
+    // state back.
+    harness
+        .get_by_label("Project show.json, unsaved changes")
+        .click();
+    step_until(&mut harness, "the project menu", |h| {
+        h.query_by_label("Open project…").is_some()
+    });
+    harness.get_by_label("Open project…").click();
+    step_until(&mut harness, "the file list", |h| {
+        h.query_by_label("show.json").is_some()
+    });
+    assert!(!clickable(&harness, "Open"), "nothing chosen yet");
+    harness.get_by_label("show.json").click();
+    step_until(&mut harness, "the check", |h| {
+        h.query_by_label("A valid project.").is_some() && clickable(h, "Open")
+    });
+    harness.get_by_label("Open").click();
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Discard and open").is_some()
+    });
+    harness.get_by_label("Discard and open").click();
+    step_until(&mut harness, "the opened project", |h| {
+        h.query_by_label("Project show.json").is_some() && !is_on(h, "Mute Tone")
+    });
+}
+
+#[test]
+fn a_name_that_exists_is_replaced_only_when_the_dialog_says_so() {
+    let dir = TempDir::new("replace");
+    std::fs::write(dir.0.join("show.json"), b"{}").expect("existing file");
+    let mut harness = harness(model(&dir));
+    harness
+        .get_by_label("Project Untitled, unsaved changes")
+        .click();
+    step_until(&mut harness, "the project menu", |h| {
+        h.query_by_label("Save as…").is_some()
+    });
+    harness.get_by_label("Save as…").click();
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    type_into_dialog(&mut harness, "show.json");
+    step_until(&mut harness, "the warning", |h| {
+        h.query_by_label("“show.json” exists: saving replaces it.")
+            .is_some()
+            && clickable(h, "Replace")
+    });
+    harness.get_by_label("Replace").click();
+    step_until(&mut harness, "the save", |h| {
+        h.query_by_label("Project show.json").is_some()
+    });
+    let saved = std::fs::read_to_string(dir.0.join("show.json")).expect("saved");
+    assert!(saved.contains("lower third"), "{saved}");
+
+    // A name the engine would refuse cannot be saved.
+    harness.get_by_label("Project show.json").click();
+    step_until(&mut harness, "the project menu", |h| {
+        h.query_by_label("Save as…").is_some()
+    });
+    harness.get_by_label("Save as…").click();
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .expect("the text field")
+        .focus();
+    harness.step();
+    // The field starts with the current name; replace it.
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    harness.step();
+    harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .expect("the text field")
+        .type_text("../away.json");
+    step_until(&mut harness, "the refusal", |h| {
+        h.query_by_label_contains("Use a plain file name").is_some()
+    });
+    assert!(harness.query_by_label("Save").is_some() && !clickable(&harness, "Save"));
+}
+
+#[test]
+fn closing_with_unsaved_changes_asks_and_can_save_first() {
+    let dir = TempDir::new("quit");
+    let mut harness = harness(model(&dir));
+    request_close(&mut harness);
+    harness.step();
+    assert!(
+        commands(&harness).contains(&egui::ViewportCommand::CancelClose),
+        "{:?}",
+        commands(&harness)
+    );
+    step_until(&mut harness, "the question", |h| {
+        h.query_by_label("Quit with unsaved changes?").is_some()
+    });
+    // Untitled: saving asks for a name, then closes once saved.
+    harness.get_by_label("Save as and quit…").click();
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    type_into_dialog(&mut harness, "last");
+    step_until(&mut harness, "the listing", |h| {
+        clickable(h, "Save and quit")
+    });
+    harness.get_by_label("Save and quit").click();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !commands(&harness).contains(&egui::ViewportCommand::Close) {
+        assert!(Instant::now() < deadline, "the window never closed");
+        harness.step();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(dir.0.join("last.json").is_file());
+}
+
+#[test]
+fn quitting_without_saving_closes_and_a_saved_project_closes_at_once() {
+    let dir = TempDir::new("discard");
+    let mut harness = harness(model(&dir));
+    request_close(&mut harness);
+    step_until(&mut harness, "the question", |h| {
+        h.query_by_label("Quit with unsaved changes?").is_some()
+    });
+    harness.get_by_label("Quit without saving").click();
+    harness.step();
+    assert!(commands(&harness).contains(&egui::ViewportCommand::Close));
+    assert!(!dir.0.join("last.json").exists());
+
+    // Nothing unsaved: the window closes without a question.
+    let dir = TempDir::new("saved");
+    let mut harness = harness_without_changes(&dir);
+    request_close(&mut harness);
+    harness.step();
+    assert!(!commands(&harness).contains(&egui::ViewportCommand::CancelClose));
+    settle(&mut harness, 3);
+    assert!(
+        harness
+            .query_by_label("Quit with unsaved changes?")
+            .is_none()
+    );
+}
+
+/// A fresh engine nobody changed: nothing to save.
+fn harness_without_changes(dir: &TempDir) -> Harness<'static, DesktopApp> {
+    let out = dir.0.clone();
+    let worker = EngineWorker::spawn(
+        move || Engine::new().with_output_dir(&out).with_project_dir(out),
+        || {},
+    )
+    .expect("worker");
+    let mut model = Model::new(worker);
+    wait(&mut model, "the scene list", |m| m.scenes.is_some());
+    harness(model)
 }

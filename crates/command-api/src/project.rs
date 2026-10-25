@@ -1,5 +1,5 @@
-//! Types of the project commands (`save_project`, `load_project`,
-//! `validate_project`; ADR 0015).
+//! Types of the project commands (`list_projects`, `save_project`,
+//! `load_project`, `validate_project`; ADR 0015).
 //!
 //! A project file holds the scenes with their ids, the active scene and the
 //! audio graph. It lives in the engine's project directory (`--project-dir`),
@@ -10,6 +10,29 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::{MixerState, SceneList};
+
+/// Most files `list_projects` returns; the rest are counted in
+/// [`ProjectFileList::omitted`].
+pub const MAX_LISTED_PROJECTS: usize = 256;
+
+/// Result of `list_projects`: the project files in the project directory,
+/// by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectFileList {
+    pub files: Vec<ProjectFileInfo>,
+    /// Files past [`MAX_LISTED_PROJECTS`], not listed.
+    pub omitted: usize,
+}
+
+/// One project file. It is not read: `validate_project` checks it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectFileInfo {
+    pub file_name: String,
+    pub bytes: u64,
+    /// When it was last written, in milliseconds since the Unix epoch, if
+    /// the system says.
+    pub modified_unix_ms: Option<u64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveProjectRequest {

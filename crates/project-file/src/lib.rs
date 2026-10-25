@@ -32,7 +32,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-pub use store::{MAX_FILE_BYTES, Saved, read, write};
+pub use store::{Entry, MAX_FILE_BYTES, Saved, list, read, write};
 
 /// The schema version this build writes. It also reads version 1 and
 /// migrates it.

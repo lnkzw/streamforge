@@ -25,8 +25,8 @@ struct Args {
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
     /// Directory for project files (save_project and load_project need
-    /// --allow sensitive; validate_project is read-only). Without it, the
-    /// project commands are unavailable.
+    /// --allow sensitive; list_projects and validate_project are
+    /// read-only). Without it, the project commands are unavailable.
     #[arg(long)]
     project_dir: Option<PathBuf>,
     /// The only RTMP target agents may stream to (needs --allow sensitive);

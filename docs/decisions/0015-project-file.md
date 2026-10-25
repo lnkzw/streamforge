@@ -21,6 +21,7 @@ The user decided where files live: a project directory set when the engine start
   | `save_project {file_name, overwrite}` | `sensitive`, destructive | Writes the scenes, the active scene and the audio setup; also while outputs run |
   | `load_project {file_name}` | `sensitive`, destructive | Replaces all three, only while the pipeline is idle; all or nothing |
   | `validate_project {file_name}` | `read_only` | The same checks, without loading; problems are a result |
+  | `list_projects` | `read_only` | The `.json` files in the directory, by name, with size and time (added in M12 step 4a) |
   | `set_screen_source {source, source_id}` | `sensitive` | Chooses what a screen source captures while it has no running capture |
 
   - Saving is `sensitive` because it can replace a file, loading because it brings in audio inputs and screen sources (as `set_audio_sources` and `add_source` do) and discards unsaved scenes.
@@ -73,4 +74,4 @@ The user decided where files live: a project directory set when the engine start
 
 - Scenes and the audio setup survive a restart, and an agent can save and restore a production, within the directory the operator chose.
 - Changing a command's parameter rules changes what a project file accepts. The project tests catch a change that breaks saved files.
-- The desktop has no project UI yet; it would need `--project-dir` and a way to pick a file. A `list_projects` command would help it and agents.
+- The desktop opens and saves projects since M12 step 4a: `--project-dir` (default: the working directory), and `list_projects` to pick a file, which agents use as well.

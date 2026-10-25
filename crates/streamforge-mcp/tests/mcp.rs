@@ -230,6 +230,7 @@ async fn project_tools_need_a_project_directory() {
     let client = connect(&dir, &["--allow", "sensitive"], &[]).await;
     let listed = names(&tools(&client).await).join(",");
     assert!(!listed.contains("save_project") && !listed.contains("validate_project"));
+    assert!(!listed.contains("list_projects"));
     let refused = call(&client, "save_project", json!({"file_name": "a.json"})).await;
     assert_eq!(error_code(&refused), "permission_denied");
     client.cancel().await.expect("close");
@@ -248,6 +249,8 @@ async fn project_tools_need_a_project_directory() {
     ok(&call(&client, "save_project", json!({"file_name": "a.json"})).await);
     let checked = call(&client, "validate_project", json!({"file_name": "a.json"})).await;
     assert_eq!(ok(&checked)["valid"], true);
+    let found = call(&client, "list_projects", json!({})).await;
+    assert_eq!(ok(&found)["files"][0]["file_name"], "a.json");
     client.cancel().await.expect("close");
 }
 

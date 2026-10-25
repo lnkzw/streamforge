@@ -112,6 +112,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `set_output_profile`       | see below | `control`, destructive | The profiles plus `{"applied_now", "next_start", "warnings"}` |
 | `set_monitor_device`       | see below | `sensitive` | The profiles |
 | `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
+| `list_projects`            | none   | `read_only` | `{"files": [{"file_name", "bytes", "modified_unix_ms"}], "omitted"}` |
 | `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
 | `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
 | `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "migrates", "problems": [{"path", "message"}]}` |
@@ -434,6 +435,7 @@ A project file holds the scenes with their ids, the active scene and the audio c
 - Commands name a file by a plain `.json` name. Directories, `..`, absolute paths and Windows device names (`CON`, `NUL`, `COM1`, …) are `invalid_params`.
 - Only regular files are read or replaced. A link is followed when reading, but saving does not replace it with a file; a directory or device is `invalid_params`.
 
+- **`list_projects`:** the files a load can name: regular files (or links to one) in the project directory whose names end in `.json` and pass the file name rule above, sorted by name, each with its size in `bytes` and `modified_unix_ms` (when it was last written, `null` where the system does not say). Hidden files (a leading `.`, such as a save's temporary file) are left out. At most 256 are listed; `omitted` counts the rest. The files are not read; `validate_project` checks one. `read_only`.
 - **`save_project {file_name, overwrite}`:** writes the current scenes and audio, also while the pipeline runs (the configured audio).
   - An existing file is `invalid_params` unless `overwrite` is `true`. A replaced file keeps its permissions (Windows refuses to replace a read-only file).
   - Writing is atomic: a temporary file next to the target, flushed to disk and renamed over it. A save that fails or is cut off leaves the previous file whole.
@@ -479,7 +481,7 @@ The file (`schema_version` 2):
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","save_project","load_project","validate_project"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.

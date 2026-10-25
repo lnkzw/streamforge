@@ -1,6 +1,6 @@
-//! The top bar: the application's mark, the transport (REC and LIVE with
-//! running timers) and the health summary, which opens the details and the
-//! activity log.
+//! The top bar: the application's mark, the project menu (open, save,
+//! save as), the transport (REC and LIVE with running timers) and the
+//! health summary, which opens the details and the activity log.
 
 use command_api::StreamState;
 use eframe::egui;
@@ -12,28 +12,39 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{
     self, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
 };
-use crate::workspace::{health_level, transport_state};
+use crate::workspace::{self, health_level, transport_state};
 
 /// The widest the health summary grows before its text is cut.
 const HEALTH_WIDTH: f32 = 360.0;
+/// The widest the project menu grows before the name is cut.
+const PROJECT_WIDTH: f32 = 240.0;
 
 impl DesktopApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let bar = ui.max_rect();
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = size::SPACE_8;
-            let (mark, _) =
-                ui.allocate_exact_size(egui::Vec2::splat(size::ICON), egui::Sense::hover());
-            Icon::Scene.paint(ui.painter(), mark, color::TEXT_PRIMARY);
-            ui.label(TextRole::Title.text("StreamForge"));
-        });
-
         // The transport sits in the middle of the bar, whatever the sides
         // hold.
         let transport = egui::Rect::from_center_size(
             bar.center(),
             egui::vec2(2.0 * TRANSPORT_WIDTH + size::SPACE_8, size::CONTROL_LARGE),
         );
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = size::SPACE_8;
+            let (mark, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(size::ICON), egui::Sense::hover());
+            Icon::Scene.paint(ui.painter(), mark, color::TEXT_PRIMARY);
+            ui.label(TextRole::Title.text("StreamForge"));
+            let (divider, _) =
+                ui.allocate_exact_size(egui::vec2(1.0, size::CONTROL), egui::Sense::hover());
+            ui.painter().vline(
+                divider.center().x,
+                divider.y_range(),
+                egui::Stroke::new(size::STROKE, color::LINE_SUBTLE),
+            );
+            let room = transport.left() - ui.cursor().left() - size::SPACE_16;
+            self.project_menu(ui, room.min(PROJECT_WIDTH));
+        });
+
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(transport)
@@ -55,6 +66,43 @@ impl DesktopApp {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
             |ui| self.health_summary(ui),
         );
+    }
+
+    /// The project's file (or "Untitled"), marked while it has unsaved
+    /// changes; its menu opens, saves and saves as.
+    fn project_menu(&mut self, ui: &mut egui::Ui, width: f32) {
+        let name = workspace::project_name(self.model.project.as_deref()).to_owned();
+        let unsaved = self.model.unsaved;
+        let label = if unsaved {
+            format!("Project {name}, unsaved changes")
+        } else {
+            format!("Project {name}")
+        };
+        let response = widgets::menu_button(ui, Icon::File, &name, unsaved, &label, width);
+        let mut chosen = None;
+        egui::Popup::menu(&response).width(220.0).show(|ui| {
+            ui.set_min_width(200.0);
+            for (item, text) in [
+                (ProjectItem::Open, "Open project…"),
+                (ProjectItem::Save, "Save"),
+                (ProjectItem::SaveAs, "Save as…"),
+            ] {
+                if ui.button(TextRole::Body.text(text)).clicked() {
+                    chosen = Some(item);
+                }
+            }
+            if let Some(folder) = &self.project_folder {
+                ui.separator();
+                ui.add(egui::Label::new(TextRole::Meta.text(folder.as_str())).truncate())
+                    .on_hover_text(folder);
+            }
+        });
+        match chosen {
+            Some(ProjectItem::Open) => self.open_projects(),
+            Some(ProjectItem::Save) => self.save_project(false),
+            Some(ProjectItem::SaveAs) => self.save_project_as(false),
+            None => {}
+        }
     }
 
     pub(crate) fn record_transport(&self) -> TransportState {
@@ -243,6 +291,13 @@ impl DesktopApp {
                 }
             });
     }
+}
+
+#[derive(Clone, Copy)]
+enum ProjectItem {
+    Open,
+    Save,
+    SaveAs,
 }
 
 /// How a log or health level reads as a status.

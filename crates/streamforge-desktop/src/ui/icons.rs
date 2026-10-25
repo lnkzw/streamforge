@@ -43,6 +43,8 @@ pub enum Icon {
     /// A circular arrow: restart.
     Restart,
     Folder,
+    /// A sheet with a folded corner: a project file.
+    File,
     Close,
 }
 
@@ -209,6 +211,16 @@ impl Icon {
                     (2.0, 13.0),
                 ]);
             }
+            Self::File => {
+                closed(&[
+                    (3.5, 2.0),
+                    (9.5, 2.0),
+                    (12.5, 5.0),
+                    (12.5, 14.0),
+                    (3.5, 14.0),
+                ]);
+                line(&[(9.5, 2.0), (9.5, 5.0), (12.5, 5.0)]);
+            }
             Self::Close => {
                 line(&[(4.0, 4.0), (12.0, 12.0)]);
                 line(&[(12.0, 4.0), (4.0, 12.0)]);
@@ -217,7 +229,7 @@ impl Icon {
     }
 
     /// Every icon, for the specimen render.
-    pub const ALL: [Icon; 24] = [
+    pub const ALL: [Icon; 25] = [
         Self::Record,
         Self::Live,
         Self::Stop,
@@ -241,6 +253,7 @@ impl Icon {
         Self::Check,
         Self::Restart,
         Self::Folder,
+        Self::File,
         Self::Close,
     ];
 }

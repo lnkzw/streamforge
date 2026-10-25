@@ -15,7 +15,7 @@ use eframe::egui;
 use crate::model::{Model, SourceForm};
 use crate::ui::theme::{self, color, size};
 use crate::views;
-use crate::workspace::{Ballistics, DRAWER_BELOW};
+use crate::workspace::{self, Ballistics, DRAWER_BELOW};
 
 /// Status and meters are polled this often.
 const LIVE_REFRESH: Duration = Duration::from_millis(100);
@@ -52,6 +52,14 @@ pub struct DesktopApp {
     /// Meters by channel or bus id.
     pub(crate) meters: HashMap<String, Ballistics>,
     pub(crate) mixer_view: MixerView,
+    /// Where project files are, as the project dialogs show it.
+    pub(crate) project_folder: Option<String>,
+    /// The operator chose to quit despite unsaved changes.
+    quit_confirmed: bool,
+    /// Quit once the save that was asked for succeeds.
+    pub(crate) quit_after_save: bool,
+    /// The window title last set.
+    title: String,
     pub(crate) preview: Option<egui::TextureHandle>,
     rgba: Vec<u8>,
     last_live: Instant,
@@ -94,6 +102,18 @@ pub(crate) enum Dialog {
         name: String,
         assigned: bool,
     },
+    /// The project directory's files; the chosen one is checked before it
+    /// can be opened.
+    OpenProject {
+        selected: Option<String>,
+    },
+    /// A file name for the project; an existing file is replaced only
+    /// with the dialog's own warning. `quit`: opened to save before
+    /// quitting.
+    SaveProject {
+        file_name: String,
+        quit: bool,
+    },
     Confirm(Confirm),
 }
 
@@ -117,6 +137,12 @@ pub(crate) enum Confirm {
         id: String,
         name: String,
     },
+    /// Open a project over unsaved changes.
+    OpenProject {
+        file_name: String,
+    },
+    /// Close the window over unsaved changes.
+    Quit,
     StopRecording,
     StopStreaming,
 }
@@ -142,6 +168,10 @@ impl DesktopApp {
             browser_split: 0.4,
             meters: HashMap::new(),
             mixer_view: MixerView::Console,
+            project_folder: None,
+            quit_confirmed: false,
+            quit_after_save: false,
+            title: String::new(),
             preview: None,
             rgba: Vec::new(),
             last_live: now,
@@ -149,6 +179,12 @@ impl DesktopApp {
             last_scenes: now,
             last_frame: now,
         }
+    }
+
+    /// Name the project folder in the project dialogs.
+    pub fn with_project_folder(mut self, folder: impl Into<String>) -> Self {
+        self.project_folder = Some(folder.into());
+        self
     }
 
     fn poll(&mut self) {
@@ -250,6 +286,65 @@ impl DesktopApp {
         );
     }
 
+    pub(crate) fn open_projects(&mut self) {
+        self.model.list_projects();
+        self.model.validation = None;
+        self.dialog = Some(Dialog::OpenProject { selected: None });
+    }
+
+    /// Save as: a name for the file, the current one to start with.
+    pub(crate) fn save_project_as(&mut self, quit: bool) {
+        self.model.list_projects();
+        self.dialog = Some(Dialog::SaveProject {
+            file_name: self.model.project.clone().unwrap_or_default(),
+            quit,
+        });
+    }
+
+    /// Save to the current file; without one, ask for a name.
+    pub(crate) fn save_project(&mut self, quit: bool) {
+        match self.model.project.clone() {
+            Some(file_name) => {
+                self.model.save_project(&file_name, true);
+                self.quit_after_save = quit;
+            }
+            None => self.save_project_as(quit),
+        }
+    }
+
+    /// Close the window: the confirmation or a save allowed it.
+    pub(crate) fn quit(&mut self, ctx: &egui::Context) {
+        self.quit_confirmed = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The window can close unless the project has unsaved changes; then
+    /// the operator chooses (save, discard or stay).
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.model.unsaved
+            && !self.quit_confirmed
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.dialog.is_none() {
+                self.dialog = Some(Dialog::Confirm(Confirm::Quit));
+            }
+        }
+        // A save for quitting: close once it went through; a failed one
+        // (in the log) keeps the window.
+        if self.quit_after_save && !self.model.pending("save_project") {
+            self.quit_after_save = false;
+            if !self.model.unsaved {
+                self.quit(ctx);
+            }
+        }
+        let title = workspace::window_title(self.model.project.as_deref(), self.model.unsaved);
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
     pub(crate) fn open_record_settings(&mut self) {
         self.dialog = Some(Dialog::RecordSettings {
             file_name: self.record_file.clone(),
@@ -322,6 +417,7 @@ impl eframe::App for DesktopApp {
         self.poll();
         self.prune_selection();
         let ctx = ui.ctx().clone();
+        self.guard_close(&ctx);
         self.update_preview(&ctx);
         let narrow = ui.max_rect().width() < DRAWER_BELOW;
         // Taken before anything is drawn: a field or popup that has focus

@@ -191,6 +191,15 @@ impl Model {
             .any(|pending| matches!(pending, Pending::Action(_)))
     }
 
+    /// Unsaved changes, or a change still on its way to the engine (a
+    /// close right after an edit must not lose it).
+    pub fn has_changes(&self) -> bool {
+        self.unsaved
+            || self.pending.values().any(|pending| {
+                matches!(pending, Pending::Action(name) if CHANGES_PROJECT.contains(&name.as_str()))
+            })
+    }
+
     /// Whether command `name` (e.g. `start_recording`) waits for the
     /// engine.
     pub fn pending(&self, name: &str) -> bool {

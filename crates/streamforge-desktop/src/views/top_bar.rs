@@ -18,6 +18,9 @@ use crate::workspace::{self, health_level, transport_state};
 const HEALTH_WIDTH: f32 = 360.0;
 /// The widest the project menu grows before the name is cut.
 const PROJECT_WIDTH: f32 = 240.0;
+/// Below this room before the transport the project menu is left out (a
+/// very narrow window), rather than drawn over the record button.
+const PROJECT_MIN_WIDTH: f32 = 120.0;
 
 impl DesktopApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -42,7 +45,9 @@ impl DesktopApp {
                 egui::Stroke::new(size::STROKE, color::LINE_SUBTLE),
             );
             let room = transport.left() - ui.cursor().left() - size::SPACE_16;
-            self.project_menu(ui, room.min(PROJECT_WIDTH));
+            if room >= PROJECT_MIN_WIDTH {
+                self.project_menu(ui, room.min(PROJECT_WIDTH));
+            }
         });
 
         ui.scope_builder(

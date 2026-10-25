@@ -47,9 +47,8 @@ pub struct Entry {
 }
 
 /// The regular files (or links to one) in `dir` whose names end in
-/// `.json`, sorted by name. Hidden files (a leading `.`, such as a save's
-/// temporary file) and names that are not UTF-8 are left out. The files
-/// are not opened.
+/// `.json`, sorted by name; names that are not UTF-8 are left out (a
+/// save's temporary file ends in `.tmp`). The files are not opened.
 pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -60,7 +59,7 @@ pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
         let json = Path::new(&file_name)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
-        if file_name.starts_with('.') || !json {
+        if !json {
             continue;
         }
         // Followed, as `read` follows it; one that vanished meanwhile, or a
@@ -300,6 +299,8 @@ mod tests {
         write(&dir.0, Path::new("A.JSON"), b"1", false).expect("A");
         fs::write(dir.0.join("notes.txt"), b"x").expect("txt");
         fs::write(dir.0.join(".hidden.json"), b"x").expect("hidden");
+        // A save's temporary file.
+        fs::write(dir.0.join(".b.json.1-2.tmp"), b"x").expect("temp");
         fs::create_dir(dir.0.join("folder.json")).expect("dir");
         #[cfg(unix)]
         {
@@ -314,11 +315,11 @@ mod tests {
             .map(|entry| entry.file_name.as_str())
             .collect();
         #[cfg(unix)]
-        assert_eq!(names, ["A.JSON", "b.json", "link.json"]);
+        assert_eq!(names, [".hidden.json", "A.JSON", "b.json", "link.json"]);
         #[cfg(not(unix))]
-        assert_eq!(names, ["A.JSON", "b.json"]);
-        assert_eq!(listed[1].bytes, 3);
-        assert!(listed[1].modified.is_some());
+        assert_eq!(names, [".hidden.json", "A.JSON", "b.json"]);
+        assert_eq!(listed[2].bytes, 3);
+        assert!(listed[2].modified.is_some());
 
         let missing = list(&dir.0.join("none")).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);

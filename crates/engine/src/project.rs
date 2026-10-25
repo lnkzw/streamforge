@@ -37,7 +37,9 @@ impl Engine {
         let entries = project_file::list(dir).map_err(|error| list_error(dir, error))?;
         let mut files: Vec<ProjectFileInfo> = entries
             .into_iter()
-            .filter(|entry| command_api::project_file_name(&entry.file_name).is_ok())
+            .filter(|entry| {
+                command_api::project_file_name("load_project", &entry.file_name).is_ok()
+            })
             .map(|entry| ProjectFileInfo {
                 modified_unix_ms: entry
                     .modified

@@ -60,7 +60,10 @@ impl DesktopApp {
                     Dialog::AddBus { name, assigned } => {
                         add_bus(ui, &mut self.model, name, assigned)
                     }
-                    Dialog::OpenProject { selected } => self.open_project(ui, selected),
+                    Dialog::OpenProject {
+                        selected,
+                        open_when_checked,
+                    } => self.open_project(ui, selected, open_when_checked),
                     Dialog::SaveProject { file_name, quit } => {
                         self.save_project_dialog(ui, file_name, *quit)
                     }
@@ -186,8 +189,14 @@ impl DesktopApp {
     }
 
     /// The project folder's files; a chosen one is checked by the engine,
-    /// and only a valid one opens, while the pipeline is idle.
-    fn open_project(&mut self, ui: &mut egui::Ui, selected: &mut Option<String>) -> Outcome {
+    /// and only a valid one opens, while the pipeline is idle. A
+    /// double-click opens it once the check is back.
+    fn open_project(
+        &mut self,
+        ui: &mut egui::Ui,
+        selected: &mut Option<String>,
+        open_when_checked: &mut bool,
+    ) -> Outcome {
         ui.label(TextRole::Title.text("Open a project"));
         self.project_folder_line(ui);
         let mut chosen = None;
@@ -243,15 +252,36 @@ impl DesktopApp {
                 }
             }
         }
-        if let Some(file_name) = chosen
-            && selected.as_deref() != Some(&file_name)
-        {
-            self.model.validate_project(&file_name);
+        if let Some(file_name) = chosen {
+            // A click checks again (the file may have changed), unless a
+            // check is on its way.
+            if !self.model.validating(&file_name) {
+                self.model.validate_project(&file_name);
+            }
+            if open_now {
+                *open_when_checked = true;
+            } else if selected.as_deref() != Some(&file_name) {
+                *open_when_checked = false;
+            }
             *selected = Some(file_name);
         }
-        let valid = selected
-            .as_deref()
-            .is_some_and(|file_name| validation_lines(ui, &self.model, file_name));
+        // One status line from the start, so the centred dialog does not
+        // move under the pointer when the check of a click shows (a
+        // double-click's second click would miss the row).
+        let listed = matches!(&self.model.projects, Some(Ok(list)) if !list.files.is_empty());
+        let valid = match selected.as_deref() {
+            Some(file_name) => validation_lines(ui, &self.model, file_name),
+            None => {
+                if listed {
+                    widgets::status_line(
+                        ui,
+                        StatusLevel::Info,
+                        "Choose a file: it is checked before it opens.",
+                    );
+                }
+                false
+            }
+        };
         let idle = self
             .model
             .status
@@ -266,14 +296,23 @@ impl DesktopApp {
         }
         ui.add_space(size::SPACE_8);
         let ready = valid && idle;
+        // A double-clicked file whose check came back: open it if it can,
+        // otherwise forget the double-click (the reason shows).
+        let checked = selected
+            .as_deref()
+            .is_some_and(|file_name| !self.model.validating(file_name));
+        let open_checked = *open_when_checked && checked && ready;
+        if checked {
+            *open_when_checked = false;
+        }
         let open = match buttons(ui, ButtonKind::Primary, "Open", ready) {
             Some(true) => true,
             Some(false) => return Outcome::Cancel,
-            None => open_now && ready,
+            None => open_checked,
         };
         match (open, selected.as_deref()) {
             (true, Some(file_name)) => {
-                if self.model.unsaved {
+                if self.model.has_changes() {
                     self.dialog = Some(Dialog::Confirm(Confirm::OpenProject {
                         file_name: file_name.to_owned(),
                     }));
@@ -303,9 +342,10 @@ impl DesktopApp {
                 .desired_width(f32::INFINITY),
         );
         let file = workspace::project_file(file_name);
-        let problem = !file.is_empty() && command_api::project_file_name(&file).is_err();
+        let problem =
+            !file.is_empty() && command_api::project_file_name("save_project", &file).is_err();
         let exists = matches!(&self.model.projects, Some(Ok(list))
-            if list.files.iter().any(|listed| listed.file_name == file));
+            if list.files.iter().any(|listed| workspace::same_file_name(&listed.file_name, &file)));
         if problem {
             widgets::status_line(
                 ui,
@@ -595,10 +635,7 @@ fn validation_lines(ui: &mut egui::Ui, model: &Model, file_name: &str) -> bool {
         }
         _ => {
             if model.validating(file_name) {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(TextRole::Meta.text("Checking the file…"));
-                });
+                widgets::status_line(ui, StatusLevel::Info, "Checking the file…");
             }
             false
         }

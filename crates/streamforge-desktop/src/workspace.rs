@@ -173,22 +173,35 @@ pub fn window_title(project: Option<&str>, unsaved: bool) -> String {
     format!("{}{mark} — StreamForge", project_name(project))
 }
 
-/// The file name a typed project name stands for: trimmed, with `.json`
-/// added when it has no extension. The engine's rule then checks it.
+/// The file name a typed project name stands for: trimmed (trailing dots
+/// too, which Windows drops), with `.json` added unless it ends so
+/// already, whatever other dots it has ("Show 2026.10"). The engine's rule
+/// then checks it.
 pub fn project_file(typed: &str) -> String {
-    let typed = typed.trim();
-    if typed.is_empty() || std::path::Path::new(typed).extension().is_some() {
+    let typed = typed.trim().trim_end_matches('.');
+    if typed.is_empty() || typed.to_ascii_lowercase().ends_with(".json") {
         typed.to_owned()
     } else {
         format!("{typed}.json")
     }
 }
 
-/// A file size for a list: bytes, then kB and MB (powers of 1000).
+/// Whether two file names name the same file in the project folder: Windows
+/// and macOS (by default) do not tell case apart.
+pub fn same_file_name(a: &str, b: &str) -> bool {
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+/// A file size for a list: bytes, then kB and MB (powers of 1000), each
+/// unit up to where its rounding would read 1000.
 pub fn file_size(bytes: u64) -> String {
     match bytes {
         0..1_000 => format!("{bytes} B"),
-        1_000..1_000_000 => format!("{:.1} kB", bytes as f64 / 1e3),
+        1_000..999_950 => format!("{:.1} kB", bytes as f64 / 1e3),
         _ => format!("{:.1} MB", bytes as f64 / 1e6),
     }
 }
@@ -412,16 +425,24 @@ mod tests {
             "show.json • — StreamForge"
         );
         assert_eq!(project_file("  show "), "show.json");
-        assert_eq!(project_file("show.json"), "show.json");
-        // Another extension stays, for the engine's rule to refuse.
-        assert_eq!(project_file("show.txt"), "show.txt");
+        assert_eq!(project_file("show.JSON"), "show.JSON");
+        // Other dots are part of the name.
+        assert_eq!(project_file("Show 2026.10"), "Show 2026.10.json");
+        assert_eq!(project_file("show."), "show.json");
         assert_eq!(project_file(" "), "");
+        assert!(same_file_name("show.json", "show.json"));
+        assert_eq!(
+            same_file_name("Show.json", "show.json"),
+            cfg!(any(target_os = "windows", target_os = "macos"))
+        );
     }
 
     #[test]
     fn file_lists_say_size_and_age_coarsely() {
         assert_eq!(file_size(999), "999 B");
         assert_eq!(file_size(12_345), "12.3 kB");
+        assert_eq!(file_size(999_949), "999.9 kB");
+        assert_eq!(file_size(999_960), "1.0 MB");
         assert_eq!(file_size(1_048_576), "1.0 MB");
         let now = Duration::from_secs(1_000_000);
         let ago = |seconds| written_ago(now - Duration::from_secs(seconds), now);

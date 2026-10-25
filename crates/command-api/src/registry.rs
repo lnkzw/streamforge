@@ -1528,10 +1528,11 @@ fn decode_project_file(command: &str, params: Option<&Value>) -> Result<PathBuf,
 }
 
 /// Check a project file name by the project commands' rule (a plain
-/// `.json` name, not a Windows device), so a client can check a name as it
-/// is typed and the engine can list only names it would accept.
-pub fn project_file_name(file_name: &str) -> Result<PathBuf, CommandError> {
-    project_file("save_project", file_name.to_owned())
+/// `.json` name, not a Windows device) for `command`, which the error
+/// names. A client checks a name as it is typed with it, and the engine
+/// lists only names it would accept.
+pub fn project_file_name(command: &str, file_name: &str) -> Result<PathBuf, CommandError> {
+    project_file(command, file_name.to_owned())
 }
 
 fn project_file(command: &str, file_name: String) -> Result<PathBuf, CommandError> {
@@ -2617,8 +2618,12 @@ mod tests {
             Ok(Command::ListProjects)
         );
         assert!(decode("list_projects", json!({"dir": "/tmp"})).is_err());
-        assert!(project_file_name("show.json").is_ok());
-        assert!(project_file_name("NUL.json").is_err());
+        assert!(project_file_name("save_project", "show.json").is_ok());
+        let device = project_file_name("load_project", "NUL.json").unwrap_err();
+        assert_eq!(
+            device.details.as_ref().map(|d| &d["command"]),
+            Some(&json!("load_project"))
+        );
         assert_eq!(
             access("set_screen_source"),
             Some((CommandAccess::Sensitive, false))

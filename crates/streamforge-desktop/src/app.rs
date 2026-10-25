@@ -106,6 +106,8 @@ pub(crate) enum Dialog {
     /// can be opened.
     OpenProject {
         selected: Option<String>,
+        /// A double-click: open the file once its check is back.
+        open_when_checked: bool,
     },
     /// A file name for the project; an existing file is replaced only
     /// with the dialog's own warning. `quit`: opened to save before
@@ -289,7 +291,10 @@ impl DesktopApp {
     pub(crate) fn open_projects(&mut self) {
         self.model.list_projects();
         self.model.validation = None;
-        self.dialog = Some(Dialog::OpenProject { selected: None });
+        self.dialog = Some(Dialog::OpenProject {
+            selected: None,
+            open_when_checked: false,
+        });
     }
 
     /// Save as: a name for the file, the current one to start with.
@@ -322,11 +327,17 @@ impl DesktopApp {
     /// the operator chooses (save, discard or stay).
     fn guard_close(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.viewport().close_requested())
-            && self.model.unsaved
+            && self.model.has_changes()
             && !self.quit_confirmed
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if self.dialog.is_none() {
+            // The question replaces another dialog (its draft is lost), but
+            // not itself or the save it led to.
+            let quitting = matches!(
+                self.dialog,
+                Some(Dialog::Confirm(Confirm::Quit) | Dialog::SaveProject { quit: true, .. })
+            );
+            if !quitting {
                 self.dialog = Some(Dialog::Confirm(Confirm::Quit));
             }
         }

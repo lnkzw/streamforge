@@ -14,9 +14,11 @@ const SILENCE_AFTER_ERROR: Duration = Duration::from_millis(500);
 
 /// Whether a stream still delivers.
 ///
-/// An error's kind does not tell: WASAPI's capture loop ends on any error
-/// but keeps capturing after `StreamInvalidated` (a new default device), and
-/// other hosts pause on some errors. What follows the error does: a stream
+/// Glitches (underruns, overruns, refused real-time scheduling) never end a
+/// stream and are not reported here. For other errors the kind does not
+/// tell: WASAPI's capture loop ends on most errors but keeps capturing
+/// after `StreamInvalidated` (a new default device), and other hosts pause
+/// on some errors. What follows the error does: a stream
 /// that reported one and has delivered no data since, for
 /// [`SILENCE_AFTER_ERROR`], has ended. A stream that stops without an error
 /// is not detected here (the mixer counts its underruns).

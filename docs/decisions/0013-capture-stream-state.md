@@ -26,9 +26,10 @@ While running, `get_health` (ADR 0012) showed such a source only indirectly, thr
   | WGC (Windows) | the item is closed (`on_closed`), or the capture thread ended | "the captured window was closed" or "the captured display went away", by item kind; for the thread, a pointer to the capture report, which gets its error at the stop |
   | SCK (macOS) | the delegate reports `did_stop_with_error`, or a frame reports `Stopped` | the system's error, or "ScreenCaptureKit stopped the capture" |
   | PipeWire (Linux) | the capture thread returns, or panics, before a stop: a stream error, or the stream went unconnected after streaming | the error, "the PipeWire stream ended", or the panic |
-  | cpal (Windows, macOS audio) | an error was reported and no data followed for 500 ms | the last error's message |
+  | cpal (Windows, macOS audio) | an error other than a glitch was reported and no data followed for 500 ms | the last error's message |
 
   - **cpal: what follows an error decides, not its kind.** Hosts differ: in cpal 0.18, WASAPI's capture loop ends on any error, but keeps capturing after `StreamInvalidated` (a new default device), and other hosts pause on some errors. A stream that reported an error and delivered no data since, for 500 ms (many device periods), has ended. If data comes back, it reads `running` again.
+    - Glitches are the exception: cpal's `Xrun` (an underrun or overrun) and `RealtimeDenied` never end a stream, on every host, so they do not count. macOS reports a processor overload as `Xrun`, which on a loaded machine can come before the first pull; counted, it failed a playback's start once the first pull took longer than 500 ms (a CI flake on macOS).
     - The data callback stores a timestamp (no lock, no allocation).
     - The error callback, off the data path, stores the message in a reused buffer.
     - Errors stay warnings in the stop report, as before.

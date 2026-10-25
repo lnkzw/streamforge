@@ -39,7 +39,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use media_core::SampleReader;
 
-use crate::backend::{best_config, capture_error, description, device_name, host, is_named};
+use crate::backend::{
+    best_config, capture_error, description, device_name, host, is_named, may_end,
+};
 use crate::convert::PlaybackConverter;
 use crate::liveness::Liveness;
 
@@ -286,8 +288,13 @@ fn build<T: DeviceSample>(
     device.build_output_stream::<T, _, _>(
         *config,
         move |data: &mut [T], _info| render.on_data(data),
-        // Rare and not in the data path.
-        move |err| liveness.error(&err.to_string()),
+        // Rare and not in the data path; a glitch (which macOS reports on
+        // the real-time thread) returns before anything is allocated.
+        move |err| {
+            if may_end(err.kind()) {
+                liveness.error(&err.to_string());
+            }
+        },
         None,
     )
 }

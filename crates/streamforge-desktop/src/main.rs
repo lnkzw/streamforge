@@ -9,18 +9,49 @@ use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
 
+const USAGE: &str = "usage: streamforge-desktop [--output-dir DIR] [--project-dir DIR]";
+
 fn main() -> ExitCode {
-    // One optional argument: where recordings go (default: the working
-    // directory), as `--output-dir` for the CLI.
+    // Where recordings and project files go, as `--output-dir` and
+    // `--project-dir` for the CLI and the engine; both default to the
+    // working directory.
+    let mut output_dir = None;
+    let mut project_dir = None;
     let mut args = std::env::args_os().skip(1);
-    let output_dir = match (args.next(), args.next()) {
-        (None, _) => PathBuf::from("."),
-        (Some(flag), Some(dir)) if flag == "--output-dir" => PathBuf::from(dir),
-        _ => {
-            eprintln!("usage: streamforge-desktop [--output-dir DIR]");
+    while let Some(flag) = args.next() {
+        let slot = if flag == "--output-dir" {
+            &mut output_dir
+        } else if flag == "--project-dir" {
+            &mut project_dir
+        } else {
+            eprintln!("{USAGE}");
             return ExitCode::FAILURE;
+        };
+        match args.next() {
+            Some(dir) if slot.is_none() => *slot = Some(PathBuf::from(dir)),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::FAILURE;
+            }
         }
-    };
+    }
+    let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
+    // As the engine does: a mistyped directory stops here, not at the
+    // first save.
+    if !project_dir.is_dir() {
+        eprintln!(
+            "streamforge-desktop: --project-dir {} is not a directory",
+            project_dir.display()
+        );
+        return ExitCode::FAILURE;
+    }
+    // Shown in the project dialogs, so the operator knows where files are
+    // (`absolute`, not `canonicalize`: no `\\?\` prefix on Windows).
+    let project_folder = std::path::absolute(&project_dir)
+        .unwrap_or_else(|_| project_dir.clone())
+        .display()
+        .to_string();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("StreamForge")
@@ -34,11 +65,16 @@ fn main() -> ExitCode {
             let ctx = cc.egui_ctx.clone();
             let worker = EngineWorker::spawn(
                 move || {
-                    Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir)
+                    Engine::with_capture(capture_platform::backend())
+                        .with_output_dir(output_dir)
+                        .with_project_dir(project_dir)
                 },
                 move || ctx.request_repaint(),
             )?;
-            Ok(Box::new(DesktopApp::new(&cc.egui_ctx, Model::new(worker))))
+            Ok(Box::new(
+                DesktopApp::new(&cc.egui_ctx, Model::new(worker))
+                    .with_project_folder(project_folder),
+            ))
         }),
     );
     match result {

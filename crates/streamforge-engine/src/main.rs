@@ -24,8 +24,9 @@ struct Args {
     /// Clients only choose file names inside it.
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
-    /// Directory for project files (save_project, load_project,
-    /// validate_project); clients only choose file names inside it.
+    /// Directory for project files (list_projects, save_project,
+    /// load_project, validate_project); clients only choose file names
+    /// inside it.
     /// Without it, the project commands are unavailable.
     #[arg(long)]
     project_dir: Option<PathBuf>,

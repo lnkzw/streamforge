@@ -36,11 +36,13 @@ pub use outputs::{
     StreamingRequest, StreamingStarted,
 };
 pub use project::{
-    ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation, SaveProjectRequest,
+    MAX_LISTED_PROJECTS, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem,
+    ProjectSaved, ProjectValidation, SaveProjectRequest,
 };
 pub use registry::{
     CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
-    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, registry,
+    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, project_file_name,
+    registry,
 };
 pub use scenes::{
     AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
@@ -131,6 +133,8 @@ pub enum Command {
         source: SourceRef,
         source_id: String,
     },
+    /// List the project files in the project directory.
+    ListProjects,
     /// Write the scenes and audio setup to a project file.
     SaveProject(SaveProjectRequest),
     /// Replace the scenes and audio setup with a project file's (only while
@@ -205,6 +209,7 @@ pub enum CommandOutput {
     OutputProfiles(OutputProfiles),
     OutputProfileSet(OutputProfileSet),
     PreviewState(Box<PreviewState>),
+    ProjectFiles(ProjectFileList),
     ProjectSaved(ProjectSaved),
     ProjectLoaded(Box<ProjectLoaded>),
     ProjectValidation(ProjectValidation),

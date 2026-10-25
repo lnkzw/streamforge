@@ -1,7 +1,8 @@
 //! What the production workspace shows, computed from the model's state
 //! without widgets: the scene selection, the transport states, the monitor
-//! rectangle, meter ballistics and the health summary. The views draw
-//! these; keeping them here keeps them unit-tested.
+//! rectangle, meter ballistics, the health summary and the project's name
+//! and files. The views draw these; keeping them here keeps them
+//! unit-tested.
 
 use std::time::Duration;
 
@@ -158,6 +159,63 @@ pub fn health_level(items: &[HealthItem], stale: bool, unseen_errors: usize) -> 
         StatusLevel::Ok
     } else {
         StatusLevel::Info
+    }
+}
+
+/// The project's name as the top bar and the window title show it.
+pub fn project_name(project: Option<&str>) -> &str {
+    project.unwrap_or("Untitled")
+}
+
+/// The window title: the project, marked while it has unsaved changes.
+pub fn window_title(project: Option<&str>, unsaved: bool) -> String {
+    let mark = if unsaved { " •" } else { "" };
+    format!("{}{mark} — StreamForge", project_name(project))
+}
+
+/// The file name a typed project name stands for: trimmed (trailing dots
+/// too, which Windows drops), with `.json` added unless it ends so
+/// already, whatever other dots it has ("Show 2026.10"). The engine's rule
+/// then checks it.
+pub fn project_file(typed: &str) -> String {
+    let typed = typed.trim().trim_end_matches('.');
+    if typed.is_empty() || typed.to_ascii_lowercase().ends_with(".json") {
+        typed.to_owned()
+    } else {
+        format!("{typed}.json")
+    }
+}
+
+/// Whether two file names name the same file in the project folder: Windows
+/// and macOS (by default) do not tell case apart.
+pub fn same_file_name(a: &str, b: &str) -> bool {
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+/// A file size for a list: bytes, then kB and MB (powers of 1000), each
+/// unit up to where its rounding would read 1000.
+pub fn file_size(bytes: u64) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} B"),
+        1_000..999_950 => format!("{:.1} kB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
+    }
+}
+
+/// How long ago a file was written, coarsely: a list needs "which one is
+/// recent", not a timestamp. A time in the future (another clock) reads as
+/// just now.
+pub fn written_ago(modified: Duration, now: Duration) -> String {
+    let seconds = now.saturating_sub(modified).as_secs();
+    match seconds {
+        0..60 => "just now".to_owned(),
+        60..3_600 => format!("{} min ago", seconds / 60),
+        3_600..86_400 => format!("{} h ago", seconds / 3_600),
+        _ => format!("{} d ago", seconds / 86_400),
     }
 }
 
@@ -357,5 +415,41 @@ mod tests {
         );
         // A failed command the operator has not seen is an error too.
         assert_eq!(health_level(&[], false, 1), StatusLevel::Error);
+    }
+
+    #[test]
+    fn the_project_reads_as_its_file_and_marks_unsaved_changes() {
+        assert_eq!(window_title(None, false), "Untitled — StreamForge");
+        assert_eq!(
+            window_title(Some("show.json"), true),
+            "show.json • — StreamForge"
+        );
+        assert_eq!(project_file("  show "), "show.json");
+        assert_eq!(project_file("show.JSON"), "show.JSON");
+        // Other dots are part of the name.
+        assert_eq!(project_file("Show 2026.10"), "Show 2026.10.json");
+        assert_eq!(project_file("show."), "show.json");
+        assert_eq!(project_file(" "), "");
+        assert!(same_file_name("show.json", "show.json"));
+        assert_eq!(
+            same_file_name("Show.json", "show.json"),
+            cfg!(any(target_os = "windows", target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn file_lists_say_size_and_age_coarsely() {
+        assert_eq!(file_size(999), "999 B");
+        assert_eq!(file_size(12_345), "12.3 kB");
+        assert_eq!(file_size(999_949), "999.9 kB");
+        assert_eq!(file_size(999_960), "1.0 MB");
+        assert_eq!(file_size(1_048_576), "1.0 MB");
+        let now = Duration::from_secs(1_000_000);
+        let ago = |seconds| written_ago(now - Duration::from_secs(seconds), now);
+        assert_eq!(ago(5), "just now");
+        assert_eq!(ago(125), "2 min ago");
+        assert_eq!(ago(7_200), "2 h ago");
+        assert_eq!(ago(3 * 86_400), "3 d ago");
+        assert_eq!(written_ago(now + Duration::from_secs(60), now), "just now");
     }
 }

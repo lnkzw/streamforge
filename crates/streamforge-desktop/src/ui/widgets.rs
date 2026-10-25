@@ -258,6 +258,75 @@ pub fn status_button(ui: &mut Ui, level: StatusLevel, text: &str, max_width: f32
     response
 }
 
+/// A ghost button that opens a menu: an icon, a line of text (cut to fit
+/// `max_width`), a dot when `marked` (the project's unsaved changes) and a
+/// chevron. `label` names it for assistive technology and the tooltip.
+pub fn menu_button(
+    ui: &mut Ui,
+    icon: Icon,
+    text: &str,
+    marked: bool,
+    label: &str,
+    max_width: f32,
+) -> Response {
+    const DOT: f32 = 6.0;
+    // The project name is a title (design system, typography).
+    let mut job = LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(TextRole::Title.font(), Color32::PLACEHOLDER),
+    );
+    let mark_space = if marked { DOT + size::SPACE_6 } else { 0.0 };
+    let fixed = 2.0 * (size::ICON + size::SPACE_6) + mark_space + 2.0 * size::SPACE_8;
+    job.wrap = egui::text::TextWrapping::truncate_at_width((max_width - fixed).max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let width = galley.size().x + fixed;
+    let enabled = ui.is_enabled();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, size::CONTROL), Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, enabled);
+        let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+        let tint = if enabled {
+            color::TEXT_PRIMARY
+        } else {
+            color::TEXT_DISABLED
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, CornerRadius::same(size::RADIUS_CONTROL), fill);
+        let mut x = rect.left() + size::SPACE_8;
+        icon.paint(
+            painter,
+            icon_rect(pos2(x + size::ICON / 2.0, rect.center().y), 14.0),
+            color::TEXT_TERTIARY,
+        );
+        x += size::ICON + size::SPACE_6;
+        let text_width = galley.size().x;
+        painter.galley(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley,
+            tint,
+        );
+        x += text_width + size::SPACE_6;
+        if marked {
+            painter.circle_filled(
+                pos2(x + DOT / 2.0, rect.center().y),
+                DOT / 2.0,
+                color::TEXT_SECONDARY,
+            );
+            x += DOT + size::SPACE_6;
+        }
+        Icon::ChevronDown.paint(
+            painter,
+            icon_rect(pos2(x + size::ICON / 2.0, rect.center().y), 12.0),
+            color::TEXT_TERTIARY,
+        );
+        if response.has_focus() {
+            focus_ring(painter, rect, size::RADIUS_CONTROL);
+        }
+    }
+    response.on_hover_text(label)
+}
+
 /// Where a dock has nothing to show: an icon and one line saying what is
 /// missing, centred. The caller adds the action that fixes it below.
 pub fn empty_state(ui: &mut Ui, icon: Icon, text: &str) {

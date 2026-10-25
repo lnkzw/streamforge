@@ -260,7 +260,10 @@ From the project owner's brief: a professional production studio with its own id
 - [x] Audit, design direction, design-system foundation (tokens, bundled IBM Plex fonts, painted icons, components) and headless renders of the real UI (`tests/render.rs`).
 - [x] The production workspace as a vertical slice: program monitor with tally, transport, scenes, sources and inspector, outputs, health (step 2). The mixer dock shows channel strips and the program bus until the console replaces it. The preview is 480×270, so a large monitor shows it soft; a sharper preview is an engine change, not yet planned.
 - [x] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model (step 3): sends with level and tap, aux bus assignment, buses added and removed while idle, each output's mix, the recording's tracks and the monitor switch, and the double-routing mark. Choosing devices for channels and the monitor comes with the audio sources (next step).
-- [ ] Projects in the desktop (`--project-dir`, save, load, choose a file), audio sources, output settings.
+- [ ] Projects, audio sources and output settings in the desktop (step 4, in three parts):
+  - [x] 4a: projects. `--project-dir` (default: the working directory), a project menu in the top bar (open, save, save as) with an unsaved-changes mark that the window title repeats, an open dialog that lists the folder (`list_projects`, new in `command-api`, so agents have it too) and shows the engine's check of the chosen file, a save dialog that warns before replacing a file, and a question before opening a project or closing the window over unsaved changes (closing offers to save).
+  - [ ] 4b: audio sources. Channels added and removed, and their input chosen (`set_channel_input`), in the routing matrix.
+  - [ ] 4c: output settings. Encoder and bitrate in the output settings, and the monitor's device.
 - [ ] Rollout to the remaining views; keyboard operation as specified.
 
 Acceptance:

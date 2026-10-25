@@ -1,18 +1,24 @@
 //! Modal dialogs: confirmations for consequential actions, adding a
-//! source or a bus, and the output targets. One is open at a time; Escape or a
-//! click outside cancels.
+//! source or a bus, the output targets, and opening and saving projects.
+//! One is open at a time; Escape or a click outside cancels.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use command_api::{StreamKey, StreamTarget};
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
 use crate::model::{Model, SourceForm, SourceType};
+use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
-use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
+use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
+use crate::workspace;
 
 use super::coordinate_range;
 
 const DIALOG_WIDTH: f32 = 420.0;
+/// Problems of a project file shown before the rest are counted.
+const PROBLEMS_SHOWN: usize = 4;
 
 /// What the operator did in a dialog this frame.
 enum Outcome {
@@ -54,6 +60,13 @@ impl DesktopApp {
                     Dialog::AddBus { name, assigned } => {
                         add_bus(ui, &mut self.model, name, assigned)
                     }
+                    Dialog::OpenProject {
+                        selected,
+                        open_when_checked,
+                    } => self.open_project(ui, selected, open_when_checked),
+                    Dialog::SaveProject { file_name, quit } => {
+                        self.save_project_dialog(ui, file_name, *quit)
+                    }
                 }
             });
         let keep = match modal.inner {
@@ -67,7 +80,15 @@ impl DesktopApp {
     }
 
     fn confirm(&mut self, ui: &mut egui::Ui, confirm: &Confirm) -> Outcome {
+        let lost = match &self.model.project {
+            Some(project) => format!("Changes to “{project}” since it was saved are lost."),
+            None => "The current setup was never saved; it is lost.".to_owned(),
+        };
         let (title, text, action) = match confirm {
+            Confirm::Quit => return self.confirm_quit(ui, &lost),
+            Confirm::OpenProject { file_name } => {
+                (format!("Open “{file_name}”?"), lost, "Discard and open")
+            }
             Confirm::DeleteScene { name, .. } => (
                 format!("Delete scene “{name}”?"),
                 "Its sources are deleted with it. This cannot be undone.".to_owned(),
@@ -116,6 +137,8 @@ impl DesktopApp {
                     }
                     Confirm::RestartSource { id, .. } => self.model.restart_source(id, None),
                     Confirm::RemoveBus { id, name } => self.model.remove_bus_confirmed(id, name),
+                    Confirm::OpenProject { file_name } => self.model.load_project(file_name),
+                    Confirm::Quit => {}
                     Confirm::StopRecording => self.model.stop_recording(),
                     Confirm::StopStreaming => self.model.stop_streaming(),
                 }
@@ -123,6 +146,250 @@ impl DesktopApp {
             }
             Some(false) => Outcome::Cancel,
             None => Outcome::Open,
+        }
+    }
+
+    /// Unsaved changes when the window closes: save them (to the current
+    /// file, or one chosen now), discard them, or stay.
+    fn confirm_quit(&mut self, ui: &mut egui::Ui, lost: &str) -> Outcome {
+        ui.label(TextRole::Title.text("Quit with unsaved changes?"));
+        ui.label(TextRole::Body.text(lost).color(color::TEXT_SECONDARY));
+        ui.add_space(size::SPACE_8);
+        let save = if self.model.project.is_some() {
+            "Save and quit"
+        } else {
+            "Save as and quit…"
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(Button::new(ButtonKind::Primary, save).min_width(96.0))
+                .clicked()
+            {
+                // To the current file, or through the save dialog, which
+                // replaces this one.
+                self.save_project(true);
+                return Outcome::Done;
+            }
+            if ui
+                .add(Button::new(ButtonKind::Danger, "Quit without saving").min_width(96.0))
+                .clicked()
+            {
+                self.quit(ui.ctx());
+                return Outcome::Done;
+            }
+            if ui
+                .add(Button::new(ButtonKind::Secondary, "Cancel").min_width(80.0))
+                .clicked()
+            {
+                return Outcome::Cancel;
+            }
+            Outcome::Open
+        })
+        .inner
+    }
+
+    /// The project folder's files; a chosen one is checked by the engine,
+    /// and only a valid one opens, while the pipeline is idle. A
+    /// double-click opens it once the check is back.
+    fn open_project(
+        &mut self,
+        ui: &mut egui::Ui,
+        selected: &mut Option<String>,
+        open_when_checked: &mut bool,
+    ) -> Outcome {
+        ui.label(TextRole::Title.text("Open a project"));
+        self.project_folder_line(ui);
+        let mut chosen = None;
+        let mut open_now = false;
+        match &self.model.projects {
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(TextRole::Meta.text("Looking for project files…"));
+                });
+            }
+            Some(Err(reason)) => {
+                widgets::status_line(ui, StatusLevel::Error, reason);
+            }
+            Some(Ok(list)) if list.files.is_empty() => {
+                widgets::empty_state(ui, Icon::File, "No project files in this folder yet.");
+            }
+            Some(Ok(list)) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                egui::ScrollArea::vertical()
+                    .id_salt("project files")
+                    .max_height(240.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for file in &list.files {
+                            let size = workspace::file_size(file.bytes);
+                            let meta = match file.modified_unix_ms {
+                                Some(ms) => format!(
+                                    "{size} · {}",
+                                    workspace::written_ago(Duration::from_millis(ms), now)
+                                ),
+                                None => size,
+                            };
+                            let row = ui.add(
+                                ListRow::new(Icon::File, &file.file_name)
+                                    .meta(&meta)
+                                    .selected(selected.as_deref() == Some(&file.file_name)),
+                            );
+                            if row.clicked() || row.double_clicked() {
+                                chosen = Some(file.file_name.clone());
+                                open_now = row.double_clicked();
+                            }
+                        }
+                    });
+                if list.omitted > 0 {
+                    ui.label(
+                        TextRole::Meta
+                            .text(format!("{} more file(s) are not listed.", list.omitted)),
+                    );
+                }
+            }
+        }
+        if let Some(file_name) = chosen {
+            // A click checks again (the file may have changed), unless a
+            // check is on its way.
+            if !self.model.validating(&file_name) {
+                self.model.validate_project(&file_name);
+            }
+            if open_now {
+                *open_when_checked = true;
+            } else if selected.as_deref() != Some(&file_name) {
+                *open_when_checked = false;
+            }
+            *selected = Some(file_name);
+        }
+        // One status line from the start, so the centred dialog does not
+        // move under the pointer when the check of a click shows (a
+        // double-click's second click would miss the row).
+        let listed = matches!(&self.model.projects, Some(Ok(list)) if !list.files.is_empty());
+        let valid = match selected.as_deref() {
+            Some(file_name) => validation_lines(ui, &self.model, file_name),
+            None => {
+                if listed {
+                    widgets::status_line(
+                        ui,
+                        StatusLevel::Info,
+                        "Choose a file: it is checked before it opens.",
+                    );
+                }
+                false
+            }
+        };
+        let idle = self
+            .model
+            .status
+            .as_ref()
+            .is_some_and(|status| !status.pipeline_running);
+        if !idle {
+            widgets::status_line(
+                ui,
+                StatusLevel::Warn,
+                "Stop the preview and the outputs to open a project.",
+            );
+        }
+        ui.add_space(size::SPACE_8);
+        let ready = valid && idle;
+        // A double-clicked file whose check came back: open it if it can,
+        // otherwise forget the double-click (the reason shows).
+        let checked = selected
+            .as_deref()
+            .is_some_and(|file_name| !self.model.validating(file_name));
+        let open_checked = *open_when_checked && checked && ready;
+        if checked {
+            *open_when_checked = false;
+        }
+        let open = match buttons(ui, ButtonKind::Primary, "Open", ready) {
+            Some(true) => true,
+            Some(false) => return Outcome::Cancel,
+            None => open_checked,
+        };
+        match (open, selected.as_deref()) {
+            (true, Some(file_name)) => {
+                if self.model.has_changes() {
+                    self.dialog = Some(Dialog::Confirm(Confirm::OpenProject {
+                        file_name: file_name.to_owned(),
+                    }));
+                } else {
+                    self.model.load_project(file_name);
+                }
+                Outcome::Done
+            }
+            _ => Outcome::Open,
+        }
+    }
+
+    /// A name for the project file; a name that exists is replaced only
+    /// with this dialog's warning and its action saying so.
+    fn save_project_dialog(
+        &mut self,
+        ui: &mut egui::Ui,
+        file_name: &mut String,
+        quit: bool,
+    ) -> Outcome {
+        ui.label(TextRole::Title.text("Save the project as"));
+        self.project_folder_line(ui);
+        ui.label(TextRole::Label.text("File name"));
+        ui.add(
+            egui::TextEdit::singleline(file_name)
+                .hint_text("show.json")
+                .desired_width(f32::INFINITY),
+        );
+        let file = workspace::project_file(file_name);
+        let problem =
+            !file.is_empty() && command_api::project_file_name("save_project", &file).is_err();
+        let exists = matches!(&self.model.projects, Some(Ok(list))
+            if list.files.iter().any(|listed| workspace::same_file_name(&listed.file_name, &file)));
+        if problem {
+            widgets::status_line(
+                ui,
+                StatusLevel::Error,
+                "Use a plain file name ending in .json, without folders and not a device \
+                 name such as CON or NUL.",
+            );
+        } else if exists {
+            widgets::status_line(
+                ui,
+                StatusLevel::Warn,
+                &format!("“{file}” exists: saving replaces it."),
+            );
+        } else {
+            ui.label(TextRole::Meta.text(
+                "Scenes, audio and output settings are saved. Stream keys and what screen \
+                 sources capture are not.",
+            ));
+        }
+        ui.add_space(size::SPACE_8);
+        // Whether the name exists is known once the folder was listed (a
+        // listing that failed leaves it to the engine, which refuses).
+        let ready = !file.is_empty() && !problem && self.model.projects.is_some();
+        let (kind, action) = match (exists, quit) {
+            (true, false) => (ButtonKind::Danger, "Replace"),
+            (true, true) => (ButtonKind::Danger, "Replace and quit"),
+            (false, false) => (ButtonKind::Primary, "Save"),
+            (false, true) => (ButtonKind::Primary, "Save and quit"),
+        };
+        match buttons(ui, kind, action, ready) {
+            Some(true) => {
+                self.model.save_project(&file, exists);
+                self.quit_after_save = quit;
+                Outcome::Done
+            }
+            Some(false) => Outcome::Cancel,
+            None => Outcome::Open,
+        }
+    }
+
+    fn project_folder_line(&self, ui: &mut egui::Ui) {
+        if let Some(folder) = &self.project_folder {
+            ui.add(egui::Label::new(TextRole::Meta.text(format!("In {folder}"))).truncate())
+                .on_hover_text(folder);
         }
     }
 
@@ -322,6 +589,56 @@ fn add_bus(
         }
         Some(false) => Outcome::Cancel,
         None => Outcome::Open,
+    }
+}
+
+/// The engine's check of `file_name`: ready, converted on opening, or
+/// its problems. Returns whether it can be opened.
+fn validation_lines(ui: &mut egui::Ui, model: &Model, file_name: &str) -> bool {
+    match &model.validation {
+        Some((checked, Ok(validation))) if checked == file_name => {
+            if !validation.valid {
+                let count = validation.problems.len();
+                widgets::status_line(
+                    ui,
+                    StatusLevel::Error,
+                    &format!("{count} problem(s): this file cannot be opened."),
+                );
+                for problem in validation.problems.iter().take(PROBLEMS_SHOWN) {
+                    let text = if problem.path.is_empty() {
+                        problem.message.clone()
+                    } else {
+                        format!("{}: {}", problem.path, problem.message)
+                    };
+                    ui.add(egui::Label::new(TextRole::Meta.text(text)).truncate());
+                }
+                if count > PROBLEMS_SHOWN {
+                    ui.label(TextRole::Meta.text(format!("and {} more", count - PROBLEMS_SHOWN)));
+                }
+                false
+            } else if validation.migrates {
+                widgets::status_line(
+                    ui,
+                    StatusLevel::Info,
+                    "An older file version: it is converted when opened, and saving writes \
+                     the current one.",
+                );
+                true
+            } else {
+                widgets::status_line(ui, StatusLevel::Ok, "A valid project.");
+                true
+            }
+        }
+        Some((checked, Err(reason))) if checked == file_name => {
+            widgets::status_line(ui, StatusLevel::Error, reason);
+            false
+        }
+        _ => {
+            if model.validating(file_name) {
+                widgets::status_line(ui, StatusLevel::Info, "Checking the file…");
+            }
+            false
+        }
     }
 }
 

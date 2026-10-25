@@ -38,6 +38,47 @@ pub fn read(dir: &Path, file_name: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A project file in a directory, as [`list`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub file_name: String,
+    pub bytes: u64,
+    pub modified: Option<SystemTime>,
+}
+
+/// The regular files (or links to one) in `dir` whose names end in
+/// `.json`, sorted by name; names that are not UTF-8 are left out (a
+/// save's temporary file ends in `.tmp`). The files are not opened.
+pub fn list(dir: &Path) -> io::Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let Ok(file_name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let json = Path::new(&file_name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        if !json {
+            continue;
+        }
+        // Followed, as `read` follows it; one that vanished meanwhile, or a
+        // broken link, is not a file to list.
+        let Ok(metadata) = fs::metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.is_file() {
+            entries.push(Entry {
+                file_name,
+                bytes: metadata.len(),
+                modified: metadata.modified().ok(),
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    Ok(entries)
+}
+
 /// A finished save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Saved {
@@ -249,6 +290,39 @@ mod tests {
             // Reading follows the link.
             assert_eq!(read(&dir.0, Path::new("link.json")).expect("read"), b"two");
         }
+    }
+
+    #[test]
+    fn the_listing_has_the_json_files_by_name() {
+        let dir = TempDir::new("list");
+        write(&dir.0, Path::new("b.json"), b"two", false).expect("b");
+        write(&dir.0, Path::new("A.JSON"), b"1", false).expect("A");
+        fs::write(dir.0.join("notes.txt"), b"x").expect("txt");
+        fs::write(dir.0.join(".hidden.json"), b"x").expect("hidden");
+        // A save's temporary file.
+        fs::write(dir.0.join(".b.json.1-2.tmp"), b"x").expect("temp");
+        fs::create_dir(dir.0.join("folder.json")).expect("dir");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.0.join("b.json"), dir.0.join("link.json"))
+                .expect("link");
+            std::os::unix::fs::symlink(dir.0.join("gone"), dir.0.join("broken.json"))
+                .expect("broken link");
+        }
+        let listed = list(&dir.0).expect("list");
+        let names: Vec<&str> = listed
+            .iter()
+            .map(|entry| entry.file_name.as_str())
+            .collect();
+        #[cfg(unix)]
+        assert_eq!(names, [".hidden.json", "A.JSON", "b.json", "link.json"]);
+        #[cfg(not(unix))]
+        assert_eq!(names, [".hidden.json", "A.JSON", "b.json"]);
+        assert_eq!(listed[2].bytes, 3);
+        assert!(listed[2].modified.is_some());
+
+        let missing = list(&dir.0.join("none")).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

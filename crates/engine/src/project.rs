@@ -3,10 +3,11 @@
 
 use std::io;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use command_api::{
-    CommandError, ErrorCode, ProjectLoaded, ProjectSaved, ProjectValidation, SaveProjectRequest,
-    SourceKind,
+    CommandError, ErrorCode, MAX_LISTED_PROJECTS, ProjectFileInfo, ProjectFileList, ProjectLoaded,
+    ProjectSaved, ProjectValidation, SaveProjectRequest, SourceKind,
 };
 use project_file::{Canvas, Project};
 use serde_json::json;
@@ -27,6 +28,30 @@ impl Engine {
                 "no project directory is configured: start the engine with --project-dir",
             )
         })
+    }
+
+    /// The project files a load could name: `.json` files the commands'
+    /// name rule accepts, by name, at most [`MAX_LISTED_PROJECTS`].
+    pub(crate) fn list_projects(&self) -> Result<ProjectFileList, CommandError> {
+        let dir = self.project_dir()?;
+        let entries = project_file::list(dir).map_err(|error| list_error(dir, error))?;
+        let mut files: Vec<ProjectFileInfo> = entries
+            .into_iter()
+            .filter(|entry| {
+                command_api::project_file_name("load_project", &entry.file_name).is_ok()
+            })
+            .map(|entry| ProjectFileInfo {
+                modified_unix_ms: entry
+                    .modified
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_millis()).ok()),
+                file_name: entry.file_name,
+                bytes: entry.bytes,
+            })
+            .collect();
+        let omitted = files.len().saturating_sub(MAX_LISTED_PROJECTS);
+        files.truncate(MAX_LISTED_PROJECTS);
+        Ok(ProjectFileList { files, omitted })
     }
 
     /// Write the scenes, the active scene and the audio setup. Allowed while
@@ -150,6 +175,21 @@ impl Engine {
 enum Access {
     Read,
     Write,
+}
+
+fn list_error(dir: &Path, error: io::Error) -> CommandError {
+    let code = match error.kind() {
+        io::ErrorKind::NotFound => ErrorCode::NotFound,
+        io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+        _ => ErrorCode::BackendError,
+    };
+    CommandError::new(
+        code,
+        format!(
+            "cannot list the project directory {}: {error}",
+            dir.display()
+        ),
+    )
 }
 
 fn io_error(file_name: &Path, access: Access, error: io::Error) -> CommandError {

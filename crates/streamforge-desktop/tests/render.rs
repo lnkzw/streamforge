@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use command_api::{Command, CommandHandler};
 use eframe::egui;
+use eframe::egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use engine::Engine;
@@ -69,6 +70,30 @@ enum Situation {
     Dialog,
     /// Live, with the routing matrix instead of the console.
     Routing,
+    /// Idle, with the project menu open.
+    ProjectMenu,
+    /// Idle, with the open dialog on a file that has problems.
+    OpenProject,
+    /// Idle, with the save dialog on a name that exists.
+    SaveAs,
+}
+
+/// What the render does before it is taken, in order.
+enum Step {
+    Click(&'static str),
+    Type(&'static str),
+}
+
+/// A project directory with a valid project and a broken one.
+fn project_files(dir: &Path) {
+    let mut engine = Engine::new().with_project_dir(dir);
+    let save = Command::decode("save_project", Some(&json!({"file_name": "show.json"})))
+        .expect("save_project");
+    engine.handle(save).expect("save");
+    let broken = json!({"schema_version": 2, "canvas": {"width": 1920, "height": 1080},
+        "active_scene": "scene_missing", "scenes": [{"id": "nope", "name": "", "sources": []}],
+        "audio": {"channels": [], "program": {"gain_db": 99.0, "mute": false}}});
+    std::fs::write(dir.join("broken.json"), broken.to_string()).expect("broken");
 }
 
 /// An engine whose mixer has a second channel, a submix assigned to
@@ -123,13 +148,17 @@ fn routed_engine(dir: PathBuf) -> Engine {
 
 fn model(dir: &Path, situation: Situation) -> Model {
     let dir = dir.to_owned();
-    let live = !matches!(situation, Situation::Idle);
+    let live = matches!(
+        situation,
+        Situation::Live | Situation::Dialog | Situation::Routing
+    );
+    project_files(&dir);
     let worker = EngineWorker::spawn(
         move || {
             if live {
-                routed_engine(dir)
+                routed_engine(dir.clone()).with_project_dir(dir)
             } else {
-                Engine::new().with_output_dir(dir)
+                Engine::new().with_output_dir(&dir).with_project_dir(dir)
             }
         },
         || {},
@@ -199,23 +228,46 @@ fn model(dir: &Path, situation: Situation) -> Model {
 fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
     let dir = TempDir::new(name);
     let model = model(&dir.0, situation);
-    let mut harness = Harness::builder()
-        .with_size(size)
-        .build_eframe(move |cc| DesktopApp::new(&cc.egui_ctx, model));
+    let mut harness = Harness::builder().with_size(size).build_eframe(move |cc| {
+        DesktopApp::new(&cc.egui_ctx, model).with_project_folder("/home/operator/shows")
+    });
     // Let the polls answer and the preview and meters fill in.
     for _ in 0..60 {
         harness.step();
         thread::sleep(Duration::from_millis(16));
     }
-    let action = match situation {
-        Situation::Idle => None,
+    let steps = match situation {
+        Situation::Idle => vec![],
         // Open a source in the inspector (a drawer in narrow windows).
-        Situation::Live => Some("lower third"),
-        Situation::Dialog => Some("Add a source to this scene"),
-        Situation::Routing => Some("Routing"),
+        Situation::Live => vec![Step::Click("lower third")],
+        Situation::Dialog => vec![Step::Click("Add a source to this scene")],
+        Situation::Routing => vec![Step::Click("Routing")],
+        Situation::ProjectMenu => vec![Step::Click("Project Untitled")],
+        Situation::OpenProject => vec![
+            Step::Click("Project Untitled"),
+            Step::Click("Open project…"),
+            Step::Click("broken.json"),
+        ],
+        Situation::SaveAs => vec![
+            Step::Click("Project Untitled"),
+            Step::Click("Save as…"),
+            Step::Type("show"),
+        ],
     };
-    if let Some(label) = action {
-        harness.get_by_label(label).click();
+    for step in steps {
+        match step {
+            Step::Click(label) => harness.get_by_label(label).click(),
+            Step::Type(text) => {
+                let field = || harness.get_all_by_role(Role::TextInput).next();
+                field().expect("a text field").focus();
+                harness.step();
+                harness
+                    .get_all_by_role(Role::TextInput)
+                    .next()
+                    .expect("a text field")
+                    .type_text(text);
+            }
+        }
         for _ in 0..30 {
             harness.step();
             thread::sleep(Duration::from_millis(16));
@@ -245,6 +297,19 @@ fn render_the_workspace() {
         render(&out, &format!("routing-{label}"), Situation::Routing, size);
     }
     render(&out, "dialog-1400x900", Situation::Dialog, [1400.0, 900.0]);
+    render(
+        &out,
+        "project-menu-1280x720",
+        Situation::ProjectMenu,
+        [1280.0, 720.0],
+    );
+    render(
+        &out,
+        "open-project-1400x900",
+        Situation::OpenProject,
+        [1400.0, 900.0],
+    );
+    render(&out, "save-as-1400x900", Situation::SaveAs, [1400.0, 900.0]);
 }
 
 /// The design system's specimen: tokens and every component in its states,
@@ -356,6 +421,18 @@ fn specimen(ui: &mut egui::Ui) {
                             .busy(true),
                     );
                     ui.add(Button::new(ButtonKind::Danger, "Remove").icon(Icon::Trash));
+                });
+                ui.horizontal(|ui| {
+                    widgets::menu_button(ui, Icon::File, "show.json", false, "Menu", 240.0);
+                    widgets::menu_button(ui, Icon::File, "show.json", true, "Marked", 240.0);
+                    widgets::menu_button(
+                        ui,
+                        Icon::File,
+                        "a project with a very long file name.json",
+                        true,
+                        "Cut",
+                        200.0,
+                    );
                 });
                 ui.add_space(12.0);
                 widgets::section_header(ui, "Transport", None);

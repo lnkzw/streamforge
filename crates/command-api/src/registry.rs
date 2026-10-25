@@ -463,6 +463,16 @@ const SET_SCREEN_SOURCE: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const LIST_PROJECTS: CommandDescriptor = CommandDescriptor {
+    name: "list_projects",
+    summary: "List the project files (.json) in the engine's project directory (--project-dir), \
+              by name, with their size and when they were written; at most 256, the rest are \
+              counted in omitted. The files are not read: validate_project checks one.",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
 const SAVE_PROJECT: CommandDescriptor = CommandDescriptor {
     name: "save_project",
     summary: "Write the scenes (with their ids), the active scene and the audio setup to a \
@@ -533,6 +543,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     SET_OUTPUT_PROFILE,
     SET_MONITOR_DEVICE,
     SET_PREVIEW,
+    LIST_PROJECTS,
     SAVE_PROJECT,
     LOAD_PROJECT,
     VALIDATE_PROJECT,
@@ -602,6 +613,7 @@ impl Command {
             "remove_source" => decode_remove_source(name, params).map(Self::RemoveSource),
             "restart_source" => decode_restart_source(name, params),
             "set_screen_source" => decode_set_screen_source(name, params),
+            "list_projects" => expect_no_params(name, params).map(|()| Self::ListProjects),
             "save_project" => decode_save_project(name, params).map(Self::SaveProject),
             "load_project" => {
                 decode_project_file(name, params).map(|file_name| Self::LoadProject { file_name })
@@ -699,6 +711,7 @@ impl Command {
             Self::SetOutputProfile(_) => &SET_OUTPUT_PROFILE,
             Self::SetMonitorDevice { .. } => &SET_MONITOR_DEVICE,
             Self::SetPreview { .. } => &SET_PREVIEW,
+            Self::ListProjects => &LIST_PROJECTS,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
             Self::ValidateProject { .. } => &VALIDATE_PROJECT,
@@ -1512,6 +1525,14 @@ struct ProjectFileParams {
 fn decode_project_file(command: &str, params: Option<&Value>) -> Result<PathBuf, CommandError> {
     let params: ProjectFileParams = decode_params(command, params)?;
     project_file(command, params.file_name)
+}
+
+/// Check a project file name by the project commands' rule (a plain
+/// `.json` name, not a Windows device) for `command`, which the error
+/// names. A client checks a name as it is typed with it, and the engine
+/// lists only names it would accept.
+pub fn project_file_name(command: &str, file_name: &str) -> Result<PathBuf, CommandError> {
+    project_file(command, file_name.to_owned())
 }
 
 fn project_file(command: &str, file_name: String) -> Result<PathBuf, CommandError> {
@@ -2331,7 +2352,8 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "stop_streaming"
         | "list_scenes"
         | "get_mixer"
-        | "get_output_profiles" => {
+        | "get_output_profiles"
+        | "list_projects" => {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
         _ => return None,
@@ -2586,6 +2608,21 @@ mod tests {
         assert_eq!(
             access("validate_project"),
             Some((CommandAccess::ReadOnly, false))
+        );
+        assert_eq!(
+            access("list_projects"),
+            Some((CommandAccess::ReadOnly, false))
+        );
+        assert_eq!(
+            decode("list_projects", json!({})),
+            Ok(Command::ListProjects)
+        );
+        assert!(decode("list_projects", json!({"dir": "/tmp"})).is_err());
+        assert!(project_file_name("save_project", "show.json").is_ok());
+        let device = project_file_name("load_project", "NUL.json").unwrap_err();
+        assert_eq!(
+            device.details.as_ref().map(|d| &d["command"]),
+            Some(&json!("load_project"))
         );
         assert_eq!(
             access("set_screen_source"),

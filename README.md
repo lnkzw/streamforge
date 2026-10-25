@@ -68,8 +68,9 @@ cargo build --release -p streamforge-mcp
 claude mcp add streamforge -- "$PWD/target/release/streamforge-mcp" --allow control --output-dir /tmp
 #   --allow sensitive --stream-url rtmp://live.example.com/app --stream-key-env STREAMFORGE_STREAM_KEY
 
-# Desktop UI (scenes, preview, mixer, record and stream controls)
-cargo run --release -p streamforge-desktop -- --output-dir /tmp
+# Desktop UI (scenes, preview, mixer, record and stream controls, projects);
+# both directories default to the working directory
+cargo run --release -p streamforge-desktop -- --output-dir /tmp --project-dir ~/shows
 
 # Streaming over RTMP; the key comes from an environment variable, never from the command line
 export STREAMFORGE_STREAM_KEY=…   # e.g. read it with `read -rs STREAMFORGE_STREAM_KEY`

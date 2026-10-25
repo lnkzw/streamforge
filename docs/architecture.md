@@ -51,7 +51,7 @@
 | `control-protocol` | lib | JSON-lines wire format v1 and a transport-agnostic serve loop (`docs/protocol.md`) | `command-api` |
 | `streamforge-engine` | bin | Headless engine process; serves `control-protocol` on stdin/stdout | `engine`, `control-protocol`, `capture-platform` |
 | `streamforge-cli` | bin | Human/script CLI; calls the in-process engine through `CommandHandler` | `command-api`, `engine`, `capture-platform` |
-| `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, the production workspace (`views`, `workspace`); the "Control Room" design system in `ui` (tokens, bundled IBM Plex fonts, painted icons, components; ADR 0016) | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
+| `streamforge-desktop` | bin + lib | Desktop UI (egui/eframe, ADR 0007): engine worker thread, a model that turns actions into commands, the production workspace (`views`, `workspace`) with projects opened and saved in `--project-dir`; the "Control Room" design system in `ui` (tokens, bundled IBM Plex fonts, painted icons, components; ADR 0016) | `command-api`, `engine`, `capture-platform`, `media-core` (`eframe`) |
 | `streamforge-bench` | bin | Measurement harness (M10 step 7): records and streams to a local ingest (a child process) for a fixed time, reports render, drop and CPU figures | `command-api`, `engine`, `rtmp-test-server` (`libc` / `windows-sys` for process CPU time) |
 | `streamforge-mcp` | bin + lib | MCP server on stdio (ADR 0008): tools from the registry with generated schemas, an access policy chosen at startup, streaming only to a configured target | `command-api`, `encoder-api`, `engine`, `capture-platform` (`rmcp`, `tokio`) |
 
@@ -108,7 +108,8 @@ Access control (ADR 0008):
 The desktop UI is an adapter like the CLI:
 - **Worker thread:** it builds the engine on its own thread and executes commands there via `Command::decode` and `CommandHandler::handle`. Channels are bounded, and the UI thread never blocks.
 - **Model:** its model turns user actions into commands with the protocol's names and parameters. The widgets only call the model.
-- **Views:** the production workspace (`docs/ui/design-system.md`) is drawn by one module per dock in `views` (top bar with transport and health, scenes, sources, inspector, program monitor, mixer, outputs, dialogs). What they show (scene selection, transport state and timers, monitor fit, meter ballistics, the health summary) is computed in `workspace`, without widgets, and unit-tested there.
+- **Projects:** the model tracks the project file last saved or opened and whether a command that changes what a file holds (scenes, audio, output profiles) succeeded since; the window title and the project menu show it, and opening a project or closing the window over unsaved changes asks first.
+- **Views:** the production workspace (`docs/ui/design-system.md`) is drawn by one module per dock in `views` (top bar with project menu, transport and health, scenes, sources, inspector, program monitor, mixer, outputs, dialogs). What they show (scene selection, transport state and timers, monitor fit, meter ballistics, the health summary) is computed in `workspace`, without widgets, and unit-tested there.
 
 ## Suggested future crates
 

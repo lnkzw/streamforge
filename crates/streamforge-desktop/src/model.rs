@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use command_api::{
     CaptureKind, CaptureState, CommandError, CommandOutput, EngineStatus, HealthReport, MixerState,
-    OutputHealth, OutputKind, OutputProfiles, RecordingStarted, SceneList, ScreenSource, SendTap,
-    StreamState, StreamingStarted, VideoEncoderInfo,
+    OutputHealth, OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted,
+    SceneList, ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -21,6 +21,28 @@ use crate::worker::{EngineWorker, RequestId};
 
 /// Lines kept in the activity log.
 const LOG_LINES: usize = 200;
+
+/// Commands that change what a project file holds (scenes, audio, output
+/// profiles): once one succeeds, the project has unsaved changes. What a
+/// screen source captures is not saved, so choosing it changes nothing.
+const CHANGES_PROJECT: &[&str] = &[
+    "create_scene",
+    "delete_scene",
+    "set_active_scene",
+    "add_source",
+    "update_source",
+    "remove_source",
+    "add_channel",
+    "remove_channel",
+    "update_channel",
+    "set_channel_input",
+    "add_bus",
+    "remove_bus",
+    "update_bus",
+    "set_send",
+    "set_output_profile",
+    "set_monitor_device",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -87,6 +109,10 @@ enum Pending {
     Action(String),
     /// `list_screen_sources`; failing is normal where there is only a picker.
     ScreenSources,
+    /// `list_projects`, for the open and save dialogs.
+    Projects,
+    /// `validate_project` of this file, before it is opened.
+    Validation(String),
 }
 
 pub struct Model {
@@ -110,6 +136,17 @@ pub struct Model {
     /// Sources that can be captured by id, or why there are none (e.g. the
     /// platform only has a picker); `None` until asked for.
     pub screen_sources: Option<Result<Vec<ScreenSource>, String>>,
+    /// The project directory's files, or why they cannot be listed; `None`
+    /// until asked for (and after a save, which may have added one).
+    pub projects: Option<Result<ProjectFileList, String>>,
+    /// The check of the file chosen to open: its name and the result, or
+    /// why it could not be checked.
+    pub validation: Option<(String, Result<ProjectValidation, String>)>,
+    /// The project file last saved or opened.
+    pub project: Option<String>,
+    /// Something a project file holds changed since then (or since the
+    /// start).
+    pub unsaved: bool,
     pub log: VecDeque<LogEntry>,
     /// Entries ever pushed to the log, including those it no longer
     /// keeps: the UI tells new entries from seen ones by it.
@@ -132,6 +169,10 @@ impl Model {
             recording: None,
             streaming: None,
             screen_sources: None,
+            projects: None,
+            validation: None,
+            project: None,
+            unsaved: false,
             log: VecDeque::new(),
             log_total: 0,
         };
@@ -148,6 +189,15 @@ impl Model {
         self.pending
             .values()
             .any(|pending| matches!(pending, Pending::Action(_)))
+    }
+
+    /// Unsaved changes, or a change still on its way to the engine (a
+    /// close right after an edit must not lose it).
+    pub fn has_changes(&self) -> bool {
+        self.unsaved
+            || self.pending.values().any(|pending| {
+                matches!(pending, Pending::Action(name) if CHANGES_PROJECT.contains(&name.as_str()))
+            })
     }
 
     /// Whether command `name` (e.g. `start_recording`) waits for the
@@ -262,6 +312,50 @@ impl Model {
         {
             self.submit("list_screen_sources", json!({}), Pending::ScreenSources);
         }
+    }
+
+    /// Ask for the project directory's files (skipped while asked).
+    pub fn list_projects(&mut self) {
+        if !self
+            .pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Projects))
+        {
+            self.submit("list_projects", json!({}), Pending::Projects);
+        }
+    }
+
+    /// Check `file_name` before it is opened; [`Model::validation`] holds
+    /// the answer.
+    pub fn validate_project(&mut self, file_name: &str) {
+        self.validation = None;
+        self.submit(
+            "validate_project",
+            json!({ "file_name": file_name }),
+            Pending::Validation(file_name.to_owned()),
+        );
+    }
+
+    /// Whether the check of `file_name` is still on its way.
+    pub fn validating(&self, file_name: &str) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Validation(name) if name == file_name))
+    }
+
+    /// Save the scenes and audio to `file_name`; an existing file is only
+    /// replaced with `overwrite`.
+    pub fn save_project(&mut self, file_name: &str, overwrite: bool) {
+        self.act(
+            "save_project",
+            json!({ "file_name": file_name, "overwrite": overwrite }),
+        );
+    }
+
+    /// Replace the scenes and audio with `file_name`'s; unsaved changes
+    /// are lost, so the UI asks first when there are any.
+    pub fn load_project(&mut self, file_name: &str) {
+        self.act("load_project", json!({ "file_name": file_name }));
     }
 
     pub fn create_scene(&mut self, name: &str) {
@@ -519,13 +613,38 @@ impl Model {
         let changed = !responses.is_empty();
         for response in responses {
             let pending = self.pending.remove(&response.id);
-            if matches!(pending, Some(Pending::ScreenSources)) {
-                self.screen_sources = Some(match response.result {
-                    Ok(CommandOutput::ScreenSources(list)) => Ok(list.sources),
-                    Ok(other) => Err(format!("unexpected response: {other:?}")),
-                    Err(error) => Err(error.message),
-                });
-                continue;
+            match pending {
+                Some(Pending::ScreenSources) => {
+                    self.screen_sources = Some(match response.result {
+                        Ok(CommandOutput::ScreenSources(list)) => Ok(list.sources),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    continue;
+                }
+                Some(Pending::Projects) => {
+                    self.projects = Some(match response.result {
+                        Ok(CommandOutput::ProjectFiles(list)) => Ok(list),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    continue;
+                }
+                Some(Pending::Validation(file_name)) => {
+                    let result = match response.result {
+                        Ok(CommandOutput::ProjectValidation(validation)) => Ok(validation),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    };
+                    self.validation = Some((file_name, result));
+                    continue;
+                }
+                Some(Pending::Action(ref name))
+                    if response.result.is_ok() && CHANGES_PROJECT.contains(&name.as_str()) =>
+                {
+                    self.unsaved = true;
+                }
+                _ => {}
             }
             match response.result {
                 Ok(output) => self.apply(output),
@@ -569,6 +688,32 @@ impl Model {
                 self.profiles = Some(set.profiles);
             }
             CommandOutput::Health(health) => self.set_health(Some(*health)),
+            CommandOutput::ProjectSaved(saved) => {
+                self.push(
+                    Level::Info,
+                    format!(
+                        "Project saved: {} ({} scene(s), {} bytes)",
+                        saved.path, saved.scenes, saved.bytes
+                    ),
+                );
+                self.project = Some(saved.file_name);
+                self.unsaved = false;
+                // The file may be new; the dialogs ask again.
+                self.projects = None;
+            }
+            CommandOutput::ProjectLoaded(loaded) => {
+                let loaded = *loaded;
+                self.push(Level::Info, format!("Project opened: {}", loaded.file_name));
+                for warning in loaded.warnings {
+                    self.push(Level::Warning, warning);
+                }
+                self.scenes = Some(loaded.scenes);
+                self.mixer = Some(loaded.mixer);
+                self.project = Some(loaded.file_name);
+                self.unsaved = false;
+                // The file's output profiles replaced the engine's.
+                self.refresh(Refresh::Profiles);
+            }
             CommandOutput::PreviewState(preview) => {
                 self.preview_enabled = preview.enabled;
                 if let Some(dropped) = preview.frames_dropped.filter(|dropped| *dropped > 0) {

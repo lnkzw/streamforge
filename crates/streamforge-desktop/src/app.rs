@@ -573,7 +573,7 @@ impl DesktopApp {
                     scenes
                         .scenes
                         .get(index)
-                        .filter(|scene| scene.id != scenes.active_id)
+                        .filter(|scene| scene.id != scenes.active_scene_id)
                         .map(|scene| (scene.id.clone(), scene.name.clone()))
                 });
                 if let Some((id, name)) = scene {

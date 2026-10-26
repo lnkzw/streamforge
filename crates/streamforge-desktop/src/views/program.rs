@@ -25,7 +25,7 @@ impl DesktopApp {
             .model
             .scenes
             .as_ref()
-            .map(|scenes| scenes.active.clone())
+            .map(|scenes| scenes.active_scene_name.clone())
             .unwrap_or_default();
 
         let actions = widgets::section_header(ui, "Program", None);
@@ -168,7 +168,7 @@ impl DesktopApp {
         else {
             return;
         };
-        if *scene_id != scenes.active_id {
+        if *scene_id != scenes.active_scene_id {
             return;
         }
         let Some(source) =
@@ -200,7 +200,7 @@ impl DesktopApp {
         };
         let scale = scenes.canvas_width.max(1) as f32 / monitor.width();
         let at = (pointer - monitor.min) * scale;
-        let Some(program) = scene(scenes, &scenes.active_id) else {
+        let Some(program) = scene(scenes, &scenes.active_scene_id) else {
             return;
         };
         let hit = program.sources.iter().rev().find(|source| {

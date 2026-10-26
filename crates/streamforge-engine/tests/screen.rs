@@ -1,5 +1,5 @@
 //! M9b acceptance: through the real engine process, record a screen
-//! source named from `list_screen_sources`, on platforms whose capture
+//! source named from `list_capture_targets`, on platforms whose capture
 //! backend lists sources (Windows, macOS). Elsewhere the listing must fail
 //! with a structured error, and so must it where screen recording is not
 //! permitted (macOS without the permission); the test says which.
@@ -22,9 +22,9 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
     let mut engine =
         EngineProcess::spawn_with(&[std::ffi::OsStr::new("--output-dir"), dir.0.as_os_str()]);
     let caps = call(&mut engine, 1, "get_capture_capabilities", json!({}));
-    let listed = call(&mut engine, 2, "list_screen_sources", json!({}));
+    let listed = call(&mut engine, 2, "list_capture_targets", json!({}));
     println!("{caps}\n{listed}");
-    if caps["result"]["screen"]["source_list"] != true {
+    if caps["result"]["screen"]["target_list"] != true {
         assert_eq!(listed["ok"], false, "{listed}");
         assert!(listed["error"]["message"].is_string(), "{listed}");
         println!("this platform has no screen source list; nothing to record");
@@ -37,7 +37,7 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
         assert!(engine.finish().success());
         return;
     }
-    let sources = listed["result"]["sources"].as_array().expect("sources");
+    let sources = listed["result"]["targets"].as_array().expect("sources");
     let monitor = sources
         .iter()
         .find(|source| source["kind"] == "monitor")
@@ -48,9 +48,9 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
         ("create_scene", json!({"name": "Desk"})),
         (
             "add_source",
-            json!({"scene": "Desk", "name": "monitor", "kind": "screen", "source_id": id}),
+            json!({"scene_name": "Desk", "name": "monitor", "kind": "screen", "capture_target_id": id}),
         ),
-        ("set_active_scene", json!({"name": "Desk"})),
+        ("set_active_scene", json!({"scene_name": "Desk"})),
         ("start_recording", json!({"file_name": "screen.mkv"})),
     ];
     for (n, (command, params)) in steps.into_iter().enumerate() {

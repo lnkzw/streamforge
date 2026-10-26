@@ -350,3 +350,57 @@ fn backend_error_codes_reach_the_wire() {
     assert_error(&response, &json!("c"), "unsupported");
     assert_eq!(handler.calls, vec![Command::GetCaptureCapabilities]);
 }
+
+#[test]
+fn renamed_commands_and_selectors_have_no_wire_aliases() {
+    let mut handler = FakeHandler::default();
+    for command in ["list_screen_sources", "set_screen_source"] {
+        let response = respond(
+            &mut handler,
+            &json!({"id": 1, "command": command}).to_string(),
+        );
+        assert_error(&response, &json!(1), "unknown_command");
+    }
+    for (command, params) in [
+        ("set_active_scene", json!({"name": "Main"})),
+        (
+            "add_source",
+            json!({"scene": "Main", "name": "bars", "kind": "color_bars"}),
+        ),
+        ("update_source", json!({"id": "src_bars", "x": 1})),
+        ("remove_channel", json!({"name": "Music"})),
+        ("remove_bus", json!({"id": "bus_music"})),
+        (
+            "set_send",
+            json!({"channel": "Music", "bus": "Program", "enabled": true}),
+        ),
+        (
+            "set_output_profile",
+            json!({"output": "recording", "mix_bus": "Program"}),
+        ),
+        ("probe_screen_capture", json!({"source_id": "monitor:1"})),
+        ("probe_screen_capture", json!({"source_types": ["monitor"]})),
+        ("probe_screen_capture", json!({"cursor": "hidden"})),
+        ("probe_composite", json!({"snapshot_path": "frame.ppm"})),
+    ] {
+        let response = respond(
+            &mut handler,
+            &json!({"id": 2, "command": command, "params": params}).to_string(),
+        );
+        assert_error(&response, &json!(2), "invalid_params");
+    }
+    assert!(handler.calls.is_empty());
+    let response = respond(
+        &mut handler,
+        r#"{"id":3,"command":"set_capture_target","params":{"source_id":"src_bars","capture_target_id":"monitor:1"}}"#,
+    );
+    // The fake does not implement it, but the typed command reaches it.
+    assert_error(&response, &json!(3), "unsupported");
+    assert_eq!(
+        handler.calls,
+        vec![Command::SetCaptureTarget {
+            source: command_api::SourceRef::id("src_bars"),
+            capture_target_id: "monitor:1".into(),
+        }]
+    );
+}

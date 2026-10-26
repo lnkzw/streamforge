@@ -83,7 +83,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class", "loopback_of"}]}` |
 | `list_audio_outputs`       | none   | `read_only` | `{"outputs": [{"name", "description", "media_class"}]}` |
-| `list_screen_sources`      | none   | `sensitive` | `{"sources": [{"id", "kind", "name", "width", "height"}]}` |
+| `list_capture_targets`      | none   | `sensitive` | `{"targets": [{"id", "kind", "name", "width", "height"}]}` |
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
@@ -100,7 +100,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `update_source`            | see below | `control`, destructive | Scene list |
 | `remove_source`            | see below | `control`, destructive | Scene list |
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
-| `set_screen_source`        | see below | `sensitive`, destructive | Scene list |
+| `set_capture_target`        | see below | `sensitive`, destructive | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `add_channel`              | see below | `sensitive` | Mixer state |
 | `remove_channel`           | see below | `control`, destructive | Mixer state |
@@ -124,7 +124,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 - **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`. Parameters are decoded first, so `required` is what that call needs.
 - **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
 
-Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`source_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_screen_sources` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
+Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`capture_target_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_capture_targets` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
 
 `capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`. `pipeline_running` is true while a media pipeline runs for outputs or the preview. Each output has one state, `null` while it is not open:
 - `recording_state`: `running`, or `failed` when the recording stopped unexpectedly (encoder, compositor or mixer failure); `stop_recording` then finalizes the file and reports the error.
@@ -173,24 +173,24 @@ Commands that create or read a file (`start_recording`, `probe_composite`'s snap
 
 `screen` and `audio` each carry `backend`, `available` and `unavailable_reason`. The reason is a string when the capability is unavailable, otherwise `null`. In addition:
 
-- `screen` has `portal_version`, `source_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`). An empty `cursor_modes` means the backend cannot select a cursor mode; the request is then ignored, with a warning.
+- `screen` has `portal_version`, `target_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`). An empty `cursor_modes` means the backend cannot select a cursor mode; the request is then ignored, with a warning.
 - `screen` also says how a source is chosen:
-  - `picker`: without `source_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
-  - `source_list`: `list_screen_sources` lists monitors and windows, and screen commands capture one by its `source_id` without a dialog (Windows).
+  - `picker`: without `capture_target_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
+  - `target_list`: `list_capture_targets` lists monitors and windows, and screen commands capture one by its `capture_target_id` without a dialog (Windows).
 - `audio` has `server_version`.
 
 ### Capture probes
 
-Probes capture briefly and return diagnostics. No media is stored or returned. A probe **blocks the engine** for its duration plus any user interaction: without `source_id`, the screen probe opens the system's source picker and waits up to 120 s. Other requests on the same connection are answered afterwards.
+Probes capture briefly and return diagnostics. No media is stored or returned. A probe **blocks the engine** for its duration plus any user interaction: without `capture_target_id`, the screen probe opens the system's source picker and waits up to 120 s. Other requests on the same connection are answered afterwards.
 
 `probe_screen_capture` params (all optional):
 
 | Param          | Type | Default | Meaning |
 |----------------|------|---------|---------|
 | `duration_ms`  | integer 100..=60000 | 5000 | Capture time after the source is selected. |
-| `source_id`    | string (1 to 256 characters) | none | An `id` from `list_screen_sources`: capture that source without a picker. Needs `source_list`; without it, the backend needs `picker`, else the call fails with `invalid_params`. Unknown or closed sources fail with `not_found`. |
-| `source_types` | array of `"monitor"`, `"window"`, `"virtual"` | `["monitor","window"]` | Source types offered in the picker; duplicates are ignored. Not checked with `source_id` (the source has its own kind). |
-| `cursor`       | `"hidden"`, `"embedded"`, `"metadata"` | `"embedded"` | Cursor handling; must be one of `cursor_modes`. |
+| `capture_target_id`    | string (1 to 256 characters) | none | An `id` from `list_capture_targets`: capture that source without a picker. Needs `target_list`; without it, the backend needs `picker`, else the call fails with `invalid_params`. Unknown or closed sources fail with `not_found`. |
+| `target_kinds` | array of `"monitor"`, `"window"`, `"virtual"` | `["monitor","window"]` | Target kinds offered in the picker; duplicates are ignored. Not checked with `capture_target_id` (the source has its own kind). |
+| `cursor_mode`       | `"hidden"`, `"embedded"`, `"metadata"` | `"embedded"` | Cursor handling; must be one of `cursor_modes`. |
 
 `probe_audio_capture` params (all optional):
 
@@ -229,14 +229,14 @@ Audio report: `{"backend", "input", "format": {"sample_format", "rate", "channel
 - optionally a live screen layer, fitted into 1152×648 at 90 % opacity
 - a half-transparent moving overlay
 
-It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_path` writes a file.
+It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_file_name` writes a file.
 
 | Param           | Type | Default | Meaning |
 |-----------------|------|---------|---------|
 | `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
-| `screen`        | boolean | `false` | Add the live screen layer: the `source_id` source, else the one picked in the system dialog. |
-| `source_id`, `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
-| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. It must be a plain file name (see File names), else `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
+| `screen`        | boolean | `false` | Add the live screen layer: the `capture_target_id` target, else the one picked in the system dialog. |
+| `capture_target_id`, `target_kinds`, `cursor_mode` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
+| `snapshot_file_name` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. It must be a plain file name (see File names), else `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
 
 Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
 
@@ -275,7 +275,7 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
   - `ring` (`{"capacity_frames", "pushed_frames", "pulled_frames", "overrun_frames", "discarded_frames", "max_push_frames"}`)
   - `buffer` (`{"target_ms", "min_ms", "mean_ms", "max_ms", "windows_ms"}`), where `windows_ms` is the mean fill per 10 s window, oldest first
 
-`warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `source_types`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
+`warnings` lists non-fatal observations, e.g. "no frames received" on a static screen, or a delivered source kind that differs from `target_kinds`. When a probe fails, warnings gathered before the failure are in `error.details.warnings`. If the portal session could not be closed afterwards, `error.details.session_close_error` says why.
 
 ### Outputs: recording and streaming
 
@@ -283,8 +283,8 @@ Outputs share one **media pipeline**: the active scene (see below; by default th
 
 - **Start and stop:** the first output to start brings the pipeline up with the active scene; screen capture comes from the scene's screen sources. The pipeline stops when the last output and the preview stop.
 - **Output profiles (ADR 0017):** each output has a profile: the bus it takes as its mix, and its encoder settings (`recording`: `mix`, `tracks`, `video_encoder`; `stream`: `mix`, `video_bitrate_kbps`, `video_encoder`; `monitor`: `mix`, `enabled`, `device`, see Monitor). By default all take the program bus, with `auto` encoders and 6000 kbit/s, and the monitor is off. `start_recording` and `start_streaming` use it; their `video_encoder` and `video_bitrate_kbps` override it for that run. The stream's target is not part of the profile: the URL stays a `start_streaming` parameter, and the key is never stored.
-  - **`set_output_profile {output, mix_bus_id | mix_bus, tracks, video_encoder, video_bitrate_kbps, enabled}`** (at least one; `tracks` only for `recording`, the bitrate only for `stream`, the encoder not for `monitor`, `enabled` only for `monitor`): a new mix applies to a running output now, fading over one block; tracks and encoder settings wait for its next start. A running recording's mix cannot become one of the tracks it records (`invalid_state`, `details.bus`), since its tracks are fixed until it stops. The result lists the profiles, which fields applied now (`applied_now`) or wait (`next_start`), and `warnings`, e.g. a monitor device that did not open.
-  - **Recording tracks:** the mix is audio track 1; `tracks` lists up to 7 more buses (ids, or names: an entry that looks like a bus id is taken as one), each recorded as its own AAC stream in the Matroska file and named after its bus (the stream's `title`). A bus is in the list once and not as the mix too. The list is fixed when the recording starts; switching the mix live changes what track 1 carries, not its name. All tracks of a block travel as one queue item, so they share the queue's depth and are dropped together. The report's `recording.audio` is track 1 and `recording.extra_audio` has one entry per further track, each with its `name`.
+  - **`set_output_profile {output, bus_id | bus_name, tracks, video_encoder, video_bitrate_kbps, enabled}`** (at least one; `tracks` only for `recording`, the bitrate only for `stream`, the encoder not for `monitor`, `enabled` only for `monitor`): a new mix applies to a running output now, fading over one block; tracks and encoder settings wait for its next start. A running recording's mix cannot become one of the tracks it records (`invalid_state`, `details.bus`), since its tracks are fixed until it stops. The result lists the profiles, which fields applied now (`applied_now`) or wait (`next_start`), and `warnings`, e.g. a monitor device that did not open.
+  - **Recording tracks:** the mix is audio track 1; `tracks` lists up to 7 more bus references (`[{"bus_id": "bus_…"} | {"bus_name": "Music"}]`); each entry requires at least one field, both must agree, and unknown fields are refused. Profiles still store and report bus ids (`tracks: ["bus_…"]`). Each bus is recorded as its own AAC stream in the Matroska file and named after its bus (the stream's `title`). A bus is in the list once and not as the mix too. The list is fixed when the recording starts; switching the mix live changes what track 1 carries, not its name. All tracks of a block travel as one queue item, so they share the queue's depth and are dropped together. The report's `recording.audio` is track 1 and `recording.extra_audio` has one entry per further track, each with its `name`.
   - `remove_bus` is `invalid_state` while a profile takes the bus as its mix or a track (`details.outputs`).
 - **A missing device** does not keep the pipeline from starting (ADR 0017): when a configured channel's device is not found, the channel is silent for the run, and that is reported everywhere. The `warnings` of `start_recording`, `start_streaming` and `set_preview` say so, `get_mixer` repeats it while the run lasts, `get_health` lists the channel's capture as `ended` with `reason: "could not start: …"`, and the stop report has the device's error in `audio_captures` and a warning that names the channel. Any other capture error (not permitted, no audio server, …) still fails the start, since the user has to act. A device that disappears during a run ends its capture the same way (`get_health`), and the channel goes silent; the outputs keep running. Nothing reconnects on its own: connect the device, or stop the outputs and preview and choose another input with `set_channel_input`. `probe_audio_mix` tests devices, so there a missing device is `not_found`.
 - **Joining:** an output started while another output or the preview runs joins the pipeline.
@@ -362,7 +362,7 @@ Errors:
 The monitor plays a bus on an audio device, e.g. headphones, while the pipeline runs and the monitor is on (ADR 0017). It is not an encoder output: it cannot be recorded, it has no report of its own, and its failures never touch the recording or the stream.
 
 - **On and off:** `set_output_profile {"output": "monitor", "enabled": true}`. It is off by default. While the pipeline runs, switching applies now (`applied_now: ["enabled"]`), ramped over one block. Off, a device that played in this run stays open and plays silence, so switching back on is instant; it closes when the pipeline stops. Switched on while idle, the monitor starts with the next pipeline (an output or the preview).
-- **Its bus:** `mix_bus_id` or `mix_bus`, by default the program bus; usually a separate mix (an aux bus with `assign_db: null`) with pre-fader sends, so the monitor level does not follow the faders. On a device that runs (on, or off and playing silence), a new bus applies now (`applied_now`), faded over one block, like an output's mix; otherwise it waits for the monitor to be switched on (`next_start`).
+- **Its bus:** `bus_id` or `bus_name`, by default the program bus; usually a separate mix (an aux bus with `assign_db: null`) with pre-fader sends, so the monitor level does not follow the faders. On a device that runs (on, or off and playing silence), a new bus applies now (`applied_now`), faded over one block, like an output's mix; otherwise it waits for the monitor to be switched on (`next_start`).
 - **Its device:** **`set_monitor_device {device}`**, a name from **`list_audio_outputs`**, or `null` or left out for the system default; only while the pipeline is idle (`invalid_state` otherwise), and `sensitive`, since it chooses where audio is played. Linux plays through PipeWire, Windows through WASAPI and macOS through CoreAudio (both through cpal, `docs/platforms.md`). A device that goes away during the run (headphones unplugged) ends the monitor; it is never moved to another device, such as the speakers, where the microphones would pick it up. On the system default, the monitor stays on the device that was the default when it started.
 - **A device that does not open** leaves the monitor silent, with a warning in the start's `warnings` (or `set_output_profile`'s), in `get_mixer` while the run lasts, and in `get_health` (`state: "ended"`, `reason: "could not start: …"`). Switching it on again tries again. A device that ends during the run ends the monitor the same way (`get_health`, and a warning in the stop report); the outputs keep running.
 - **Feedback:** when a channel captures what the monitor device plays (an input whose `loopback_of` names the device: a PipeWire sink's monitor, or an output's `<output>.monitor` on Windows and macOS), switching the monitor on warns, every time, and so do the run's audio warnings while it is on: if the monitor's bus has that channel, it feeds back. The system default output is not compared, as its name is not known to the engine. If the inputs cannot be listed for the check, that is a warning too.
@@ -373,59 +373,61 @@ The monitor plays a bus on an audio device, e.g. headphones, while the pipeline 
 
 The engine keeps a collection of scenes on a 1920×1080 canvas and renders the **active** one. Changes to the active scene, or switching scenes, apply live while preview or outputs run. A live change that fails (e.g. the picker of a new screen source is cancelled) is undone and returns the error. Scenes live in memory; `save_project` and `load_project` keep them in a file (see Projects).
 
-At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active", "active_id", "scenes": [{"id", "name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`. `active` is the active scene's name, `active_id` its id.
+At start the collection has one scene, `Test pattern`: full-canvas color bars plus a moving gray `overlay`, the M3 reference scene. Every scene command returns the scene list: `{"canvas_width", "canvas_height", "active_scene_name", "active_scene_id", "scenes": [{"id", "name", "sources": [{"id", "name", "kind", ..., "x", "y", "width", "height", "opacity"}]}]}`. `active_scene_name` is the active scene's name, `active_scene_id` its id.
 
 - **Ids (ADR 0014):** every scene and source has a stable id that the engine assigns: `scene_` or `src_` and 12 random characters (`a-z`, `0-9`). Clients treat ids as opaque strings and take them from `list_scenes`.
   - An id never changes while its scene or source exists. Ids are random, so a removed source's id does not come back, and source ids are unique across all scenes.
   - The built-in scene and its sources have fixed ids: `scene_test_pattern`, `src_color_bars` and `src_overlay`.
   - `render.sources[].id` (in `get_health` and the stop reports) and `captures[].id` are these source ids.
-- **Naming a scene or source:** commands take an id or a name.
-  - A scene: `scene_id`, or its name (`name` in the scene commands, `scene` in the source commands).
-  - A source: its `id` alone, or its scene and `name`.
-  - The id is looked up first. Given both, they must name the same scene or source, otherwise the command is `invalid_params`. An id that names nothing is `not_found` with `details` `{"scene_id": ...}` or `{"id": ...}`; an unknown name gives `{"scene": ...}` or `{"source": ...}`.
-  - `source_id` is not a source id: it names what a screen source captures (from `list_screen_sources`).
+- **Naming a scene or source:** every request reference uses `<entity>_id` or `<entity>_name`.
+  - A scene: `scene_id` or `scene_name`. A source: `source_id`, or its `scene_id`/`scene_name` and `source_name`.
+  - Channels use `channel_id`/`channel_name`, buses use `bus_id`/`bus_name`, including an output profile's mix and each recording track.
+  - The id is looked up first. Given both, they must name the same object, otherwise `invalid_params`. A source's scene, when given with its id, must also agree.
+  - An unknown reference is `not_found`; `details` names the supplied field: `scene_id`, `scene_name`, `source_id`, `source_name`, `channel_id`, `channel_name`, `bus_id` or `bus_name`.
+  - A new object's own name stays `name` (`create_scene`, `add_source`, `add_channel`, `add_bus`); listed objects keep their own `id` and `name`.
+  - `capture_target_id` names the monitor or window a screen source captures, from `list_capture_targets`.
 - **Scene commands:**
   - `create_scene {name}` creates an empty scene (black); the scene list holds its id.
-  - `set_active_scene {scene_id | name}` switches the rendered scene.
-  - `delete_scene {scene_id | name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
+  - `set_active_scene {scene_id | scene_name}` switches the rendered scene.
+  - `delete_scene {scene_id | scene_name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
 - **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
-- **`add_source`:** params `scene_id` or `scene`, `name`, `kind`, optional rectangle and `opacity`. The scene list holds the new source's id.
+- **`add_source`:** params `scene_id` or `scene_name`, `name`, `kind`, optional rectangle and `opacity`. The scene list holds the new source's id.
   - Kinds:
     - `color_bars`: stretched to the rectangle.
     - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
-    - `screen` with optional `source_id`, `source_types` and `cursor` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept. The scene list shows `source_id` when one is set.
+    - `screen` with optional `capture_target_id`, `target_kinds` and `cursor_mode` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept. The scene list shows `capture_target_id` when one is set.
   - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
   - `opacity` 0..=1.
   - Sources are drawn in order, so later ones are on top.
   - A screen source starts its capture when it becomes part of the rendered scene: the named source directly, otherwise through the system picker.
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
-  - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`source_id`) start without waiting and are allowed.
+  - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`capture_target_id`) start without waiting and are allowed.
   - Capture reports are in the output reports' `scene_captures` (`{"id", "source", "report", "error"}`, with the source's id and name): the most recent 64, with `scene_captures_omitted` counting older ones.
-- **`update_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and any of `x`, `y`, `width`, `height`, `opacity`.
-- **`remove_source`:** the source (`id`, or `scene` or `scene_id` and `name`).
-- **`restart_source`:** the source (`id`, or `scene` or `scene_id` and `name`), optional `source_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
+- **`update_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and any of `x`, `y`, `width`, `height`, `opacity`.
+- **`remove_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`).
+- **`restart_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), optional `capture_target_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
   - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
-  - **`source_id`:** capture this source from `list_screen_sources` from now on; the scene keeps it. A closed window's id never comes back, so restarting a window source needs the id of a window that exists. A display's id returns when the display reconnects, so the same id works then.
-  - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `source_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
-  - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `source_id`, and the error is returned (e.g. `not_found` for a gone source).
+  - **`capture_target_id`:** capture this source from `list_capture_targets` from now on; the scene keeps it. A closed window's id never comes back, so restarting a window source needs the id of a window that exists. A display's id returns when the display reconnects, so the same id works then.
+  - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `capture_target_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
+  - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `capture_target_id`, and the error is returned (e.g. `not_found` for a gone source).
   - Both captures' reports are in the output reports' `scene_captures`.
   - Live audio inputs cannot be restarted: the mixer's inputs are fixed while it runs.
   - It is destructive: it ends a running capture, and a picker choice is gone.
-- **`set_screen_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and `source_id` from `list_screen_sources`. Chooses what a screen source captures from now on, e.g. after `load_project`, which does not store it.
-  - Only while the source has no capture; with one (running or ended), it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
+- **`set_capture_target`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and `capture_target_id` from `list_capture_targets`. Chooses what a screen source captures from now on, e.g. after `load_project`, which does not store it.
+  - Only while the source has no capture; with one (running or ended), it is `invalid_state` (switch it with `restart_source` and a `capture_target_id`). Other kinds are `invalid_params`.
   - It is `sensitive`, like `add_source`: it decides what is captured. If the source is in the rendered scene, its capture starts now, and a failure (e.g. `not_found` for a gone source) changes nothing.
 
 Mixer (ADR 0017):
-- **Channels:** the pipeline mixes a list of channels, each one input's strip: what it plays (a capture device or a test tone), a fader, mute and balance, and one send to every bus. At most 8 channels. Channels have stable ids (`ch_…`, ADR 0014), and commands name one by `id`, `name` or both (which must then agree; the id is looked up first). Names are unique among the channels.
+- **Channels:** the pipeline mixes a list of channels, each one input's strip: what it plays (a capture device or a test tone), a fader, mute and balance, and one send to every bus. At most 8 channels. Channels have stable ids (`ch_…`, ADR 0014), and commands name one by `channel_id`, `channel_name` or both (which must then agree; the id is looked up first). Names are unique among the channels.
 - **Buses:** the program bus, `bus_program` named `Program`, is the main mix and every output's default (see Output profiles); it cannot be removed. Up to 8 aux buses (`bus_…`) add submixes and separate mixes: each has a fader and mute, and `assign_db`, its level into the program bus, or `null` for a separate mix (e.g. for monitoring, or for an output of its own). Every bus is hard-limited to [−1, 1] where it leaves the graph. Bus names are unique, `Program` included. Two tiers only: an aux bus feeds the program bus or nothing, so no loop can be built.
 - **Sends:** each channel has one send per bus, in bus order (program first): `{"bus", "enabled", "level_db", "tap"}`. `tap` is `post_fader` (after fader and balance) or `pre_fader` (after mute, before the fader: the channel fader does not move it). Mute comes before both taps, so a muted channel is silent in every bus. A new channel sends to the program bus post-fader at 0 dB and nowhere else; a new bus starts with every channel's send to it off.
-- **`get_mixer`:** returns `{"running", "channels": [{"id", "name", "input", "gain_db", "mute", "balance", "sends", "peak_dbfs"}], "buses": [{"id", "name", "kind", "gain_db", "mute", "assign_db", "peak_dbfs"}], "outputs": [{"output", "bus", "tracks", "running"}], "warnings"}`; `outputs` has the recording, the stream and the monitor; an output's `bus` is the one it takes now, or would take if it started now (its profile's), and the monitor is `running` while it plays its bus; buses are listed with the program bus first (`kind: "program"`, then `"aux"`). `input` is `{"kind": "device", "device": name or null for the default input}` or `{"kind": "tone", "frequency_hz", "level_dbfs"}`. Peaks are the highest level of the last 300 ms: a channel's after its fader, a bus's before the output limit, so it can exceed 0 dBFS when the mix overloads (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll. `warnings` lists routing that is allowed but rarely meant: a channel that reaches the program bus more than once, directly and through each assigned aux bus it sends to (+6 dB for two equal paths). It is about the routing, so mutes and levels, which change live, do not count.
+- **`get_mixer`:** returns `{"running", "channels": [{"id", "name", "input", "gain_db", "mute", "balance", "sends", "peak_dbfs"}], "buses": [{"id", "name", "kind", "gain_db", "mute", "assign_db", "peak_dbfs"}], "outputs": [{"output", "bus_id", "tracks", "running"}], "warnings"}`; `outputs` has the recording, the stream and the monitor; an output's `bus_id` is the one it takes now, or would take if it started now (its profile's), and the monitor is `running` while it plays its bus; buses are listed with the program bus first (`kind: "program"`, then `"aux"`). `input` is `{"kind": "device", "device": name or null for the default input}` or `{"kind": "tone", "frequency_hz", "level_dbfs"}`. Peaks are the highest level of the last 300 ms: a channel's after its fader, a bus's before the output limit, so it can exceed 0 dBFS when the mix overloads (`null` for silence, or when not running). Reading them changes nothing, so several clients can poll. `warnings` lists routing that is allowed but rarely meant: a channel that reaches the program bus more than once, directly and through each assigned aux bus it sends to (+6 dB for two equal paths). It is about the routing, so mutes and levels, which change live, do not count.
 - **`add_channel {name, input, gain_db?, mute?, balance?}`:** adds a channel at the end, with a fresh id. A tone's `level_dbfs` defaults to −12; gain is −96 to +24 dB, balance −1 (left only) to 1 (right only), centre unity on both sides. It is `sensitive`, because a device channel captures a microphone. A duplicate name is `invalid_params`, a ninth channel `invalid_state`.
-- **`add_bus {name, gain_db?, mute?, assign_db?}`** (`assign_db` absent or `null`: a separate mix) and **`remove_bus {id | name}`** (which removes every send to it; the program bus is `invalid_params`).
-- **Structure needs an idle pipeline:** `add_channel`, `remove_channel {id | name}`, `set_channel_input {id | name, input}` (`sensitive`, as it chooses what is captured), `add_bus` and `remove_bus` change the mixer's structure, so they are `invalid_state` while a preview or output runs.
-- **Live:** **`update_channel {id | name, gain_db?, mute?, balance?}`**, **`update_bus {id | name, gain_db?, mute?, assign_db?}`** (`assign_db: null` makes an aux bus a separate mix; on the program bus it is `invalid_params`) and **`set_send {channel_id | channel, bus_id | bus, enabled?, level_db?, tap?}`** apply while running, ramped over one block so nothing clicks; a tap change fades out on the old tap, then in on the new one. They are kept in the configuration, which is what every run mixes.
+- **`add_bus {name, gain_db?, mute?, assign_db?}`** (`assign_db` absent or `null`: a separate mix) and **`remove_bus {bus_id | bus_name}`** (which removes every send to it; the program bus is `invalid_params`).
+- **Structure needs an idle pipeline:** `add_channel`, `remove_channel {channel_id | channel_name}`, `set_channel_input {channel_id | channel_name, input}` (`sensitive`, as it chooses what is captured), `add_bus` and `remove_bus` change the mixer's structure, so they are `invalid_state` while a preview or output runs.
+- **Live:** **`update_channel {channel_id | channel_name, gain_db?, mute?, balance?}`**, **`update_bus {bus_id | bus_name, gain_db?, mute?, assign_db?}`** (`assign_db: null` makes an aux bus a separate mix; on the program bus it is `invalid_params`) and **`set_send {channel_id | channel_name, bus_id | bus_name, enabled?, level_db?, tap?}`** apply while running, ramped over one block so nothing clicks; a tap change fades out on the old tap, then in on the new one. They are kept in the configuration, which is what every run mixes.
 
 Preview:
 - **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
@@ -447,17 +449,17 @@ A project file holds the scenes with their ids, the active scene and the audio c
   - Result: `{"file_name", "path", "replaced", "scenes", "bytes"}`.
 - **`load_project {file_name}`:** replaces the scenes, the active scene and the audio with the file's, all or nothing.
   - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
-  - Screen sources load without a capture target; a warning says so. Choose one with `set_screen_source`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
+  - Screen sources load without a capture target; a warning says so. Choose one with `set_capture_target`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
   - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`, at most 100 plus one that counts the rest).
   - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.
 - **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "migrates", "problems"}`; `migrates` is true for a valid file of an older schema version. An invalid file is a result, not an error. `read_only`.
 - **Errors:** a missing file (or, for a save, a missing directory) is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
-- **Not stored:** stream keys, file paths, and what screen sources capture (`source_id`: machine-specific, and window titles can be private).
+- **Not stored:** stream keys, file paths, and what screen sources capture (`capture_target_id`: machine-specific, and window titles can be private).
 
-The file (`schema_version` 2):
+The file (`schema_version` 3):
 
 ```json
-{"schema_version": 2,
+{"schema_version": 3,
  "canvas": {"width": 1920, "height": 1080},
  "active_scene": "scene_k3j9x2m4q8w1",
  "scenes": [{"id": "scene_k3j9x2m4q8w1", "name": "Show", "sources": [
@@ -472,13 +474,14 @@ The file (`schema_version` 2):
            "program": {"gain_db": 0.0, "mute": false}}}
 ```
 
-- **Sources** are their `list_scenes` objects without `source_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
+- **Sources** are their `list_scenes` objects without `capture_target_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
 - **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given (a device channel's `device` may be left out or `null` for the default input), checked by the `add_channel` rules. Their **`sends`** are checked by the `set_send` rules, each naming an existing bus once; a send that is left out is the default (on to program, off to an aux bus), in any order.
 - **`buses`** (aux buses, in mixer order; may be left out for none) are their `get_mixer` objects without `kind` and `peak_dbfs`, checked by the `add_bus` rules (`assign_db` may be left out for a separate mix). **`program`** is checked by the `update_bus` rules.
 - **`outputs`** holds the output profiles as `get_output_profiles` shows them, every field given (but the recording's `tracks` may be left out for none, and the monitor's `device` for the default); a profile that is left out (or `outputs` as a whole) is the default. Each is checked by the `set_output_profile` rules, the monitor's `device` by the `set_monitor_device` rules; its `mix` and each of its `tracks` (by id) must name a bus of the file, and a bus is a track once and not the mix as well. A loaded profile with the monitor on plays it from the next pipeline start.
 - **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's. The audio is checked by the graph's own rules, the ones the engine keeps: channel and bus ids (form, unique, an aux bus not `bus_program`), unique channel names, unique bus names (`Program` is taken), at most 8 channels and 8 aux buses, and every send naming an existing bus once. An entry that is wrong on its own still counts for these, so every problem is reported at once.
-- **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
-- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update).
+- **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 3.
+- **Versions 1 and 2** also migrate screen sources' `source_types` to `target_kinds` and `cursor` to `cursor_mode` before source decoding. Version 3 refuses those old fields. Capture targets are never stored: an old file carrying `source_id` is refused at that path, and version 3 refuses `capture_target_id`. Sources must not carry `scene_id` or `scene_name`; their scene is the containing one. `load_project` warns on migration, `validate_project.migrates` reports it, and saving writes version 3.
+- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1, 2 and 3 is refused (a newer one with a hint to update).
 - **Left out or `null`:** an optional single value may be left out or `null` for its default: a source's rectangle and `opacity`, a device (the system default), `assign_db` (a separate mix), `outputs` and each of its profiles. A list that may be left out (`buses`, a channel's `sends`, the recording's `tracks`) is left out for none; `null` is a problem there.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
 
@@ -487,7 +490,7 @@ The file (`schema_version` 2):
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.
@@ -495,6 +498,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 ## Versioning policy
 
 - **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
+  - 2026-10-27, ADR 0018 step 2b: capture-target `source_id` → `capture_target_id`, `source_types` and capabilities' `source_kinds` → `target_kinds`, `cursor` → `cursor_mode`, capability `source_list` → `target_list`; `list_screen_sources` → `list_capture_targets` with result `sources` → `targets`; `set_screen_source` → `set_capture_target`. Request references now use `scene_id`/`scene_name` (formerly `name` or `scene`), `source_id`/`source_name` (formerly `id`/`name`), `channel_id`/`channel_name` and `bus_id`/`bus_name` (formerly `id`/`name`, or `channel`/`bus` in `set_send`); output mix selectors `mix_bus_id`/`mix_bus` → `bus_id`/`bus_name`. `not_found` details use those supplied selector names. Scene-list `active`/`active_id` → `active_scene_name`/`active_scene_id`; `get_mixer.outputs[].bus` → `bus_id`. Recording request `tracks` now takes explicit bus references, with both-given agreement and no string heuristic; profile results and files still store bus ids. `probe_composite.snapshot_path` → `snapshot_file_name`. CLI `record --file` → `--file-name`, `stream --key-env` → `--stream-key-env`, `stream --bitrate-kbps` → `--video-bitrate-kbps`, `--source-id` → `--capture-target-id`, `--source` → `--target-kind`, `--cursor` → `--cursor-mode`, `compose --snapshot` → `--snapshot-file-name`, `capture sources` → `capture targets`. Project files are schema 3 for the screen field renames; versions 1 and 2 migrate on load.
   - 2026-10-26, ADR 0018 step 2a: `get_status` lost `media_engine_ready`, `recording_active`, `recording_failed` and `streaming_active` and gained `recording_state` (`null`, `running` or `failed`). `start_recording` and `start_streaming` lost the screen layer (`screen`, `source_id`, `source_types`, `cursor`, now unknown fields), the stop reports and partial-error details lost `screen_capture` and `screen_capture_error`, renders no longer have a `screen_layer` source, and `get_health.captures[].id` is never `null`. In `get_health`, `recording.state` is `running` or `failed` instead of `null`, and `connects` and `reconnect_attempts` are only in `streaming`. `set_preview`, `set_monitor_device` and `set_screen_source` are destructive. File names follow one rule on every system (File names): `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*`, control characters and a device name before the first dot are refused; a project file saved before under such a name is no longer listed or loaded, and has to be renamed. A repeated key in a request is refused (`invalid_request`, or `invalid_params` inside `params`), and `v` is checked before unknown fields. `invalid_params` lists unknown parameters in `details.unexpected` for every command. The CLI's `record --screen` and `stream --screen` add a screen source to the active scene instead.
   - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
   - 2026-10-25, M12 step 3: `set_output_profile` refuses a running recording's track as its new mix (`invalid_state`, `details.bus`); before, the file could carry the same bus twice until the recording stopped.

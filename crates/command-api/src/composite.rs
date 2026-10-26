@@ -10,14 +10,14 @@ use video_compositor::RenderStats;
 
 /// Composite the reference scene for `duration` and report render
 /// diagnostics. `duration` is validated by `Command::decode`; a
-/// `snapshot_path` is a plain `.ppm` file name inside the engine's output
+/// `snapshot_file_name` is a plain `.ppm` file name inside the engine's output
 /// directory and is never overwritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeRequest {
     pub duration: Duration,
     /// Include a live screen capture layer (opens the system picker).
     pub screen: Option<ScreenSelection>,
-    pub snapshot_path: Option<PathBuf>,
+    pub snapshot_file_name: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

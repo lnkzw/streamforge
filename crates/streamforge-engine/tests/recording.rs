@@ -36,7 +36,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         &[
             // The configured channel, louder than its default -20 dBFS.
             (
-                r#"{"id":0,"command":"set_channel_input","params":{"name":"Tone","input":{"kind":"tone","frequency_hz":1000,"level_dbfs":-12}}}"#,
+                r#"{"id":0,"command":"set_channel_input","params":{"channel_name":"Tone","input":{"kind":"tone","frequency_hz":1000,"level_dbfs":-12}}}"#,
                 None,
             ),
             (

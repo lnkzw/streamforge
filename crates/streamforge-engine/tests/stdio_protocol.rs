@@ -223,7 +223,7 @@ fn capture_capabilities_are_structured_on_every_platform() {
 fn invalid_capture_params_are_rejected_before_any_device_access() {
     let mut engine = EngineProcess::spawn();
     let response = engine.request(
-        r#"{"id":1,"command":"probe_screen_capture","params":{"source_types":["printer"]}}"#,
+        r#"{"id":1,"command":"probe_screen_capture","params":{"target_kinds":["printer"]}}"#,
     );
     assert_error(&response, &json!(1), "invalid_params");
     let response =
@@ -341,5 +341,34 @@ fn allow_restricts_what_the_client_may_run() {
         create["error"]["details"]["required"], "control",
         "{create}"
     );
+    assert!(engine.finish().success());
+}
+
+#[test]
+fn scene_and_mixer_results_use_explicit_reference_names() {
+    let mut engine = EngineProcess::spawn();
+    let scenes = engine.request(r#"{"id":1,"command":"list_scenes"}"#);
+    assert_eq!(scenes["ok"], true, "{scenes}");
+    assert_eq!(scenes["result"]["active_scene_name"], "Test pattern");
+    assert_eq!(scenes["result"]["active_scene_id"], "scene_test_pattern");
+    assert!(scenes["result"].get("active").is_none());
+    assert!(scenes["result"].get("active_id").is_none());
+    let added = engine.request(r#"{"id":4,"command":"add_source","params":{"scene_name":"Test pattern","name":"desk","kind":"screen","capture_target_id":"monitor:1","target_kinds":["monitor"],"cursor_mode":"hidden"}}"#);
+    assert_eq!(added["ok"], true, "{added}");
+    let source = &added["result"]["scenes"][0]["sources"][2];
+    assert_eq!(source["capture_target_id"], "monitor:1");
+    assert_eq!(source["target_kinds"], json!(["monitor"]));
+    assert_eq!(source["cursor_mode"], "hidden");
+    assert!(source.get("source_id").is_none());
+    let mixer = engine.request(r#"{"id":2,"command":"get_mixer"}"#);
+    for output in mixer["result"]["outputs"].as_array().unwrap() {
+        assert_eq!(output["bus_id"], "bus_program");
+        assert!(output.get("bus").is_none());
+    }
+    let caps = engine.request(r#"{"id":3,"command":"get_capture_capabilities"}"#);
+    let screen = &caps["result"]["screen"];
+    assert!(screen["target_kinds"].is_array(), "{caps}");
+    assert!(screen["target_list"].is_boolean());
+    assert!(screen.get("source_kinds").is_none() && screen.get("source_list").is_none());
     assert!(engine.finish().success());
 }

@@ -136,8 +136,8 @@ const LIST_AUDIO_OUTPUTS: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
-const LIST_SCREEN_SOURCES: CommandDescriptor = CommandDescriptor {
-    name: "list_screen_sources",
+const LIST_CAPTURE_TARGETS: CommandDescriptor = CommandDescriptor {
+    name: "list_capture_targets",
     summary: "List monitors and windows that can be captured by id without a picker (where the \
               platform allows it; see get_capture_capabilities). Window titles can reveal private \
               content.",
@@ -149,9 +149,9 @@ const LIST_SCREEN_SOURCES: CommandDescriptor = CommandDescriptor {
 const PROBE_SCREEN_CAPTURE: CommandDescriptor = CommandDescriptor {
     name: "probe_screen_capture",
     summary: "Capture a screen or window and report format, timestamps, FPS and drops. \
-              Params: duration_ms (100..=60000, default 5000), source_id (from list_screen_sources; \
-              without it the user picks in the system dialog), source_types ([\"monitor\",\"window\",\"virtual\"], \
-              default [\"monitor\",\"window\"]), cursor (\"hidden\"|\"embedded\"|\"metadata\", default \"embedded\").",
+              Params: duration_ms (100..=60000, default 5000), capture_target_id (from list_capture_targets; \
+              without it the user picks in the system dialog), target_kinds ([\"monitor\",\"window\",\"virtual\"], \
+              default [\"monitor\",\"window\"]), cursor_mode (\"hidden\"|\"embedded\"|\"metadata\", default \"embedded\").",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -170,9 +170,10 @@ const PROBE_COMPOSITE: CommandDescriptor = CommandDescriptor {
     name: "probe_composite",
     summary: "Composite a 1920x1080@60 test scene (color bars, moving overlay, optional live screen) \
               and report render time, late frames and source drops. Params: duration_ms (100..=60000, \
-              default 5000), screen (bool, default false; opens the system picker), source_types and \
-              cursor (only with screen), snapshot_path (plain .ppm file name, written to the engine's output \
-              directory, never overwritten).",
+              default 5000), screen (bool, default false), capture_target_id (from \
+              list_capture_targets; without it the screen opens the system picker), target_kinds and \
+              cursor_mode (only with screen), snapshot_file_name (plain .ppm file name, written to the \
+              engine's output directory, never overwritten).",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -255,7 +256,7 @@ const CREATE_SCENE: CommandDescriptor = CommandDescriptor {
 
 const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "delete_scene",
-    summary: "Delete a scene that is not active; irreversible. Params: scene_id or name, confirm \
+    summary: "Delete a scene that is not active; irreversible. Params: scene_id or scene_name, confirm \
               (must be true). Returns the scene list.",
     access: CommandAccess::Sensitive,
     destructive: true,
@@ -266,7 +267,7 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "set_active_scene",
     summary: "Render this scene from now on (applies live while preview or outputs run; its \
               screen sources start capturing, which opens the system picker). Params: scene_id \
-              or name. Returns the scene list.",
+              or scene_name. Returns the scene list.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -274,11 +275,11 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
 
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "add_source",
-    summary: "Add a source on top of a scene. Params: scene_id or scene, name, kind (color_bars, solid, \
-              screen), color (#rrggbb[aa], solid), source_id, source_types and cursor (screen), x, \
+    summary: "Add a source on top of a scene. Params: scene_id or scene_name, name, kind (color_bars, solid, \
+              screen), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), x, \
               y, width, height (canvas pixels; all or none, default the whole canvas), opacity \
-              (0-1). Screen sources start capturing when the scene is rendered: the source_id from \
-              list_screen_sources, or else the one the user picks in the system dialog. Returns \
+              (0-1). Screen sources start capturing when the scene is rendered: the capture_target_id from \
+              list_capture_targets, or else the one the user picks in the system dialog. Returns \
               the scene list.",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -287,8 +288,8 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "update_source",
-    summary: "Move, resize or fade a source. Params: the source's id, or scene (or scene_id) and \
-              name; any of x, y, width, height, opacity. Returns the scene list.",
+    summary: "Move, resize or fade a source. Params: source_id, or scene_name (or scene_id) and \
+              source_name; any of x, y, width, height, opacity. Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -296,8 +297,8 @@ const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "remove_source",
-    summary: "Remove a source from a scene. Params: the source's id, or scene (or scene_id) and \
-              name. Returns the scene list.",
+    summary: "Remove a source from a scene. Params: source_id, or scene_name (or scene_id) and \
+              source_name. Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -306,9 +307,9 @@ const REMOVE_SOURCE: CommandDescriptor = CommandDescriptor {
 const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "restart_source",
     summary: "Start a screen source's capture again and end the old one, e.g. after get_health \
-              reports it ended; outputs keep running. Params: the source's id, or scene (or \
-              scene_id) and name; optional source_id \
-              (from list_screen_sources) to capture another source from now on: a closed \
+              reports it ended; outputs keep running. Params: source_id, or scene_name (or \
+              scene_id) and source_name; optional capture_target_id \
+              (from list_capture_targets) to capture another target from now on: a closed \
               window's id does not come back, a display's does when it reconnects. A picker \
               source asks the user again, so it is refused while recording or streaming. \
               Returns the scene list.",
@@ -341,7 +342,7 @@ const ADD_CHANNEL: CommandDescriptor = CommandDescriptor {
 
 const REMOVE_CHANNEL: CommandDescriptor = CommandDescriptor {
     name: "remove_channel",
-    summary: "Remove a mixer channel while the pipeline is idle. Params: id, or name. Returns \
+    summary: "Remove a mixer channel while the pipeline is idle. Params: channel_id or channel_name. Returns \
               the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
@@ -350,7 +351,7 @@ const REMOVE_CHANNEL: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_CHANNEL: CommandDescriptor = CommandDescriptor {
     name: "update_channel",
-    summary: "Change a channel's fader, mute or balance (live if running). Params: id or name; \
+    summary: "Change a channel's fader, mute or balance (live if running). Params: channel_id or channel_name; \
               gain_db (-96..24), mute, balance (-1..1). Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
@@ -359,7 +360,7 @@ const UPDATE_CHANNEL: CommandDescriptor = CommandDescriptor {
 
 const SET_CHANNEL_INPUT: CommandDescriptor = CommandDescriptor {
     name: "set_channel_input",
-    summary: "Choose what a channel plays while the pipeline is idle. Params: id or name; input \
+    summary: "Choose what a channel plays while the pipeline is idle. Params: channel_id or channel_name; input \
               as for add_channel. Returns the mixer state.",
     access: CommandAccess::Sensitive,
     destructive: true,
@@ -380,7 +381,7 @@ const ADD_BUS: CommandDescriptor = CommandDescriptor {
 const REMOVE_BUS: CommandDescriptor = CommandDescriptor {
     name: "remove_bus",
     summary: "Remove an aux bus and every send to it while the pipeline is idle; the program \
-              bus cannot be removed. Params: id, or name. Returns the mixer state.",
+              bus cannot be removed. Params: bus_id or bus_name. Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -388,8 +389,8 @@ const REMOVE_BUS: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_BUS: CommandDescriptor = CommandDescriptor {
     name: "update_bus",
-    summary: "Change a bus's fader, mute or assignment (live if running). Params: id (e.g. \
-              bus_program) or name (e.g. Program); gain_db (-96..24), mute, assign_db (aux \
+    summary: "Change a bus's fader, mute or assignment (live if running). Params: bus_id (e.g. \
+              bus_program) or bus_name (e.g. Program); gain_db (-96..24), mute, assign_db (aux \
               buses: -96..24, or null for a separate mix). Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
@@ -399,7 +400,7 @@ const UPDATE_BUS: CommandDescriptor = CommandDescriptor {
 const SET_SEND: CommandDescriptor = CommandDescriptor {
     name: "set_send",
     summary: "Change a channel's send to a bus (live if running). Params: channel_id or \
-              channel (name); bus_id or bus (name); enabled, level_db (-96..24), tap (pre_fader: \
+              channel_name; bus_id or bus_name; enabled, level_db (-96..24), tap (pre_fader: \
               the channel fader does not move it; post_fader). Returns the mixer state.",
     access: CommandAccess::Control,
     destructive: true,
@@ -419,8 +420,8 @@ const GET_OUTPUT_PROFILES: CommandDescriptor = CommandDescriptor {
 const SET_OUTPUT_PROFILE: CommandDescriptor = CommandDescriptor {
     name: "set_output_profile",
     summary: "Change an output's profile. Params: output (recording, stream or monitor); \
-              mix_bus_id or mix_bus (name): the bus it takes as its mix (audio track 1, or what \
-              the monitor plays); tracks (recording only: up to 7 buses, ids or names, recorded \
+              bus_id or bus_name: the bus it takes as its mix (audio track 1, or what \
+              the monitor plays); tracks (recording only: up to 7 bus references {bus_id or bus_name}, recorded \
               as further audio tracks named after them); video_encoder (auto, software, hardware; \
               not for the monitor); video_bitrate_kbps (stream only); enabled (monitor only: \
               plays the bus on its device while the pipeline runs; off by default). A running \
@@ -451,12 +452,12 @@ const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
-const SET_SCREEN_SOURCE: CommandDescriptor = CommandDescriptor {
-    name: "set_screen_source",
+const SET_CAPTURE_TARGET: CommandDescriptor = CommandDescriptor {
+    name: "set_capture_target",
     summary: "Choose what a screen source captures from now on, while it has no running capture \
               (e.g. after load_project, which does not store it; for a running capture use \
-              restart_source). Params: the source's id, or scene (or scene_id) and name; \
-              source_id from list_screen_sources. Returns the scene list.",
+              restart_source). Params: source_id, or scene_name (or scene_id) and source_name; \
+              capture_target_id from list_capture_targets. Returns the scene list.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -477,7 +478,7 @@ const SAVE_PROJECT: CommandDescriptor = CommandDescriptor {
     summary: "Write the scenes (with their ids), the active scene and the audio setup to a \
               project file. Params: file_name (plain .json name in the engine's project \
               directory, --project-dir), overwrite (replace an existing file atomically; \
-              default false). Screen source ids and stream keys are not saved.",
+              default false). Capture target ids and stream keys are not saved.",
     access: CommandAccess::Sensitive,
     // With `overwrite`, it replaces the previous file.
     destructive: true,
@@ -489,7 +490,7 @@ const LOAD_PROJECT: CommandDescriptor = CommandDescriptor {
     summary: "Replace the scenes and the audio setup with a project file's, while no preview or \
               output runs. Params: file_name (plain .json name in the project directory). \
               Unsaved scenes are lost. Screen sources load without a capture target (choose one \
-              with set_screen_source, or the picker asks). Returns the scenes and the mixer.",
+              with set_capture_target, or the picker asks). Returns the scenes and the mixer.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -511,7 +512,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     GET_CAPTURE_CAPABILITIES,
     LIST_AUDIO_INPUTS,
     LIST_AUDIO_OUTPUTS,
-    LIST_SCREEN_SOURCES,
+    LIST_CAPTURE_TARGETS,
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
     PROBE_COMPOSITE,
@@ -528,7 +529,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     UPDATE_SOURCE,
     REMOVE_SOURCE,
     RESTART_SOURCE,
-    SET_SCREEN_SOURCE,
+    SET_CAPTURE_TARGET,
     GET_MIXER,
     ADD_CHANNEL,
     REMOVE_CHANNEL,
@@ -551,7 +552,7 @@ const COMMANDS: &[CommandDescriptor] = &[
 const DEFAULT_SOURCE_KINDS: [VideoSourceKind; 2] =
     [VideoSourceKind::Monitor, VideoSourceKind::Window];
 const DEFAULT_CURSOR: CursorMode = CursorMode::Embedded;
-/// Longest accepted screen source id, in characters.
+/// Longest accepted capture target id, in characters.
 const MAX_SOURCE_ID_CHARS: usize = 256;
 
 /// All commands known to this build, in a stable order.
@@ -588,8 +589,8 @@ impl Command {
             "get_health" => expect_no_params(name, params).map(|()| Self::GetHealth),
             "list_audio_inputs" => expect_no_params(name, params).map(|()| Self::ListAudioInputs),
             "list_audio_outputs" => expect_no_params(name, params).map(|()| Self::ListAudioOutputs),
-            "list_screen_sources" => {
-                expect_no_params(name, params).map(|()| Self::ListScreenSources)
+            "list_capture_targets" => {
+                expect_no_params(name, params).map(|()| Self::ListCaptureTargets)
             }
             "probe_screen_capture" => {
                 decode_screen_probe(name, params).map(Self::ProbeScreenCapture)
@@ -611,7 +612,7 @@ impl Command {
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
             "remove_source" => decode_remove_source(name, params).map(Self::RemoveSource),
             "restart_source" => decode_restart_source(name, params),
-            "set_screen_source" => decode_set_screen_source(name, params),
+            "set_capture_target" => decode_set_capture_target(name, params),
             "list_projects" => expect_no_params(name, params).map(|()| Self::ListProjects),
             "save_project" => decode_save_project(name, params).map(Self::SaveProject),
             "load_project" => {
@@ -679,7 +680,7 @@ impl Command {
             Self::GetHealth => &GET_HEALTH,
             Self::ListAudioInputs => &LIST_AUDIO_INPUTS,
             Self::ListAudioOutputs => &LIST_AUDIO_OUTPUTS,
-            Self::ListScreenSources => &LIST_SCREEN_SOURCES,
+            Self::ListCaptureTargets => &LIST_CAPTURE_TARGETS,
             Self::ProbeScreenCapture(_) => &PROBE_SCREEN_CAPTURE,
             Self::ProbeAudioCapture(_) => &PROBE_AUDIO_CAPTURE,
             Self::ProbeComposite(_) => &PROBE_COMPOSITE,
@@ -696,7 +697,7 @@ impl Command {
             Self::UpdateSource(_) => &UPDATE_SOURCE,
             Self::RemoveSource { .. } => &REMOVE_SOURCE,
             Self::RestartSource { .. } => &RESTART_SOURCE,
-            Self::SetScreenSource { .. } => &SET_SCREEN_SOURCE,
+            Self::SetCaptureTarget { .. } => &SET_CAPTURE_TARGET,
             Self::GetMixer => &GET_MIXER,
             Self::AddChannel(_) => &ADD_CHANNEL,
             Self::RemoveChannel(_) => &REMOVE_CHANNEL,
@@ -727,12 +728,12 @@ impl Command {
 struct ScreenProbeParams {
     /// Run time in milliseconds.
     duration_ms: Option<u64>,
-    /// Screen source id from list_screen_sources: capture it without a picker.
-    source_id: Option<String>,
-    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
-    source_types: Option<Vec<VideoSourceKind>>,
+    /// Capture target id from list_capture_targets: capture it without a picker.
+    capture_target_id: Option<String>,
+    /// Capture target kinds to offer in the picker (monitor, window, virtual); default monitor and window.
+    target_kinds: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
-    cursor: Option<CursorMode>,
+    cursor_mode: Option<CursorMode>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1103,7 +1104,7 @@ fn required_scene(
         .ok_or_else(|| invalid_params(command, format!("give `scene_id` or `{name_field}`")))
 }
 
-/// A source named by its `id`, or by its scene and `name`.
+/// A source named by `source_id`, or by its scene and `source_name`.
 fn source_ref(
     command: &str,
     id: Option<String>,
@@ -1112,16 +1113,16 @@ fn source_ref(
     name: Option<String>,
 ) -> Result<SourceRef, CommandError> {
     let id = id
-        .map(|id| valid_id(command, "id", SOURCE_ID_PREFIX, id))
+        .map(|id| valid_id(command, "source_id", SOURCE_ID_PREFIX, id))
         .transpose()?;
-    let scene = scene_ref(command, scene_id, "scene", scene)?;
+    let scene = scene_ref(command, scene_id, "scene_name", scene)?;
     let name = name
-        .map(|name| valid_name(command, "name", name))
+        .map(|name| valid_name(command, "source_name", name))
         .transpose()?;
     if id.is_none() && (scene.is_none() || name.is_none()) {
         return Err(invalid_params(
             command,
-            "give the source's `id`, or `scene` (or `scene_id`) and `name`",
+            "give the source's `source_id`, or `scene_name` (or `scene_id`) and `source_name`",
         ));
     }
     Ok(SourceRef { id, scene, name })
@@ -1130,10 +1131,10 @@ fn source_ref(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetActiveSceneParams {
-    /// Scene id from list_scenes (or give the name).
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name (or give scene_id).
-    name: Option<String>,
+    scene_name: Option<String>,
 }
 
 fn decode_set_active_scene(
@@ -1141,16 +1142,16 @@ fn decode_set_active_scene(
     params: Option<&Value>,
 ) -> Result<SceneRef, CommandError> {
     let params: SetActiveSceneParams = decode_params(command, params)?;
-    required_scene(command, params.scene_id, "name", params.name)
+    required_scene(command, params.scene_id, "scene_name", params.scene_name)
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DeleteSceneParams {
-    /// Scene id from list_scenes (or give the name).
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name (or give scene_id).
-    name: Option<String>,
+    scene_name: Option<String>,
     /// Must be true: deleting a scene cannot be undone.
     confirm: Option<bool>,
 }
@@ -1163,7 +1164,7 @@ fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<SceneRef
             "deleting a scene cannot be undone; pass `confirm: true`",
         ));
     }
-    required_scene(command, params.scene_id, "name", params.name)
+    required_scene(command, params.scene_id, "scene_name", params.scene_name)
 }
 
 fn coordinate(command: &str, field: &str, value: f32, size: bool) -> Result<f32, CommandError> {
@@ -1209,10 +1210,10 @@ fn parse_color(command: &str, text: &str) -> Result<Rgba, CommandError> {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddSourceParams {
-    /// Scene id from list_scenes (or give scene).
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name (or give scene_id).
-    scene: Option<String>,
+    scene_name: Option<String>,
     /// Source name, unique within the scene.
     name: String,
     /// Source kind: color_bars, solid or screen.
@@ -1220,12 +1221,12 @@ struct AddSourceParams {
     kind: String,
     /// Solid sources: #rrggbb or #rrggbbaa.
     color: Option<String>,
-    /// Screen source id from list_screen_sources: capture it without a picker.
-    source_id: Option<String>,
-    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
-    source_types: Option<Vec<VideoSourceKind>>,
+    /// Capture target id from list_capture_targets: capture it without a picker.
+    capture_target_id: Option<String>,
+    /// Capture target kinds to offer in the picker (monitor, window, virtual); default monitor and window.
+    target_kinds: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
-    cursor: Option<CursorMode>,
+    cursor_mode: Option<CursorMode>,
     /// Left edge in canvas pixels.
     x: Option<f32>,
     /// Top edge in canvas pixels.
@@ -1246,14 +1247,14 @@ fn decode_add_source(
     let screen_only = || {
         invalid_params(
             command,
-            "`source_id`, `source_types` and `cursor` apply to screen sources only",
+            "`capture_target_id`, `target_kinds` and `cursor_mode` apply to screen sources only",
         )
     };
     let kind = match params.kind.as_str() {
         "color_bars" | "solid"
-            if params.source_id.is_some()
-                || params.source_types.is_some()
-                || params.cursor.is_some() =>
+            if params.capture_target_id.is_some()
+                || params.target_kinds.is_some()
+                || params.cursor_mode.is_some() =>
         {
             return Err(screen_only());
         }
@@ -1282,14 +1283,14 @@ fn decode_add_source(
         "screen" => {
             let selection = screen_selection(
                 command,
-                params.source_id,
-                params.source_types,
-                params.cursor,
+                params.capture_target_id,
+                params.target_kinds,
+                params.cursor_mode,
             )?;
             SourceKind::Screen {
-                source_types: selection.source_kinds,
-                cursor: selection.cursor,
-                source_id: selection.source,
+                target_kinds: selection.target_kinds,
+                cursor_mode: selection.cursor_mode,
+                capture_target_id: selection.source,
             }
         }
         _ => {
@@ -1315,7 +1316,7 @@ fn decode_add_source(
         }
     };
     Ok(AddSourceRequest {
-        scene: required_scene(command, params.scene_id, "scene", params.scene)?,
+        scene: required_scene(command, params.scene_id, "scene_name", params.scene_name)?,
         name: valid_name(command, "name", params.name)?,
         kind,
         rect,
@@ -1326,14 +1327,14 @@ fn decode_add_source(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateSourceParams {
-    /// Source id from list_scenes (or give scene and name).
-    id: Option<String>,
-    /// Scene id from list_scenes (or give scene).
+    /// Source id from list_scenes (or give scene_name/scene_id and source_name).
+    source_id: Option<String>,
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name.
-    scene: Option<String>,
+    scene_name: Option<String>,
     /// Source name.
-    name: Option<String>,
+    source_name: Option<String>,
     /// Left edge in canvas pixels.
     x: Option<f32>,
     /// Top edge in canvas pixels.
@@ -1374,10 +1375,10 @@ fn decode_update_source(
     Ok(UpdateSourceRequest {
         source: source_ref(
             command,
-            params.id,
+            params.source_id,
             params.scene_id,
-            params.scene,
-            params.name,
+            params.scene_name,
+            params.source_name,
         )?,
         x: check("x", params.x, false)?,
         y: check("y", params.y, false)?,
@@ -1390,30 +1391,30 @@ fn decode_update_source(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RemoveSourceParams {
-    /// Source id from list_scenes (or give scene and name).
-    id: Option<String>,
-    /// Scene id from list_scenes (or give scene).
+    /// Source id from list_scenes (or give scene_name/scene_id and source_name).
+    source_id: Option<String>,
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name.
-    scene: Option<String>,
+    scene_name: Option<String>,
     /// Source name.
-    name: Option<String>,
+    source_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RestartSourceParams {
-    /// Source id from list_scenes (or give scene and name).
-    id: Option<String>,
-    /// Scene id from list_scenes (or give scene).
+    /// Source id from list_scenes (or give scene_name/scene_id and source_name).
+    source_id: Option<String>,
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name.
-    scene: Option<String>,
+    scene_name: Option<String>,
     /// Source name.
-    name: Option<String>,
-    /// Capture this source from list_screen_sources from now on (the scene
+    source_name: Option<String>,
+    /// Capture this target from list_capture_targets from now on (the scene
     /// keeps it), e.g. instead of a closed window.
-    source_id: Option<String>,
+    capture_target_id: Option<String>,
 }
 
 fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Command, CommandError> {
@@ -1421,47 +1422,47 @@ fn decode_restart_source(command: &str, params: Option<&Value>) -> Result<Comman
     Ok(Command::RestartSource {
         source: source_ref(
             command,
-            params.id,
+            params.source_id,
             params.scene_id,
-            params.scene,
-            params.name,
+            params.scene_name,
+            params.source_name,
         )?,
-        source_id: params
-            .source_id
-            .map(|id| valid_source_id(command, id))
+        capture_target_id: params
+            .capture_target_id
+            .map(|id| valid_capture_target_id(command, id))
             .transpose()?,
     })
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct SetScreenSourceParams {
-    /// Source id from list_scenes (or give scene and name).
-    id: Option<String>,
-    /// Scene id from list_scenes (or give scene).
+struct SetCaptureTargetParams {
+    /// Source id from list_scenes (or give scene_name/scene_id and source_name).
+    source_id: Option<String>,
+    /// Scene id from list_scenes (or give scene_name).
     scene_id: Option<String>,
     /// Scene name.
-    scene: Option<String>,
+    scene_name: Option<String>,
     /// Source name.
-    name: Option<String>,
-    /// Screen source id from list_screen_sources.
-    source_id: String,
+    source_name: Option<String>,
+    /// Capture target id from list_capture_targets.
+    capture_target_id: String,
 }
 
-fn decode_set_screen_source(
+fn decode_set_capture_target(
     command: &str,
     params: Option<&Value>,
 ) -> Result<Command, CommandError> {
-    let params: SetScreenSourceParams = decode_params(command, params)?;
-    Ok(Command::SetScreenSource {
+    let params: SetCaptureTargetParams = decode_params(command, params)?;
+    Ok(Command::SetCaptureTarget {
         source: source_ref(
             command,
-            params.id,
+            params.source_id,
             params.scene_id,
-            params.scene,
-            params.name,
+            params.scene_name,
+            params.source_name,
         )?,
-        source_id: valid_source_id(command, params.source_id)?,
+        capture_target_id: valid_capture_target_id(command, params.capture_target_id)?,
     })
 }
 
@@ -1519,10 +1520,10 @@ fn decode_remove_source(command: &str, params: Option<&Value>) -> Result<SourceR
     let params: RemoveSourceParams = decode_params(command, params)?;
     source_ref(
         command,
-        params.id,
+        params.source_id,
         params.scene_id,
-        params.scene,
-        params.name,
+        params.scene_name,
+        params.source_name,
     )
 }
 
@@ -1647,8 +1648,8 @@ fn channel_ref(
         command,
         "channel",
         CHANNEL_ID_PREFIX,
-        ("id", id),
-        ("name", name),
+        ("channel_id", id),
+        ("channel_name", name),
     )?;
     Ok(ChannelRef { id, name })
 }
@@ -1675,10 +1676,10 @@ where
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ChannelParams {
-    /// Channel id from get_mixer (or give name).
-    id: Option<String>,
+    /// Channel id from get_mixer (or give channel_name).
+    channel_id: Option<String>,
     /// Channel name.
-    name: Option<String>,
+    channel_name: Option<String>,
 }
 
 fn decode_remove_channel(
@@ -1686,16 +1687,16 @@ fn decode_remove_channel(
     params: Option<&Value>,
 ) -> Result<ChannelRef, CommandError> {
     let params: ChannelParams = decode_params(command, params)?;
-    channel_ref(command, params.id, params.name)
+    channel_ref(command, params.channel_id, params.channel_name)
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateChannelParams {
-    /// Channel id from get_mixer (or give name).
-    id: Option<String>,
+    /// Channel id from get_mixer (or give channel_name).
+    channel_id: Option<String>,
     /// Channel name.
-    name: Option<String>,
+    channel_name: Option<String>,
     /// Fader in dB, -96 to 24.
     gain_db: Option<f32>,
     /// Mute the channel in every mix.
@@ -1716,7 +1717,7 @@ fn decode_update_channel(
         ));
     }
     Ok(UpdateChannelRequest {
-        channel: channel_ref(command, params.id, params.name)?,
+        channel: channel_ref(command, params.channel_id, params.channel_name)?,
         gain_db: params
             .gain_db
             .map(|value| gain_db(command, "gain_db", value))
@@ -1732,10 +1733,10 @@ fn decode_update_channel(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetChannelInputParams {
-    /// Channel id from get_mixer (or give name).
-    id: Option<String>,
+    /// Channel id from get_mixer (or give channel_name).
+    channel_id: Option<String>,
     /// Channel name.
-    name: Option<String>,
+    channel_name: Option<String>,
     /// What the channel plays from now on.
     input: ChannelInputParams,
 }
@@ -1746,7 +1747,7 @@ fn decode_set_channel_input(
 ) -> Result<SetChannelInputRequest, CommandError> {
     let params: SetChannelInputParams = decode_params(command, params)?;
     Ok(SetChannelInputRequest {
-        channel: channel_ref(command, params.id, params.name)?,
+        channel: channel_ref(command, params.channel_id, params.channel_name)?,
         input: channel_input(command, params.input)?,
     })
 }
@@ -1780,24 +1781,28 @@ fn decode_add_bus(command: &str, params: Option<&Value>) -> Result<AddBusRequest
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BusParams {
-    /// Bus id from get_mixer (or give name).
-    id: Option<String>,
+    /// Bus id from get_mixer (or give bus_name).
+    bus_id: Option<String>,
     /// Bus name.
-    name: Option<String>,
+    bus_name: Option<String>,
 }
 
 fn decode_remove_bus(command: &str, params: Option<&Value>) -> Result<BusRef, CommandError> {
     let params: BusParams = decode_params(command, params)?;
-    bus_ref(command, ("id", params.id), ("name", params.name))
+    bus_ref(
+        command,
+        ("bus_id", params.bus_id),
+        ("bus_name", params.bus_name),
+    )
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct UpdateBusParams {
-    /// Bus id from get_mixer, e.g. bus_program (or give name).
-    id: Option<String>,
+    /// Bus id from get_mixer, e.g. bus_program (or give bus_name).
+    bus_id: Option<String>,
     /// Bus name, e.g. Program.
-    name: Option<String>,
+    bus_name: Option<String>,
     /// Fader in dB, -96 to 24.
     gain_db: Option<f32>,
     /// Mute the bus.
@@ -1819,7 +1824,11 @@ fn decode_update_bus(
         ));
     }
     Ok(UpdateBusRequest {
-        bus: bus_ref(command, ("id", params.id), ("name", params.name))?,
+        bus: bus_ref(
+            command,
+            ("bus_id", params.bus_id),
+            ("bus_name", params.bus_name),
+        )?,
         gain_db: params
             .gain_db
             .map(|value| gain_db(command, "gain_db", value))
@@ -1839,14 +1848,14 @@ fn decode_update_bus(
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetSendParams {
-    /// Channel id from get_mixer (or give channel).
+    /// Channel id from get_mixer (or give channel_name).
     channel_id: Option<String>,
     /// Channel name.
-    channel: Option<String>,
-    /// Bus id from get_mixer (or give bus).
+    channel_name: Option<String>,
+    /// Bus id from get_mixer (or give bus_name).
     bus_id: Option<String>,
     /// Bus name.
-    bus: Option<String>,
+    bus_name: Option<String>,
     /// Whether the channel feeds the bus.
     enabled: Option<bool>,
     /// Send level in dB, -96 to 24.
@@ -1868,11 +1877,15 @@ fn decode_set_send(command: &str, params: Option<&Value>) -> Result<SetSendReque
         "channel",
         CHANNEL_ID_PREFIX,
         ("channel_id", params.channel_id),
-        ("channel", params.channel),
+        ("channel_name", params.channel_name),
     )?;
     Ok(SetSendRequest {
         channel: ChannelRef { id, name },
-        bus: bus_ref(command, ("bus_id", params.bus_id), ("bus", params.bus))?,
+        bus: bus_ref(
+            command,
+            ("bus_id", params.bus_id),
+            ("bus_name", params.bus_name),
+        )?,
         enabled: params.enabled,
         level_db: params
             .level_db
@@ -1899,19 +1912,28 @@ fn video_bitrate(command: &str, kbps: u32) -> Result<u32, CommandError> {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct TrackBusParams {
+    /// Bus id from get_mixer (or give bus_name).
+    bus_id: Option<String>,
+    /// Bus name; if bus_id is also given, both must name the same bus.
+    bus_name: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetOutputProfileParams {
     /// The output: recording, stream or monitor.
     output: OutputKind,
-    /// Id of the bus it takes as its mix (or give mix_bus).
-    mix_bus_id: Option<String>,
+    /// Id of the bus it takes as its mix (or give bus_name).
+    bus_id: Option<String>,
     /// Name of the bus it takes as its mix.
-    mix_bus: Option<String>,
+    bus_name: Option<String>,
     /// H.264 encoder: auto, software or hardware.
     video_encoder: Option<EncoderPreference>,
     /// Stream only: video bitrate in kbit/s.
     video_bitrate_kbps: Option<u32>,
-    /// Recording only: the buses (ids or names) recorded as audio tracks 2 and on, in order.
-    tracks: Option<Vec<String>>,
+    /// Recording only: bus references (bus_id or bus_name) for audio tracks 2 and on, in order.
+    tracks: Option<Vec<TrackBusParams>>,
     /// Monitor only: play the bus on the monitor device (live, ramped).
     enabled: Option<bool>,
 }
@@ -1921,12 +1943,12 @@ fn decode_set_output_profile(
     params: Option<&Value>,
 ) -> Result<SetOutputProfileRequest, CommandError> {
     let params: SetOutputProfileParams = decode_params(command, params)?;
-    let mix = (params.mix_bus_id.is_some() || params.mix_bus.is_some())
+    let mix = (params.bus_id.is_some() || params.bus_name.is_some())
         .then(|| {
             bus_ref(
                 command,
-                ("mix_bus_id", params.mix_bus_id),
-                ("mix_bus", params.mix_bus),
+                ("bus_id", params.bus_id),
+                ("bus_name", params.bus_name),
             )
         })
         .transpose()?;
@@ -1938,7 +1960,7 @@ fn decode_set_output_profile(
     {
         return Err(invalid_params(
             command,
-            "give `mix_bus_id` or `mix_bus`, `tracks`, `video_encoder`, `video_bitrate_kbps` or \
+            "give `bus_id` or `bus_name`, `tracks`, `video_encoder`, `video_bitrate_kbps` or \
              `enabled`",
         ));
     }
@@ -1971,20 +1993,7 @@ fn decode_set_output_profile(
             }
             tracks
                 .into_iter()
-                .map(|bus| {
-                    // An id is looked up as one; anything else is a name.
-                    if is_valid_id(BUS_ID_PREFIX, &bus) {
-                        Ok(BusRef {
-                            id: Some(bus),
-                            name: None,
-                        })
-                    } else {
-                        valid_name(command, "tracks", bus).map(|name| BusRef {
-                            id: None,
-                            name: Some(name),
-                        })
-                    }
-                })
+                .map(|bus| bus_ref(command, ("bus_id", bus.bus_id), ("bus_name", bus.bus_name)))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
@@ -2044,14 +2053,14 @@ struct CompositeProbeParams {
     duration_ms: Option<u64>,
     /// Add a live screen layer (opens the system picker).
     screen: Option<bool>,
-    /// Screen source id from list_screen_sources: capture it without a picker.
-    source_id: Option<String>,
-    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
-    source_types: Option<Vec<VideoSourceKind>>,
+    /// Capture target id from list_capture_targets: capture it without a picker.
+    capture_target_id: Option<String>,
+    /// Capture target kinds to offer in the picker (monitor, window, virtual); default monitor and window.
+    target_kinds: Option<Vec<VideoSourceKind>>,
     /// Cursor mode: hidden, embedded or metadata.
-    cursor: Option<CursorMode>,
+    cursor_mode: Option<CursorMode>,
     /// Plain .ppm file name for a snapshot of the last frame.
-    snapshot_path: Option<String>,
+    snapshot_file_name: Option<String>,
 }
 
 fn decode_composite_probe(
@@ -2062,16 +2071,16 @@ fn decode_composite_probe(
     let screen = optional_screen(
         command,
         params.screen,
-        params.source_id,
-        params.source_types,
-        params.cursor,
+        params.capture_target_id,
+        params.target_kinds,
+        params.cursor_mode,
     )?;
     Ok(CompositeRequest {
         duration: probe_duration(command, params.duration_ms)?,
         screen,
-        snapshot_path: params
-            .snapshot_path
-            .map(|path| output_file(command, "snapshot_path", path, "ppm"))
+        snapshot_file_name: params
+            .snapshot_file_name
+            .map(|name| output_file(command, "snapshot_file_name", name, "ppm"))
             .transpose()?,
     })
 }
@@ -2080,17 +2089,17 @@ fn decode_composite_probe(
 fn optional_screen(
     command: &str,
     screen: Option<bool>,
-    source_id: Option<String>,
-    source_types: Option<Vec<VideoSourceKind>>,
-    cursor: Option<CursorMode>,
+    capture_target_id: Option<String>,
+    target_kinds: Option<Vec<VideoSourceKind>>,
+    cursor_mode: Option<CursorMode>,
 ) -> Result<Option<ScreenSelection>, CommandError> {
     if screen.unwrap_or(false) {
-        return screen_selection(command, source_id, source_types, cursor).map(Some);
+        return screen_selection(command, capture_target_id, target_kinds, cursor_mode).map(Some);
     }
-    if source_id.is_some() || source_types.is_some() || cursor.is_some() {
+    if capture_target_id.is_some() || target_kinds.is_some() || cursor_mode.is_some() {
         return Err(invalid_params(
             command,
-            "`source_id`, `source_types` and `cursor` require `screen: true`",
+            "`capture_target_id`, `target_kinds` and `cursor_mode` require `screen: true`",
         ));
     }
     Ok(None)
@@ -2180,22 +2189,22 @@ fn decode_screen_probe(
     Ok(ScreenCaptureRequest {
         selection: screen_selection(
             command,
-            params.source_id,
-            params.source_types,
-            params.cursor,
+            params.capture_target_id,
+            params.target_kinds,
+            params.cursor_mode,
         )?,
         duration: probe_duration(command, params.duration_ms)?,
     })
 }
 
 /// Defaults, deduplication and validation shared by all screen commands.
-fn valid_source_id(command: &str, id: String) -> Result<String, CommandError> {
+fn valid_capture_target_id(command: &str, id: String) -> Result<String, CommandError> {
     if id.is_empty() || id.chars().count() > MAX_SOURCE_ID_CHARS || id.chars().any(char::is_control)
     {
         return Err(invalid_params(
             command,
             format!(
-                "`source_id` must be an id from list_screen_sources \
+                "`capture_target_id` must be an id from list_capture_targets \
                  (1 to {MAX_SOURCE_ID_CHARS} characters)"
             ),
         ));
@@ -2205,26 +2214,26 @@ fn valid_source_id(command: &str, id: String) -> Result<String, CommandError> {
 
 fn screen_selection(
     command: &str,
-    source_id: Option<String>,
-    source_types: Option<Vec<VideoSourceKind>>,
-    cursor: Option<CursorMode>,
+    capture_target_id: Option<String>,
+    target_kinds: Option<Vec<VideoSourceKind>>,
+    cursor_mode: Option<CursorMode>,
 ) -> Result<ScreenSelection, CommandError> {
-    let source_id = source_id
-        .map(|id| valid_source_id(command, id))
+    let capture_target_id = capture_target_id
+        .map(|id| valid_capture_target_id(command, id))
         .transpose()?;
-    let mut source_kinds = Vec::new();
-    for kind in source_types.unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec()) {
-        if !source_kinds.contains(&kind) {
-            source_kinds.push(kind);
+    let mut kinds = Vec::new();
+    for kind in target_kinds.unwrap_or_else(|| DEFAULT_SOURCE_KINDS.to_vec()) {
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
         }
     }
-    if source_kinds.is_empty() {
-        return Err(invalid_params(command, "`source_types` must not be empty"));
+    if kinds.is_empty() {
+        return Err(invalid_params(command, "`target_kinds` must not be empty"));
     }
     Ok(ScreenSelection {
-        source_kinds,
-        cursor: cursor.unwrap_or(DEFAULT_CURSOR),
-        source: source_id,
+        target_kinds: kinds,
+        cursor_mode: cursor_mode.unwrap_or(DEFAULT_CURSOR),
+        source: capture_target_id,
     })
 }
 
@@ -2289,7 +2298,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "update_source" => schema_of::<UpdateSourceParams>(),
         "remove_source" => schema_of::<RemoveSourceParams>(),
         "restart_source" => schema_of::<RestartSourceParams>(),
-        "set_screen_source" => schema_of::<SetScreenSourceParams>(),
+        "set_capture_target" => schema_of::<SetCaptureTargetParams>(),
         "save_project" => schema_of::<SaveProjectParams>(),
         "load_project" | "validate_project" => schema_of::<ProjectFileParams>(),
         "add_channel" => schema_of::<AddChannelParams>(),
@@ -2311,7 +2320,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "get_health"
         | "list_audio_inputs"
         | "list_audio_outputs"
-        | "list_screen_sources"
+        | "list_capture_targets"
         | "stop_recording"
         | "stop_streaming"
         | "list_scenes"
@@ -2440,23 +2449,34 @@ mod tests {
         match name {
             "start_recording" => Some(json!({"file_name": "sample.mkv"})),
             "start_streaming" => Some(json!({"url": "rtmp://127.0.0.1:1/live"})),
-            "create_scene" | "set_active_scene" => Some(json!({"name": "Scene"})),
-            "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
-            "add_source" => Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"})),
-            "update_source" => Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5})),
-            "remove_source" | "restart_source" => Some(json!({"scene": "Scene", "name": "bars"})),
+            "create_scene" => Some(json!({"name": "Scene"})),
+            "set_active_scene" => Some(json!({"scene_name": "Scene"})),
+            "delete_scene" => Some(json!({"scene_name": "Scene", "confirm": true})),
+            "add_source" => {
+                Some(json!({"scene_name": "Scene", "name": "bars", "kind": "color_bars"}))
+            }
+            "update_source" => {
+                Some(json!({"scene_name": "Scene", "source_name": "bars", "opacity": 0.5}))
+            }
+            "remove_source" | "restart_source" => {
+                Some(json!({"scene_name": "Scene", "source_name": "bars"}))
+            }
             "add_channel" => Some(json!({"name": "Mic", "input": {"kind": "device"}})),
-            "remove_channel" => Some(json!({"name": "Mic"})),
-            "update_channel" => Some(json!({"id": "ch_a1", "mute": true})),
-            "set_channel_input" => Some(json!({"name": "Mic", "input": {"kind": "device",
+            "remove_channel" => Some(json!({"channel_name": "Mic"})),
+            "update_channel" => Some(json!({"channel_id": "ch_a1", "mute": true})),
+            "set_channel_input" => Some(json!({"channel_name": "Mic", "input": {"kind": "device",
                 "device": "alsa_input.usb"}})),
             "add_bus" => Some(json!({"name": "Voice", "assign_db": 0})),
-            "remove_bus" => Some(json!({"name": "Voice"})),
-            "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
-            "set_send" => Some(json!({"channel": "Mic", "bus": "Voice", "enabled": true})),
-            "set_output_profile" => Some(json!({"output": "stream", "mix_bus": "Voice"})),
+            "remove_bus" => Some(json!({"bus_name": "Voice"})),
+            "update_bus" => Some(json!({"bus_id": "bus_program", "gain_db": -3.0})),
+            "set_send" => {
+                Some(json!({"channel_name": "Mic", "bus_name": "Voice", "enabled": true}))
+            }
+            "set_output_profile" => Some(json!({"output": "stream", "bus_name": "Voice"})),
             "set_preview" => Some(json!({"enabled": false})),
-            "set_screen_source" => Some(json!({"id": "src_a1", "source_id": "monitor:1"})),
+            "set_capture_target" => {
+                Some(json!({"source_id": "src_a1", "capture_target_id": "monitor:1"}))
+            }
             "save_project" | "load_project" | "validate_project" => {
                 Some(json!({"file_name": "show.json"}))
             }
@@ -2474,14 +2494,17 @@ mod tests {
             Command::SetActiveScene(SceneRef::id("scene_k3j9x2"))
         );
         assert_eq!(
-            decode("delete_scene", json!({"name": "Main", "confirm": true})),
+            decode(
+                "delete_scene",
+                json!({"scene_name": "Main", "confirm": true})
+            ),
             Command::DeleteScene(SceneRef::name("Main"))
         );
         // Both may be given; the engine checks that they agree.
         assert_eq!(
             decode(
                 "set_active_scene",
-                json!({"scene_id": "scene_k3j9x2", "name": "Main"})
+                json!({"scene_id": "scene_k3j9x2", "scene_name": "Main"})
             ),
             Command::SetActiveScene(SceneRef {
                 id: Some("scene_k3j9x2".to_owned()),
@@ -2489,17 +2512,20 @@ mod tests {
             })
         );
         assert_eq!(
-            decode("remove_source", json!({"id": "src_a1"})),
+            decode("remove_source", json!({"source_id": "src_a1"})),
             Command::RemoveSource(SourceRef::id("src_a1"))
         );
         assert_eq!(
-            decode("remove_source", json!({"scene": "Main", "name": "bars"})),
+            decode(
+                "remove_source",
+                json!({"scene_name": "Main", "source_name": "bars"})
+            ),
             Command::RemoveSource(SourceRef::named("Main", "bars"))
         );
         assert_eq!(
             decode(
                 "remove_source",
-                json!({"scene_id": "scene_main", "name": "bars"})
+                json!({"scene_id": "scene_main", "source_name": "bars"})
             ),
             Command::RemoveSource(SourceRef {
                 id: None,
@@ -2508,7 +2534,7 @@ mod tests {
             })
         );
         let Command::UpdateSource(update) =
-            decode("update_source", json!({"id": "src_a1", "x": 4}))
+            decode("update_source", json!({"source_id": "src_a1", "x": 4}))
         else {
             panic!("update_source");
         };
@@ -2521,7 +2547,7 @@ mod tests {
         };
         assert_eq!(add.scene, SceneRef::id("scene_main"));
         let Command::RestartSource { source, .. } =
-            decode("restart_source", json!({"id": "src_a1"}))
+            decode("restart_source", json!({"source_id": "src_a1"}))
         else {
             panic!("restart_source");
         };
@@ -2587,20 +2613,20 @@ mod tests {
         }
         assert_eq!(
             decode(
-                "set_screen_source",
-                json!({"id": "src_a1", "source_id": "window:7:0x2a"})
+                "set_capture_target",
+                json!({"source_id": "src_a1", "capture_target_id": "window:7:0x2a"})
             ),
-            Ok(Command::SetScreenSource {
+            Ok(Command::SetCaptureTarget {
                 source: SourceRef::id("src_a1"),
-                source_id: "window:7:0x2a".to_owned(),
+                capture_target_id: "window:7:0x2a".to_owned(),
             })
         );
         for bad in [
-            json!({"id": "src_a1"}),
-            json!({"id": "src_a1", "source_id": ""}),
-            json!({"source_id": "monitor:1"}),
+            json!({"source_id": "src_a1"}),
+            json!({"source_id": "src_a1", "capture_target_id": ""}),
+            json!({"capture_target_id": "monitor:1"}),
         ] {
-            let error = decode("set_screen_source", bad.clone()).unwrap_err();
+            let error = decode("set_capture_target", bad.clone()).unwrap_err();
             assert_eq!(error.code, ErrorCode::InvalidParams, "{bad}");
         }
         let access = |name: &str| {
@@ -2637,7 +2663,7 @@ mod tests {
             Some(&json!("load_project"))
         );
         assert_eq!(
-            access("set_screen_source"),
+            access("set_capture_target"),
             Some((CommandAccess::Sensitive, true))
         );
         assert!(NAME_RULE.contains(&MAX_NAME_CHARS.to_string()));
@@ -2647,25 +2673,30 @@ mod tests {
     fn restart_source_params() {
         let decode = |params: Value| Command::decode("restart_source", Some(&params));
         assert!(matches!(
-            decode(json!({"scene": "Scene", "name": "desk"})),
+            decode(json!({"scene_name": "Scene", "source_name": "desk"})),
             Ok(Command::RestartSource {
-                source_id: None,
+                capture_target_id: None,
                 ..
             })
         ));
-        let Ok(Command::RestartSource { source_id, .. }) =
-            decode(json!({"scene": "Scene", "name": "desk", "source_id": "window:7:0x2a"}))
+        let Ok(Command::RestartSource {
+            capture_target_id, ..
+        }) = decode(
+            json!({"scene_name": "Scene", "source_name": "desk", "capture_target_id": "window:7:0x2a"}),
+        )
         else {
             panic!("decode");
         };
-        assert_eq!(source_id.as_deref(), Some("window:7:0x2a"));
+        assert_eq!(capture_target_id.as_deref(), Some("window:7:0x2a"));
         for bad in [
             json!(""),
             json!("a\nb"),
             json!("x".repeat(MAX_SOURCE_ID_CHARS + 1)),
         ] {
-            let err =
-                decode(json!({"scene": "Scene", "name": "desk", "source_id": bad})).unwrap_err();
+            let err = decode(
+                json!({"scene_name": "Scene", "source_name": "desk", "capture_target_id": bad}),
+            )
+            .unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{bad}");
         }
         // It ends the running capture.
@@ -2681,7 +2712,7 @@ mod tests {
         let Ok(Command::AddSource(solid)) = Command::decode(
             "add_source",
             Some(
-                &json!({"scene": "Main", "name": "logo", "kind": "solid", "color": "#ff8000",
+                &json!({"scene_name": "Main", "name": "logo", "kind": "solid", "color": "#ff8000",
                          "x": 10, "y": 20, "width": 300, "height": 100, "opacity": 0.5}),
             ),
         ) else {
@@ -2704,7 +2735,7 @@ mod tests {
         );
         let Ok(Command::AddSource(screen)) = Command::decode(
             "add_source",
-            Some(&json!({"scene": "Main", "name": "desk", "kind": "screen"})),
+            Some(&json!({"scene_name": "Main", "name": "desk", "kind": "screen"})),
         ) else {
             panic!("decode");
         };
@@ -2723,52 +2754,58 @@ mod tests {
             ("create_scene", json!({"name": " padded "})),
             ("create_scene", json!({"name": "x".repeat(65)})),
             ("create_scene", json!({"name": "tab\there"})),
-            ("delete_scene", json!({"name": "Main"})),
-            ("delete_scene", json!({"name": "Main", "confirm": false})),
+            ("delete_scene", json!({"scene_name": "Main"})),
             (
-                "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "video"}),
+                "delete_scene",
+                json!({"scene_name": "Main", "confirm": false}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "solid"}),
+                json!({"scene_name": "Main", "name": "a", "kind": "video"}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "solid", "color": "red"}),
+                json!({"scene_name": "Main", "name": "a", "kind": "solid"}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "color_bars", "x": 1}),
+                json!({"scene_name": "Main", "name": "a", "kind": "solid", "color": "red"}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "color_bars", "cursor": "hidden"}),
+                json!({"scene_name": "Main", "name": "a", "kind": "color_bars", "x": 1}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "color_bars",
+                json!({"scene_name": "Main", "name": "a", "kind": "color_bars", "cursor_mode": "hidden"}),
+            ),
+            (
+                "add_source",
+                json!({"scene_name": "Main", "name": "a", "kind": "color_bars",
                                   "x": 0, "y": 0, "width": 0, "height": 10}),
             ),
             (
                 "add_source",
-                json!({"scene": "Main", "name": "a", "kind": "color_bars", "opacity": 2}),
+                json!({"scene_name": "Main", "name": "a", "kind": "color_bars", "opacity": 2}),
             ),
-            ("update_source", json!({"scene": "Main", "name": "a"})),
+            (
+                "update_source",
+                json!({"scene_name": "Main", "source_name": "a"}),
+            ),
             // A source needs its id, or its scene and name.
-            ("update_source", json!({"name": "a", "x": 1})),
-            ("remove_source", json!({"scene": "Main"})),
+            ("update_source", json!({"source_name": "a", "x": 1})),
+            ("remove_source", json!({"scene_name": "Main"})),
             ("remove_source", json!({"scene_id": "scene_main"})),
             ("restart_source", json!({})),
             ("add_source", json!({"name": "a", "kind": "color_bars"})),
             ("set_active_scene", json!({})),
             // Ids come from list_scenes: the right prefix, a-z, 0-9 or _.
-            ("remove_source", json!({"id": "scene_main"})),
-            ("remove_source", json!({"id": "src_"})),
-            ("remove_source", json!({"id": "src_ABC"})),
+            ("remove_source", json!({"source_id": "scene_main"})),
+            ("remove_source", json!({"source_id": "src_"})),
+            ("remove_source", json!({"source_id": "src_ABC"})),
             (
                 "remove_source",
-                json!({"id": format!("src_{}", "a".repeat(61))}),
+                json!({"source_id": format!("src_{}", "a".repeat(61))}),
             ),
             ("set_active_scene", json!({"scene_id": "src_abc"})),
             ("set_active_scene", json!({"scene_id": 7})),
@@ -2803,7 +2840,7 @@ mod tests {
         );
         let Command::SetChannelInput(input) = Command::decode(
             "set_channel_input",
-            Some(&json!({"id": "ch_a1", "input": {"kind": "device", "device": null}})),
+            Some(&json!({"channel_id": "ch_a1", "input": {"kind": "device", "device": null}})),
         )
         .expect("decode") else {
             panic!("set_channel_input");
@@ -2812,7 +2849,7 @@ mod tests {
         assert_eq!(input.input, ChannelInput::Device { device: None });
         let Command::UpdateBus(bus) = Command::decode(
             "update_bus",
-            Some(&json!({"name": "Program", "mute": true})),
+            Some(&json!({"bus_name": "Program", "mute": true})),
         )
         .expect("decode") else {
             panic!("update_bus");
@@ -2824,7 +2861,7 @@ mod tests {
         // `assign_db`: absent changes nothing, null makes a separate mix.
         let Command::UpdateBus(separate) = Command::decode(
             "update_bus",
-            Some(&json!({"name": "Voice", "assign_db": null})),
+            Some(&json!({"bus_name": "Voice", "assign_db": null})),
         )
         .expect("decode") else {
             panic!("update_bus");
@@ -2847,7 +2884,7 @@ mod tests {
         let Command::SetSend(send) = Command::decode(
             "set_send",
             Some(
-                &json!({"channel_id": "ch_a1", "bus": "Voice", "level_db": -6,
+                &json!({"channel_id": "ch_a1", "bus_name": "Voice", "level_db": -6,
                          "tap": "pre_fader"}),
             ),
         )
@@ -2896,34 +2933,43 @@ mod tests {
                 json!({"name": "Mic", "input": {"kind": "device"}, "balance": 1.5}),
             ),
             ("remove_channel", json!({})),
-            ("remove_channel", json!({"id": "src_mic"})),
-            ("update_channel", json!({"name": "Mic"})),
+            ("remove_channel", json!({"channel_id": "src_mic"})),
+            ("update_channel", json!({"channel_name": "Mic"})),
             ("update_channel", json!({"gain_db": 0})),
-            ("update_channel", json!({"name": "Mic", "balance": -2})),
-            ("set_channel_input", json!({"name": "Mic"})),
-            ("update_bus", json!({"id": "bus_program"})),
+            (
+                "update_channel",
+                json!({"channel_name": "Mic", "balance": -2}),
+            ),
+            ("set_channel_input", json!({"channel_name": "Mic"})),
+            ("update_bus", json!({"bus_id": "bus_program"})),
             ("update_bus", json!({"gain_db": 0})),
-            ("update_bus", json!({"id": "ch_program", "gain_db": 0})),
-            ("update_bus", json!({"id": "bus_program", "gain_db": -200})),
-            ("update_bus", json!({"name": "Voice", "assign_db": 30})),
+            ("update_bus", json!({"bus_id": "ch_program", "gain_db": 0})),
+            (
+                "update_bus",
+                json!({"bus_id": "bus_program", "gain_db": -200}),
+            ),
+            ("update_bus", json!({"bus_name": "Voice", "assign_db": 30})),
             ("add_bus", json!({})),
             ("add_bus", json!({"name": "Voice", "assign_db": -200})),
             ("remove_bus", json!({})),
-            ("remove_bus", json!({"id": "ch_voice"})),
-            ("set_send", json!({"channel": "Mic", "bus": "Voice"})),
-            ("set_send", json!({"bus": "Voice", "enabled": true})),
-            ("set_send", json!({"channel": "Mic", "enabled": true})),
+            ("remove_bus", json!({"bus_id": "ch_voice"})),
             (
                 "set_send",
-                json!({"channel": "Mic", "bus": "Voice", "tap": "sideways"}),
+                json!({"channel_name": "Mic", "bus_name": "Voice"}),
+            ),
+            ("set_send", json!({"bus_name": "Voice", "enabled": true})),
+            ("set_send", json!({"channel_name": "Mic", "enabled": true})),
+            (
+                "set_send",
+                json!({"channel_name": "Mic", "bus_name": "Voice", "tap": "sideways"}),
             ),
             (
                 "set_send",
-                json!({"channel": "Mic", "bus": "Voice", "level_db": 99}),
+                json!({"channel_name": "Mic", "bus_name": "Voice", "level_db": 99}),
             ),
             (
                 "set_send",
-                json!({"channel_id": "bus_mic", "bus": "Voice", "enabled": true}),
+                json!({"channel_id": "bus_mic", "bus_name": "Voice", "enabled": true}),
             ),
         ] {
             let err = Command::decode(command, Some(&params)).unwrap_err();
@@ -2935,7 +2981,7 @@ mod tests {
     fn output_profiles_decode_with_their_rules() {
         let Command::SetOutputProfile(request) = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "stream", "mix_bus_id": "bus_voice",
+            Some(&json!({"output": "stream", "bus_id": "bus_voice",
                          "video_bitrate_kbps": 4000})),
         )
         .expect("decode") else {
@@ -2950,7 +2996,7 @@ mod tests {
         // Track entries are ids when they look like one, names otherwise.
         let Command::SetOutputProfile(request) = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "recording", "tracks": ["bus_voice", "Music"]})),
+            Some(&json!({"output": "recording", "tracks": [{"bus_id": "bus_voice"}, {"bus_name": "Music"}]})),
         )
         .expect("decode") else {
             panic!("set_output_profile");
@@ -2961,7 +3007,7 @@ mod tests {
         // The monitor: a bus and on or off.
         let Command::SetOutputProfile(request) = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "monitor", "mix_bus": "Cue", "enabled": true})),
+            Some(&json!({"output": "monitor", "bus_name": "Cue", "enabled": true})),
         )
         .expect("decode") else {
             panic!("set_output_profile");
@@ -2972,8 +3018,8 @@ mod tests {
         );
         for params in [
             json!({"output": "stream"}),
-            json!({"mix_bus": "Voice"}),
-            json!({"output": "speakers", "mix_bus": "Voice"}),
+            json!({"bus_name": "Voice"}),
+            json!({"output": "speakers", "bus_name": "Voice"}),
             json!({"output": "monitor", "video_encoder": "software"}),
             json!({"output": "monitor", "video_bitrate_kbps": 4000}),
             json!({"output": "monitor", "tracks": ["Voice"]}),
@@ -2981,7 +3027,7 @@ mod tests {
             json!({"output": "stream", "enabled": false}),
             json!({"output": "recording", "video_bitrate_kbps": 4000}),
             json!({"output": "stream", "video_bitrate_kbps": 1}),
-            json!({"output": "stream", "mix_bus_id": "ch_voice"}),
+            json!({"output": "stream", "bus_id": "ch_voice"}),
             json!({"output": "stream", "video_encoder": "quantum"}),
             json!({"output": "stream", "tracks": ["Voice"]}),
             json!({"output": "recording", "tracks": ["", "Voice"]}),
@@ -3069,8 +3115,8 @@ mod tests {
             Command::decode("probe_screen_capture", None),
             Ok(Command::ProbeScreenCapture(ScreenCaptureRequest {
                 selection: ScreenSelection {
-                    source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
-                    cursor: CursorMode::Embedded,
+                    target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+                    cursor_mode: CursorMode::Embedded,
                     source: None,
                 },
                 duration: Duration::from_secs(5),
@@ -3082,15 +3128,15 @@ mod tests {
     fn screen_probe_params_are_decoded_and_deduplicated() {
         let params = json!({
             "duration_ms": 1500,
-            "source_types": ["window", "window", "virtual"],
-            "cursor": "hidden",
+            "target_kinds": ["window", "window", "virtual"],
+            "cursor_mode": "hidden",
         });
         assert_eq!(
             Command::decode("probe_screen_capture", Some(&params)),
             Ok(Command::ProbeScreenCapture(ScreenCaptureRequest {
                 selection: ScreenSelection {
-                    source_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
-                    cursor: CursorMode::Hidden,
+                    target_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
+                    cursor_mode: CursorMode::Hidden,
                     source: None,
                 },
                 duration: Duration::from_millis(1500),
@@ -3104,14 +3150,14 @@ mod tests {
             json!({"duration_ms": 50}),
             json!({"duration_ms": 60_001}),
             json!({"duration_ms": -1}),
-            json!({"source_types": []}),
-            json!({"source_types": ["printer"]}),
-            json!({"cursor": "sparkly"}),
+            json!({"target_kinds": []}),
+            json!({"target_kinds": ["printer"]}),
+            json!({"cursor_mode": "sparkly"}),
             json!({"seconds": 5}),
-            json!({"source_id": ""}),
-            json!({"source_id": "monitor:\n1"}),
-            json!({"source_id": "m".repeat(257)}),
-            json!({"source_id": 1}),
+            json!({"capture_target_id": ""}),
+            json!({"capture_target_id": "monitor:\n1"}),
+            json!({"capture_target_id": "m".repeat(257)}),
+            json!({"capture_target_id": 1}),
         ] {
             let err = Command::decode("probe_screen_capture", Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
@@ -3125,12 +3171,12 @@ mod tests {
     #[test]
     fn named_screen_sources_are_decoded_everywhere() {
         assert_eq!(
-            Command::decode("list_screen_sources", None),
-            Ok(Command::ListScreenSources)
+            Command::decode("list_capture_targets", None),
+            Ok(Command::ListCaptureTargets)
         );
         let probe = Command::decode(
             "probe_screen_capture",
-            Some(&json!({"source_id": "monitor:1"})),
+            Some(&json!({"capture_target_id": "monitor:1"})),
         );
         let Ok(Command::ProbeScreenCapture(request)) = probe else {
             panic!("{probe:?}");
@@ -3140,23 +3186,28 @@ mod tests {
         // Outputs capture through scene sources only (ADR 0018).
         let recording = Command::decode(
             "start_recording",
-            Some(&json!({"file_name": "a.mkv", "screen": true, "source_id": "window:0x2a"})),
+            Some(
+                &json!({"file_name": "a.mkv", "screen": true, "capture_target_id": "window:0x2a"}),
+            ),
         );
         assert_eq!(recording.unwrap_err().code, ErrorCode::InvalidParams);
 
         let add = Command::decode(
             "add_source",
             Some(
-                &json!({"scene": "S", "name": "desk", "kind": "screen", "source_id": "monitor:2"}),
+                &json!({"scene_name": "S", "name": "desk", "kind": "screen", "capture_target_id": "monitor:2"}),
             ),
         );
         let Ok(Command::AddSource(request)) = add else {
             panic!("{add:?}");
         };
-        let SourceKind::Screen { source_id, .. } = &request.kind else {
+        let SourceKind::Screen {
+            capture_target_id, ..
+        } = &request.kind
+        else {
             panic!("{request:?}");
         };
-        assert_eq!(source_id.as_deref(), Some("monitor:2"));
+        assert_eq!(capture_target_id.as_deref(), Some("monitor:2"));
     }
 
     #[test]
@@ -3192,21 +3243,21 @@ mod tests {
     }
 
     #[test]
-    fn source_ids_need_a_screen_source() {
+    fn capture_target_ids_need_a_screen_source() {
         for (name, params) in [
             (
                 "start_recording",
-                json!({"file_name": "a.mkv", "source_id": "monitor:1"}),
+                json!({"file_name": "a.mkv", "capture_target_id": "monitor:1"}),
             ),
-            ("probe_composite", json!({"source_id": "monitor:1"})),
+            ("probe_composite", json!({"capture_target_id": "monitor:1"})),
             (
                 "add_source",
-                json!({"scene": "S", "name": "b", "kind": "color_bars", "source_id": "monitor:1"}),
+                json!({"scene_name": "S", "name": "b", "kind": "color_bars", "capture_target_id": "monitor:1"}),
             ),
         ] {
             let err = Command::decode(name, Some(&params)).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams, "{name}: {params}");
-            assert!(err.message.contains("source_id"), "{}", err.message);
+            assert!(err.message.contains("capture_target_id"), "{}", err.message);
         }
     }
 
@@ -3270,7 +3321,7 @@ mod tests {
             Ok(Command::ProbeComposite(CompositeRequest {
                 duration: Duration::from_secs(5),
                 screen: None,
-                snapshot_path: None,
+                snapshot_file_name: None,
             }))
         );
     }
@@ -3280,19 +3331,19 @@ mod tests {
         let params = json!({
             "duration_ms": 2000,
             "screen": true,
-            "source_types": ["window"],
-            "snapshot_path": "frame.PPM",
+            "target_kinds": ["window"],
+            "snapshot_file_name": "frame.PPM",
         });
         assert_eq!(
             Command::decode("probe_composite", Some(&params)),
             Ok(Command::ProbeComposite(CompositeRequest {
                 duration: Duration::from_secs(2),
                 screen: Some(ScreenSelection {
-                    source_kinds: vec![VideoSourceKind::Window],
-                    cursor: CursorMode::Embedded,
+                    target_kinds: vec![VideoSourceKind::Window],
+                    cursor_mode: CursorMode::Embedded,
                     source: None,
                 }),
-                snapshot_path: Some(PathBuf::from("frame.PPM")),
+                snapshot_file_name: Some(PathBuf::from("frame.PPM")),
             }))
         );
     }
@@ -3300,15 +3351,15 @@ mod tests {
     #[test]
     fn invalid_composite_params_are_rejected() {
         for params in [
-            json!({"source_types": ["monitor"]}),
-            json!({"cursor": "hidden"}),
-            json!({"snapshot_path": "frame.png"}),
-            json!({"snapshot_path": "/tmp/frame.ppm"}),
-            json!({"snapshot_path": "../frame.ppm"}),
-            json!({"snapshot_path": "out/frame.ppm"}),
-            json!({"snapshot_path": "./frame.ppm"}),
-            json!({"snapshot_path": ".ppm"}),
-            json!({"snapshot_path": ""}),
+            json!({"target_kinds": ["monitor"]}),
+            json!({"cursor_mode": "hidden"}),
+            json!({"snapshot_file_name": "frame.png"}),
+            json!({"snapshot_file_name": "/tmp/frame.ppm"}),
+            json!({"snapshot_file_name": "../frame.ppm"}),
+            json!({"snapshot_file_name": "out/frame.ppm"}),
+            json!({"snapshot_file_name": "./frame.ppm"}),
+            json!({"snapshot_file_name": ".ppm"}),
+            json!({"snapshot_file_name": ""}),
             json!({"screen": "yes"}),
             json!({"duration_ms": 10}),
         ] {
@@ -3390,7 +3441,7 @@ mod tests {
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
         // The output screen layer is gone (ADR 0018): screen capture comes
         // from the scene's screen sources.
-        for field in ["screen", "source_id", "source_types", "cursor"] {
+        for field in ["screen", "capture_target_id", "target_kinds", "cursor_mode"] {
             let mut params = json!({"file_name": "a.mkv"});
             params[field] = json!(false);
             let err = Command::decode("start_recording", Some(&params)).unwrap_err();
@@ -3463,7 +3514,7 @@ mod tests {
             json!({"url": "rtmp://host/app", "video_bitrate_kbps": 10}),
             json!({"url": "rtmp://host/app", "reconnect_attempts": 1000}),
             json!({"url": "rtmp://host/app", "reconnect_delay_ms": 5}),
-            json!({"url": "rtmp://host/app", "cursor": "hidden"}),
+            json!({"url": "rtmp://host/app", "cursor_mode": "hidden"}),
             json!({"url": "rtmp://host/app", "key": "SECRET"}),
             json!({"url": "rtmp://host/app", "stream_key": 12345678}),
             json!({"url": "rtmp://host/app", "stream_key": ["SECRET"]}),
@@ -3486,7 +3537,7 @@ mod tests {
             json!({"file_name": "a.mp4"}),
             json!({"file_name": "../a.mkv"}),
             json!({"file_name": "/tmp/a.mkv"}),
-            json!({"file_name": "a.mkv", "cursor": "hidden"}),
+            json!({"file_name": "a.mkv", "cursor_mode": "hidden"}),
             json!({"file_name": "a.mkv", "tones": [{"frequency_hz": 0.0}]}),
         ] {
             let err = Command::decode("start_recording", Some(&params)).unwrap_err();
@@ -3514,7 +3565,7 @@ mod tests {
         assert_eq!(add["required"], json!(["name", "kind"]));
         // The advertised kinds are exactly the ones the decoder accepts.
         for kind in add["properties"]["kind"]["enum"].as_array().expect("kinds") {
-            let mut params = json!({"scene": "Main", "name": "s", "kind": kind});
+            let mut params = json!({"scene_name": "Main", "name": "s", "kind": kind});
             if kind == "solid" {
                 params["color"] = json!("#000000");
             }
@@ -3530,7 +3581,7 @@ mod tests {
         );
         // Enums keep their wire names (in whatever form schemars emits).
         let probe = params_schema("probe_screen_capture").expect("schema");
-        let kinds = probe["properties"]["source_types"]["items"].to_string();
+        let kinds = probe["properties"]["target_kinds"]["items"].to_string();
         for kind in ["monitor", "window", "virtual"] {
             assert!(kinds.contains(&format!("\"{kind}\"")), "{kinds}");
         }
@@ -3565,7 +3616,7 @@ mod tests {
         assert!(!get("create_scene").destructive && !get("get_status").destructive);
         // Ending the preview can stop the pipeline; the others replace a
         // choice.
-        for name in ["set_preview", "set_monitor_device", "set_screen_source"] {
+        for name in ["set_preview", "set_monitor_device", "set_capture_target"] {
             assert!(get(name).destructive, "{name}");
         }
         assert!(get("start_streaming").open_world);
@@ -3591,9 +3642,10 @@ mod tests {
                 .expect("decode")
                 .required_access()
         };
-        let bars = add(json!({"scene": "Main", "name": "s", "kind": "color_bars"}));
-        let solid = add(json!({"scene": "Main", "name": "s", "kind": "solid", "color": "#ffffff"}));
-        let screen = add(json!({"scene": "Main", "name": "s", "kind": "screen"}));
+        let bars = add(json!({"scene_name": "Main", "name": "s", "kind": "color_bars"}));
+        let solid =
+            add(json!({"scene_name": "Main", "name": "s", "kind": "solid", "color": "#ffffff"}));
+        let screen = add(json!({"scene_name": "Main", "name": "s", "kind": "screen"}));
         assert_eq!(
             (bars, solid, screen),
             (
@@ -3619,7 +3671,7 @@ mod tests {
         assert_eq!(access("restart_source"), Some(CommandAccess::Sensitive));
         // Window titles can reveal private content.
         assert_eq!(
-            access("list_screen_sources"),
+            access("list_capture_targets"),
             Some(CommandAccess::Sensitive)
         );
         assert_eq!(
@@ -3650,6 +3702,37 @@ mod tests {
                 "destructive": false,
                 "open_world": false,
             })
+        );
+    }
+    #[test]
+    fn recording_tracks_require_strict_explicit_bus_references() {
+        for tracks in [
+            json!(["Music"]),
+            json!([{}]),
+            json!([{"bus_id": "ch_music"}]),
+            json!([{"bus_name": ""}]),
+            json!([{"bus_name": "Music", "typo": true}]),
+        ] {
+            let error = Command::decode(
+                "set_output_profile",
+                Some(&json!({"output": "recording", "tracks": tracks})),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{tracks}");
+        }
+        let Command::SetOutputProfile(request) = Command::decode("set_output_profile", Some(&json!({"output": "recording", "tracks": [{"bus_name": "bus_program"}, {"bus_id": "bus_music", "bus_name": "Music"}]}))).unwrap() else { panic!("profile"); };
+        assert_eq!(
+            request.tracks.unwrap(),
+            vec![
+                BusRef {
+                    id: None,
+                    name: Some("bus_program".into())
+                },
+                BusRef {
+                    id: Some("bus_music".into()),
+                    name: Some("Music".into())
+                }
+            ]
         );
     }
 }

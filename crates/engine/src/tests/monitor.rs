@@ -145,11 +145,11 @@ fn the_monitor_plays_its_bus_live_beside_a_recording() {
     run(
         &mut engine,
         "set_send",
-        json!({"channel": "Tone", "bus": "Cue", "enabled": true, "level_db": -20}),
+        json!({"channel_name": "Tone", "bus_name": "Cue", "enabled": true, "level_db": -20}),
     );
     let set = profile_set(
         &mut engine,
-        json!({"output": "monitor", "mix_bus": "Cue", "enabled": true}),
+        json!({"output": "monitor", "bus_name": "Cue", "enabled": true}),
     );
     // Nothing runs yet: the profile waits for the pipeline.
     assert!(
@@ -177,13 +177,13 @@ fn the_monitor_plays_its_bus_live_beside_a_recording() {
     let entry = &mixer.outputs[2];
     assert_eq!(entry.output, command_api::OutputKind::Monitor);
     assert!(entry.running);
-    assert_eq!(entry.bus, cue);
+    assert_eq!(entry.bus_id, cue);
 
     // Live, faded: the program bus at -20 dBFS.
     let mark = played_len(&played);
     let set = profile_set(
         &mut engine,
-        json!({"output": "monitor", "mix_bus": "Program"}),
+        json!({"output": "monitor", "bus_name": "Program"}),
     );
     assert_eq!(set.applied_now, ["mix"]);
     std::thread::sleep(Duration::from_millis(400));
@@ -310,7 +310,7 @@ fn a_monitor_that_ends_leaves_the_recording_running() {
     // No device runs: a new bus waits for the monitor to be switched on.
     let set = profile_set(
         &mut engine,
-        json!({"output": "monitor", "mix_bus": "Program"}),
+        json!({"output": "monitor", "bus_name": "Program"}),
     );
     assert!(set.applied_now.is_empty(), "{set:?}");
     assert_eq!(set.next_start, ["mix"]);

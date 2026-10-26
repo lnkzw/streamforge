@@ -96,7 +96,7 @@ pub(crate) fn probe(
         }
     };
     let snapshot = request
-        .snapshot_path
+        .snapshot_file_name
         .as_ref()
         .map(|name| write_snapshot(&output_dir.join(name), &run.last_frame));
 

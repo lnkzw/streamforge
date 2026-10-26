@@ -82,12 +82,12 @@ pub struct ScreenCaptureCapability {
     /// Why capture is unavailable, including a remedy where one is known.
     pub unavailable_reason: Option<String>,
     pub portal_version: Option<u32>,
-    pub source_kinds: Vec<VideoSourceKind>,
+    pub target_kinds: Vec<VideoSourceKind>,
     pub cursor_modes: Vec<CursorMode>,
     /// The user picks the source in a system dialog (no `source`).
     pub picker: bool,
     /// Sources can be listed ([`ScreenSource`]) and captured by id.
-    pub source_list: bool,
+    pub target_list: bool,
 }
 
 impl ScreenCaptureCapability {
@@ -97,10 +97,10 @@ impl ScreenCaptureCapability {
             available: false,
             unavailable_reason: Some(reason.into()),
             portal_version: None,
-            source_kinds: Vec::new(),
+            target_kinds: Vec::new(),
             cursor_modes: Vec::new(),
             picker: false,
-            source_list: false,
+            target_list: false,
         }
     }
 }
@@ -202,16 +202,16 @@ impl PlaybackRequest {
     }
 }
 
-/// Which screen source to capture and how the cursor is captured: a
+/// Which capture target to capture and how the cursor is captured: a
 /// [`ScreenSource::id`], or (without one) whatever the user picks in the
-/// system dialog among `source_kinds`.
+/// system dialog among `target_kinds`.
 ///
-/// `source_kinds` is non-empty and duplicate-free, and `source` is not
+/// `target_kinds` is non-empty and duplicate-free, and `source` is not
 /// empty; `command_api` enforces this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSelection {
-    pub source_kinds: Vec<VideoSourceKind>,
-    pub cursor: CursorMode,
+    pub target_kinds: Vec<VideoSourceKind>,
+    pub cursor_mode: CursorMode,
     pub source: Option<String>,
 }
 
@@ -228,11 +228,11 @@ pub struct ScreenCaptureRequest {
 impl ScreenSelection {
     /// Reject source kinds or cursor modes the backend did not advertise.
     /// An empty `cursor_modes` list means the backend cannot select a cursor
-    /// mode at all (e.g. ScreenCast portal v1); the cursor request is then
+    /// mode at all (e.g. ScreenCast portal v1); the cursor mode request is then
     /// not checked and the backend reports that it was ignored.
     ///
     /// A named `source` needs a backend with a source list and defines its
-    /// own kind, so `source_kinds` is not checked; without one the backend
+    /// own kind, so `target_kinds` is not checked; without one the backend
     /// needs a picker.
     pub fn check_supported(
         &self,
@@ -246,45 +246,47 @@ impl ScreenSelection {
                     .unwrap_or_else(|| "screen capture is not available".to_owned()),
             ));
         }
-        match (&self.source, capability.source_list, capability.picker) {
+        match (&self.source, capability.target_list, capability.picker) {
             (Some(_), false, _) => {
                 return Err(CaptureError::unsupported(
                     "this screen capture backend cannot capture a named source; \
-                     omit `source_id` to pick one in the system dialog",
+                     omit `capture_target_id` to pick one in the system dialog",
                 ));
             }
             (None, _, false) => {
                 return Err(CaptureError::new(
                     CaptureErrorKind::InvalidRequest,
                     "this screen capture backend has no system picker; \
-                     name a source (`source_id`) from list_screen_sources",
+                     name a source (`capture_target_id`) from list_capture_targets",
                 ));
             }
             _ => {}
         }
         let missing: Vec<_> = self
-            .source_kinds
+            .target_kinds
             .iter()
-            .filter(|kind| self.source.is_none() && !capability.source_kinds.contains(kind))
+            .filter(|kind| self.source.is_none() && !capability.target_kinds.contains(kind))
             .map(|kind| kind.as_str())
             .collect();
         if !missing.is_empty() {
             return Err(CaptureError::unsupported(format!(
-                "screen capture backend does not offer source type(s): {}",
+                "screen capture backend does not offer target kind(s): {}",
                 missing.join(", ")
             ))
             .with_details(json!({
-                "requested": self.source_kinds,
-                "available": capability.source_kinds,
+                "requested": self.target_kinds,
+                "available": capability.target_kinds,
             })));
         }
-        if !capability.cursor_modes.is_empty() && !capability.cursor_modes.contains(&self.cursor) {
+        if !capability.cursor_modes.is_empty()
+            && !capability.cursor_modes.contains(&self.cursor_mode)
+        {
             return Err(CaptureError::unsupported(format!(
                 "screen capture backend does not offer cursor mode `{}`",
-                self.cursor.as_str()
+                self.cursor_mode.as_str()
             ))
             .with_details(json!({
-                "requested": self.cursor,
+                "requested": self.cursor_mode,
                 "available": capability.cursor_modes,
             })));
         }
@@ -414,17 +416,17 @@ mod tests {
             available: true,
             unavailable_reason: None,
             portal_version: Some(5),
-            source_kinds: kinds.to_vec(),
+            target_kinds: kinds.to_vec(),
             cursor_modes: cursors.to_vec(),
             picker: true,
-            source_list: false,
+            target_list: false,
         }
     }
 
-    fn request(kinds: &[VideoSourceKind], cursor: CursorMode) -> ScreenSelection {
+    fn request(kinds: &[VideoSourceKind], cursor_mode: CursorMode) -> ScreenSelection {
         ScreenSelection {
-            source_kinds: kinds.to_vec(),
-            cursor,
+            target_kinds: kinds.to_vec(),
+            cursor_mode,
             source: None,
         }
     }
@@ -440,27 +442,27 @@ mod tests {
     }
 
     #[test]
-    fn named_sources_need_a_source_list_and_pickers_a_picker() {
+    fn named_sources_need_a_target_list_and_pickers_a_picker() {
         let picker_only = capability(&[VideoSourceKind::Monitor], &[]);
         let mut named = request(&[VideoSourceKind::Window], CursorMode::Embedded);
         named.source = Some("monitor:1".into());
         let err = named.check_supported(&picker_only).unwrap_err();
         assert_eq!(err.kind, CaptureErrorKind::Unsupported);
-        assert!(err.message.contains("source_id"), "{}", err.message);
+        assert!(err.message.contains("capture_target_id"), "{}", err.message);
 
         let list_only = ScreenCaptureCapability {
             picker: false,
-            source_list: true,
+            target_list: true,
             ..picker_only
         };
-        // The named source defines its kind; `source_kinds` is not checked.
+        // The named source defines its kind; `target_kinds` is not checked.
         assert_eq!(named.check_supported(&list_only), Ok(()));
         let err = request(&[VideoSourceKind::Monitor], CursorMode::Embedded)
             .check_supported(&list_only)
             .unwrap_err();
         assert_eq!(err.kind, CaptureErrorKind::InvalidRequest);
         assert!(
-            err.message.contains("list_screen_sources"),
+            err.message.contains("list_capture_targets"),
             "{}",
             err.message
         );

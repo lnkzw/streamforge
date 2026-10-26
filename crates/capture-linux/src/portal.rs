@@ -21,7 +21,7 @@ const HYPRLAND_HINT: &str = "install xdg-desktop-portal and a backend with Scree
 
 pub(crate) struct PortalInfo {
     pub version: u32,
-    pub source_kinds: Vec<VideoSourceKind>,
+    pub target_kinds: Vec<VideoSourceKind>,
     pub cursor_modes: Vec<CursorMode>,
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn query(timeout: Duration) -> Result<PortalInfo, CaptureError> {
         };
         Ok(PortalInfo {
             version: proxy.version(),
-            source_kinds: source_kinds(kinds),
+            target_kinds: target_kinds(kinds),
             cursor_modes: cursor_modes(cursors),
         })
     })
@@ -68,14 +68,14 @@ struct Selection {
 
 /// Create a session, let the user pick one source and open its PipeWire remote.
 ///
-/// `cursor` is `None` for portals that cannot select a cursor mode (v1).
+/// `cursor_mode` is `None` for portals that cannot select a cursor mode (v1).
 /// The session is closed again on every failure after it was created,
 /// including cancellation and `selection_timeout`; ashpd shares one D-Bus
 /// connection per process, so an unclosed session would otherwise keep the
 /// compositor sharing until the process exits.
 pub(crate) fn start(
     kinds: &[VideoSourceKind],
-    cursor: Option<CursorMode>,
+    cursor_mode: Option<CursorMode>,
     selection_timeout: Duration,
     close_timeout: Duration,
 ) -> Result<Cast, CaptureError> {
@@ -97,7 +97,7 @@ pub(crate) fn start(
     let selection = block_on_timeout(
         selection_timeout,
         "the screen cast portal dialog",
-        select(&proxy, &session, sources, cursor),
+        select(&proxy, &session, sources, cursor_mode),
     );
     match selection {
         Ok(selection) => Ok(Cast {
@@ -118,13 +118,13 @@ async fn select(
     proxy: &Screencast,
     session: &Session<Screencast>,
     sources: BitFlags<SourceType>,
-    cursor: Option<CursorMode>,
+    cursor_mode: Option<CursorMode>,
 ) -> Result<Selection, CaptureError> {
     proxy
         .select_sources(
             session,
             SelectSourcesOptions::default()
-                .set_cursor_mode(cursor.map(portal_cursor_mode))
+                .set_cursor_mode(cursor_mode.map(portal_cursor_mode))
                 .set_sources(sources)
                 .set_multiple(false)
                 .set_persist_mode(PersistMode::DoNot),
@@ -207,7 +207,7 @@ fn map_error(context: &str, error: PortalApiError) -> CaptureError {
     }
 }
 
-fn source_kinds(flags: BitFlags<SourceType>) -> Vec<VideoSourceKind> {
+fn target_kinds(flags: BitFlags<SourceType>) -> Vec<VideoSourceKind> {
     flags.iter().map(video_source_kind).collect()
 }
 
@@ -251,9 +251,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portal_bitmask_seven_means_all_source_kinds() {
+    fn portal_bitmask_seven_means_all_target_kinds() {
         let flags = BitFlags::<SourceType>::from_bits(7).expect("valid bits");
-        assert_eq!(source_kinds(flags), VideoSourceKind::ALL.to_vec());
+        assert_eq!(target_kinds(flags), VideoSourceKind::ALL.to_vec());
     }
 
     #[test]

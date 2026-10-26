@@ -460,7 +460,7 @@ impl Pipeline {
                 matches!(
                     source.kind,
                     SourceKind::Screen {
-                        source_id: None,
+                        capture_target_id: None,
                         ..
                     }
                 ) && !self
@@ -474,7 +474,7 @@ impl Pipeline {
                 format!(
                     "screen source `{}` would open the system picker, which would block \
                      the engine while recording or streaming; add picker sources while only \
-                     the preview runs, or name a source (`source_id`)",
+                     the preview runs, or name a source (`capture_target_id`)",
                     source.name
                 ),
             ));
@@ -537,7 +537,7 @@ impl Pipeline {
         let picker = matches!(
             source.kind,
             SourceKind::Screen {
-                source_id: None,
+                capture_target_id: None,
                 ..
             }
         );
@@ -547,7 +547,7 @@ impl Pipeline {
                 format!(
                     "restarting `{}` would open the system picker, which would block the engine \
                      while recording or streaming; restart it while only the preview runs, or \
-                     pass a `source_id` from list_screen_sources",
+                     pass a `capture_target_id` from list_capture_targets",
                     source.name
                 ),
             ));
@@ -936,9 +936,9 @@ fn start_screens(
     let mut started = Vec::new();
     for source in &scene.sources {
         let SourceKind::Screen {
-            source_types,
-            cursor,
-            source_id,
+            target_kinds,
+            cursor_mode,
+            capture_target_id,
         } = &source.kind
         else {
             continue;
@@ -947,9 +947,9 @@ fn start_screens(
             continue;
         }
         let selection = ScreenSelection {
-            source_kinds: source_types.clone(),
-            cursor: *cursor,
-            source: source_id.clone(),
+            target_kinds: target_kinds.clone(),
+            cursor_mode: *cursor_mode,
+            source: capture_target_id.clone(),
         };
         let stream = capture.start_screen_stream(&selection).map_err(|error| {
             command_error(error).with_details(serde_json::json!({ "source": source.name }))

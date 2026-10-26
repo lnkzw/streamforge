@@ -144,7 +144,9 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
     assert!(errors(&model).is_empty(), "{:?}", model.log);
     model.activate_scene(&scene_id, "Show");
     wait(&mut model, "the scene to be active", |m| {
-        m.scenes.as_ref().is_some_and(|list| list.active == "Show")
+        m.scenes
+            .as_ref()
+            .is_some_and(|list| list.active_scene_name == "Show")
     });
 
     {

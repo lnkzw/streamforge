@@ -92,12 +92,12 @@ impl Engine {
     }
 
     /// Restart a screen source's capture (e.g. after it ended), optionally
-    /// on another source (`source_id`, kept by the scene), while the
+    /// on another source (`capture_target_id`, kept by the scene), while the
     /// pipeline and its outputs keep running. On error nothing changes.
     pub(crate) fn restart_source(
         &mut self,
         source: &SourceRef,
-        source_id: Option<&str>,
+        capture_target_id: Option<&str>,
     ) -> Result<SceneList, CommandError> {
         let spec = self.scenes.source(source)?;
         let name = &spec.name.clone();
@@ -122,8 +122,8 @@ impl Engine {
             Some(_) => {}
         }
         let before = self.scenes.snapshot();
-        if let Some(id) = source_id {
-            self.scenes.set_screen_source_id(source, id)?;
+        if let Some(id) = capture_target_id {
+            self.scenes.set_capture_target_id(source, id)?;
         }
         let source = self.scenes.source(source)?.clone();
         let (allow_new_captures, keep) = self.capture_policy();
@@ -147,7 +147,7 @@ impl Engine {
     /// Choose what screen source `source` captures, while nothing captures
     /// it: a running (or ended) capture keeps its target until
     /// `restart_source`. If the source is rendered, its capture starts now.
-    pub(crate) fn set_screen_source(
+    pub(crate) fn set_capture_target(
         &mut self,
         source: &SourceRef,
         screen: &str,
@@ -163,12 +163,12 @@ impl Engine {
                 ErrorCode::InvalidState,
                 format!(
                     "`{name}` is capturing; switch a running capture with restart_source and a \
-                     `source_id`"
+                     `capture_target_id`"
                 ),
             ));
         }
         let source = SourceRef::id(id);
-        self.edit_scenes(|scenes| scenes.set_screen_source_id(&source, screen))
+        self.edit_scenes(|scenes| scenes.set_capture_target_id(&source, screen))
     }
 
     /// Whether new captures may start (open outputs must not wait for a
@@ -205,7 +205,7 @@ impl Engine {
                 };
                 OutputMix {
                     output,
-                    bus: bus.unwrap_or_else(|| self.profiles.mix(output).to_owned()),
+                    bus_id: bus.unwrap_or_else(|| self.profiles.mix(output).to_owned()),
                     tracks,
                     running,
                 }
@@ -280,7 +280,7 @@ impl Engine {
         let mix = request
             .mix
             .as_ref()
-            .map(|bus| bus_id(bus, ("mix_bus_id", "mix_bus")))
+            .map(|bus| bus_id(bus, ("bus_id", "bus_name")))
             .transpose()?;
         if let Some(mix) = &mix {
             *next.mix_mut(output) = mix.clone();
@@ -288,7 +288,7 @@ impl Engine {
         if let Some(tracks) = &request.tracks {
             next.recording.tracks = tracks
                 .iter()
-                .map(|bus| bus_id(bus, ("tracks", "tracks")))
+                .map(|bus| bus_id(bus, ("bus_id", "bus_name")))
                 .collect::<Result<_, _>>()?;
         }
         if let Some(encoder) = request.video_encoder {
@@ -465,7 +465,8 @@ impl Engine {
     /// profile never names a missing bus.
     pub(crate) fn remove_bus(&mut self, bus: &BusRef) -> Result<MixerState, CommandError> {
         self.audio_structure_idle()?;
-        if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus, ("id", "name"))? {
+        if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus, ("bus_id", "bus_name"))?
+        {
             let id = &self.audio.buses[index].id;
             let users: Vec<&str> = OutputKind::ALL
                 .into_iter()

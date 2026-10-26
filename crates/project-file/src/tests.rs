@@ -51,9 +51,9 @@ fn project() -> Project {
                     id: "src_a1b2c3d4e5f6".to_owned(),
                     name: "desk".to_owned(),
                     kind: SourceKind::Screen {
-                        source_types: vec![VideoSourceKind::Window],
-                        cursor: CursorMode::Hidden,
-                        source_id: None,
+                        target_kinds: vec![VideoSourceKind::Window],
+                        cursor_mode: CursorMode::Hidden,
+                        capture_target_id: None,
                     },
                     rect: rect(-10.5, 20.25, 960.0, 540.0),
                     opacity: 0.9,
@@ -134,11 +134,26 @@ fn loaded() -> Loaded {
     }
 }
 
+fn old_screen_fields(value: &mut Value) {
+    for scene in value["scenes"].as_array_mut().unwrap() {
+        for source in scene["sources"].as_array_mut().unwrap() {
+            if source["kind"] == "screen" {
+                let object = source.as_object_mut().unwrap();
+                let kinds = object.remove("target_kinds").unwrap();
+                let cursor = object.remove("cursor_mode").unwrap();
+                object.insert("source_types".into(), kinds);
+                object.insert("cursor".into(), cursor);
+            }
+        }
+    }
+}
+
 /// `project()` as a version 1 file: its audio as `set_audio_sources`
 /// parameters, as version 1 stored it.
 fn v1_file() -> Value {
     let mut value = file();
     value["schema_version"] = json!(1);
+    old_screen_fields(&mut value);
     // Version 1 had no output profiles.
     value.as_object_mut().expect("file").remove("outputs");
     value["audio"] = json!({
@@ -184,14 +199,17 @@ fn a_saved_project_loads_back_unchanged() {
 #[test]
 fn screen_capture_targets_are_not_saved() {
     let mut original = project();
-    let SourceKind::Screen { source_id, .. } = &mut original.scenes[1].sources[0].kind else {
+    let SourceKind::Screen {
+        capture_target_id, ..
+    } = &mut original.scenes[1].sources[0].kind
+    else {
         panic!("screen source");
     };
-    *source_id = Some("window:7:0x2a".to_owned());
+    *capture_target_id = Some("window:7:0x2a".to_owned());
     let bytes = to_json(&original, CANVAS);
     let text = String::from_utf8(bytes.clone()).expect("utf-8");
     assert!(
-        !text.contains("source_id") && !text.contains("window:7"),
+        !text.contains("capture_target_id") && !text.contains("window:7"),
         "{text}"
     );
     // Everything else comes back.
@@ -202,7 +220,7 @@ fn screen_capture_targets_are_not_saved() {
 #[test]
 fn the_file_reads_like_the_command_results() {
     let value = file();
-    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["schema_version"], 3);
     assert_eq!(value["canvas"], json!({"width": 1920, "height": 1080}));
     assert_eq!(value["active_scene"], "scene_k3j9x2m4q8w1");
     // A source is its `list_scenes` object.
@@ -265,13 +283,13 @@ fn unreadable_files_and_other_versions_are_refused() {
         "schema_version"
     );
     let mut value = file();
-    value["schema_version"] = json!(3);
+    value["schema_version"] = json!(4);
     assert_eq!(
         only(&value, "newer than this build reads"),
         "schema_version"
     );
     let invalid = parse(&serde_json::to_vec(&value).expect("bytes"), CANVAS).unwrap_err();
-    assert_eq!(invalid.schema_version, Some(3));
+    assert_eq!(invalid.schema_version, Some(4));
     value["schema_version"] = json!(0);
     assert_eq!(only(&value, "not supported"), "schema_version");
 }
@@ -399,7 +417,7 @@ fn source_problems_name_the_source() {
     value["scenes"][0]["sources"][1]["blur"] = json!(3);
     assert_eq!(only(&value, "unknown field `blur`"), at);
     // Without the command's field list, which names fields a file refuses.
-    assert!(!problems(&value)[0].1.contains("source_id"));
+    assert!(!problems(&value)[0].1.contains("capture_target_id"));
     let mut value = file();
     value["scenes"][0]["sources"][1]["name"] = json!("color_bars");
     assert_eq!(
@@ -407,11 +425,14 @@ fn source_problems_name_the_source() {
         "scenes[0].sources[1].name"
     );
     let mut value = file();
-    value["scenes"][0]["sources"][1]["scene"] = json!("Show");
+    value["scenes"][0]["sources"][1]["scene_name"] = json!("Show");
     assert_eq!(only(&value, "the one it is listed in"), at);
     let mut value = file();
-    value["scenes"][1]["sources"][0]["source_id"] = json!("monitor:1");
-    assert_eq!(only(&value, "not stored"), "scenes[1].sources[0].source_id");
+    value["scenes"][1]["sources"][0]["capture_target_id"] = json!("monitor:1");
+    assert_eq!(
+        only(&value, "not stored"),
+        "scenes[1].sources[0].capture_target_id"
+    );
 }
 
 #[test]
@@ -609,7 +630,7 @@ fn output_profiles_name_existing_buses_and_follow_their_rules() {
     // Not an id at all: one problem, from the command's rules.
     let mut value = file();
     value["outputs"]["recording"]["mix"] = json!("Voice");
-    assert_eq!(only(&value, "`mix_bus_id`"), "outputs.recording");
+    assert_eq!(only(&value, "`bus_id`"), "outputs.recording");
     let mut value = file();
     value["outputs"]["stream"]["video_bitrate_kbps"] = json!(1);
     assert_eq!(only(&value, "`video_bitrate_kbps`"), "outputs.stream");
@@ -690,7 +711,7 @@ fn a_version_1_file_is_migrated() {
     assert_eq!(loaded.project.audio, expected);
     assert_eq!(loaded.project.scenes, project().scenes);
     assert_eq!(loaded.project.outputs, OutputProfiles::default());
-    // The same ids every time, until the file is saved as version 2.
+    // The same ids every time, until the file is saved as version 3.
     assert_eq!(parse(&bytes, CANVAS), Ok(loaded));
 }
 
@@ -717,9 +738,8 @@ fn version_1_audio_keeps_its_rules_with_paths() {
     assert_eq!(only(&value, "at most 8 sources"), "audio");
     // Version 2's shape is not version 1's: neither its audio nor its
     // output profiles.
-    let mut value = file();
-    value["schema_version"] = json!(1);
-    value.as_object_mut().expect("file").remove("outputs");
+    let mut value = v1_file();
+    value["audio"] = file()["audio"].clone();
     assert_eq!(only(&value, "unknown field `buses`"), "audio.buses");
     let mut value = v1_file();
     value["outputs"] = json!({});
@@ -777,4 +797,70 @@ fn every_problem_is_reported_at_once() {
             "audio.program"
         ]
     );
+}
+
+#[test]
+fn version_2_screen_fields_migrate_and_save_as_version_3() {
+    let mut old = file();
+    old["schema_version"] = json!(2);
+    old_screen_fields(&mut old);
+    let loaded = parse(&serde_json::to_vec(&old).unwrap(), CANVAS).expect("v2 migrates");
+    assert_eq!(loaded.migrated_from, Some(2));
+    assert_eq!(loaded.project, project());
+    let saved = to_json(&loaded.project, CANVAS);
+    let value: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(value["schema_version"], 3);
+    let screen = &value["scenes"][1]["sources"][0];
+    assert_eq!(screen["target_kinds"], json!(["window"]));
+    assert_eq!(screen["cursor_mode"], "hidden");
+    assert!(screen.get("source_types").is_none() && screen.get("cursor").is_none());
+    assert_eq!(
+        parse(&saved, CANVAS).unwrap(),
+        super::Loaded {
+            project: loaded.project,
+            migrated_from: None
+        }
+    );
+}
+
+#[test]
+fn old_screen_fields_in_version_3_and_stored_targets_have_paths() {
+    for (old, new) in [("source_types", "target_kinds"), ("cursor", "cursor_mode")] {
+        let mut value = file();
+        let screen = value["scenes"][1]["sources"][0].as_object_mut().unwrap();
+        let field = screen.remove(new).unwrap();
+        screen.insert(old.into(), field);
+        assert_eq!(
+            only(&value, &format!("unknown field `{old}`")),
+            format!("scenes[1].sources[0].{old}")
+        );
+    }
+    let mut old = file();
+    old["schema_version"] = json!(2);
+    old_screen_fields(&mut old);
+    old["scenes"][1]["sources"][0]["source_id"] = json!("monitor:1");
+    assert_eq!(only(&old, "not stored"), "scenes[1].sources[0].source_id");
+    let mut current = file();
+    current["scenes"][1]["sources"][0]["capture_target_id"] = json!("monitor:1");
+    assert_eq!(
+        only(&current, "not stored"),
+        "scenes[1].sources[0].capture_target_id"
+    );
+}
+
+#[test]
+fn migration_refuses_conflicting_spellings_and_preserves_invalid_value_paths() {
+    let mut old = file();
+    old["schema_version"] = json!(2);
+    old_screen_fields(&mut old);
+    old["scenes"][1]["sources"][0]["cursor_mode"] = json!("embedded");
+    assert_eq!(
+        only(&old, "unknown field `cursor_mode`"),
+        "scenes[1].sources[0].cursor_mode"
+    );
+    let mut old = file();
+    old["schema_version"] = json!(2);
+    old_screen_fields(&mut old);
+    old["scenes"][1]["sources"][0]["source_types"] = json!([]);
+    assert_eq!(only(&old, "must not be empty"), "scenes[1].sources[0]");
 }

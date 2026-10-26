@@ -28,7 +28,7 @@ pub fn selected_scene(previous: Option<&str>, clicked: Option<&str>, scenes: &Sc
     clicked
         .filter(exists)
         .or(previous.filter(exists))
-        .unwrap_or(&scenes.active_id)
+        .unwrap_or(&scenes.active_scene_id)
         .to_owned()
 }
 
@@ -543,8 +543,8 @@ mod tests {
         SceneList {
             canvas_width: 1920,
             canvas_height: 1080,
-            active: active.to_owned(),
-            active_id: id(active),
+            active_scene_name: active.to_owned(),
+            active_scene_id: id(active),
             scenes: names
                 .iter()
                 .map(|name| SceneSpec {

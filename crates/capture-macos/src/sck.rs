@@ -120,17 +120,17 @@ fn shareable_content() -> Result<SCShareableContent, CaptureError> {
 
 /// ScreenCaptureKit is linked, so capture is offered. Whether the app may
 /// use it is only known by asking, which can show the system's permission
-/// prompt; capabilities therefore do not ask (`list_screen_sources` does).
+/// prompt; capabilities therefore do not ask (`list_capture_targets` does).
 fn screen_capability() -> ScreenCaptureCapability {
     ScreenCaptureCapability {
         backend: Some(BACKEND.to_owned()),
         available: true,
         unavailable_reason: None,
         portal_version: None,
-        source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+        target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
         cursor_modes: vec![CursorMode::Hidden, CursorMode::Embedded],
         picker: false,
-        source_list: true,
+        target_list: true,
     }
 }
 
@@ -231,7 +231,7 @@ fn resolve(id: &str) -> Result<(SCContentFilter, VideoSourceInfo), CaptureError>
     let not_found = || {
         CaptureError::new(
             CaptureErrorKind::NotFound,
-            format!("no screen source `{id}`; list them with list_screen_sources"),
+            format!("no screen source `{id}`; list them with list_capture_targets"),
         )
     };
     let source = SourceRef::parse(id).ok_or_else(not_found)?;
@@ -285,7 +285,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<SckStream, Captur
     let id = selection.source.as_deref().ok_or_else(|| {
         CaptureError::new(
             CaptureErrorKind::InvalidRequest,
-            "name a source (`source_id`) from list_screen_sources",
+            "name a source (`capture_target_id`) from list_capture_targets",
         )
     })?;
     let (filter, source) = resolve(id)?;
@@ -293,7 +293,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<SckStream, Captur
         .with_width(source.width.unwrap_or(1280))
         .with_height(source.height.unwrap_or(720))
         .with_pixel_format(SckPixelFormat::BGRA)
-        .with_shows_cursor(selection.cursor != CursorMode::Hidden)
+        .with_shows_cursor(selection.cursor_mode != CursorMode::Hidden)
         // At most the canvas rate; ScreenCaptureKit sends fewer frames
         // while nothing changes.
         .with_minimum_frame_interval(&CMTime::new(1, 60))

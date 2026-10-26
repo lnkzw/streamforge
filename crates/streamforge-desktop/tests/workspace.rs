@@ -67,7 +67,12 @@ fn model(dir: &TempDir) -> Model {
     .expect("worker");
     let mut model = Model::new(worker);
     wait(&mut model, "the scene list", |m| m.scenes.is_some());
-    let program = model.scenes.as_ref().expect("scenes").active_id.clone();
+    let program = model
+        .scenes
+        .as_ref()
+        .expect("scenes")
+        .active_scene_id
+        .clone();
     model.add_source(
         &program,
         &SourceForm {

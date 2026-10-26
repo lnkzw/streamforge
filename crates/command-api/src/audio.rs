@@ -464,7 +464,7 @@ pub fn program_paths<'a>(
 pub struct OutputMix {
     pub output: OutputKind,
     /// The bus's id.
-    pub bus: String,
+    pub bus_id: String,
     /// The recording's further audio tracks (bus ids); fixed while it runs.
     pub tracks: Vec<String>,
     pub running: bool,

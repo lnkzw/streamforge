@@ -69,17 +69,17 @@ impl CaptureBackend for LinuxCapture {
         let screen = match portal {
             Ok(info) => ScreenCaptureCapability {
                 backend: Some(screen::BACKEND.to_owned()),
-                available: !info.source_kinds.is_empty(),
+                available: !info.target_kinds.is_empty(),
                 unavailable_reason: info
-                    .source_kinds
+                    .target_kinds
                     .is_empty()
                     .then(|| "the ScreenCast portal advertises no source types".to_owned()),
                 portal_version: Some(info.version),
-                source_kinds: info.source_kinds,
+                target_kinds: info.target_kinds,
                 cursor_modes: info.cursor_modes,
                 // The portal always asks the user; it cannot capture a named source.
                 picker: true,
-                source_list: false,
+                target_list: false,
             },
             Err(err) => ScreenCaptureCapability::unavailable(Some(screen::BACKEND), err.message),
         };
@@ -102,7 +102,7 @@ impl CaptureBackend for LinuxCapture {
     }
 
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
-        Err(screen::no_source_list())
+        Err(screen::no_target_list())
     }
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {

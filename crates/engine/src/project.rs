@@ -134,7 +134,7 @@ impl Engine {
         if screens > 0 {
             warnings.push(format!(
                 "{screens} screen source(s) have no capture target (it is not saved): choose one \
-                 with set_screen_source; only where a system picker exists (Linux) can it ask \
+                 with set_capture_target; only where a system picker exists (Linux) can it ask \
                  instead when the scene is rendered"
             ));
         }

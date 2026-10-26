@@ -27,10 +27,10 @@ All changes below are made before 0.1.0, in three steps (2a, 2b, 2c), each liste
 
 ### Step 2b: names
 
-9. **Capture targets get their own name.** What a screen source captures (a monitor or a window from the system) was `source_id`, next to the scene source's own `id`. It becomes `capture_target_id`; `list_screen_sources` becomes `list_capture_targets` (result `targets`), `set_screen_source` becomes `set_capture_target`, the picker filter `source_types` becomes `target_kinds` (and the capabilities' `source_kinds` too), and `cursor` becomes `cursor_mode`.
-10. **One rule for references in requests:** an object is named by `<entity>_id` or `<entity>_name`: `scene_id`/`scene_name`, `source_id`/`source_name`, `channel_id`/`channel_name`, `bus_id`/`bus_name` (also for `set_output_profile`'s mix). The id is looked up first, and given both, they must agree, as today. Results name references explicitly: the scene list's `active` becomes `active_scene_name` (next to `active_scene_id`), and `get_mixer`'s `outputs[].bus` becomes `bus_id`. An object's own fields stay `id` and `name`, and the profiles keep `mix` and `tracks` (always bus ids), so the project file keeps schema version 2.
+9. **Capture targets get their own name.** What a screen source captures (a monitor or a window from the system) was `source_id`, next to the scene source's own `id`. It becomes `capture_target_id`; `list_screen_sources` becomes `list_capture_targets` (result `targets`), `set_screen_source` becomes `set_capture_target`, the picker filter `source_types` becomes `target_kinds` (and the capabilities' `source_kinds` too), and `cursor` becomes `cursor_mode`. The capabilities' `source_list` becomes `target_list`.
+10. **One rule for references in requests:** an object is named by `<entity>_id` or `<entity>_name`: `scene_id`/`scene_name`, `source_id`/`source_name`, `channel_id`/`channel_name`, `bus_id`/`bus_name` (also for `set_output_profile`'s mix). The id is looked up first, and given both, they must agree, as today. Results name references explicitly: the scene list's `active` becomes `active_scene_name` (next to `active_scene_id`), and `get_mixer`'s `outputs[].bus` becomes `bus_id`. An object's own fields stay `id` and `name`, and the profiles keep `mix` and `tracks` (always bus ids), but renamed screen fields move the project file to schema version 3; version 1 and 2 files migrate on load.
 11. **Recording tracks are named explicitly:** `tracks: [{"bus_id": …} | {"bus_name": …}]`. Before, a string that looked like a bus id was taken as one, so a bus named like an id could not be chosen by name.
-15. **CLI flags follow the protocol:** `--file-name`, `--target-kind`, `--capture-target-id`, `--video-bitrate-kbps`, `--stream-key-env` (as in the MCP server); `probe_composite`'s `snapshot_path` becomes `snapshot_file_name`, since it takes a file name, not a path.
+15. **CLI flags follow the protocol:** `--file-name`, `--target-kind`, `--capture-target-id`, `--video-bitrate-kbps`, `--stream-key-env` (as in the MCP server), `--cursor-mode` and `compose --snapshot-file-name`; `capture sources` becomes `capture targets`; `probe_composite`'s `snapshot_path` becomes `snapshot_file_name`, since it takes a file name, not a path.
 
 ### Step 2c: report shapes, then the freeze guard
 
@@ -48,6 +48,6 @@ All changes below are made before 0.1.0, in three steps (2a, 2b, 2c), each liste
 ## Consequences
 
 - Every in-repo client changes in the same step as the protocol; the MCP tools follow from the registry. Agents and scripts written against the pre-release protocol break, which is acceptable before the first release (`docs/protocol.md`).
-- The project file keeps schema version 2.
+- The project file writes schema version 3 for the renamed screen fields, migrating version 1 and 2 files on load.
 - After step 2c, the soak test (M13) runs against the final protocol, and the user documentation uses the final names.
 - From 0.1.0 on, each of these shapes is v1 and changes only additively.

@@ -69,14 +69,14 @@ fn screen_capability() -> ScreenCaptureCapability {
             available: true,
             unavailable_reason: None,
             portal_version: None,
-            source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+            target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
             cursor_modes: if cursor_selectable() {
                 vec![CursorMode::Hidden, CursorMode::Embedded]
             } else {
                 Vec::new()
             },
             picker: false,
-            source_list: true,
+            target_list: true,
         },
         Err(err) => ScreenCaptureCapability::unavailable(Some(BACKEND), err.message),
     }
@@ -181,7 +181,7 @@ fn resolve(id: &str) -> Result<(Item, VideoSourceInfo), CaptureError> {
     let not_found = || {
         CaptureError::new(
             CaptureErrorKind::NotFound,
-            format!("no screen source `{id}`; list them with list_screen_sources"),
+            format!("no screen source `{id}`; list them with list_capture_targets"),
         )
     };
     match SourceRef::parse(id).ok_or_else(not_found)? {
@@ -220,13 +220,13 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
     let id = selection.source.as_deref().ok_or_else(|| {
         CaptureError::new(
             CaptureErrorKind::InvalidRequest,
-            "name a source (`source_id`) from list_screen_sources",
+            "name a source (`capture_target_id`) from list_capture_targets",
         )
     })?;
     let (item, source) = resolve(id)?;
     let mut warnings = Vec::new();
-    let cursor = if cursor_selectable() {
-        match selection.cursor {
+    let cursor_mode = if cursor_selectable() {
+        match selection.cursor_mode {
             CursorMode::Hidden => CursorCaptureSettings::WithoutCursor,
             // `Metadata` is not advertised, so `check_supported` rejected it.
             CursorMode::Embedded | CursorMode::Metadata => CursorCaptureSettings::WithCursor,
@@ -234,7 +234,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
     } else {
         warnings.push(format!(
             "this Windows version cannot select a cursor mode; `{}` was ignored",
-            selection.cursor.as_str()
+            selection.cursor_mode.as_str()
         ));
         CursorCaptureSettings::Default
     };
@@ -242,7 +242,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
     let control = match item {
         Item::Monitor(monitor) => run(
             monitor,
-            cursor,
+            cursor_mode,
             (
                 Arc::clone(&sink),
                 "the captured display went away (disconnected or turned off)",
@@ -250,7 +250,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
         ),
         Item::Window(window) => run(
             window,
-            cursor,
+            cursor_mode,
             (Arc::clone(&sink), "the captured window was closed"),
         ),
     }?;
@@ -265,7 +265,7 @@ fn start(selection: &ScreenSelection, deliver: bool) -> Result<WgcStream, Captur
 
 fn run<T>(
     item: T,
-    cursor: CursorCaptureSettings,
+    cursor_mode: CursorCaptureSettings,
     flags: (Arc<FrameSink>, &'static str),
 ) -> Result<CaptureControl<Handler, String>, CaptureError>
 where
@@ -273,7 +273,7 @@ where
 {
     let settings = Settings::new(
         item,
-        cursor,
+        cursor_mode,
         DrawBorderSettings::Default,
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,

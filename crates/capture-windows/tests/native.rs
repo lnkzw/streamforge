@@ -13,10 +13,10 @@ use capture_api::{
 };
 use capture_windows::WgcCapture;
 
-fn selection(source: Option<&str>, cursor: CursorMode) -> ScreenSelection {
+fn selection(source: Option<&str>, cursor_mode: CursorMode) -> ScreenSelection {
     ScreenSelection {
-        source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
-        cursor,
+        target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+        cursor_mode,
         source: source.map(str::to_owned),
     }
 }
@@ -29,8 +29,8 @@ fn capabilities_describe_named_sources_without_a_picker() {
     let screen = &capabilities.screen;
     assert_eq!(screen.available, screen.unavailable_reason.is_none());
     if screen.available {
-        assert!(screen.source_list && !screen.picker);
-        assert!(screen.source_kinds.contains(&VideoSourceKind::Monitor));
+        assert!(screen.target_list && !screen.picker);
+        assert!(screen.target_kinds.contains(&VideoSourceKind::Monitor));
     }
     assert!(!capabilities.audio.available, "audio comes from cpal");
 }
@@ -144,7 +144,7 @@ fn bad_selections_are_structured_errors() {
             "{other}: {reused:?}"
         );
     }
-    // Without cursor selection every mode is accepted (and reported ignored).
+    // Without cursor_mode selection every mode is accepted (and reported ignored).
     if !screen.cursor_modes.is_empty() {
         let metadata = error(selection(Some("monitor:x"), CursorMode::Metadata));
         assert_eq!(metadata.kind, CaptureErrorKind::Unsupported, "{metadata:?}");

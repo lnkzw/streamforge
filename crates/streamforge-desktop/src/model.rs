@@ -10,10 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_api::{
-    AudioInput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
-    DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EngineStatus, HealthReport, MixerState, OutputHealth,
-    OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted, SceneList,
-    ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
+    AudioInput, AudioOutput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
+    DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EncoderPreference, EngineStatus, HealthReport,
+    MixerState, OutputHealth, OutputKind, OutputProfiles, ProjectFileList, ProjectValidation,
+    RecordingStarted, SceneList, ScreenSource, SendTap, StreamState, StreamingStarted,
+    VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -174,6 +175,8 @@ enum Pending {
     ScreenSources,
     /// `list_audio_inputs`, for the channels' inputs.
     AudioInputs,
+    /// `list_audio_outputs`, for the monitor's device.
+    AudioOutputs,
     /// `list_projects`, for the open and save dialogs.
     Projects,
     /// `validate_project` of this file, before it is opened.
@@ -187,7 +190,7 @@ pub struct Model {
     pub scenes: Option<SceneList>,
     pub mixer: Option<MixerState>,
     /// What each output starts with: its mix, the recording's tracks, the
-    /// monitor's switch.
+    /// encoder settings, the monitor's switch and device.
     pub profiles: Option<OutputProfiles>,
     /// Live counters and capture states (`get_health`), while a pipeline
     /// may run.
@@ -205,6 +208,10 @@ pub struct Model {
     /// listed; `None` until asked for. A new list replaces it on arrival.
     pub audio_inputs: Option<Result<Vec<AudioInput>, String>>,
     audio_inputs_received: Option<Instant>,
+    /// The audio outputs the monitor can play on, or why they cannot be
+    /// listed; `None` until asked for. A new list replaces it on arrival.
+    pub audio_outputs: Option<Result<Vec<AudioOutput>, String>>,
+    audio_outputs_received: Option<Instant>,
     /// The project directory's files, or why they cannot be listed; `None`
     /// until asked for (and after a save, which may have added one).
     pub projects: Option<Result<ProjectFileList, String>>,
@@ -240,6 +247,8 @@ impl Model {
             screen_sources: None,
             audio_inputs: None,
             audio_inputs_received: None,
+            audio_outputs: None,
+            audio_outputs_received: None,
             projects: None,
             validation: None,
             project: None,
@@ -403,6 +412,26 @@ impl Model {
         self.pending
             .values()
             .any(|pending| matches!(pending, Pending::AudioInputs))
+    }
+
+    /// Ask the engine for the audio outputs (skipped while asked).
+    pub fn find_audio_outputs(&mut self) {
+        if !self.finding_audio_outputs() {
+            self.submit("list_audio_outputs", json!({}), Pending::AudioOutputs);
+        }
+    }
+
+    /// How old the list of audio outputs is.
+    pub fn audio_outputs_age(&self) -> Option<Duration> {
+        self.audio_outputs_received
+            .map(|received| received.elapsed())
+    }
+
+    /// Whether the list of audio outputs is on its way.
+    pub fn finding_audio_outputs(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::AudioOutputs))
     }
 
     /// Ask for the project directory's files (skipped while asked).
@@ -686,6 +715,42 @@ impl Model {
         );
     }
 
+    /// Choose the monitor's device (`None`: the system default); only
+    /// while the pipeline is idle.
+    pub fn set_monitor_device(&mut self, device: Option<&str>) {
+        self.act("set_monitor_device", json!({ "device": device }));
+    }
+
+    /// The video encoder and, for the stream, the bitrate that `output`
+    /// takes at its next start; what is `None` stays.
+    pub fn set_video_settings(
+        &mut self,
+        output: OutputKind,
+        video_encoder: Option<EncoderPreference>,
+        video_bitrate_kbps: Option<u32>,
+    ) {
+        let mut params = Map::new();
+        params.insert("output".into(), output.as_str().into());
+        if let Some(encoder) = video_encoder {
+            params.insert("video_encoder".into(), encoder.as_str().into());
+        }
+        if let Some(kbps) = video_bitrate_kbps {
+            params.insert("video_bitrate_kbps".into(), kbps.into());
+        }
+        // Shown at once, as for the mix.
+        if let Some(profiles) = &mut self.profiles {
+            if let (Some(encoder), Some(current)) =
+                (video_encoder, profiles.video_encoder_mut(output))
+            {
+                *current = encoder;
+            }
+            if let (Some(kbps), OutputKind::Stream) = (video_bitrate_kbps, output) {
+                profiles.stream.video_bitrate_kbps = kbps;
+            }
+        }
+        self.act("set_output_profile", Value::Object(params));
+    }
+
     pub fn start_recording(&mut self, file_name: &str) {
         self.act("start_recording", json!({ "file_name": file_name }));
     }
@@ -738,6 +803,15 @@ impl Model {
                         Err(error) => Err(error.message),
                     });
                     self.audio_inputs_received = Some(Instant::now());
+                    continue;
+                }
+                Some(Pending::AudioOutputs) => {
+                    self.audio_outputs = Some(match response.result {
+                        Ok(CommandOutput::AudioOutputs(list)) => Ok(list.outputs),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    self.audio_outputs_received = Some(Instant::now());
                     continue;
                 }
                 Some(Pending::Projects) => {
@@ -1068,6 +1142,12 @@ pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
             );
         }
     }
+    // Switched on but silent; nothing recorded or streamed is affected.
+    if let Some(monitor) = health.monitor.as_ref().filter(|monitor| monitor.enabled)
+        && let CaptureState::Ended { reason } = &monitor.state
+    {
+        push(Level::Warning, format!("monitor ended: {reason}"));
+    }
     items
 }
 
@@ -1109,7 +1189,7 @@ fn encoder_label(info: &VideoEncoderInfo) -> String {
 mod tests {
     use command_api::{
         CaptureHealth, LiveInputStats, LiveMixStats, LiveOutputStats, LiveRenderStats,
-        LiveSourceStats, SourceId,
+        LiveSourceStats, MonitorHealth, SourceId,
     };
 
     use super::*;
@@ -1277,5 +1357,32 @@ mod tests {
         assert_eq!(items[0].level, Level::Error);
         assert!(items[0].text.starts_with("REC failed"), "{items:?}");
         assert_eq!(items[1].level, Level::Error);
+
+        // A monitor that ended warns while it is switched on.
+        let mut monitor = MonitorHealth {
+            device: Some("headphones".to_owned()),
+            enabled: true,
+            state: CaptureState::Ended {
+                reason: "not_found: headphones is gone".to_owned(),
+            },
+            latency_ms: None,
+            feed: None,
+        };
+        health.monitor = Some(monitor.clone());
+        let last = health_items(&health).pop().expect("items");
+        assert_eq!(
+            last,
+            HealthItem {
+                level: Level::Warning,
+                text: "monitor ended: not_found: headphones is gone".to_owned(),
+            }
+        );
+        monitor.enabled = false;
+        health.monitor = Some(monitor);
+        let items = health_items(&health);
+        assert!(
+            items.iter().all(|item| !item.text.starts_with("monitor")),
+            "{items:?}"
+        );
     }
 }

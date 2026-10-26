@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use command_api::{DEFAULT_VIDEO_BITRATE_KBPS, EncoderPreference};
 use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
@@ -88,13 +89,21 @@ pub(crate) enum Dialog {
     /// Edits a draft; Done applies it, cancelling drops it.
     RecordSettings {
         file_name: String,
+        encoder: EncoderPreference,
     },
-    /// Edits a draft of the target. `go_live`: opened from the LIVE button
-    /// without a target; its action starts the stream.
+    /// Edits a draft of the target and the video settings. `go_live`:
+    /// opened from the LIVE button without a target; its action starts the
+    /// stream.
     StreamSettings {
         url: String,
         key: String,
         go_live: bool,
+        encoder: EncoderPreference,
+        bitrate_kbps: u32,
+    },
+    /// A draft of the monitor's device (`None`: the system default).
+    MonitorSettings {
+        device: Option<String>,
     },
     /// A new channel's name and what it plays.
     AddChannel {
@@ -371,17 +380,44 @@ impl DesktopApp {
         }
     }
 
+    /// The video settings come from the output's profile (the defaults
+    /// until it is known).
     pub(crate) fn open_record_settings(&mut self) {
+        let profiles = self.model.profiles.as_ref();
         self.dialog = Some(Dialog::RecordSettings {
             file_name: self.record_file.clone(),
+            encoder: profiles.map_or_else(EncoderPreference::default, |profiles| {
+                profiles.recording.video_encoder
+            }),
         });
     }
 
     pub(crate) fn open_stream_settings(&mut self, go_live: bool) {
+        let stream = self
+            .model
+            .profiles
+            .as_ref()
+            .map(|profiles| &profiles.stream);
         self.dialog = Some(Dialog::StreamSettings {
             url: self.stream_url.clone(),
             key: self.stream_key.clone(),
             go_live,
+            encoder: stream.map_or_else(EncoderPreference::default, |stream| stream.video_encoder),
+            bitrate_kbps: stream.map_or(DEFAULT_VIDEO_BITRATE_KBPS, |stream| {
+                stream.video_bitrate_kbps
+            }),
+        });
+    }
+
+    /// The device list is asked for again: devices come and go.
+    pub(crate) fn open_monitor_settings(&mut self) {
+        self.model.find_audio_outputs();
+        self.dialog = Some(Dialog::MonitorSettings {
+            device: self
+                .model
+                .profiles
+                .as_ref()
+                .and_then(|profiles| profiles.monitor.device.clone()),
         });
     }
 

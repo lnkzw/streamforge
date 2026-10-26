@@ -1,11 +1,14 @@
 //! Modal dialogs: confirmations for consequential actions, adding a
-//! source, a channel or a bus, a channel's input, the output targets, and
-//! opening and saving projects.
+//! source, a channel or a bus, a channel's input, the output settings
+//! (targets, video encoder and bitrate, the monitor's device), and opening
+//! and saving projects.
 //! One is open at a time; Escape or a click outside cancels.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use command_api::{MIN_GAIN_DB, StreamKey, StreamTarget};
+use command_api::{
+    EncoderPreference, MIN_GAIN_DB, OutputKind, StreamKey, StreamTarget, VIDEO_BITRATE_KBPS,
+};
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
@@ -56,9 +59,18 @@ impl DesktopApp {
                         scene_name,
                         form,
                     } => add_source(ui, &mut self.model, scene_id, scene_name, form),
-                    Dialog::RecordSettings { file_name } => self.record_settings(ui, file_name),
-                    Dialog::StreamSettings { url, key, go_live } => {
-                        self.stream_settings(ui, url, key, *go_live)
+                    Dialog::RecordSettings { file_name, encoder } => {
+                        self.record_settings(ui, file_name, encoder)
+                    }
+                    Dialog::StreamSettings {
+                        url,
+                        key,
+                        go_live,
+                        encoder,
+                        bitrate_kbps,
+                    } => self.stream_settings(ui, url, key, *go_live, (encoder, bitrate_kbps)),
+                    Dialog::MonitorSettings { device } => {
+                        monitor_settings(ui, &mut self.model, device)
                     }
                     Dialog::AddChannel { name, input } => {
                         add_channel(ui, &mut self.model, name, input)
@@ -410,7 +422,12 @@ impl DesktopApp {
         }
     }
 
-    fn record_settings(&mut self, ui: &mut egui::Ui, file_name: &mut String) -> Outcome {
+    fn record_settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        file_name: &mut String,
+        encoder: &mut EncoderPreference,
+    ) -> Outcome {
         ui.label(TextRole::Title.text("Recording"));
         ui.label(TextRole::Label.text("File name"));
         ui.add(
@@ -418,17 +435,25 @@ impl DesktopApp {
                 .hint_text("recording.mkv")
                 .desired_width(f32::INFINITY),
         );
-        let note = if self.model.recording.is_some() {
-            "Saved in the recordings directory. A change applies to the next recording."
-        } else {
-            "Saved in the recordings directory."
-        };
-        ui.label(TextRole::Meta.text(note));
+        ui.label(TextRole::Meta.text("Saved in the recordings directory."));
+        encoder_picker(ui, encoder);
+        if self.model.recording.is_some() {
+            ui.label(TextRole::Meta.text("A change applies to the next recording."));
+        }
         ui.add_space(size::SPACE_8);
         let name = file_name.trim();
         match buttons(ui, ButtonKind::Primary, "Done", !name.is_empty()) {
             Some(true) => {
                 self.record_file = name.to_owned();
+                let current = self
+                    .model
+                    .profiles
+                    .as_ref()
+                    .map(|profiles| profiles.recording.video_encoder);
+                if current != Some(*encoder) {
+                    self.model
+                        .set_video_settings(OutputKind::Recording, Some(*encoder), None);
+                }
                 Outcome::Done
             }
             Some(false) => Outcome::Cancel,
@@ -437,13 +462,15 @@ impl DesktopApp {
     }
 
     /// The target is checked with the engine's rules as it is typed, so a
-    /// mistake shows here and not as a failed start.
+    /// mistake shows here and not as a failed start. Changed video settings
+    /// reach the engine before the stream starts.
     fn stream_settings(
         &mut self,
         ui: &mut egui::Ui,
         url: &mut String,
         key: &mut String,
         go_live: bool,
+        (encoder, bitrate_kbps): (&mut EncoderPreference, &mut u32),
     ) -> Outcome {
         ui.label(TextRole::Title.text("Stream"));
         ui.label(TextRole::Label.text("Server URL"));
@@ -474,6 +501,20 @@ impl DesktopApp {
                 ));
             }
         }
+        ui.horizontal(|ui| {
+            ui.label(TextRole::Label.text("Video bitrate"));
+            let field = ui.add(
+                egui::DragValue::new(bitrate_kbps)
+                    .range(VIDEO_BITRATE_KBPS)
+                    .speed(50.0)
+                    .suffix(" kbps"),
+            );
+            labelled(ui, field, "Video bitrate (kbps)");
+        });
+        encoder_picker(ui, encoder);
+        if self.model.streaming.is_some() {
+            ui.label(TextRole::Meta.text("Video settings apply to the next stream."));
+        }
         ui.add_space(size::SPACE_8);
         let ready = problem.is_none() && (!target.is_empty() || !go_live);
         let action = if go_live { "Go live" } else { "Done" };
@@ -481,6 +522,22 @@ impl DesktopApp {
             Some(true) => {
                 self.stream_url = target.to_owned();
                 self.stream_key = std::mem::take(key);
+                let current = self.model.profiles.as_ref().map(|profiles| {
+                    (
+                        profiles.stream.video_encoder,
+                        profiles.stream.video_bitrate_kbps,
+                    )
+                });
+                let encoder =
+                    (current.map(|(encoder, _)| encoder) != Some(*encoder)).then_some(*encoder);
+                let bitrate =
+                    (current.map(|(_, kbps)| kbps) != Some(*bitrate_kbps)).then_some(*bitrate_kbps);
+                if encoder.is_some() || bitrate.is_some() {
+                    // The engine answers in order, so a start below takes
+                    // these settings.
+                    self.model
+                        .set_video_settings(OutputKind::Stream, encoder, bitrate);
+                }
                 if go_live {
                     self.model
                         .start_streaming(&self.stream_url, &self.stream_key);
@@ -755,6 +812,124 @@ fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
             .clicked()
         {
             model.find_audio_inputs();
+        }
+        ui.add(egui::Label::new(TextRole::Meta.text(note)).wrap());
+    });
+}
+
+/// Which H.264 encoders an output tries (ADR 0011), with what each choice
+/// means; one note line, always there.
+fn encoder_picker(ui: &mut egui::Ui, encoder: &mut EncoderPreference) {
+    ui.label(TextRole::Label.text("Video encoder"));
+    ui.horizontal(|ui| {
+        for (choice, label) in [
+            (EncoderPreference::Auto, "Auto"),
+            (EncoderPreference::Software, "Software"),
+            (EncoderPreference::Hardware, "Hardware"),
+        ] {
+            ui.selectable_value(encoder, choice, label);
+        }
+    });
+    let note = match encoder {
+        EncoderPreference::Auto => "A hardware encoder if one opens on this machine, else x264.",
+        EncoderPreference::Software => "x264 on the CPU: the same on every machine, more load.",
+        EncoderPreference::Hardware => {
+            "A hardware encoder only; the output does not start without one."
+        }
+    };
+    ui.label(TextRole::Meta.text(note));
+}
+
+/// Choose the monitor's device while the pipeline is idle, as the engine
+/// requires; the bus it plays is chosen in the routing matrix.
+fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>) -> Outcome {
+    ui.label(TextRole::Title.text("Monitor"));
+    let profile = model.profiles.as_ref().map(|profiles| &profiles.monitor);
+    let bus = profile.and_then(|profile| {
+        model
+            .mixer
+            .as_ref()?
+            .buses
+            .iter()
+            .find(|bus| bus.id == profile.mix)
+            .map(|bus| bus.name.clone())
+    });
+    let current = profile.map(|profile| profile.device.clone());
+    ui.label(TextRole::Meta.text(format!(
+        "Plays {} for listening; it is never recorded or streamed. Its mix is chosen in the \
+         routing matrix.",
+        bus.as_deref().unwrap_or("its mix")
+    )));
+    let idle = model.mixer.as_ref().is_none_or(|mixer| !mixer.running);
+    ui.label(TextRole::Label.text("Output device"));
+    ui.add_enabled_ui(idle, |ui| output_picker(ui, model, device, idle));
+    ui.add_space(size::SPACE_8);
+    let changed = current.is_some_and(|current| current != *device);
+    match buttons(ui, ButtonKind::Primary, "Use device", idle && changed) {
+        Some(true) => {
+            model.set_monitor_device(device.as_deref());
+            Outcome::Done
+        }
+        Some(false) => Outcome::Cancel,
+        None => Outcome::Open,
+    }
+}
+
+/// Choose a listed audio output, or the system's default one. A device
+/// that is not listed (unplugged) stays choosable under its name.
+fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>, idle: bool) {
+    const DEFAULT: &str = "System default output";
+    // Without a list (still asked for, or failed), nothing counts as
+    // missing.
+    let listed = match &model.audio_outputs {
+        Some(Ok(outputs)) => Some(outputs.as_slice()),
+        _ => None,
+    };
+    let chosen = workspace::output_label(device.as_deref(), listed);
+    let unlisted = format!("{} (not found)", chosen.text);
+    let selected = match device {
+        None => DEFAULT,
+        Some(_) if chosen.missing => &unlisted,
+        Some(_) => &chosen.text,
+    };
+    let combo = egui::ComboBox::from_id_salt("audio output")
+        .selected_text(selected)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(device, None, DEFAULT);
+            if chosen.missing {
+                let name = device.clone();
+                ui.selectable_value(device, name, unlisted.as_str());
+            }
+            for output in listed.unwrap_or_default() {
+                ui.selectable_value(
+                    device,
+                    Some(output.name.clone()),
+                    workspace::output_name(output),
+                )
+                .on_hover_text(&output.name);
+            }
+        });
+    labelled(ui, combo.response, "Audio output");
+    // One line, always there: the dialog is centred and must not jump.
+    let note = match &model.audio_outputs {
+        _ if !idle => "Stop the preview and the outputs to choose another device.".to_owned(),
+        None => "Looking for audio outputs…".to_owned(),
+        Some(Err(reason)) => format!("The audio outputs could not be listed: {reason}"),
+        Some(Ok(outputs)) if outputs.is_empty() => "No audio outputs found.".to_owned(),
+        Some(Ok(_)) => "The device opens when the monitor is on and the pipeline runs.".to_owned(),
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                Button::new(ButtonKind::Ghost, "Refresh")
+                    .icon(Icon::Restart)
+                    .busy(model.finding_audio_outputs()),
+            )
+            .on_hover_text("List the audio outputs again")
+            .clicked()
+        {
+            model.find_audio_outputs();
         }
         ui.add(egui::Label::new(TextRole::Meta.text(note)).wrap());
     });

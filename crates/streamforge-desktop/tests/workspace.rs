@@ -17,7 +17,7 @@ use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
-use support::ListedInputs;
+use support::ListedDevices;
 
 struct TempDir(PathBuf);
 
@@ -58,7 +58,7 @@ fn model(dir: &TempDir) -> Model {
     let out = dir.0.clone();
     let worker = EngineWorker::spawn(
         move || {
-            Engine::with_capture(Box::new(ListedInputs::new()))
+            Engine::with_capture(Box::new(ListedDevices::new()))
                 .with_output_dir(&out)
                 .with_project_dir(out)
         },
@@ -417,6 +417,120 @@ fn a_bus_strip_mutes_and_buses_stay_while_the_pipeline_runs() {
     assert!(!clickable(&harness, "Add a channel"));
     assert!(!clickable(&harness, "Remove channel Tone…"));
     assert!(!clickable(&harness, "Input of Tone"));
+}
+
+#[test]
+fn the_stream_video_settings_reach_the_engine() {
+    let dir = TempDir::new("video");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Stream settings").click();
+    step_until(&mut harness, "the stream settings", |h| {
+        h.query_by_label("Video bitrate (kbps)").is_some()
+    });
+    assert!(is_on(&harness, "Auto"), "the default encoder");
+    // A focused number field selects its text; typing replaces it.
+    harness.get_by_label("Video bitrate (kbps)").focus();
+    settle(&mut harness, 2);
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text("4500".to_owned()));
+    harness.step();
+    harness.key_press(egui::Key::Enter);
+    harness.step();
+    harness.get_by_label("Software").click();
+    harness.step();
+    harness.get_by_label("Done").click();
+    // Unsaved changes mark a change the engine took.
+    step_until(&mut harness, "the engine's answer", |h| {
+        h.query_by_label("Server URL").is_none()
+            && h.query_by_label("Project Untitled, unsaved changes")
+                .is_some()
+    });
+
+    harness.get_by_label("Stream settings").click();
+    step_until(&mut harness, "the stream settings again", |h| {
+        h.query_by_label("Video bitrate (kbps)").is_some()
+    });
+    assert!(is_on(&harness, "Software"));
+    assert_eq!(
+        harness
+            .get_by_label("Video bitrate (kbps)")
+            .value()
+            .as_deref()
+            .map(str::trim),
+        Some("4500 kbps")
+    );
+    harness.get_by_label("Cancel").click();
+    step_until(&mut harness, "the dialog to close", |h| {
+        h.query_by_label("Server URL").is_none()
+    });
+
+    // The recording has an encoder too, and no bitrate.
+    harness.get_by_label("Recording settings").click();
+    step_until(&mut harness, "the recording settings", |h| {
+        h.query_by_label("Hardware").is_some()
+    });
+    assert!(harness.query_by_label("Video bitrate (kbps)").is_none());
+    harness.get_by_label("Hardware").click();
+    harness.step();
+    harness.get_by_label("Done").click();
+    step_until(&mut harness, "the dialog to close", |h| {
+        h.query_by_label("Hardware").is_none()
+    });
+    // The engine's answer (or, on a refusal, a new reading) replaces what
+    // the dialog showed at once.
+    settle(&mut harness, 10);
+    harness.get_by_label("Recording settings").click();
+    step_until(&mut harness, "the recording settings again", |h| {
+        is_on(h, "Hardware")
+    });
+}
+
+#[test]
+fn the_monitor_device_is_chosen_while_idle_and_an_ended_monitor_says_why() {
+    let dir = TempDir::new("monitor");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Monitor settings").click();
+    step_until(&mut harness, "the monitor settings", |h| {
+        h.query_by_label("Audio output").is_some()
+    });
+    assert!(!clickable(&harness, "Use device"), "nothing changed yet");
+    harness.get_by_label("Audio output").click();
+    step_until(&mut harness, "the output list", |h| {
+        h.query_by_label("USB Headset").is_some()
+    });
+    harness.get_by_label("USB Headset").click();
+    harness.step();
+    harness.get_by_label("Use device").click();
+    // The dock names the engine's device.
+    step_until(&mut harness, "the device", |h| {
+        h.query_by_label("Use device").is_none() && h.query_by_label("USB Headset").is_some()
+    });
+
+    // The test backend plays nothing: switched on in a run, the monitor
+    // ends, and the dock says why.
+    harness.get_by_label("Routing").click();
+    step_until(&mut harness, "the matrix", |h| {
+        h.query_by_label("Monitor on").is_some()
+    });
+    harness.get_by_label("Monitor on").click();
+    step_until(&mut harness, "the monitor", |h| is_on(h, "Monitor on"));
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Preview")
+        .click();
+    step_until(&mut harness, "the ended monitor", |h| {
+        h.query_by_label_contains("Switch it off and on to open the device again")
+            .is_some()
+    });
+    // The device changes only while the pipeline is idle.
+    harness.get_by_label("Monitor settings").click();
+    step_until(&mut harness, "the idle note", |h| {
+        h.query_by_label("Stop the preview and the outputs to choose another device.")
+            .is_some()
+    });
+    assert!(!clickable(&harness, "Audio output"));
+    assert!(!clickable(&harness, "Use device"));
 }
 
 /// What the matrix says channel `channel` plays.

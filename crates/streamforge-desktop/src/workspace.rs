@@ -1,12 +1,15 @@
 //! What the production workspace shows, computed from the model's state
 //! without widgets: the scene selection, the transport states, the monitor
 //! rectangle, meter ballistics, the health summary, the project's name
-//! and files, and what a channel plays. The views draw these; keeping
-//! them here keeps them unit-tested.
+//! and files, what a channel plays, and where and whether the monitor
+//! plays. The views draw these; keeping them here keeps them unit-tested.
 
 use std::time::Duration;
 
-use command_api::{AudioInput, ChannelInput, OutputHealth, SceneList, StreamState};
+use command_api::{
+    AudioInput, AudioOutput, CaptureState, ChannelInput, MonitorHealth, MonitorProfile,
+    OutputHealth, SceneList, StreamState,
+};
 use eframe::egui::{Rect, vec2};
 
 use crate::model::{HealthItem, Level};
@@ -314,6 +317,86 @@ pub fn input_label(input: &ChannelInput, inputs: Option<&[AudioInput]>) -> Input
     }
 }
 
+/// The monitor's device, as the outputs dock and its dialog show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputLabel {
+    /// Short, for the dock.
+    pub text: String,
+    /// All of it, for the tooltip.
+    pub detail: String,
+    /// A device the engine does not list now: the monitor stays silent
+    /// while it is missing.
+    pub missing: bool,
+}
+
+/// An audio output's name for people: its description, else its name.
+pub fn output_name(output: &AudioOutput) -> &str {
+    output
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or(&output.name)
+}
+
+/// The monitor's `device` (`None`: the system default), given the
+/// engine's audio outputs (`None` while they are not known, so nothing
+/// counts as missing).
+pub fn output_label(device: Option<&str>, outputs: Option<&[AudioOutput]>) -> OutputLabel {
+    let label = |text: &str, detail: String| OutputLabel {
+        text: text.to_owned(),
+        detail,
+        missing: false,
+    };
+    let Some(device) = device else {
+        return label("Default output", "The system's default output".to_owned());
+    };
+    let Some(outputs) = outputs else {
+        return label(device, device.to_owned());
+    };
+    let Some(output) = outputs.iter().find(|output| output.name == device) else {
+        return OutputLabel {
+            text: device.to_owned(),
+            detail: format!(
+                "{device} is not among the audio outputs now; the monitor is silent while it is \
+                 missing"
+            ),
+            missing: true,
+        };
+    };
+    let name = output_name(output);
+    if name == device {
+        label(device, device.to_owned())
+    } else {
+        label(name, format!("{name} ({device})"))
+    }
+}
+
+/// Whether the monitor plays, for its row in the outputs dock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorState {
+    Off,
+    /// Switched on; it plays while the preview or an output runs.
+    On,
+    Playing,
+    /// Switched on, but its device ended or did not open; the reason says
+    /// why. Switching it on again opens the device anew.
+    Ended(String),
+}
+
+/// The monitor's state from its profile (the switch, shown at once) and
+/// the run's health (`None` without a pipeline, or before the monitor was
+/// first switched on in the run).
+pub fn monitor_state(profile: &MonitorProfile, health: Option<&MonitorHealth>) -> MonitorState {
+    if !profile.enabled {
+        return MonitorState::Off;
+    }
+    match health.map(|health| &health.state) {
+        Some(CaptureState::Ended { reason }) => MonitorState::Ended(reason.clone()),
+        Some(CaptureState::Running) => MonitorState::Playing,
+        None => MonitorState::On,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use command_api::{LiveOutputStats, SceneSpec, VideoEncoderInfo};
@@ -610,5 +693,73 @@ mod tests {
             level_dbfs: 0.0,
         });
         assert_eq!(odd.detail, "A test tone, 261.6 Hz at 0.0 dBFS");
+    }
+
+    #[test]
+    fn the_monitor_device_reads_by_its_description_and_is_marked_when_missing() {
+        let outputs = vec![
+            AudioOutput {
+                name: "alsa_output.usb".to_owned(),
+                description: Some("USB Headset".to_owned()),
+                media_class: "Audio/Sink".to_owned(),
+            },
+            AudioOutput {
+                name: "line".to_owned(),
+                description: Some(" ".to_owned()),
+                media_class: "Audio/Sink".to_owned(),
+            },
+        ];
+        let label = |device| output_label(device, Some(&outputs));
+        let usb = label(Some("alsa_output.usb"));
+        assert_eq!(
+            (usb.text.as_str(), usb.detail.as_str(), usb.missing),
+            ("USB Headset", "USB Headset (alsa_output.usb)", false)
+        );
+        assert_eq!(label(Some("line")).detail, "line");
+        assert_eq!(label(None).text, "Default output");
+        let gone = label(Some("headset"));
+        assert!(gone.missing);
+        assert_eq!(gone.text, "headset");
+        assert!(!output_label(Some("headset"), None).missing);
+    }
+
+    #[test]
+    fn the_monitor_state_follows_its_switch_and_the_run() {
+        let profile = |enabled| MonitorProfile {
+            mix: "bus_program".to_owned(),
+            enabled,
+            device: None,
+        };
+        let health = |state| MonitorHealth {
+            device: None,
+            enabled: true,
+            state,
+            latency_ms: None,
+            feed: None,
+        };
+        let running = health(CaptureState::Running);
+        let ended = health(CaptureState::Ended {
+            reason: "could not start: no device".to_owned(),
+        });
+        assert_eq!(monitor_state(&profile(false), None), MonitorState::Off);
+        assert_eq!(monitor_state(&profile(true), None), MonitorState::On);
+        assert_eq!(
+            monitor_state(&profile(true), Some(&running)),
+            MonitorState::Playing
+        );
+        // The switch shows at once, before the next health reading.
+        assert_eq!(
+            monitor_state(&profile(false), Some(&running)),
+            MonitorState::Off
+        );
+        assert_eq!(
+            monitor_state(&profile(true), Some(&ended)),
+            MonitorState::Ended("could not start: no device".to_owned())
+        );
+        // Off, an ended device does not matter until it is switched on.
+        assert_eq!(
+            monitor_state(&profile(false), Some(&ended)),
+            MonitorState::Off
+        );
     }
 }

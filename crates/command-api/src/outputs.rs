@@ -31,6 +31,9 @@ use crate::{
 /// A stream's video bitrate when nothing else says.
 pub const DEFAULT_VIDEO_BITRATE_KBPS: u32 = 6_000;
 
+/// The video bitrates a stream takes.
+pub const VIDEO_BITRATE_KBPS: std::ops::RangeInclusive<u32> = 300..=50_000;
+
 /// An output that has a profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -26,7 +26,7 @@ use serde_json::json;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
-use support::ListedInputs;
+use support::ListedDevices;
 
 struct TempDir(PathBuf);
 
@@ -86,6 +86,13 @@ enum Situation {
     InputDialog,
     /// InputDialog, with its list of devices open.
     InputList,
+    /// Idle, with the stream settings open.
+    StreamSettings,
+    /// Idle, with the monitor settings and their list of devices open.
+    MonitorList,
+    /// The preview on, and the monitor switched on to a device that is
+    /// not there: it ended.
+    MonitorEnded,
 }
 
 /// What the render does before it is taken, in order.
@@ -147,6 +154,10 @@ fn routed_engine(dir: PathBuf) -> Engine {
             "set_output_profile",
             json!({"output": "recording", "tracks": ["Voice"]}),
         ),
+        (
+            "set_monitor_device",
+            json!({"device": "alsa_output.usb-headset"}),
+        ),
     ] {
         let command = Command::decode(name, Some(&params)).expect(name);
         if let Err(error) = engine.handle(command) {
@@ -156,9 +167,31 @@ fn routed_engine(dir: PathBuf) -> Engine {
     engine
 }
 
-/// An engine that lists audio inputs (`support`) but captures nothing.
+/// An engine that lists audio devices (`support`) but captures and plays
+/// nothing.
 fn engine(dir: PathBuf) -> Engine {
-    Engine::with_capture(Box::new(ListedInputs::new())).with_output_dir(dir)
+    Engine::with_capture(Box::new(ListedDevices::new())).with_output_dir(dir)
+}
+
+/// An idle engine whose monitor is on, on a device that is not listed.
+fn monitor_engine(dir: PathBuf) -> Engine {
+    let mut engine = engine(dir);
+    for (name, params) in [
+        (
+            "set_monitor_device",
+            json!({"device": "bluetooth_headphones"}),
+        ),
+        (
+            "set_output_profile",
+            json!({"output": "monitor", "enabled": true}),
+        ),
+    ] {
+        let command = Command::decode(name, Some(&params)).expect(name);
+        if let Err(error) = engine.handle(command) {
+            panic!("{name}: {error:?}");
+        }
+    }
+    engine
 }
 
 /// An idle engine with a channel on each kind of device input.
@@ -195,6 +228,8 @@ fn model(dir: &Path, situation: Situation) -> Model {
                 Situation::Inputs | Situation::InputDialog | Situation::InputList
             ) {
                 inputs_engine(dir.clone()).with_project_dir(dir)
+            } else if matches!(situation, Situation::MonitorEnded) {
+                monitor_engine(dir.clone()).with_project_dir(dir)
             } else {
                 engine(dir.clone()).with_project_dir(dir)
             }
@@ -260,6 +295,10 @@ fn model(dir: &Path, situation: Situation) -> Model {
         model.start_recording("render.mkv");
         wait(&mut model, "the recording", |m| m.recording.is_some());
     }
+    if matches!(situation, Situation::MonitorEnded) {
+        model.set_preview(true);
+        wait(&mut model, "the preview", |m| m.preview_enabled);
+    }
     model
 }
 
@@ -298,6 +337,11 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
             Step::Click("Input of Desktop"),
             Step::Click("Audio input"),
         ],
+        Situation::StreamSettings => vec![Step::Click("Stream settings")],
+        Situation::MonitorList => {
+            vec![Step::Click("Monitor settings"), Step::Click("Audio output")]
+        }
+        Situation::MonitorEnded => vec![],
     };
     for step in steps {
         match step {
@@ -368,6 +412,29 @@ fn render_the_workspace() {
         [1400.0, 900.0],
     );
     render(&out, "save-as-1400x900", Situation::SaveAs, [1400.0, 900.0]);
+    render(
+        &out,
+        "stream-settings-1400x900",
+        Situation::StreamSettings,
+        [1400.0, 900.0],
+    );
+    render(
+        &out,
+        "monitor-list-1400x900",
+        Situation::MonitorList,
+        [1400.0, 900.0],
+    );
+    for (size, label) in [
+        ([1280.0, 720.0], "1280x720"),
+        ([1920.0, 1080.0], "1920x1080"),
+    ] {
+        render(
+            &out,
+            &format!("monitor-ended-{label}"),
+            Situation::MonitorEnded,
+            size,
+        );
+    }
 }
 
 /// The design system's specimen: tokens and every component in its states,

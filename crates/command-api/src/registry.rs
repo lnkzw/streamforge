@@ -23,7 +23,7 @@ use crate::{
     OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest,
     SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
     SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
-    UpdateSourceRequest,
+    UpdateSourceRequest, VIDEO_BITRATE_KBPS,
 };
 
 /// Permission class of a command.
@@ -930,7 +930,6 @@ fn decode_start_recording(
     })
 }
 
-const VIDEO_BITRATE_KBPS: std::ops::RangeInclusive<u32> = 300..=50_000;
 const MAX_RECONNECT_ATTEMPTS: u32 = 100;
 const RECONNECT_DELAY_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
 

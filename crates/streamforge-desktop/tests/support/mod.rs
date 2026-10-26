@@ -1,23 +1,23 @@
 //! A capture backend for the tests: like `Engine::new()`'s, nothing can be
-//! captured, but it lists audio inputs (one of them desktop audio), and a
-//! listed device reads as unplugged when a pipeline starts, so its channel
-//! runs silent.
+//! captured or played, but it lists audio inputs (one of them desktop
+//! audio) and audio outputs, and a listed input reads as unplugged when a
+//! pipeline starts, so its channel runs silent.
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioStream, AudioStreamRequest,
-    CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, ScreenCaptureRequest,
-    ScreenSelection, UnsupportedCapture, VideoCaptureReport, VideoStream,
+    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput, AudioStream,
+    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
+    ScreenCaptureRequest, ScreenSelection, UnsupportedCapture, VideoCaptureReport, VideoStream,
 };
 
-pub struct ListedInputs(UnsupportedCapture);
+pub struct ListedDevices(UnsupportedCapture);
 
-impl ListedInputs {
+impl ListedDevices {
     pub fn new() -> Self {
         Self(UnsupportedCapture::new("the tests capture nothing"))
     }
 }
 
-impl CaptureBackend for ListedInputs {
+impl CaptureBackend for ListedDevices {
     fn capabilities(&mut self) -> CaptureCapabilities {
         self.0.capabilities()
     }
@@ -33,6 +33,18 @@ impl CaptureBackend for ListedInputs {
             input("alsa_input.usb-mic", "USB Mic", None),
             input("alsa_input.analog", "Built-in Audio Analog Stereo", None),
             input("speakers.monitor", "Monitor of Speakers", Some("speakers")),
+        ])
+    }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        let output = |name: &str, description: &str| AudioOutput {
+            name: name.to_owned(),
+            description: Some(description.to_owned()),
+            media_class: "Audio/Sink".to_owned(),
+        };
+        Ok(vec![
+            output("speakers", "Speakers"),
+            output("alsa_output.usb-headset", "USB Headset"),
         ])
     }
 

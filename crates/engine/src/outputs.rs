@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use audio_engine::{CHANNELS, RATE};
-use capture_api::ScreenSelection;
 use command_api::{
     CommandError, ErrorCode, HealthReport, OutputHealth, OutputKind, OutputProfiles,
-    PipelineReport, RecordingReport, RecordingRequest, RecordingStarted, StreamingReport,
-    StreamingRequest, StreamingStarted,
+    PipelineReport, RecordingReport, RecordingRequest, RecordingStarted, RecordingState,
+    StreamingReport, StreamingRequest, StreamingStarted,
 };
 use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
@@ -53,25 +52,34 @@ impl Engine {
     pub(crate) fn health(&self) -> HealthReport {
         let live = self.pipeline.as_ref().map(Pipeline::live);
         let elapsed_ms = |t0: Instant| duration_millis(t0.elapsed());
-        let recording = self.recording.as_ref().map(|output| OutputHealth {
-            target: output.display.clone(),
-            elapsed_ms: elapsed_ms(output.t0),
-            running: self.recording_running(),
-            state: None,
-            video_encoder: output.recorder.video_encoder().clone(),
-            counters: output.recorder.live(),
-        });
-        let streaming = self.streaming.as_ref().map(|output| {
-            let state = self.streaming_state();
-            OutputHealth {
-                target: output.streamer.target().to_owned(),
-                elapsed_ms: elapsed_ms(output.t0),
-                running: state.is_some_and(|state| state != StreamState::Failed),
-                state,
-                video_encoder: output.streamer.video_encoder().clone(),
-                counters: output.streamer.live(),
-            }
-        });
+        let recording =
+            self.recording
+                .as_ref()
+                .zip(self.recording_state())
+                .map(|(output, state)| OutputHealth {
+                    target: output.display.clone(),
+                    elapsed_ms: elapsed_ms(output.t0),
+                    running: state == RecordingState::Running,
+                    state,
+                    video_encoder: output.recorder.video_encoder().clone(),
+                    counters: output.recorder.live(),
+                    connection: None,
+                });
+        let streaming =
+            self.streaming
+                .as_ref()
+                .zip(self.streaming_state())
+                .map(|(output, state)| OutputHealth {
+                    target: output.streamer.target().to_owned(),
+                    elapsed_ms: elapsed_ms(output.t0),
+                    // `stopped` comes only after the stop request; not running
+                    // either way.
+                    running: !matches!(state, StreamState::Failed | StreamState::Stopped),
+                    state,
+                    video_encoder: output.streamer.video_encoder().clone(),
+                    counters: output.streamer.live(),
+                    connection: Some(output.streamer.connection()),
+                });
         let (render, mix) = live.unzip();
         HealthReport {
             pipeline_running: self.pipeline_running(),
@@ -89,11 +97,14 @@ impl Engine {
     }
 
     /// The recording is open and all its workers run.
-    pub(crate) fn recording_running(&self) -> bool {
-        self.recording
-            .as_ref()
-            .is_some_and(|output| output.recorder.is_running())
-            && self.pipeline_running()
+    /// State of the open recording; a dead pipeline counts as failed.
+    pub(crate) fn recording_state(&self) -> Option<RecordingState> {
+        let output = self.recording.as_ref()?;
+        Some(if output.recorder.is_running() && self.pipeline_running() {
+            RecordingState::Running
+        } else {
+            RecordingState::Failed
+        })
     }
 
     /// State of the open stream; a dead pipeline counts as failed.
@@ -132,19 +143,10 @@ impl Engine {
     }
 
     /// Make sure the pipeline runs; returns whether this call started it.
-    /// It renders the active scene, with `screen` on top if given, and
-    /// mixes the configured audio (ADR 0017).
-    pub(crate) fn ensure_pipeline(
-        &mut self,
-        screen: Option<&ScreenSelection>,
-    ) -> Result<bool, CommandError> {
+    /// It renders the active scene and mixes the configured audio
+    /// (ADR 0017).
+    pub(crate) fn ensure_pipeline(&mut self) -> Result<bool, CommandError> {
         match &self.pipeline {
-            Some(_) if screen.is_some() => Err(CommandError::new(
-                ErrorCode::InvalidState,
-                "the media pipeline already runs (for the preview or another output); omit the \
-                 screen layer parameters (screen, source_id, source_types, cursor) to join it, \
-                 or turn the preview off first",
-            )),
             Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
                 ErrorCode::InvalidState,
                 "the media pipeline stopped unexpectedly; turn the preview off and stop the \
@@ -157,7 +159,6 @@ impl Engine {
                     self.capture.as_mut(),
                     self.scenes.active(),
                     self.audio.clone(),
-                    screen,
                 )?;
                 if self.profiles.monitor.enabled {
                     // A device that does not open leaves the monitor
@@ -192,7 +193,7 @@ impl Engine {
         request: &RecordingRequest,
     ) -> Result<RecordingStarted, CommandError> {
         if let Some(open) = &self.recording {
-            let message = if self.recording_running() {
+            let message = if self.recording_state() == Some(RecordingState::Running) {
                 "a recording is already running; stop it first"
             } else {
                 "the open recording stopped unexpectedly; call stop_recording to finalize it \
@@ -202,7 +203,7 @@ impl Engine {
                 .with_details(json!({ "recording": open.path.display().to_string() })));
         }
         let path = reserve(&self.output_dir.join(&request.file_name))?;
-        let started_pipeline = match self.ensure_pipeline(request.screen.as_ref()) {
+        let started_pipeline = match self.ensure_pipeline() {
             Ok(started) => started,
             Err(error) => {
                 let _ = fs::remove_file(&path);
@@ -315,7 +316,7 @@ impl Engine {
                 "a stream is already open; stop it first",
             ));
         }
-        let started_pipeline = self.ensure_pipeline(request.screen.as_ref())?;
+        let started_pipeline = self.ensure_pipeline()?;
         let video_bitrate_kbps = request
             .video_bitrate_kbps
             .unwrap_or(self.profiles.stream.video_bitrate_kbps);

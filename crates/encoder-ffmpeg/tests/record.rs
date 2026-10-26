@@ -419,7 +419,6 @@ fn live_counters_track_the_recording() {
     // AAC encodes whole 1024-sample frames; the rest waits for the flush.
     assert!(100 * 480 - live.samples_encoded < 1024, "{live:?}");
     assert_eq!((live.frames_dropped, live.blocks_dropped), (0, 0));
-    assert_eq!((live.connects, live.reconnect_attempts), (0, 0));
     let stats = recorder.stop().expect("stop");
     assert_eq!(stats.video.frames_encoded, live.frames_encoded);
     assert!(stats.audio.samples_encoded >= live.samples_encoded);

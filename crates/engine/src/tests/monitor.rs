@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 use capture_api::{CaptureEnd, CaptureState, PlaybackRequest, PlaybackStream};
-use command_api::{OutputProfileSet, PROGRAM_BUS_ID, RecordingReport};
+use command_api::{OutputProfileSet, PROGRAM_BUS_ID, RecordingReport, RecordingState};
 use media_core::SampleReader;
 
 use super::*;
@@ -201,7 +201,10 @@ fn the_monitor_plays_its_bus_live_beside_a_recording() {
     assert_eq!(monitor.state, CaptureState::Running);
 
     // The recording never noticed.
-    assert!(status(&mut engine).recording_active);
+    assert_eq!(
+        status(&mut engine).recording_state,
+        Some(RecordingState::Running)
+    );
     let report = stop_recording(&mut engine);
     assert!(report.recording.audio.samples_encoded > 0, "{report:?}");
     let monitor = report.pipeline.monitor.expect("monitor in the report");
@@ -257,7 +260,10 @@ fn a_monitor_device_that_does_not_open_only_warns() {
     let set = profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
     assert_eq!(set.applied_now, ["enabled"]);
     assert!(!set.warnings.is_empty(), "{set:?}");
-    assert!(status(&mut engine).recording_active);
+    assert_eq!(
+        status(&mut engine).recording_state,
+        Some(RecordingState::Running)
+    );
     stop_recording(&mut engine);
 
     // Idle: the default device works.
@@ -297,7 +303,10 @@ fn a_monitor_that_ends_leaves_the_recording_running() {
         }
     );
     assert_eq!(monitor.latency_ms, None);
-    assert!(status(&mut engine).recording_active);
+    assert_eq!(
+        status(&mut engine).recording_state,
+        Some(RecordingState::Running)
+    );
     // No device runs: a new bus waits for the monitor to be switched on.
     let set = profile_set(
         &mut engine,

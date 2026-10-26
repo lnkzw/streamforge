@@ -2,7 +2,7 @@
 
 use command_api::{
     Command, CommandError, CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode,
-    registry,
+    RecordingState, registry,
 };
 use control_protocol::{MAX_REQUEST_BYTES, handle_line, serve};
 use serde_json::{Value, json};
@@ -24,13 +24,10 @@ impl CommandHandler for FakeHandler {
             Command::GetStatus => CommandOutput::Status(EngineStatus {
                 application: "Fake".to_owned(),
                 version: "9.9.9".to_owned(),
-                media_engine_ready: true,
                 pipeline_running: false,
                 capture_available: false,
-                streaming_active: false,
+                recording_state: Some(RecordingState::Running),
                 streaming_state: None,
-                recording_active: true,
-                recording_failed: false,
                 preview_active: false,
             }),
             Command::ListCommands => CommandOutput::Commands(CommandList::all()),
@@ -83,13 +80,10 @@ fn get_status_success_envelope() {
             "result": {
                 "application": "Fake",
                 "version": "9.9.9",
-                "media_engine_ready": true,
                 "pipeline_running": false,
                 "capture_available": false,
-                "streaming_active": false,
+                "recording_state": "running",
                 "streaming_state": null,
-                "recording_active": true,
-                "recording_failed": false,
                 "preview_active": false,
             },
         })
@@ -190,6 +184,45 @@ fn malformed_requests_never_reach_the_handler() {
             json!("h"),
             "invalid_params",
         ),
+        // A repeated key fails instead of the last one winning.
+        (
+            r#"{"id":"i","command":"get_status","command":"list_commands"}"#,
+            json!("i"),
+            "invalid_request",
+        ),
+        (
+            r#"{"id":"j","command":"get_status","params":{},"params":{}}"#,
+            json!("j"),
+            "invalid_request",
+        ),
+        (
+            r#"{"id":"k","id":"l","command":"get_status"}"#,
+            json!(null),
+            "invalid_request",
+        ),
+        // Whatever comes first: an earlier repeated parameter does not hide
+        // a repeated `id`.
+        (
+            r#"{"params":{"enabled":true,"enabled":false},"id":1,"id":2,"command":"set_preview"}"#,
+            json!(null),
+            "invalid_request",
+        ),
+        (
+            r#"{"id":"m","command":"set_preview","params":{"enabled":true,"enabled":false}}"#,
+            json!("m"),
+            "invalid_params",
+        ),
+        (
+            r#"{"id":"n","command":"nope","params":{"x":1,"x":2}}"#,
+            json!("n"),
+            "unknown_command",
+        ),
+        // The version comes before the fields a later version may add.
+        (
+            r#"{"v":2,"id":"o","command":"get_status","trace":"x"}"#,
+            json!("o"),
+            "unsupported_version",
+        ),
     ];
     let mut handler = FakeHandler::default();
     for (request, id, code) in cases {
@@ -223,6 +256,17 @@ fn error_details_are_structured() {
 
     let field = respond(&mut handler, r#"{"id":3,"command":"get_status","x":0}"#);
     assert_eq!(field["error"]["details"], json!({"field": "x"}));
+
+    let duplicate = respond(
+        &mut handler,
+        r#"{"id":4,"command":"probe_audio_mix","params":{"tones":[{"frequency_hz":440,"gain_db":1,"gain_db":2}]}}"#,
+    );
+    assert_eq!(
+        duplicate["error"]["details"],
+        json!({"command": "probe_audio_mix", "duplicate": "tones[0].gain_db"})
+    );
+    let top = respond(&mut handler, r#"{"id":5,"command":"a","command":"b"}"#);
+    assert_eq!(top["error"]["details"], json!({"duplicate": "command"}));
 }
 
 #[test]

@@ -3,7 +3,9 @@
 
 use audio_engine::{LiveMixStats, PlaybackFeedStats};
 use capture_api::CaptureState;
-use encoder_api::{LiveOutputStats, StreamState, VideoEncoderInfo};
+use encoder_api::{LiveConnectionStats, LiveOutputStats, StreamState, VideoEncoderInfo};
+
+use crate::RecordingState;
 use serde::Serialize;
 use video_compositor::LiveRenderStats;
 
@@ -18,14 +20,13 @@ pub struct HealthReport {
     pub render: Option<LiveRenderStats>,
     /// Mixer counters, refreshed every 250 ms; `None` without a pipeline.
     pub mix: Option<LiveMixStats>,
-    pub recording: Option<OutputHealth>,
-    pub streaming: Option<OutputHealth>,
+    pub recording: Option<OutputHealth<RecordingState>>,
+    pub streaming: Option<OutputHealth<StreamState>>,
     /// The monitor, once it was switched on in this run.
     pub monitor: Option<MonitorHealth>,
-    /// Every running capture: screen sources of the scenes, the legacy
-    /// screen layer and live audio inputs. An `ended` capture delivers
-    /// nothing more. Scene screen sources (those with an `id`) can be
-    /// started again with `restart_source`; the others cannot.
+    /// Every running capture: screen sources of the scenes and live audio
+    /// inputs. An `ended` capture delivers nothing more. Screen sources can
+    /// be started again with `restart_source`; audio inputs cannot.
     pub captures: Vec<CaptureHealth>,
 }
 
@@ -49,10 +50,10 @@ impl CaptureKind {
 pub struct CaptureHealth {
     pub kind: CaptureKind,
     /// The scene source's `id`, as in `list_scenes` and `render.sources`,
-    /// or the channel's, as in `get_mixer` (`None` for the screen layer).
-    pub id: Option<String>,
-    /// The scene source's or channel's name, or `screen layer`. A channel's
-    /// device is in `get_mixer`.
+    /// or the channel's, as in `get_mixer`.
+    pub id: String,
+    /// The scene source's or channel's name. A channel's device is in
+    /// `get_mixer`.
     pub name: String,
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
     #[serde(flatten)]
@@ -80,8 +81,10 @@ pub struct MonitorHealth {
     pub feed: Option<PlaybackFeedStats>,
 }
 
+/// A running output's health; `S` is its state: [`RecordingState`] or
+/// [`StreamState`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct OutputHealth {
+pub struct OutputHealth<S> {
     /// File path (recording) or redacted target (stream); never a key.
     pub target: String,
     /// Time since the output started.
@@ -89,13 +92,15 @@ pub struct OutputHealth {
     /// The output and the pipeline it needs are running; `false` once
     /// either failed (the stop report says why).
     pub running: bool,
-    /// Streams only: `connecting`, `connected`, `reconnecting` or `failed`.
-    pub state: Option<StreamState>,
+    pub state: S,
     pub video_encoder: VideoEncoderInfo,
     /// `frames_encoded`, `frames_dropped`, `samples_encoded`,
-    /// `blocks_dropped`, `queue_depth`, `connects`, `reconnect_attempts`.
+    /// `blocks_dropped`, `queue_depth`.
     #[serde(flatten)]
     pub counters: LiveOutputStats,
+    /// Streams only: `connects`, `reconnect_attempts`.
+    #[serde(flatten)]
+    pub connection: Option<LiveConnectionStats>,
 }
 
 #[cfg(test)]
@@ -120,7 +125,7 @@ mod tests {
             monitor: None,
             captures: vec![CaptureHealth {
                 kind: CaptureKind::Screen,
-                id: Some("src_desk".to_owned()),
+                id: "src_desk".to_owned(),
                 name: "desk".to_owned(),
                 state: CaptureState::Ended {
                     reason: "the captured window was closed".to_owned(),
@@ -130,7 +135,7 @@ mod tests {
                 target: "rtmp://example.com/live/<stream key>".to_owned(),
                 elapsed_ms: 1500,
                 running: true,
-                state: Some(StreamState::Reconnecting),
+                state: StreamState::Reconnecting,
                 video_encoder: VideoEncoderInfo {
                     encoder: "libx264".to_owned(),
                     hardware: false,
@@ -142,9 +147,11 @@ mod tests {
                     samples_encoded: 72_704,
                     blocks_dropped: 1,
                     queue_depth: 2,
+                },
+                connection: Some(LiveConnectionStats {
                     connects: 1,
                     reconnect_attempts: 1,
-                },
+                }),
             }),
         };
         let value = serde_json::to_value(&health).expect("serialize");
@@ -153,6 +160,7 @@ mod tests {
         assert_eq!(stream["state"], "reconnecting");
         assert_eq!(stream["frames_encoded"], 90);
         assert_eq!(stream["queue_depth"], 2);
+        assert_eq!(stream["reconnect_attempts"], 1);
         assert_eq!(stream["video_encoder"]["encoder"], "libx264");
         assert!(stream.get("counters").is_none(), "{stream}");
         assert_eq!(

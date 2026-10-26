@@ -22,7 +22,7 @@ use video_compositor::{
     pattern,
 };
 
-use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, SCREEN_BOX, overlay_x};
+use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, overlay_x};
 
 /// The built-in scene (the M3 reference scene).
 pub(crate) const DEFAULT_SCENE: &str = "Test pattern";
@@ -39,9 +39,6 @@ const BUILTIN_OVERLAY_RECT: SourceRect = SourceRect {
     width: 160.0,
     height: 160.0,
 };
-/// Compositor id of the legacy `screen: true` output layer; not a scene
-/// source id (those start with `src_`).
-const EXTRA_SCREEN: &str = "screen_layer";
 /// Solid colors are tiny frames stretched over their rectangle.
 const SOLID_SIZE: u32 = 8;
 
@@ -368,11 +365,9 @@ impl FrameCache {
     }
 }
 
-/// Live inputs the build can use: screen captures by source id, and the
-/// legacy output screen layer.
+/// Live inputs the build can use: screen captures by source id.
 pub(crate) struct LiveFrames<'a> {
     pub screens: &'a [(String, Arc<FrameMailbox>)],
-    pub extra_screen: Option<&'a Arc<FrameMailbox>>,
 }
 
 /// Turn `scene` into compositor input. Screen sources without a running
@@ -383,7 +378,7 @@ pub(crate) fn build(
     cache: &mut FrameCache,
 ) -> Result<SceneUpdate, CommandError> {
     let mut canvas = Scene::new(CANVAS_WIDTH, CANVAS_HEIGHT);
-    let mut sources = Vec::with_capacity(scene.sources.len() + 1);
+    let mut sources = Vec::with_capacity(scene.sources.len());
     for spec in &scene.sources {
         let id = SourceId::from(spec.id.as_str());
         let rect = spec.rect;
@@ -418,21 +413,6 @@ pub(crate) fn build(
             id,
             name: spec.name.clone(),
             input,
-        });
-    }
-    if let Some(mailbox) = live.extra_screen {
-        // Above the bottom source, as in the reference scene (bars, screen,
-        // overlay).
-        let at = canvas.layers.len().min(1);
-        let id = SourceId::from(EXTRA_SCREEN);
-        canvas.layers.insert(
-            at,
-            Layer::fitted("screen", id.clone(), SCREEN_BOX).with_opacity(0.9),
-        );
-        sources.push(SourceConfig {
-            id,
-            name: "screen".to_owned(),
-            input: SourceInput::Live(Arc::clone(mailbox)),
         });
     }
     // A project file can give any source the built-in id; only a solid one
@@ -503,10 +483,7 @@ mod tests {
         assert_eq!(names, ["color_bars", "overlay"]);
         let update = build(
             collection.active(),
-            &LiveFrames {
-                screens: &[],
-                extra_screen: None,
-            },
+            &LiveFrames { screens: &[] },
             &mut FrameCache::default(),
         )
         .expect("build");
@@ -518,10 +495,7 @@ mod tests {
     #[test]
     fn only_the_builtin_overlay_in_place_is_animated() {
         let mut collection = SceneCollection::new();
-        let none = LiveFrames {
-            screens: &[],
-            extra_screen: None,
-        };
+        let none = LiveFrames { screens: &[] };
         let mut cache = FrameCache::default();
         collection
             .update_source(&UpdateSourceRequest {
@@ -562,28 +536,6 @@ mod tests {
         collection.restore((scenes, active));
         let loaded = build(collection.active(), &none, &mut cache).expect("build");
         assert!(loaded.animation.is_none());
-    }
-
-    #[test]
-    fn the_legacy_screen_layer_sits_above_the_bottom_source() {
-        let collection = SceneCollection::new();
-        let mailbox = Arc::new(FrameMailbox::new());
-        let update = build(
-            collection.active(),
-            &LiveFrames {
-                screens: &[],
-                extra_screen: Some(&mailbox),
-            },
-            &mut FrameCache::default(),
-        )
-        .expect("build");
-        let names: Vec<_> = update
-            .scene
-            .layers
-            .iter()
-            .map(|l| l.name.as_str())
-            .collect();
-        assert_eq!(names, ["color_bars", "screen", "overlay"]);
     }
 
     #[test]
@@ -742,10 +694,7 @@ mod tests {
             .expect("scene")
             .clone();
         let mut cache = FrameCache::default();
-        let none = LiveFrames {
-            screens: &[],
-            extra_screen: None,
-        };
+        let none = LiveFrames { screens: &[] };
         let first = build(&scene, &none, &mut cache).expect("build");
         // Without a running capture the screen source is left out.
         assert_eq!(first.sources.len(), 1);
@@ -762,7 +711,6 @@ mod tests {
             &scene,
             &LiveFrames {
                 screens: &[(screen_id, Arc::clone(&mailbox))],
-                extra_screen: None,
             },
             &mut cache,
         )

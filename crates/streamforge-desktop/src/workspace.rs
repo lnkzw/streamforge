@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use command_api::{
-    AudioInput, AudioOutput, CaptureState, ChannelInput, MonitorHealth, MonitorProfile,
+    AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
     OutputHealth, SceneList, StreamState,
 };
 use eframe::egui::{Rect, vec2};
@@ -384,13 +384,18 @@ pub enum MonitorState {
 }
 
 /// The monitor's state from its profile (the switch, shown at once) and
-/// the run's health (`None` without a pipeline, or before the monitor was
-/// first switched on in the run).
-pub fn monitor_state(profile: &MonitorProfile, health: Option<&MonitorHealth>) -> MonitorState {
+/// the last health reading (`None` without a pipeline). A reading of a
+/// stopped pipeline, or from before the monitor was switched on (again),
+/// says nothing about now.
+pub fn monitor_state(profile: &MonitorProfile, health: Option<&HealthReport>) -> MonitorState {
     if !profile.enabled {
         return MonitorState::Off;
     }
-    match health.map(|health| &health.state) {
+    let monitor = health
+        .filter(|health| health.pipeline_running)
+        .and_then(|health| health.monitor.as_ref())
+        .filter(|monitor| monitor.enabled);
+    match monitor.map(|monitor| &monitor.state) {
         Some(CaptureState::Ended { reason }) => MonitorState::Ended(reason.clone()),
         Some(CaptureState::Running) => MonitorState::Playing,
         None => MonitorState::On,
@@ -399,7 +404,7 @@ pub fn monitor_state(profile: &MonitorProfile, health: Option<&MonitorHealth>) -
 
 #[cfg(test)]
 mod tests {
-    use command_api::{LiveOutputStats, SceneSpec, VideoEncoderInfo};
+    use command_api::{LiveOutputStats, MonitorHealth, SceneSpec, VideoEncoderInfo};
     use eframe::egui::pos2;
 
     use super::*;
@@ -730,17 +735,26 @@ mod tests {
             enabled,
             device: None,
         };
-        let health = |state| MonitorHealth {
-            device: None,
-            enabled: true,
-            state,
-            latency_ms: None,
-            feed: None,
+        let health = |state, enabled, pipeline_running| HealthReport {
+            pipeline_running,
+            render: None,
+            mix: None,
+            recording: None,
+            streaming: None,
+            monitor: Some(MonitorHealth {
+                device: None,
+                enabled,
+                state,
+                latency_ms: None,
+                feed: None,
+            }),
+            captures: Vec::new(),
         };
-        let running = health(CaptureState::Running);
-        let ended = health(CaptureState::Ended {
+        let running = health(CaptureState::Running, true, true);
+        let ended = || CaptureState::Ended {
             reason: "could not start: no device".to_owned(),
-        });
+        };
+        let ended_on = health(ended(), true, true);
         assert_eq!(monitor_state(&profile(false), None), MonitorState::Off);
         assert_eq!(monitor_state(&profile(true), None), MonitorState::On);
         assert_eq!(
@@ -753,13 +767,26 @@ mod tests {
             MonitorState::Off
         );
         assert_eq!(
-            monitor_state(&profile(true), Some(&ended)),
+            monitor_state(&profile(true), Some(&ended_on)),
             MonitorState::Ended("could not start: no device".to_owned())
         );
         // Off, an ended device does not matter until it is switched on.
         assert_eq!(
-            monitor_state(&profile(false), Some(&ended)),
+            monitor_state(&profile(false), Some(&ended_on)),
             MonitorState::Off
+        );
+        // Switched on again: the reading from while it was off is old.
+        assert_eq!(
+            monitor_state(&profile(true), Some(&health(ended(), false, true))),
+            MonitorState::On
+        );
+        // A stopped pipeline plays nothing; it is reported on its own.
+        assert_eq!(
+            monitor_state(
+                &profile(true),
+                Some(&health(CaptureState::Running, true, false))
+            ),
+            MonitorState::On
         );
     }
 }

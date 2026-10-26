@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use command_api::{DEFAULT_VIDEO_BITRATE_KBPS, EncoderPreference};
+use command_api::EncoderPreference;
 use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
@@ -86,20 +86,21 @@ pub(crate) enum Dialog {
         scene_name: String,
         form: SourceForm,
     },
-    /// Edits a draft; Done applies it, cancelling drops it.
+    /// Edits a draft; Done applies it, cancelling drops it. The video
+    /// settings are `None` until the output profiles are known.
     RecordSettings {
         file_name: String,
-        encoder: EncoderPreference,
+        encoder: Option<EncoderPreference>,
     },
-    /// Edits a draft of the target and the video settings. `go_live`:
-    /// opened from the LIVE button without a target; its action starts the
-    /// stream.
+    /// Edits a draft of the target and the video settings (as for the
+    /// recording). `go_live`: opened from the LIVE button without a
+    /// target; its action starts the stream.
     StreamSettings {
         url: String,
         key: String,
         go_live: bool,
-        encoder: EncoderPreference,
-        bitrate_kbps: u32,
+        encoder: Option<EncoderPreference>,
+        bitrate_kbps: Option<u32>,
     },
     /// A draft of the monitor's device (`None`: the system default).
     MonitorSettings {
@@ -380,32 +381,21 @@ impl DesktopApp {
         }
     }
 
-    /// The video settings come from the output's profile (the defaults
-    /// until it is known).
+    /// The video settings come from the output's profile, once known.
     pub(crate) fn open_record_settings(&mut self) {
-        let profiles = self.model.profiles.as_ref();
         self.dialog = Some(Dialog::RecordSettings {
             file_name: self.record_file.clone(),
-            encoder: profiles.map_or_else(EncoderPreference::default, |profiles| {
-                profiles.recording.video_encoder
-            }),
+            encoder: None,
         });
     }
 
     pub(crate) fn open_stream_settings(&mut self, go_live: bool) {
-        let stream = self
-            .model
-            .profiles
-            .as_ref()
-            .map(|profiles| &profiles.stream);
         self.dialog = Some(Dialog::StreamSettings {
             url: self.stream_url.clone(),
             key: self.stream_key.clone(),
             go_live,
-            encoder: stream.map_or_else(EncoderPreference::default, |stream| stream.video_encoder),
-            bitrate_kbps: stream.map_or(DEFAULT_VIDEO_BITRATE_KBPS, |stream| {
-                stream.video_bitrate_kbps
-            }),
+            encoder: None,
+            bitrate_kbps: None,
         });
     }
 

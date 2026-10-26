@@ -207,11 +207,14 @@ pub struct Model {
     /// The audio inputs a channel can capture, or why they cannot be
     /// listed; `None` until asked for. A new list replaces it on arrival.
     pub audio_inputs: Option<Result<Vec<AudioInput>, String>>,
-    audio_inputs_received: Option<Instant>,
+    /// When the inputs were last asked for, also if the engine was busy:
+    /// views that ask again after a while must not ask every frame.
+    audio_inputs_asked: Option<Instant>,
     /// The audio outputs the monitor can play on, or why they cannot be
     /// listed; `None` until asked for. A new list replaces it on arrival.
     pub audio_outputs: Option<Result<Vec<AudioOutput>, String>>,
-    audio_outputs_received: Option<Instant>,
+    /// As `audio_inputs_asked`.
+    audio_outputs_asked: Option<Instant>,
     /// The project directory's files, or why they cannot be listed; `None`
     /// until asked for (and after a save, which may have added one).
     pub projects: Option<Result<ProjectFileList, String>>,
@@ -246,9 +249,9 @@ impl Model {
             streaming: None,
             screen_sources: None,
             audio_inputs: None,
-            audio_inputs_received: None,
+            audio_inputs_asked: None,
             audio_outputs: None,
-            audio_outputs_received: None,
+            audio_outputs_asked: None,
             projects: None,
             validation: None,
             project: None,
@@ -293,20 +296,26 @@ impl Model {
         self.log_total
     }
 
-    fn submit(&mut self, name: &str, params: Value, pending: Pending) {
+    fn submit(&mut self, name: &str, params: Value, pending: Pending) -> bool {
         match self.worker.submit(name, params) {
             Ok(id) => {
                 self.pending.insert(id, pending);
+                true
             }
-            Err(_) => self.push(
-                Level::Error,
-                format!("{name}: the engine is busy; try again"),
-            ),
+            Err(_) => {
+                self.push(
+                    Level::Error,
+                    format!("{name}: the engine is busy; try again"),
+                );
+                false
+            }
         }
     }
 
-    fn act(&mut self, name: &str, params: Value) {
-        self.submit(name, params, Pending::Action(name.to_owned()));
+    /// Returns whether the command went to the engine (else the log says
+    /// it was busy).
+    fn act(&mut self, name: &str, params: Value) -> bool {
+        self.submit(name, params, Pending::Action(name.to_owned()))
     }
 
     fn refresh(&mut self, what: Refresh) {
@@ -397,14 +406,14 @@ impl Model {
     /// Ask the engine for the audio inputs (skipped while asked).
     pub fn find_audio_inputs(&mut self) {
         if !self.finding_audio_inputs() {
+            self.audio_inputs_asked = Some(Instant::now());
             self.submit("list_audio_inputs", json!({}), Pending::AudioInputs);
         }
     }
 
-    /// How old the list of audio inputs is; devices come and go.
+    /// Since the audio inputs were last asked for; devices come and go.
     pub fn audio_inputs_age(&self) -> Option<Duration> {
-        self.audio_inputs_received
-            .map(|received| received.elapsed())
+        self.audio_inputs_asked.map(|asked| asked.elapsed())
     }
 
     /// Whether the list of audio inputs is on its way.
@@ -417,14 +426,45 @@ impl Model {
     /// Ask the engine for the audio outputs (skipped while asked).
     pub fn find_audio_outputs(&mut self) {
         if !self.finding_audio_outputs() {
+            self.audio_outputs_asked = Some(Instant::now());
             self.submit("list_audio_outputs", json!({}), Pending::AudioOutputs);
         }
     }
 
-    /// How old the list of audio outputs is.
+    /// Since the audio outputs were last asked for.
     pub fn audio_outputs_age(&self) -> Option<Duration> {
-        self.audio_outputs_received
-            .map(|received| received.elapsed())
+        self.audio_outputs_asked.map(|asked| asked.elapsed())
+    }
+
+    /// The listed audio outputs; `None` while not known (asked for, or
+    /// failed), so nothing counts as missing.
+    pub fn listed_audio_outputs(&self) -> Option<&[AudioOutput]> {
+        match &self.audio_outputs {
+            Some(Ok(outputs)) => Some(outputs),
+            _ => None,
+        }
+    }
+
+    /// The name of bus `id`, once the mixer is known.
+    pub fn bus_name(&self, id: &str) -> Option<&str> {
+        self.mixer
+            .as_ref()?
+            .buses
+            .iter()
+            .find(|bus| bus.id == id)
+            .map(|bus| bus.name.as_str())
+    }
+
+    /// Nothing in the engine has a pipeline: no preview, no output (also
+    /// none whose pipeline failed and still waits to be stopped), as far
+    /// as known. Device choices need it.
+    pub fn pipeline_idle(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|status| !status.pipeline_running)
+            && !self.preview_enabled
+            && self.recording.is_none()
+            && self.streaming.is_none()
     }
 
     /// Whether the list of audio outputs is on its way.
@@ -722,13 +762,14 @@ impl Model {
     }
 
     /// The video encoder and, for the stream, the bitrate that `output`
-    /// takes at its next start; what is `None` stays.
+    /// takes at its next start; what is `None` stays. Returns whether the
+    /// change went to the engine.
     pub fn set_video_settings(
         &mut self,
         output: OutputKind,
         video_encoder: Option<EncoderPreference>,
         video_bitrate_kbps: Option<u32>,
-    ) {
+    ) -> bool {
         let mut params = Map::new();
         params.insert("output".into(), output.as_str().into());
         if let Some(encoder) = video_encoder {
@@ -736,6 +777,9 @@ impl Model {
         }
         if let Some(kbps) = video_bitrate_kbps {
             params.insert("video_bitrate_kbps".into(), kbps.into());
+        }
+        if !self.act("set_output_profile", Value::Object(params)) {
+            return false;
         }
         // Shown at once, as for the mix.
         if let Some(profiles) = &mut self.profiles {
@@ -748,7 +792,7 @@ impl Model {
                 profiles.stream.video_bitrate_kbps = kbps;
             }
         }
-        self.act("set_output_profile", Value::Object(params));
+        true
     }
 
     pub fn start_recording(&mut self, file_name: &str) {
@@ -802,7 +846,6 @@ impl Model {
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });
-                    self.audio_inputs_received = Some(Instant::now());
                     continue;
                 }
                 Some(Pending::AudioOutputs) => {
@@ -811,7 +854,6 @@ impl Model {
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });
-                    self.audio_outputs_received = Some(Instant::now());
                     continue;
                 }
                 Some(Pending::Projects) => {
@@ -1142,8 +1184,10 @@ pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
             );
         }
     }
-    // Switched on but silent; nothing recorded or streamed is affected.
+    // Switched on but silent; nothing recorded or streamed is affected. A
+    // stopped pipeline is reported above.
     if let Some(monitor) = health.monitor.as_ref().filter(|monitor| monitor.enabled)
+        && health.pipeline_running
         && let CaptureState::Ended { reason } = &monitor.state
     {
         push(Level::Warning, format!("monitor ended: {reason}"));

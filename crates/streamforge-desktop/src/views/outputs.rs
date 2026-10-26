@@ -16,24 +16,25 @@ use crate::ui::widgets::{self, BadgeKind, StatusLevel, TransportState};
 use crate::workspace::{self, MonitorState};
 
 /// How often the dock asks for the audio outputs again while the monitor
-/// names a device: devices come and go.
+/// is on and names a device: devices come and go.
 const OUTPUTS_REFRESH: Duration = Duration::from_secs(10);
 
 impl DesktopApp {
     pub(crate) fn outputs_dock(&mut self, ui: &mut egui::Ui) {
         widgets::section_header(ui, "Outputs", Some(3));
         // A named monitor device's description, and whether it is there,
-        // need the engine's list.
-        let named = self
+        // need the engine's list: asked once, and again now and then while
+        // the monitor is on, where a missing device matters.
+        if let Some(monitor) = self
             .model
             .profiles
             .as_ref()
-            .is_some_and(|profiles| profiles.monitor.device.is_some());
-        if named
+            .map(|profiles| &profiles.monitor)
+            .filter(|monitor| monitor.device.is_some())
             && self
                 .model
                 .audio_outputs_age()
-                .is_none_or(|age| age > OUTPUTS_REFRESH)
+                .is_none_or(|age| monitor.enabled && age > OUTPUTS_REFRESH)
         {
             self.model.find_audio_outputs();
         }
@@ -141,29 +142,16 @@ impl DesktopApp {
         else {
             return false;
         };
-        let outputs = match &self.model.audio_outputs {
-            Some(Ok(outputs)) => Some(outputs.as_slice()),
-            _ => None,
-        };
+        let outputs = self.model.listed_audio_outputs();
         let device = workspace::output_label(profile.device.as_deref(), outputs);
-        let health = self
-            .model
-            .health
-            .as_ref()
-            .and_then(|health| health.monitor.as_ref());
-        let state = workspace::monitor_state(profile, health);
+        let state = workspace::monitor_state(profile, self.model.health.as_ref());
         let badge = match state {
             MonitorState::Off => (BadgeKind::Neutral, "off"),
             MonitorState::On => (BadgeKind::Neutral, "on"),
             MonitorState::Playing => (BadgeKind::Ok, "playing"),
             MonitorState::Ended(_) => (BadgeKind::Error, "ended"),
         };
-        let bus = self
-            .model
-            .mixer
-            .as_ref()
-            .and_then(|mixer| mixer.buses.iter().find(|bus| bus.id == profile.mix))
-            .map_or(profile.mix.as_str(), |bus| bus.name.as_str());
+        let bus = self.model.bus_name(&profile.mix).unwrap_or(&profile.mix);
         let settings = output_row(
             ui,
             Icon::Speaker,

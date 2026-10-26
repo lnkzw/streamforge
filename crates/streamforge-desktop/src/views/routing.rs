@@ -278,10 +278,7 @@ impl DesktopApp {
                 ui.label(TextRole::Body.text(label));
                 if output == OutputKind::Monitor {
                     let mut on = profiles.monitor.enabled;
-                    let outputs = match &self.model.audio_outputs {
-                        Some(Ok(outputs)) => Some(outputs.as_slice()),
-                        _ => None,
-                    };
+                    let outputs = self.model.listed_audio_outputs();
                     let device = match &profiles.monitor.device {
                         None => "the system's default output".to_owned(),
                         Some(device) => workspace::output_label(Some(device), outputs).text,

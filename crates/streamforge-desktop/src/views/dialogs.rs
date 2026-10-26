@@ -426,8 +426,18 @@ impl DesktopApp {
         &mut self,
         ui: &mut egui::Ui,
         file_name: &mut String,
-        encoder: &mut EncoderPreference,
+        encoder: &mut Option<EncoderPreference>,
     ) -> Outcome {
+        let current = self
+            .model
+            .profiles
+            .as_ref()
+            .map(|profiles| profiles.recording.video_encoder);
+        // From the profile once it is known, so an untouched dialog changes
+        // nothing.
+        if encoder.is_none() {
+            *encoder = current;
+        }
         ui.label(TextRole::Title.text("Recording"));
         ui.label(TextRole::Label.text("File name"));
         ui.add(
@@ -436,7 +446,12 @@ impl DesktopApp {
                 .desired_width(f32::INFINITY),
         );
         ui.label(TextRole::Meta.text("Saved in the recordings directory."));
-        encoder_picker(ui, encoder);
+        match encoder {
+            Some(encoder) => encoder_picker(ui, encoder),
+            None => {
+                ui.label(TextRole::Meta.text("Reading the output settings…"));
+            }
+        }
         if self.model.recording.is_some() {
             ui.label(TextRole::Meta.text("A change applies to the next recording."));
         }
@@ -445,14 +460,11 @@ impl DesktopApp {
         match buttons(ui, ButtonKind::Primary, "Done", !name.is_empty()) {
             Some(true) => {
                 self.record_file = name.to_owned();
-                let current = self
-                    .model
-                    .profiles
-                    .as_ref()
-                    .map(|profiles| profiles.recording.video_encoder);
-                if current != Some(*encoder) {
+                if let (Some(chosen), Some(current)) = (*encoder, current)
+                    && chosen != current
+                {
                     self.model
-                        .set_video_settings(OutputKind::Recording, Some(*encoder), None);
+                        .set_video_settings(OutputKind::Recording, Some(chosen), None);
                 }
                 Outcome::Done
             }
@@ -470,8 +482,19 @@ impl DesktopApp {
         url: &mut String,
         key: &mut String,
         go_live: bool,
-        (encoder, bitrate_kbps): (&mut EncoderPreference, &mut u32),
+        (encoder, bitrate_kbps): (&mut Option<EncoderPreference>, &mut Option<u32>),
     ) -> Outcome {
+        let current = self.model.profiles.as_ref().map(|profiles| {
+            (
+                profiles.stream.video_encoder,
+                profiles.stream.video_bitrate_kbps,
+            )
+        });
+        // From the profile once it is known, as for the recording.
+        if let (None, Some((current_encoder, current_kbps))) = (*encoder, current) {
+            *encoder = Some(current_encoder);
+            *bitrate_kbps = Some(current_kbps);
+        }
         ui.label(TextRole::Title.text("Stream"));
         ui.label(TextRole::Label.text("Server URL"));
         ui.add(
@@ -501,17 +524,24 @@ impl DesktopApp {
                 ));
             }
         }
-        ui.horizontal(|ui| {
-            ui.label(TextRole::Label.text("Video bitrate"));
-            let field = ui.add(
-                egui::DragValue::new(bitrate_kbps)
-                    .range(VIDEO_BITRATE_KBPS)
-                    .speed(50.0)
-                    .suffix(" kbps"),
-            );
-            labelled(ui, field, "Video bitrate (kbps)");
-        });
-        encoder_picker(ui, encoder);
+        match (encoder.as_mut(), bitrate_kbps.as_mut()) {
+            (Some(encoder), Some(bitrate_kbps)) => {
+                ui.horizontal(|ui| {
+                    ui.label(TextRole::Label.text("Video bitrate"));
+                    let field = ui.add(
+                        egui::DragValue::new(bitrate_kbps)
+                            .range(VIDEO_BITRATE_KBPS)
+                            .speed(50.0)
+                            .suffix(" kbps"),
+                    );
+                    labelled(ui, field, "Video bitrate (kbps)");
+                });
+                encoder_picker(ui, encoder);
+            }
+            _ => {
+                ui.label(TextRole::Meta.text("Reading the output settings…"));
+            }
+        }
         if self.model.streaming.is_some() {
             ui.label(TextRole::Meta.text("Video settings apply to the next stream."));
         }
@@ -522,23 +552,20 @@ impl DesktopApp {
             Some(true) => {
                 self.stream_url = target.to_owned();
                 self.stream_key = std::mem::take(key);
-                let current = self.model.profiles.as_ref().map(|profiles| {
-                    (
-                        profiles.stream.video_encoder,
-                        profiles.stream.video_bitrate_kbps,
-                    )
-                });
-                let encoder =
-                    (current.map(|(encoder, _)| encoder) != Some(*encoder)).then_some(*encoder);
-                let bitrate =
-                    (current.map(|(_, kbps)| kbps) != Some(*bitrate_kbps)).then_some(*bitrate_kbps);
-                if encoder.is_some() || bitrate.is_some() {
-                    // The engine answers in order, so a start below takes
-                    // these settings.
-                    self.model
+                let (encoder, bitrate) = match current {
+                    Some((current_encoder, current_kbps)) => (
+                        encoder.filter(|chosen| *chosen != current_encoder),
+                        bitrate_kbps.filter(|chosen| *chosen != current_kbps),
+                    ),
+                    None => (None, None),
+                };
+                // The engine answers in order, so a start below takes these
+                // settings; it does not start without them.
+                let sent = (encoder.is_none() && bitrate.is_none())
+                    || self
+                        .model
                         .set_video_settings(OutputKind::Stream, encoder, bitrate);
-                }
-                if go_live {
+                if go_live && sent {
                     self.model
                         .start_streaming(&self.stream_url, &self.stream_key);
                 }
@@ -845,22 +872,14 @@ fn encoder_picker(ui: &mut egui::Ui, encoder: &mut EncoderPreference) {
 fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>) -> Outcome {
     ui.label(TextRole::Title.text("Monitor"));
     let profile = model.profiles.as_ref().map(|profiles| &profiles.monitor);
-    let bus = profile.and_then(|profile| {
-        model
-            .mixer
-            .as_ref()?
-            .buses
-            .iter()
-            .find(|bus| bus.id == profile.mix)
-            .map(|bus| bus.name.clone())
-    });
-    let current = profile.map(|profile| profile.device.clone());
+    let bus = profile.and_then(|profile| model.bus_name(&profile.mix));
     ui.label(TextRole::Meta.text(format!(
         "Plays {} for listening; it is never recorded or streamed. Its mix is chosen in the \
          routing matrix.",
-        bus.as_deref().unwrap_or("its mix")
+        bus.unwrap_or("its mix")
     )));
-    let idle = model.mixer.as_ref().is_none_or(|mixer| !mixer.running);
+    let current = profile.map(|profile| profile.device.clone());
+    let idle = model.pipeline_idle();
     ui.label(TextRole::Label.text("Output device"));
     ui.add_enabled_ui(idle, |ui| output_picker(ui, model, device, idle));
     ui.add_space(size::SPACE_8);
@@ -879,12 +898,7 @@ fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<St
 /// that is not listed (unplugged) stays choosable under its name.
 fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>, idle: bool) {
     const DEFAULT: &str = "System default output";
-    // Without a list (still asked for, or failed), nothing counts as
-    // missing.
-    let listed = match &model.audio_outputs {
-        Some(Ok(outputs)) => Some(outputs.as_slice()),
-        _ => None,
-    };
+    let listed = model.listed_audio_outputs();
     let chosen = workspace::output_label(device.as_deref(), listed);
     let unlisted = format!("{} (not found)", chosen.text);
     let selected = match device {

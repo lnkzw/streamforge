@@ -65,7 +65,7 @@ impl DesktopApp {
     pub(crate) fn mixer_dock(&mut self, ui: &mut egui::Ui) {
         let Some(mixer) = self.model.mixer.clone() else {
             widgets::section_header(ui, "Mixer", None);
-            ui.spinner();
+            widgets::loading(ui, "Loading the mixer…");
             return;
         };
         let actions = widgets::section_header(ui, "Mixer", Some(mixer.channels.len()));

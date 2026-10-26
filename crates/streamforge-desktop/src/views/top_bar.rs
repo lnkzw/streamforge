@@ -10,7 +10,7 @@ use crate::model::Level;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{
-    self, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
+    self, MenuItem, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
 };
 use crate::workspace::{self, health_level, transport_state};
 
@@ -86,20 +86,31 @@ impl DesktopApp {
         let response = widgets::menu_button(ui, Icon::File, &name, unsaved, &label, width);
         let mut chosen = None;
         egui::Popup::menu(&response).width(220.0).show(|ui| {
-            ui.set_min_width(200.0);
-            for (item, text) in [
-                (ProjectItem::Open, "Open project…"),
-                (ProjectItem::Save, "Save"),
-                (ProjectItem::SaveAs, "Save as…"),
+            ui.set_min_width(220.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (item, icon, text) in [
+                (ProjectItem::Open, Some(Icon::Folder), "Open project…"),
+                (ProjectItem::Save, Some(Icon::File), "Save"),
+                (ProjectItem::SaveAs, None, "Save as…"),
             ] {
-                if ui.button(TextRole::Body.text(text)).clicked() {
+                let mut row = MenuItem::new(text);
+                if let Some(icon) = icon {
+                    row = row.icon(icon);
+                }
+                if ui.add(row).clicked() {
                     chosen = Some(item);
                 }
             }
             if let Some(folder) = &self.project_folder {
-                ui.separator();
-                ui.add(egui::Label::new(TextRole::Meta.text(folder.as_str())).truncate())
-                    .on_hover_text(folder);
+                ui.add_space(size::SPACE_4);
+                widgets::divider(ui);
+                ui.add_space(size::SPACE_4);
+                ui.horizontal(|ui| {
+                    ui.add_space(size::SPACE_6);
+                    ui.add(egui::Label::new(TextRole::Meta.text(folder.as_str())).truncate())
+                        .on_hover_text(folder);
+                });
+                ui.add_space(size::SPACE_2);
             }
         });
         match chosen {
@@ -252,6 +263,7 @@ impl DesktopApp {
         let response =
             widgets::status_button(ui, level, &text, width).on_hover_text("Health and activity");
         let popup = egui::Popup::from_toggle_button_response(&response)
+            .frame(egui::Frame::popup(ui.style()).inner_margin(size::SPACE_8))
             .width(440.0)
             .align(egui::RectAlign::BOTTOM_END)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)

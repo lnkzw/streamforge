@@ -18,6 +18,8 @@ use command_api::{
 use eframe::egui;
 
 use crate::ui::icons::Icon;
+use crate::ui::theme::size;
+use crate::ui::widgets;
 
 /// The value edit to send, if any: when a drag ends, or right away for
 /// keyboard and typed input. Mid-drag values are not sent, so a drag is
@@ -50,6 +52,26 @@ fn labelled(ui: &egui::Ui, response: egui::Response, label: &str) -> egui::Respo
     ui.ctx()
         .accesskit_node_builder(response.id, |builder| builder.set_label(label));
     response.on_hover_text(label)
+}
+
+/// A source's opacity in percent: a slider and, beside it, a number field
+/// for the exact value. Returns both responses; a live edit commits them
+/// with [`commit`], a form takes them as they change.
+fn opacity_row(ui: &mut egui::Ui, percent: &mut f32) -> [egui::Response; 2] {
+    const FIELD: f32 = 64.0;
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - FIELD - ui.spacing().item_spacing.x).max(80.0);
+        let slider = widgets::slider(ui, percent, 0.0..=100.0, 1.0, width, "Opacity");
+        let field = ui.add_sized(
+            [FIELD, size::CONTROL],
+            egui::DragValue::new(percent)
+                .range(0.0..=100.0)
+                .suffix(" %")
+                .fixed_decimals(0),
+        );
+        [slider, labelled(ui, field, "Opacity (%)")]
+    })
+    .inner
 }
 
 /// A bus's name where room is short: `PGM` for the program bus.

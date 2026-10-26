@@ -11,7 +11,7 @@ use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 
-use super::{commit, coordinate_range, kind_label, right_to_left, scene, source};
+use super::{commit, coordinate_range, kind_label, opacity_row, right_to_left, scene, source};
 
 impl DesktopApp {
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
@@ -133,12 +133,8 @@ impl DesktopApp {
         ui.add_space(size::SPACE_8);
         widgets::section_header(ui, "Opacity", None);
         let mut percent = source.opacity * 100.0;
-        let slider = ui.add(
-            egui::Slider::new(&mut percent, 0.0..=100.0)
-                .suffix(" %")
-                .fixed_decimals(0),
-        );
-        if let Some(percent) = commit(ui, &slider, percent) {
+        let [slider, field] = opacity_row(ui, &mut percent);
+        if let Some(percent) = commit(ui, &slider, percent).or(commit(ui, &field, percent)) {
             self.model
                 .update_source(&source.id, None, Some((percent / 100.0).clamp(0.0, 1.0)));
         }
@@ -249,16 +245,15 @@ impl DesktopApp {
                     .as_ref()
                     .and_then(|chosen| sources.iter().find(|source| &source.id == chosen))
                     .map_or(SAME, |source| source.name.as_str());
-                egui::ComboBox::from_id_salt(("restart target", id))
-                    .selected_text(text)
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(selected, None, SAME);
-                        for source in sources {
-                            let label = format!("{} ({})", source.name, source.kind.as_str());
-                            ui.selectable_value(selected, Some(source.id.clone()), label);
-                        }
-                    });
+                let width = ui.available_width();
+                widgets::dropdown(ui, text, "Restart on", width, |ui| {
+                    widgets::choice(ui, selected, None, SAME);
+                    for source in sources {
+                        let label = format!("{} ({})", source.name, source.kind.as_str());
+                        widgets::choice(ui, selected, Some(source.id.clone()), &label);
+                    }
+                })
+                .on_hover_text("The source the capture restarts on");
             }
             _ => {
                 if ui

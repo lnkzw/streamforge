@@ -8,7 +8,7 @@ use eframe::egui;
 use crate::app::{Confirm, DesktopApp, Dialog};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, size};
-use crate::ui::widgets::{self, Button, ButtonKind, ListRow};
+use crate::ui::widgets::{self, Button, ButtonKind, ListRow, MenuItem};
 use crate::workspace::selected_scene;
 
 use super::{right_to_left, scene};
@@ -17,7 +17,7 @@ impl DesktopApp {
     pub(crate) fn scenes_dock(&mut self, ui: &mut egui::Ui) {
         let Some(scenes) = &self.model.scenes else {
             widgets::section_header(ui, "Scenes", None);
-            ui.spinner();
+            widgets::loading(ui, "Loading the scenes…");
             return;
         };
         let actions = widgets::section_header(ui, "Scenes", Some(scenes.scenes.len()));
@@ -59,14 +59,20 @@ impl DesktopApp {
                         take = Some((scene.id.clone(), scene.name.clone()));
                     }
                     row.context_menu(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
                         if ui
-                            .add_enabled(!on_air, egui::Button::new("Put on program"))
+                            .add(MenuItem::new("Put on program").enabled(!on_air))
                             .clicked()
                         {
                             take = Some((scene.id.clone(), scene.name.clone()));
                         }
                         if ui
-                            .add_enabled(!on_air, egui::Button::new("Delete…"))
+                            .add(
+                                MenuItem::new("Delete…")
+                                    .icon(Icon::Trash)
+                                    .danger(true)
+                                    .enabled(!on_air),
+                            )
                             .on_disabled_hover_text("The scene on program cannot be deleted")
                             .clicked()
                         {

@@ -194,11 +194,13 @@ impl Widget for Button<'_> {
     }
 }
 
-/// A square ghost button showing only `icon`. `label` says what it does:
-/// it is the tooltip and the name for assistive technology.
+/// A square ghost button showing only `icon`, at the `Ui`'s control height
+/// (smaller in a compact table). `label` says what it does: it is the
+/// tooltip and the name for assistive technology.
 pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
     let enabled = ui.is_enabled();
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size::CONTROL), Sense::click());
+    let side = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
     if ui.is_rect_visible(rect) {
         let state = VisualState::of(&response, enabled);
@@ -325,6 +327,78 @@ pub fn menu_button(
         }
     }
     response.on_hover_text(label)
+}
+
+/// A field that shows a choice and opens it elsewhere (a dialog): an icon
+/// in `tint`, the current value cut to fit `width`, and a chevron, at the
+/// `Ui`'s control height. `label` names it for assistive technology, which
+/// reads `text` as its value; the caller adds the tooltip. Disabled with
+/// the `Ui`.
+pub fn select_field(
+    ui: &mut Ui,
+    icon: Icon,
+    tint: Color32,
+    text: &str,
+    label: &str,
+    width: f32,
+) -> Response {
+    const ICON: f32 = 14.0;
+    const CHEVRON: f32 = 12.0;
+    let mut job = LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(TextRole::Body.font(), Color32::PLACEHOLDER),
+    );
+    let fixed = ICON + CHEVRON + 2.0 * size::SPACE_4 + 2.0 * size::SPACE_6;
+    job.wrap = egui::text::TextWrapping::truncate_at_width((width - fixed).max(0.0));
+    let galley = ui.painter().layout_job(job);
+    let enabled = ui.is_enabled();
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    response.widget_info(|| {
+        let mut info = WidgetInfo::labeled(WidgetType::Button, enabled, label);
+        info.current_text_value = Some(text.to_owned());
+        info
+    });
+    if ui.is_rect_visible(rect) {
+        let state = VisualState::of(&response, enabled);
+        let (fill, stroke, text_color) = button_colors(ButtonKind::Secondary, state);
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            CornerRadius::same(size::RADIUS_CONTROL),
+            fill,
+            stroke,
+            StrokeKind::Inside,
+        );
+        let mut x = rect.left() + size::SPACE_6;
+        let tint = if enabled { tint } else { color::TEXT_DISABLED };
+        icon.paint(
+            painter,
+            icon_rect(pos2(x + ICON / 2.0, rect.center().y), ICON),
+            tint,
+        );
+        x += ICON + size::SPACE_4;
+        painter.galley(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text_color,
+        );
+        Icon::ChevronDown.paint(
+            painter,
+            icon_rect(
+                pos2(
+                    rect.right() - size::SPACE_6 - CHEVRON / 2.0,
+                    rect.center().y,
+                ),
+                CHEVRON,
+            ),
+            color::TEXT_TERTIARY,
+        );
+        if response.has_focus() {
+            focus_ring(painter, rect, size::RADIUS_CONTROL);
+        }
+    }
+    response
 }
 
 /// Where a dock has nothing to show: an icon and one line saying what is

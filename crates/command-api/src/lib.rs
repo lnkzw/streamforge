@@ -56,11 +56,11 @@ pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats};
 use std::path::PathBuf;
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput, CaptureCapabilities,
+    AudioCaptureReport, AudioCaptureRequest, AudioOutput, CaptureCapabilities,
     ScreenCaptureRequest, VideoCaptureReport,
 };
 /// Capture types in results, for adapters that do not use `capture-api`.
-pub use capture_api::{CaptureState, ScreenSource};
+pub use capture_api::{AudioInput, CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
 /// `StreamTarget` lets a client check a stream URL and show its redacted
 /// form before `start_streaming`, with the engine's own rules.

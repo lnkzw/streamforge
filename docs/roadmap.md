@@ -262,7 +262,7 @@ From the project owner's brief: a professional production studio with its own id
 - [x] The mixer as a console (channels, buses, program) and a routing matrix (channels × buses, with each output's mix bus beside it), on the M11 model (step 3): sends with level and tap, aux bus assignment, buses added and removed while idle, each output's mix, the recording's tracks and the monitor switch, and the double-routing mark. Choosing devices for channels and the monitor comes with the audio sources (next step).
 - [ ] Projects, audio sources and output settings in the desktop (step 4, in three parts):
   - [x] 4a: projects. `--project-dir` (default: the working directory), a project menu in the top bar (open, save, save as) with an unsaved-changes mark that the window title repeats, an open dialog that lists the folder (`list_projects`, new in `command-api`, so agents have it too) and shows the engine's check of the chosen file, a save dialog that warns before replacing a file, and a question before opening a project or closing the window over unsaved changes (closing offers to save).
-  - [ ] 4b: audio sources. Channels added and removed, and their input chosen (`set_channel_input`), in the routing matrix.
+  - [x] 4b: audio sources. Channels added and removed, and their input chosen (`set_channel_input`), in the routing matrix: an input column with the engine's audio inputs (`list_audio_inputs`; desktop audio grouped apart, a device that is not listed now marked), a test tone, or the system's default input.
   - [ ] 4c: output settings. Encoder and bitrate in the output settings, and the monitor's device.
 - [ ] Rollout to the remaining views; keyboard operation as specified.
 

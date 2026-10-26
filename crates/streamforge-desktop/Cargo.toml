@@ -24,6 +24,8 @@ serde_json.workspace = true
 eframe = "0.36.2"
 
 [dev-dependencies]
+# A capture backend for the tests that lists audio inputs (tests/support).
+capture-api = { path = "../capture-api" }
 # Drives the real UI headless: simulated input for component behaviour
 # (tests/widgets.rs) and wgpu renders to check the visual result
 # (tests/render.rs).

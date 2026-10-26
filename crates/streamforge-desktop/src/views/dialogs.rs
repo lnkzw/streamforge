@@ -1,24 +1,27 @@
 //! Modal dialogs: confirmations for consequential actions, adding a
-//! source or a bus, the output targets, and opening and saving projects.
+//! source, a channel or a bus, a channel's input, the output targets, and
+//! opening and saving projects.
 //! One is open at a time; Escape or a click outside cancels.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use command_api::{StreamKey, StreamTarget};
+use command_api::{ChannelInput, MIN_GAIN_DB, StreamKey, StreamTarget};
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
-use crate::model::{Model, SourceForm, SourceType};
+use crate::model::{InputForm, InputType, Model, SourceForm, SourceType};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
 use crate::workspace;
 
-use super::coordinate_range;
+use super::{coordinate_range, labelled};
 
 const DIALOG_WIDTH: f32 = 420.0;
 /// Problems of a project file shown before the rest are counted.
 const PROBLEMS_SHOWN: usize = 4;
+/// A test tone's frequency; the engine takes up to half the sample rate.
+const TONE_HZ: std::ops::RangeInclusive<f64> = 20.0..=20_000.0;
 
 /// What the operator did in a dialog this frame.
 enum Outcome {
@@ -57,6 +60,15 @@ impl DesktopApp {
                     Dialog::StreamSettings { url, key, go_live } => {
                         self.stream_settings(ui, url, key, *go_live)
                     }
+                    Dialog::AddChannel { name, input } => {
+                        add_channel(ui, &mut self.model, name, input)
+                    }
+                    Dialog::ChannelInput {
+                        id,
+                        name,
+                        current,
+                        input,
+                    } => channel_input(ui, &mut self.model, id, name, current, input),
                     Dialog::AddBus { name, assigned } => {
                         add_bus(ui, &mut self.model, name, assigned)
                     }
@@ -104,6 +116,11 @@ impl DesktopApp {
                 "The working capture ends and starts again; outputs keep running.".to_owned(),
                 "Restart capture",
             ),
+            Confirm::RemoveChannel { name, .. } => (
+                format!("Remove channel “{name}”?"),
+                "Its sends are removed with it.".to_owned(),
+                "Remove channel",
+            ),
             Confirm::RemoveBus { name, .. } => (
                 format!("Remove bus “{name}”?"),
                 "Every send to it is removed with it.".to_owned(),
@@ -136,6 +153,9 @@ impl DesktopApp {
                         self.model.remove_source(id);
                     }
                     Confirm::RestartSource { id, .. } => self.model.restart_source(id, None),
+                    Confirm::RemoveChannel { id, name } => {
+                        self.model.remove_channel_confirmed(id, name);
+                    }
                     Confirm::RemoveBus { id, name } => self.model.remove_bus_confirmed(id, name),
                     Confirm::OpenProject { file_name } => self.model.load_project(file_name),
                     Confirm::Quit => {}
@@ -556,6 +576,176 @@ fn add_source(
         Some(false) => Outcome::Cancel,
         None => Outcome::Open,
     }
+}
+
+fn add_channel(
+    ui: &mut egui::Ui,
+    model: &mut Model,
+    name: &mut String,
+    input: &mut InputForm,
+) -> Outcome {
+    ui.label(TextRole::Title.text("New channel"));
+    ui.label(TextRole::Label.text("Name"));
+    ui.add(
+        egui::TextEdit::singleline(name)
+            .hint_text("e.g. Host mic")
+            .desired_width(f32::INFINITY),
+    );
+    input_form(ui, model, input);
+    ui.label(TextRole::Meta.text("It sends to the program bus; route it in the matrix."));
+    ui.add_space(size::SPACE_8);
+    match buttons(
+        ui,
+        ButtonKind::Primary,
+        "Add channel",
+        !name.trim().is_empty(),
+    ) {
+        Some(true) => {
+            model.add_channel(name.trim(), &input.input());
+            Outcome::Done
+        }
+        Some(false) => Outcome::Cancel,
+        None => Outcome::Open,
+    }
+}
+
+/// Choose what a channel plays; unchanged, there is nothing to apply.
+fn channel_input(
+    ui: &mut egui::Ui,
+    model: &mut Model,
+    id: &str,
+    name: &str,
+    current: &ChannelInput,
+    input: &mut InputForm,
+) -> Outcome {
+    ui.label(TextRole::Title.text(format!("Input of “{name}”")));
+    input_form(ui, model, input);
+    ui.add_space(size::SPACE_8);
+    let chosen = input.input();
+    match buttons(ui, ButtonKind::Primary, "Use input", chosen != *current) {
+        Some(true) => {
+            model.set_channel_input(id, &chosen);
+            Outcome::Done
+        }
+        Some(false) => Outcome::Cancel,
+        None => Outcome::Open,
+    }
+}
+
+/// What a channel plays: a device from the engine's list (desktop audio
+/// apart), the system's default input, or a test tone.
+fn input_form(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
+    ui.label(TextRole::Label.text("Input"));
+    ui.horizontal(|ui| {
+        for (kind, label) in [
+            (InputType::Device, "Device"),
+            (InputType::Tone, "Test tone"),
+        ] {
+            ui.selectable_value(&mut form.kind, kind, label);
+        }
+    });
+    match form.kind {
+        InputType::Device => device_picker(ui, model, form),
+        InputType::Tone => {
+            ui.horizontal(|ui| {
+                ui.label(TextRole::Label.text("Frequency"));
+                let field = ui.add(
+                    egui::DragValue::new(&mut form.frequency_hz)
+                        .range(TONE_HZ)
+                        .clamp_existing_to_range(false)
+                        .speed(1.0)
+                        .fixed_decimals(0)
+                        .suffix(" Hz"),
+                );
+                labelled(ui, field, "Tone frequency (Hz)");
+                ui.label(TextRole::Label.text("Level"));
+                let field = ui.add(
+                    egui::DragValue::new(&mut form.level_dbfs)
+                        .range(f64::from(MIN_GAIN_DB)..=0.0)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dBFS"),
+                );
+                labelled(ui, field, "Tone level (dBFS)");
+            });
+        }
+    }
+}
+
+/// Choose a listed audio input, or the system's default one. A device
+/// that is not listed (unplugged) stays choosable under its name.
+fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
+    const DEFAULT: &str = "System default input";
+    let listed = match &model.audio_inputs {
+        Some(Ok(inputs)) => inputs.as_slice(),
+        _ => &[],
+    };
+    let chosen = form.device.clone().map(|name| {
+        let input = listed.iter().find(|input| input.name == name);
+        (name, input)
+    });
+    let missing = |name: &String| format!("{name} (not found)");
+    let selected = match &chosen {
+        None => DEFAULT.to_owned(),
+        Some((_, Some(input))) => workspace::input_name(input).to_owned(),
+        Some((name, None)) => missing(name),
+    };
+    let combo = egui::ComboBox::from_id_salt("audio input")
+        .selected_text(selected)
+        .width(ui.available_width())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut form.device, None, DEFAULT);
+            if let Some((name, None)) = &chosen {
+                let label = missing(name);
+                ui.selectable_value(&mut form.device, Some(name.clone()), label);
+            }
+            for (heading, desktop) in [("Inputs", false), ("Desktop audio", true)] {
+                let mut group = listed
+                    .iter()
+                    .filter(|input| input.loopback_of.is_some() == desktop)
+                    .peekable();
+                if group.peek().is_none() {
+                    continue;
+                }
+                ui.label(TextRole::Section.text(heading));
+                for input in group {
+                    ui.selectable_value(
+                        &mut form.device,
+                        Some(input.name.clone()),
+                        workspace::input_name(input),
+                    )
+                    .on_hover_text(&input.name);
+                }
+            }
+        });
+    labelled(ui, combo.response, "Audio input");
+    // One line, always there: the dialog is centred and must not jump.
+    let desktop = chosen
+        .and_then(|(_, input)| input)
+        .and_then(|input| input.loopback_of.as_deref());
+    let note = match (&model.audio_inputs, desktop) {
+        (None, _) => "Looking for audio inputs…".to_owned(),
+        (Some(Err(reason)), _) => format!("The audio inputs could not be listed: {reason}"),
+        (Some(Ok(inputs)), _) if inputs.is_empty() => "No audio inputs found.".to_owned(),
+        (_, Some(_)) => "Desktop audio: what an output plays. A monitor on that output whose \
+                         mix has this channel feeds back."
+            .to_owned(),
+        _ => "The device is captured while the preview or an output runs.".to_owned(),
+    };
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                Button::new(ButtonKind::Ghost, "Refresh")
+                    .icon(Icon::Restart)
+                    .busy(model.finding_audio_inputs()),
+            )
+            .on_hover_text("List the audio inputs again")
+            .clicked()
+        {
+            model.find_audio_inputs();
+        }
+        ui.add(egui::Label::new(TextRole::Meta.text(note)).wrap());
+    });
 }
 
 fn add_bus(

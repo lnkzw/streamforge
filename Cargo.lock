@@ -3955,6 +3955,7 @@ dependencies = [
 name = "streamforge-desktop"
 version = "0.1.0"
 dependencies = [
+ "capture-api",
  "capture-platform",
  "command-api",
  "eframe",

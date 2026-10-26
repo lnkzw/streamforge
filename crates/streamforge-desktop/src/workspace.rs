@@ -1,8 +1,9 @@
 //! What the production workspace shows, computed from the model's state
 //! without widgets: the scene selection, the transport states, the monitor
 //! rectangle, meter ballistics, the health summary, the project's name
-//! and files, what a channel plays, and where and whether the monitor
-//! plays. The views draw these; keeping them here keeps them unit-tested.
+//! and files, what a channel plays, where and whether the monitor plays,
+//! and what the keys do. The views draw these; keeping them here keeps
+//! them unit-tested.
 
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use command_api::{
     AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
     OutputHealth, SceneList, StreamState,
 };
-use eframe::egui::{Rect, vec2};
+use eframe::egui::{Key, KeyboardShortcut, Modifiers, Rect, vec2};
 
 use crate::model::{HealthItem, Level};
 use crate::ui::icons::Icon;
@@ -402,10 +403,110 @@ pub fn monitor_state(profile: &MonitorProfile, health: Option<&HealthReport>) ->
     }
 }
 
+/// A key of the workspace (`docs/ui/design-system.md`, Keyboard). The
+/// workspace acts on one only while no dialog or menu is open and no text
+/// field has focus; Space only while nothing has focus, since a focused
+/// control takes Space as a click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortcut {
+    /// Space: start or stop the preview.
+    Preview,
+    /// Ctrl+R: start recording; stopping asks.
+    Record,
+    /// Ctrl+L: go live; stopping asks.
+    Live,
+    /// Ctrl+1 … Ctrl+9: put the scene at this index (from 0) on program.
+    Program(usize),
+    /// Delete: remove the selected source; asks first.
+    RemoveSource,
+    /// Ctrl+O
+    OpenProject,
+    /// Ctrl+S
+    SaveProject,
+    /// Ctrl+Shift+S
+    SaveProjectAs,
+}
+
+/// The scenes Ctrl and a digit put on program.
+const PROGRAM_KEYS: [Key; 9] = [
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+];
+
+impl Shortcut {
+    /// Every shortcut, for matching a key press against.
+    pub const ALL: [Self; 16] = [
+        Self::Preview,
+        Self::Record,
+        Self::Live,
+        Self::RemoveSource,
+        Self::OpenProject,
+        Self::SaveProject,
+        Self::SaveProjectAs,
+        Self::Program(0),
+        Self::Program(1),
+        Self::Program(2),
+        Self::Program(3),
+        Self::Program(4),
+        Self::Program(5),
+        Self::Program(6),
+        Self::Program(7),
+        Self::Program(8),
+    ];
+
+    /// What a key press asks for. Ctrl is Cmd on macOS; the modifiers must
+    /// be exactly the shortcut's, so Ctrl+Shift+S is not also Ctrl+S.
+    /// Backspace removes a source too: a Mac's delete key sends it.
+    pub fn of(key: Key, modifiers: Modifiers) -> Option<Self> {
+        if key == Key::Backspace && modifiers.is_none() {
+            return Some(Self::RemoveSource);
+        }
+        Self::ALL.into_iter().find(|shortcut| {
+            shortcut.keys().is_some_and(|keys| {
+                keys.logical_key == key && modifiers.matches_exact(keys.modifiers)
+            })
+        })
+    }
+
+    /// The keys, for matching and for the hint (`Context::format_shortcut`
+    /// names Ctrl as Cmd on macOS). `None` for a scene past the ninth.
+    pub fn keys(self) -> Option<KeyboardShortcut> {
+        let command = |key| Some(KeyboardShortcut::new(Modifiers::COMMAND, key));
+        match self {
+            Self::Preview => Some(KeyboardShortcut::new(Modifiers::NONE, Key::Space)),
+            Self::Record => command(Key::R),
+            Self::Live => command(Key::L),
+            Self::Program(index) => PROGRAM_KEYS.get(index).copied().and_then(command),
+            Self::RemoveSource => Some(KeyboardShortcut::new(Modifiers::NONE, Key::Delete)),
+            Self::OpenProject => command(Key::O),
+            Self::SaveProject => command(Key::S),
+            Self::SaveProjectAs => Some(KeyboardShortcut::new(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::S,
+            )),
+        }
+    }
+}
+
+/// Where Up and Down (`steps`: down minus up presses) move in a list of
+/// `len` rows from row `index`: they stop at its ends.
+pub fn list_step(index: usize, len: usize, steps: isize) -> usize {
+    index
+        .saturating_add_signed(steps)
+        .min(len.saturating_sub(1))
+}
+
 #[cfg(test)]
 mod tests {
     use command_api::{LiveOutputStats, MonitorHealth, SceneSpec, VideoEncoderInfo};
-    use eframe::egui::pos2;
+    use eframe::egui::{self, pos2};
 
     use super::*;
 
@@ -788,5 +889,88 @@ mod tests {
             ),
             MonitorState::On
         );
+    }
+
+    #[test]
+    fn keys_map_to_shortcuts_with_exactly_their_modifiers() {
+        let command = Modifiers::COMMAND;
+        // On Linux and Windows, Ctrl sets both `ctrl` and `command`.
+        let ctrl = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        let mac_cmd = Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(Shortcut::of(Key::R, ctrl), Some(Shortcut::Record));
+        assert_eq!(Shortcut::of(Key::R, mac_cmd), Some(Shortcut::Record));
+        assert_eq!(Shortcut::of(Key::L, command), Some(Shortcut::Live));
+        assert_eq!(Shortcut::of(Key::O, command), Some(Shortcut::OpenProject));
+        assert_eq!(Shortcut::of(Key::S, command), Some(Shortcut::SaveProject));
+        assert_eq!(
+            Shortcut::of(Key::S, command | Modifiers::SHIFT),
+            Some(Shortcut::SaveProjectAs)
+        );
+        assert_eq!(Shortcut::of(Key::Num1, command), Some(Shortcut::Program(0)));
+        assert_eq!(Shortcut::of(Key::Num9, command), Some(Shortcut::Program(8)));
+        assert_eq!(
+            Shortcut::of(Key::Space, Modifiers::NONE),
+            Some(Shortcut::Preview)
+        );
+        assert_eq!(
+            Shortcut::of(Key::Delete, Modifiers::NONE),
+            Some(Shortcut::RemoveSource)
+        );
+        assert_eq!(
+            Shortcut::of(Key::Backspace, Modifiers::NONE),
+            Some(Shortcut::RemoveSource)
+        );
+        // Without Ctrl, with another modifier, or a key of its own: none.
+        assert_eq!(Shortcut::of(Key::R, Modifiers::NONE), None);
+        assert_eq!(Shortcut::of(Key::Num0, command), None);
+        assert_eq!(Shortcut::of(Key::R, command | Modifiers::ALT), None);
+        assert_eq!(Shortcut::of(Key::Space, Modifiers::SHIFT), None);
+        assert_eq!(Shortcut::of(Key::Delete, command), None);
+        // Ctrl on a Mac is not Cmd.
+        let mac_ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(Shortcut::of(Key::S, mac_ctrl), None);
+    }
+
+    #[test]
+    fn each_shortcut_has_the_keys_that_ask_for_it() {
+        for shortcut in Shortcut::ALL {
+            let keys = shortcut.keys().expect("keys");
+            assert_eq!(
+                Shortcut::of(keys.logical_key, keys.modifiers),
+                Some(shortcut)
+            );
+        }
+        // Scenes past the ninth have no key.
+        assert_eq!(Shortcut::Program(9).keys(), None);
+        let hint = |shortcut: Shortcut| {
+            shortcut
+                .keys()
+                .expect("keys")
+                .format(&egui::ModifierNames::NAMES, false)
+        };
+        assert_eq!(hint(Shortcut::SaveProjectAs), "Ctrl+Shift+S");
+        assert_eq!(hint(Shortcut::Program(2)), "Ctrl+3");
+        assert_eq!(hint(Shortcut::RemoveSource), "Delete");
+    }
+
+    #[test]
+    fn up_and_down_stop_at_the_ends_of_a_list() {
+        assert_eq!(list_step(1, 3, 1), 2);
+        assert_eq!(list_step(1, 3, -1), 0);
+        assert_eq!(list_step(0, 3, -1), 0);
+        assert_eq!(list_step(2, 3, 1), 2);
+        assert_eq!(list_step(0, 3, 5), 2);
+        assert_eq!(list_step(0, 1, 1), 0);
     }
 }

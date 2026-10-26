@@ -147,12 +147,17 @@ States are defined once:
 
 | Key | Action |
 |---|---|
-| Space | Start or stop the preview |
+| Space | Start or stop the preview, while no control has focus (a focused control takes Space as a click) |
 | Ctrl+R | Start recording; stopping asks |
 | Ctrl+L | Go live; stopping asks |
 | Ctrl+1 … Ctrl+9 | Put scene 1 to 9 on program |
-| ↑ / ↓ | Move in the focused list |
-| Delete | Remove the selected source; asks first |
+| ↑ / ↓ | Move the selection in the focused scene or source list |
+| Delete (or Backspace) | Remove the selected source; asks first |
+| Ctrl+O | Open a project |
+| Ctrl+S | Save the project; one never saved asks for a name |
+| Ctrl+Shift+S | Save the project as |
 | Esc | Cancel a confirmation, close a drawer |
 
-Tab moves focus through docks in reading order, and the focus ring is always visible.
+Ctrl is Cmd on macOS. A Mac's delete key sends Backspace, so both remove. The keys act only while no dialog or menu is open and no text field has focus, and only with exactly their modifiers. Menus show an item's keys in its shortcut column; the transport buttons, the preview switch and the inspector's remove button name theirs in the tooltip.
+
+Tab moves focus through docks in reading order (top bar, scenes, sources, program, inspector, mixer, outputs), and the focus ring is always visible: every control that takes focus draws it, and what only the pointer uses (the monitor, the dock edges, a meter's clip latch) takes no focus. A focused fader steps with Up and Down, a slider with Left and Right, and neither lets those keys move the focus away.

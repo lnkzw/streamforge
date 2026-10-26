@@ -5,14 +5,16 @@
 use command_api::StreamState;
 use eframe::egui;
 
-use crate::app::{Confirm, DesktopApp, Dialog, HEALTH_STALE};
+use crate::app::{DesktopApp, HEALTH_STALE};
 use crate::model::Level;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{
     self, MenuItem, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
 };
-use crate::workspace::{self, health_level, transport_state};
+use crate::workspace::{self, Shortcut, health_level, transport_state};
+
+use super::{key_hint, with_keys};
 
 /// The widest the health summary grows before its text is cut.
 const HEALTH_WIDTH: f32 = 360.0;
@@ -90,12 +92,28 @@ impl DesktopApp {
             // content.
             ui.set_min_width(220.0 - ui.style().spacing.menu_margin.sum().x);
             ui.spacing_mut().item_spacing.y = 0.0;
-            for (item, icon, text) in [
-                (ProjectItem::Open, Some(Icon::Folder), "Open project…"),
-                (ProjectItem::Save, Some(Icon::File), "Save"),
-                (ProjectItem::SaveAs, None, "Save as…"),
+            for (item, shortcut, icon, text) in [
+                (
+                    ProjectItem::Open,
+                    Shortcut::OpenProject,
+                    Some(Icon::Folder),
+                    "Open project…",
+                ),
+                (
+                    ProjectItem::Save,
+                    Shortcut::SaveProject,
+                    Some(Icon::File),
+                    "Save",
+                ),
+                (
+                    ProjectItem::SaveAs,
+                    Shortcut::SaveProjectAs,
+                    None,
+                    "Save as…",
+                ),
             ] {
-                let mut row = MenuItem::new(text);
+                let keys = key_hint(ui.ctx(), shortcut).unwrap_or_default();
+                let mut row = MenuItem::new(text).shortcut(&keys);
                 if let Some(icon) = icon {
                     row = row.icon(icon);
                 }
@@ -179,42 +197,29 @@ impl DesktopApp {
 
     fn record_button(&mut self, ui: &mut egui::Ui) {
         let state = self.record_transport();
-        let waiting = self.model.pending("start_recording") || self.model.pending("stop_recording");
+        let waiting = self.transport_waiting(Transport::Record);
         let response = ui
             .add(TransportButton::new(Transport::Record, state).enabled(!waiting))
+            .on_hover_ui(|ui| {
+                ui.label(transport_hint(Transport::Record, state, ui.ctx()));
+            })
             .on_disabled_hover_text("Waiting for the engine");
         if response.clicked() {
-            match state {
-                TransportState::Idle => self.model.start_recording(&self.record_file),
-                // A failed recording only needs finalizing.
-                TransportState::Failed => self.model.stop_recording(),
-                TransportState::Starting | TransportState::Running(_) => {
-                    self.dialog = Some(Dialog::Confirm(Confirm::StopRecording));
-                }
-            }
+            self.record_action();
         }
     }
 
     fn live_button(&mut self, ui: &mut egui::Ui) {
         let state = self.live_transport();
-        let waiting = self.model.pending("start_streaming") || self.model.pending("stop_streaming");
+        let waiting = self.transport_waiting(Transport::Live);
         let response = ui
             .add(TransportButton::new(Transport::Live, state).enabled(!waiting))
+            .on_hover_ui(|ui| {
+                ui.label(transport_hint(Transport::Live, state, ui.ctx()));
+            })
             .on_disabled_hover_text("Waiting for the engine");
         if response.clicked() {
-            match state {
-                // Without a target, ask for one and go live from there.
-                TransportState::Idle if self.stream_url.trim().is_empty() => {
-                    self.open_stream_settings(true);
-                }
-                TransportState::Idle => self
-                    .model
-                    .start_streaming(self.stream_url.trim(), &self.stream_key),
-                TransportState::Failed => self.model.stop_streaming(),
-                TransportState::Starting | TransportState::Running(_) => {
-                    self.dialog = Some(Dialog::Confirm(Confirm::StopStreaming));
-                }
-            }
+            self.live_action();
         }
     }
 
@@ -317,6 +322,30 @@ enum ProjectItem {
     Open,
     Save,
     SaveAs,
+}
+
+/// What a transport button and its key do now.
+fn transport_hint(output: Transport, state: TransportState, ctx: &egui::Context) -> String {
+    let (shortcut, start, stop, finalize) = match output {
+        Transport::Record => (
+            Shortcut::Record,
+            "Start recording",
+            "Stop recording, after asking",
+            "Finish the failed recording",
+        ),
+        Transport::Live => (
+            Shortcut::Live,
+            "Go live",
+            "End the stream, after asking",
+            "End the failed stream",
+        ),
+    };
+    let action = match state {
+        TransportState::Idle => start,
+        TransportState::Starting | TransportState::Running(_) => stop,
+        TransportState::Failed => finalize,
+    };
+    with_keys(ctx, action, shortcut)
 }
 
 /// How a log or health level reads as a status.

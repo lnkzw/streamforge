@@ -9,9 +9,9 @@ use crate::app::{Confirm, DesktopApp, Dialog};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, MenuItem};
-use crate::workspace::selected_scene;
+use crate::workspace::{Shortcut, selected_scene};
 
-use super::{right_to_left, scene};
+use super::{key_hint, list_keys, right_to_left, scene};
 
 impl DesktopApp {
     pub(crate) fn scenes_dock(&mut self, ui: &mut egui::Ui) {
@@ -40,7 +40,8 @@ impl DesktopApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let shown = selected_scene(self.selected_scene.as_deref(), None, scenes);
-                for scene in &scenes.scenes {
+                let mut rows = Vec::with_capacity(scenes.scenes.len());
+                for (index, scene) in scenes.scenes.iter().enumerate() {
                     let meta = match scene.sources.len() {
                         1 => "1 source".to_owned(),
                         count => format!("{count} sources"),
@@ -60,10 +61,12 @@ impl DesktopApp {
                     }
                     row.context_menu(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        if ui
-                            .add(MenuItem::new("Put on program").enabled(!on_air))
-                            .clicked()
-                        {
+                        let keys = key_hint(ui.ctx(), Shortcut::Program(index));
+                        let mut put = MenuItem::new("Put on program").enabled(!on_air);
+                        if let Some(keys) = &keys {
+                            put = put.shortcut(keys);
+                        }
+                        if ui.add(put).clicked() {
                             take = Some((scene.id.clone(), scene.name.clone()));
                         }
                         if ui
@@ -79,6 +82,10 @@ impl DesktopApp {
                             delete = Some((scene.id.clone(), scene.name.clone()));
                         }
                     });
+                    rows.push(row);
+                }
+                if let Some(index) = list_keys(ui, &rows) {
+                    clicked = Some(scenes.scenes[index].id.clone());
                 }
                 create = new_scene_field(ui, &mut self.new_scene);
             });
@@ -99,7 +106,14 @@ impl DesktopApp {
                         .enabled(!on_air)
                         .min_width(ui.available_width() - size::CONTROL - size::SPACE_6),
                 )
-                .on_hover_text("Show the selected scene on program (double-click a scene)");
+                .on_hover_ui(|ui| {
+                    let keys = |index| key_hint(ui.ctx(), Shortcut::Program(index)).unwrap_or_default();
+                    ui.label(format!(
+                        "Show the selected scene on program (or double-click it; {} … {} put scene 1 to 9 on program)",
+                        keys(0),
+                        keys(8),
+                    ));
+                });
             if put.clicked() {
                 take = Some((selected.clone(), name.clone()));
             }

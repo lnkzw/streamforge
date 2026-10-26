@@ -295,14 +295,28 @@ fn strip(ui: &mut egui::Ui, strip: Strip, meter: &mut Ballistics, height: f32) -
                         meter.peak,
                         meter.clipped,
                     );
-                    // The clip latch stays until the operator resets it.
-                    let latch = ui.interact(
-                        meter_response.rect,
-                        egui::Id::new(("clip latch", id)),
-                        egui::Sense::click(),
-                    );
-                    if meter.clipped && latch.on_hover_text("Clipped: click to reset").clicked() {
-                        meter.reset_clip();
+                    // The clip latch stays until the operator resets it: a
+                    // click on the meter, or Space on it once Tab reaches
+                    // it (only while it is latched).
+                    if meter.clipped {
+                        let latch = ui.interact(
+                            meter_response.rect,
+                            egui::Id::new(("clip latch", id)),
+                            egui::Sense::click(),
+                        );
+                        latch.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("Reset the clip of {name}"),
+                            )
+                        });
+                        if latch.has_focus() {
+                            widgets::focus_ring(ui.painter(), meter_response.rect, 0);
+                        }
+                        if latch.on_hover_text("Clipped: click to reset").clicked() {
+                            meter.reset_clip();
+                        }
                     }
                     let fader = widgets::fader(ui, height, &mut gain, GAIN_RANGE, name);
                     change.gain = commit(ui, &fader, gain);

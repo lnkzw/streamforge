@@ -20,6 +20,7 @@ use eframe::egui;
 use crate::ui::icons::Icon;
 use crate::ui::theme::size;
 use crate::ui::widgets;
+use crate::workspace::{self, Shortcut};
 
 /// The value edit to send, if any: when a drag ends, or right away for
 /// keyboard and typed input. Mid-drag values are not sent, so a drag is
@@ -49,9 +50,14 @@ fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
 /// Name a widget that has no label of its own (a number field in a
 /// table) for assistive technology and the tooltip.
 fn labelled(ui: &egui::Ui, response: egui::Response, label: &str) -> egui::Response {
-    ui.ctx()
-        .accesskit_node_builder(response.id, |builder| builder.set_label(label));
+    named(ui, &response, label);
     response.on_hover_text(label)
+}
+
+/// Name a widget for assistive technology only.
+fn named(ui: &egui::Ui, response: &egui::Response, name: &str) {
+    ui.ctx()
+        .accesskit_node_builder(response.id, |builder| builder.set_label(name));
 }
 
 /// A source's opacity in percent: a slider and, beside it, a number field
@@ -87,6 +93,46 @@ fn opacity_row(ui: &mut egui::Ui, percent: &mut f32) -> [egui::Response; 2] {
         ui.data_mut(|data| data.remove_temp::<f32>(draft));
     }
     responses
+}
+
+/// A shortcut's keys as a menu or tooltip shows them (Cmd on macOS);
+/// `None` for a scene past the ninth.
+fn key_hint(ctx: &egui::Context, shortcut: Shortcut) -> Option<String> {
+    shortcut.keys().map(|keys| ctx.format_shortcut(&keys))
+}
+
+/// A tooltip's `text` with the shortcut's keys after it.
+fn with_keys(ctx: &egui::Context, text: &str, shortcut: Shortcut) -> String {
+    match key_hint(ctx, shortcut) {
+        Some(keys) => format!("{text} ({keys})"),
+        None => text.to_owned(),
+    }
+}
+
+/// Up and Down in a list whose row with focus is among `rows`: the row
+/// to select, which takes the focus. egui would move the focus to
+/// whatever lies above or below; the list keeps it, also at its ends.
+fn list_keys(ui: &egui::Ui, rows: &[egui::Response]) -> Option<usize> {
+    let focused = rows.iter().position(egui::Response::has_focus)?;
+    let (pressed, steps) = ui.input(|input| {
+        let down = input.num_presses(egui::Key::ArrowDown);
+        let up = input.num_presses(egui::Key::ArrowUp);
+        (
+            down + up > 0 && !input.modifiers.any(),
+            down as isize - up as isize,
+        )
+    });
+    if !pressed {
+        return None;
+    }
+    ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    let target = workspace::list_step(focused, rows.len(), steps);
+    if target == focused {
+        return None;
+    }
+    rows[target].request_focus();
+    rows[target].scroll_to_me(None);
+    Some(target)
 }
 
 /// A bus's name where room is short: `PGM` for the program bus.

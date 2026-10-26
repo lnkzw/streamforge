@@ -26,14 +26,14 @@ use capture_api::{
 };
 use command_api::{
     AudioInputList, AudioOutputList, BusState, CaptureHealth, CaptureKind, CaptureOutcome,
-    CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandList, CommandOutput,
-    CompositeReport, EngineStatus, ErrorSummary, HealthReport, MixReport, MixerState,
-    MonitorHealth, MonitorProfile, OutputHealth, OutputKind, OutputMix, OutputProfileSet,
-    OutputProfiles, PipelineReport, PreviewState, ProjectFileInfo, ProjectFileList, ProjectLoaded,
-    ProjectProblem, ProjectSaved, ProjectValidation, RecordingProfile, RecordingReport,
-    RecordingStarted, RecordingState, Rgba, SceneCaptureOutcome, SceneList, SceneSpec, SendSpec,
-    SendTap, SnapshotResult, SourceKind, SourceRect, SourceSpec, StopFailure, StreamProfile,
-    StreamingReport, StreamingStarted, registry,
+    CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandAccess, CommandList,
+    CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary, HealthReport, MixReport,
+    MixerState, MonitorHealth, MonitorProfile, OutputHealth, OutputKind, OutputMix,
+    OutputProfileSet, OutputProfiles, PipelineReport, PreviewState, ProjectFileInfo,
+    ProjectFileList, ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation,
+    RecordingProfile, RecordingReport, RecordingStarted, RecordingState, Rgba, SceneCaptureOutcome,
+    SceneList, SceneSpec, SendSpec, SendTap, SnapshotResult, SourceKind, SourceRect, SourceSpec,
+    StopFailure, StreamProfile, StreamingReport, StreamingStarted, registry,
 };
 use encoder_api::{
     AudioTrackStats, EncoderPreference, LiveConnectionStats, LiveOutputStats, RecordingStats,
@@ -44,8 +44,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use video_compositor::{LiveRenderStats, LiveSourceStats, RenderStats, SourceId, SourceStats};
 
-/// Results that are not a command's success, pinned like the results.
-const STOP_FAILURE: &str = "stop_recording, stop_streaming: error details";
+/// Error details that carry results, pinned like the results.
+const RECORDING_FAILURE: &str = "stop_recording: error details";
+const STREAM_FAILURE: &str = "stop_streaming: error details";
+/// The wire names of the enums in results.
+const ENUMS: &str = "enum values";
 
 #[test]
 fn every_result_keeps_its_wire_shape() {
@@ -65,7 +68,12 @@ fn every_result_keeps_its_wire_shape() {
         unknown.is_empty(),
         "samples for unknown commands: {unknown:?}"
     );
-    sections.insert(STOP_FAILURE.to_owned(), render(&stop_failure()));
+    sections.insert(
+        RECORDING_FAILURE.to_owned(),
+        render(&stop_failure(Some(recording_stats()))),
+    );
+    sections.insert(STREAM_FAILURE.to_owned(), render(&stop_failure(None)));
+    sections.insert(ENUMS.to_owned(), enum_values());
 
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/wire_shapes.txt");
     if std::env::var_os("UPDATE_WIRE_SHAPES").is_some() {
@@ -97,7 +105,10 @@ fn every_result_keeps_its_wire_shape() {
 
 /// Every path of `value` with the JSON types found there, one per line:
 /// `a.b: number`, `a[]` for the elements of a list (merged over all of
-/// them), and `a: null|string` where elements differ.
+/// them), `a: null|string` where elements differ, and `absent` for a path
+/// that some elements of a list lack (another variant, a skipped field).
+/// Whether a field may be `null` is not pinned (samples fill every
+/// option); `docs/protocol.md` says so per field.
 fn render(value: &impl Serialize) -> BTreeSet<String> {
     let mut paths = BTreeMap::new();
     walk(
@@ -134,8 +145,22 @@ fn walk(value: &Value, path: String, paths: &mut BTreeMap<String, BTreeSet<&'sta
                 !items.is_empty(),
                 "`{path}` is empty in its sample; give it an element so its shape is pinned"
             );
-            for item in items {
-                walk(item, format!("{path}[]"), paths);
+            let shapes: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    let mut own = BTreeMap::new();
+                    walk(item, format!("{path}[]"), &mut own);
+                    own
+                })
+                .collect();
+            let all: BTreeSet<String> = shapes.iter().flat_map(|own| own.keys().cloned()).collect();
+            for own in shapes {
+                for missing in all.iter().filter(|path| !own.contains_key(*path)) {
+                    paths.entry(missing.clone()).or_default().insert("absent");
+                }
+                for (path, kinds) in own {
+                    paths.entry(path).or_default().extend(kinds);
+                }
             }
         }
         Value::Object(fields) => {
@@ -425,9 +450,154 @@ fn samples() -> Vec<(&'static [&'static str], Value)> {
     ]
 }
 
-fn stop_failure() -> StopFailure {
+/// The wire names of every enum in results, one line per enum: a renamed
+/// variant changes the protocol without changing a path. The matches fail
+/// to compile when a variant is added, so its list grows with it.
+fn enum_values() -> BTreeSet<String> {
+    fn line<T: Serialize>(name: &str, tag: Option<&str>, variants: &[T]) -> String {
+        let values: Vec<String> = variants
+            .iter()
+            .map(|variant| {
+                let value = serde_json::to_value(variant).expect("serialize");
+                let value = tag.map_or(&value, |tag| &value[tag]);
+                value.as_str().expect("a name").to_owned()
+            })
+            .collect();
+        format!("{name}: {}", values.join("|"))
+    }
+    use RecordingState as R;
+    let _ = |state: R| match state {
+        R::Running | R::Failed => {}
+    };
+    use StreamState as S;
+    let _ = |state: S| match state {
+        S::Connecting | S::Connected | S::Reconnecting | S::Failed | S::Stopped => {}
+    };
+    let _ = |state: CaptureState| match state {
+        CaptureState::Running | CaptureState::Ended { .. } => {}
+    };
+    let _ = |kind: CaptureKind| match kind {
+        CaptureKind::Screen | CaptureKind::Audio => {}
+    };
+    use OutputKind as O;
+    let _ = |output: O| match output {
+        O::Recording | O::Stream | O::Monitor => {}
+    };
+    use EncoderPreference as E;
+    let _ = |preference: E| match preference {
+        E::Auto | E::Software | E::Hardware => {}
+    };
+    let _ = |tap: SendTap| match tap {
+        SendTap::PreFader | SendTap::PostFader => {}
+    };
+    let _ = |kind: SourceKind| match kind {
+        SourceKind::ColorBars | SourceKind::Solid { .. } | SourceKind::Screen { .. } => {}
+    };
+    let _ = |input: ChannelInput| match input {
+        ChannelInput::Device { .. } | ChannelInput::Tone { .. } => {}
+    };
+    use VideoSourceKind as V;
+    let _ = |kind: V| match kind {
+        V::Monitor | V::Window | V::Virtual => {}
+    };
+    use CursorMode as C;
+    let _ = |mode: C| match mode {
+        C::Hidden | C::Embedded | C::Metadata => {}
+    };
+    use CommandAccess as A;
+    let _ = |access: A| match access {
+        A::ReadOnly | A::Control | A::Sensitive => {}
+    };
+    // `ErrorCode::ALL` is kept complete by `command-api`'s own tests.
+    let codes: Vec<ErrorSummary> = ErrorCode::ALL
+        .iter()
+        .map(|code| ErrorSummary {
+            code: *code,
+            message: String::new(),
+            details: None,
+        })
+        .collect();
+    [
+        line("RecordingState", None, &[R::Running, R::Failed]),
+        line(
+            "StreamState",
+            None,
+            &[
+                S::Connecting,
+                S::Connected,
+                S::Reconnecting,
+                S::Failed,
+                S::Stopped,
+            ],
+        ),
+        line(
+            "CaptureState",
+            Some("state"),
+            &[
+                CaptureState::Running,
+                CaptureState::Ended {
+                    reason: String::new(),
+                },
+            ],
+        ),
+        line(
+            "CaptureKind",
+            None,
+            &[CaptureKind::Screen, CaptureKind::Audio],
+        ),
+        line("OutputKind", None, &[O::Recording, O::Stream, O::Monitor]),
+        line(
+            "EncoderPreference",
+            None,
+            &[E::Auto, E::Software, E::Hardware],
+        ),
+        line("SendTap", None, &[SendTap::PreFader, SendTap::PostFader]),
+        line(
+            "SourceKind",
+            Some("kind"),
+            &[
+                SourceKind::ColorBars,
+                SourceKind::Solid {
+                    color: Rgba([0; 4]),
+                },
+                SourceKind::Screen {
+                    target_kinds: Vec::new(),
+                    cursor_mode: C::Hidden,
+                    capture_target_id: None,
+                },
+            ],
+        ),
+        line(
+            "ChannelInput",
+            Some("kind"),
+            &[
+                ChannelInput::Device { device: None },
+                ChannelInput::Tone {
+                    frequency_hz: 1_000.0,
+                    level_dbfs: -20.0,
+                },
+            ],
+        ),
+        line(
+            "VideoSourceKind",
+            None,
+            &[V::Monitor, V::Window, V::Virtual],
+        ),
+        line("CursorMode", None, &[C::Hidden, C::Embedded, C::Metadata]),
+        line(
+            "CommandAccess",
+            None,
+            &[A::ReadOnly, A::Control, A::Sensitive],
+        ),
+        line("ErrorCode", Some("code"), &codes),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn stop_failure(recording: Option<RecordingStats>) -> StopFailure {
     StopFailure {
-        recording: Some(recording_stats()),
+        recording,
         pipeline: pipeline(),
         warnings: warnings(),
     }
@@ -862,6 +1032,15 @@ fn scene_list() -> SceneList {
                         target_kinds: vec![VideoSourceKind::Monitor],
                         cursor_mode: CursorMode::Embedded,
                         capture_target_id: Some("monitor:1".to_owned()),
+                    },
+                ),
+                // Without a capture target, which is then left out.
+                source(
+                    "src_picked",
+                    SourceKind::Screen {
+                        target_kinds: vec![VideoSourceKind::Window],
+                        cursor_mode: CursorMode::Hidden,
+                        capture_target_id: None,
                     },
                 ),
             ],

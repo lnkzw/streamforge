@@ -8,6 +8,7 @@
 //! selected source (a drawer in narrow windows). Bottom: mixer and outputs.
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
 use command_api::EncoderPreference;
@@ -15,8 +16,9 @@ use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
 use crate::ui::theme::{self, color, size};
+use crate::ui::widgets::TransportState;
 use crate::views;
-use crate::workspace::{self, Ballistics, DRAWER_BELOW};
+use crate::workspace::{self, Ballistics, DRAWER_BELOW, Shortcut};
 
 /// Status and meters are polled this often.
 const LIVE_REFRESH: Duration = Duration::from_millis(100);
@@ -27,6 +29,12 @@ const HEALTH_REFRESH: Duration = Duration::from_millis(250);
 pub(crate) const HEALTH_STALE: Duration = Duration::from_millis(1500);
 /// Scenes are re-read this often (changes also arrive with each edit).
 const SCENE_REFRESH: Duration = Duration::from_secs(2);
+
+/// What the operator can resize the docks to, by dragging their edges.
+const CONSOLE_HEIGHT: RangeInclusive<f32> = 168.0..=420.0;
+const OUTPUTS_WIDTH: RangeInclusive<f32> = 300.0..=560.0;
+const BROWSER_WIDTH: RangeInclusive<f32> = 200.0..=420.0;
+const INSPECTOR_WIDTH: RangeInclusive<f32> = 260.0..=440.0;
 
 pub struct DesktopApp {
     pub(crate) model: Model,
@@ -50,6 +58,8 @@ pub struct DesktopApp {
     /// Where the scenes dock ends and the sources dock begins, as a
     /// fraction of the left column.
     browser_split: f32,
+    /// The docks' sizes, as their edges were dragged.
+    docks: DockSizes,
     /// Meters by channel or bus id.
     pub(crate) meters: HashMap<String, Ballistics>,
     pub(crate) mixer_view: MixerView,
@@ -67,6 +77,15 @@ pub struct DesktopApp {
     last_health: Instant,
     last_scenes: Instant,
     last_frame: Instant,
+}
+
+/// The sizes of the docks the operator resizes, in points.
+#[derive(Debug, Clone, Copy)]
+struct DockSizes {
+    console: f32,
+    outputs: f32,
+    browser: f32,
+    inspector: f32,
 }
 
 /// What the mixer dock shows.
@@ -193,6 +212,12 @@ impl DesktopApp {
             drawer_open: false,
             log_seen: 0,
             browser_split: 0.4,
+            docks: DockSizes {
+                console: 232.0,
+                outputs: 400.0,
+                browser: 260.0,
+                inspector: 300.0,
+            },
             meters: HashMap::new(),
             mixer_view: MixerView::Console,
             project_folder: None,
@@ -289,7 +314,8 @@ impl DesktopApp {
             egui::pos2(column.center().x, split),
             egui::vec2(column.width(), 7.0),
         );
-        let drag = ui.interact(handle, ui.id().with("browser split"), egui::Sense::drag());
+        // Not focusable: Tab would stop on it without showing a focus.
+        let drag = ui.interact(handle, ui.id().with("browser split"), egui::Sense::DRAG);
         if drag.dragged()
             && let Some(pointer) = drag.interact_pointer_pos()
         {
@@ -441,6 +467,122 @@ impl DesktopApp {
         self.drawer_open = id.is_some();
         self.selected_source = id;
     }
+
+    /// REC, by the button or its key: start; stopping asks; a failed
+    /// recording only needs finalizing. Nothing while the engine has yet
+    /// to answer a start or stop.
+    pub(crate) fn record_action(&mut self) {
+        if self.model.pending("start_recording") || self.model.pending("stop_recording") {
+            return;
+        }
+        match self.record_transport() {
+            TransportState::Idle => self.model.start_recording(&self.record_file),
+            TransportState::Failed => self.model.stop_recording(),
+            TransportState::Starting | TransportState::Running(_) => {
+                self.dialog = Some(Dialog::Confirm(Confirm::StopRecording));
+            }
+        }
+    }
+
+    /// LIVE, as [`Self::record_action`]; without a target it asks for one
+    /// and goes live from there.
+    pub(crate) fn live_action(&mut self) {
+        if self.model.pending("start_streaming") || self.model.pending("stop_streaming") {
+            return;
+        }
+        match self.live_transport() {
+            TransportState::Idle if self.stream_url.trim().is_empty() => {
+                self.open_stream_settings(true);
+            }
+            TransportState::Idle => self
+                .model
+                .start_streaming(self.stream_url.trim(), &self.stream_key),
+            TransportState::Failed => self.model.stop_streaming(),
+            TransportState::Starting | TransportState::Running(_) => {
+                self.dialog = Some(Dialog::Confirm(Confirm::StopStreaming));
+            }
+        }
+    }
+
+    /// The workspace's keys, taken out of this frame's input so no widget
+    /// acts on them too. None while a dialog or menu is open or a text
+    /// field has focus; Space also not while any control has focus (it
+    /// clicks that control).
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.dialog.is_some() || egui::Popup::is_any_open(ctx) || ctx.text_edit_focused() {
+            return;
+        }
+        let focused = ctx.memory(|memory| memory.focused().is_some());
+        let pressed = ctx.input_mut(|input| {
+            let mut pressed = Vec::new();
+            input.events.retain(|event| {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return true;
+                };
+                match Shortcut::of(*key, *modifiers) {
+                    Some(Shortcut::Preview) if focused => true,
+                    Some(shortcut) => {
+                        pressed.push(shortcut);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            pressed
+        });
+        for shortcut in pressed {
+            // An action may have opened a dialog; the keys after it wait.
+            if self.dialog.is_none() {
+                self.shortcut(shortcut);
+            }
+        }
+    }
+
+    fn shortcut(&mut self, shortcut: Shortcut) {
+        match shortcut {
+            Shortcut::Preview => self.model.set_preview(!self.model.preview_enabled),
+            Shortcut::Record => self.record_action(),
+            Shortcut::Live => self.live_action(),
+            Shortcut::Program(index) => {
+                let scene = self.model.scenes.as_ref().and_then(|scenes| {
+                    scenes
+                        .scenes
+                        .get(index)
+                        .filter(|scene| scene.id != scenes.active_id)
+                        .map(|scene| (scene.id.clone(), scene.name.clone()))
+                });
+                if let Some((id, name)) = scene {
+                    self.model.activate_scene(&id, &name);
+                }
+            }
+            Shortcut::RemoveSource => {
+                let source = self
+                    .model
+                    .scenes
+                    .as_ref()
+                    .zip(self.selected_scene.as_deref())
+                    .and_then(|(scenes, id)| views::scene(scenes, id))
+                    .zip(self.selected_source.as_deref())
+                    .and_then(|(scene, id)| views::source(scene, id));
+                if let Some(source) = source {
+                    self.dialog = Some(Dialog::Confirm(Confirm::RemoveSource {
+                        id: source.id.clone(),
+                        name: source.name.clone(),
+                    }));
+                }
+            }
+            Shortcut::OpenProject => self.open_projects(),
+            Shortcut::SaveProject => self.save_project(false),
+            Shortcut::SaveProjectAs => self.save_project_as(false),
+        }
+    }
 }
 
 /// Draw a dock (`id` keeps its widgets apart from its siblings') into
@@ -464,6 +606,94 @@ pub(crate) fn dock_frame() -> egui::Frame {
         .inner_margin(size::SPACE_8)
 }
 
+/// A panel's body in the layout pass: it takes the whole room, and its
+/// contents are drawn later with [`fill`].
+fn room(ui: &mut egui::Ui) -> egui::Rect {
+    ui.expand_to_include_rect(ui.max_rect());
+    ui.max_rect()
+}
+
+/// Draw a dock's contents into the room its panel left for them,
+/// clipped to the panel, as the panel itself would have.
+fn fill<R>(
+    ui: &mut egui::Ui,
+    id: &str,
+    panel: &egui::InnerResponse<egui::Rect>,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut dock = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(id)
+            .max_rect(panel.inner)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    dock.set_clip_rect(panel.response.rect.intersect(ui.clip_rect()));
+    add(&mut dock)
+}
+
+/// The edge of a dock that is dragged to resize it.
+#[derive(Clone, Copy)]
+enum Edge {
+    /// A dock on the left: its right edge.
+    Right,
+    /// A dock on the right: its left edge.
+    Left,
+    /// A dock at the bottom: its top edge.
+    Top,
+}
+
+/// Resize a dock (`dock`: its rect) by dragging `edge`: `size` follows
+/// the pointer within `range`. egui's own panel handles are Tab stops
+/// that show no focus; this one only senses drags, so Tab passes it. It
+/// is added after the docks' contents, so it wins over them at the edge.
+fn resize_edge(
+    ui: &egui::Ui,
+    id: &str,
+    dock: egui::Rect,
+    edge: Edge,
+    size: &mut f32,
+    range: RangeInclusive<f32>,
+) {
+    let grab = ui.style().interaction.resize_grab_radius_side;
+    // egui draws the separator on the dock's outermost pixel.
+    let (handle, line, cursor) = match edge {
+        Edge::Right => (
+            egui::Rect::from_x_y_ranges(dock.right() - grab..=dock.right() + grab, dock.y_range()),
+            dock.right() - 0.5,
+            egui::CursorIcon::ResizeHorizontal,
+        ),
+        Edge::Left => (
+            egui::Rect::from_x_y_ranges(dock.left() - grab..=dock.left() + grab, dock.y_range()),
+            dock.left() + 0.5,
+            egui::CursorIcon::ResizeHorizontal,
+        ),
+        Edge::Top => (
+            egui::Rect::from_x_y_ranges(dock.x_range(), dock.top() - grab..=dock.top() + grab),
+            dock.top() + 0.5,
+            egui::CursorIcon::ResizeVertical,
+        ),
+    };
+    let drag = ui.interact(handle, egui::Id::new(("resize", id)), egui::Sense::DRAG);
+    if drag.dragged()
+        && let Some(pointer) = drag.interact_pointer_pos()
+    {
+        let wanted = match edge {
+            Edge::Right => pointer.x - dock.left(),
+            Edge::Left => dock.right() - pointer.x,
+            Edge::Top => dock.bottom() - pointer.y,
+        };
+        *size = wanted.round().clamp(*range.start(), *range.end());
+    }
+    if drag.hovered() || drag.dragged() {
+        ui.ctx().set_cursor_icon(cursor);
+        let stroke = egui::Stroke::new(size::STROKE, color::LINE_STRONG);
+        match edge {
+            Edge::Right | Edge::Left => ui.painter().vline(line, dock.y_range(), stroke),
+            Edge::Top => ui.painter().hline(dock.x_range(), line, stroke),
+        };
+    }
+}
+
 impl eframe::App for DesktopApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
@@ -478,54 +708,100 @@ impl eframe::App for DesktopApp {
             && ctx.memory(|memory| memory.focused().is_none())
             && !egui::Popup::is_any_open(&ctx);
 
-        egui::Panel::top("top_bar")
+        self.shortcuts(&ctx);
+
+        // The panels are laid out first and their contents drawn after, in
+        // reading order: egui moves Tab focus in the order widgets are
+        // added, and panels must be laid out from the outside in.
+        let top_bar = egui::Panel::top("top_bar")
             .exact_size(48.0)
             .frame(dock_frame().inner_margin(egui::Margin::symmetric(12, 8)))
-            .show(ui, |ui| self.top_bar(ui));
-        egui::Panel::bottom("console")
-            .resizable(true)
-            .default_size(232.0)
-            .size_range(168.0..=420.0)
+            .show(ui, room);
+        let console = egui::Panel::bottom("console")
+            // egui's resize handles are Tab stops; see `resize_edge`.
+            .resizable(false)
+            .exact_size(self.docks.console)
             .frame(egui::Frame::new())
             .show(ui, |ui| {
-                egui::Panel::right("outputs")
-                    .resizable(true)
-                    .default_size(400.0)
-                    .size_range(300.0..=560.0)
+                let outputs = egui::Panel::right("outputs")
+                    .resizable(false)
+                    .exact_size(self.docks.outputs)
                     .frame(dock_frame())
-                    .show(ui, |ui| self.outputs_dock(ui));
-                egui::CentralPanel::default()
+                    .show(ui, room);
+                let mixer = egui::CentralPanel::default()
                     .frame(dock_frame())
-                    .show(ui, |ui| self.mixer_dock(ui));
+                    .show(ui, room);
+                (outputs, mixer)
             });
-        egui::Panel::left("browser")
-            .resizable(true)
-            .default_size(260.0)
-            .size_range(200.0..=420.0)
+        let browser = egui::Panel::left("browser")
+            .resizable(false)
+            .exact_size(self.docks.browser)
             .frame(egui::Frame::new().fill(color::BG_PANEL))
-            .show(ui, |ui| self.browser(ui));
-        if !narrow {
+            .show(ui, room);
+        let inspector = (!narrow).then(|| {
             egui::Panel::right("inspector")
-                .resizable(true)
-                .default_size(300.0)
-                .size_range(260.0..=440.0)
+                .resizable(false)
+                .exact_size(self.docks.inspector)
                 .frame(dock_frame())
-                .show(ui, |ui| self.inspector_dock(ui));
-        }
+                .show(ui, room)
+        });
         let program = egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(color::BG_APP)
                     .inner_margin(size::SPACE_12),
             )
-            .show(ui, |ui| self.program_dock(ui));
-        if narrow && self.drawer_open && self.selected_source.is_some() {
+            .show(ui, room);
+
+        fill(ui, "top bar", &top_bar, |ui| self.top_bar(ui));
+        fill(ui, "browser", &browser, |ui| self.browser(ui));
+        let header = fill(ui, "program", &program, |ui| self.program_dock(ui));
+        if let Some(inspector) = &inspector {
+            fill(ui, "inspector", inspector, |ui| self.inspector_dock(ui));
+        } else if self.drawer_open && self.selected_source.is_some() {
             let area = program.response.rect;
-            let below_header = egui::Rect::from_min_max(
-                egui::pos2(area.left(), program.inner + size::SPACE_6),
-                area.max,
-            );
+            let below_header =
+                egui::Rect::from_min_max(egui::pos2(area.left(), header + size::SPACE_6), area.max);
             self.inspector_drawer(&ctx, below_header, escape_free);
+        }
+        let (outputs, mixer) = &console.inner;
+        fill(ui, "mixer", mixer, |ui| self.mixer_dock(ui));
+        fill(ui, "outputs", outputs, |ui| self.outputs_dock(ui));
+
+        let docks = &mut self.docks;
+        resize_edge(
+            ui,
+            "console",
+            console.response.rect,
+            Edge::Top,
+            &mut docks.console,
+            CONSOLE_HEIGHT,
+        );
+        resize_edge(
+            ui,
+            "outputs",
+            outputs.response.rect,
+            Edge::Left,
+            &mut docks.outputs,
+            OUTPUTS_WIDTH,
+        );
+        resize_edge(
+            ui,
+            "browser",
+            browser.response.rect,
+            Edge::Right,
+            &mut docks.browser,
+            BROWSER_WIDTH,
+        );
+        if let Some(inspector) = &inspector {
+            resize_edge(
+                ui,
+                "inspector",
+                inspector.response.rect,
+                Edge::Left,
+                &mut docks.inspector,
+                INSPECTOR_WIDTH,
+            );
         }
         self.dialogs(&ctx);
 

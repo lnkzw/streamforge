@@ -86,6 +86,28 @@ fn arrow_keys_step_the_focused_fader() {
 }
 
 #[test]
+fn arrow_keys_keep_the_focus_on_the_fader() {
+    // A mute switch under the fader, as in a console strip: egui would
+    // move the focus down to it.
+    let mut harness = Harness::new_ui_state(
+        |ui, (gain, mute): &mut (f32, bool)| {
+            widgets::fader(ui, HEIGHT, gain, RANGE, "mic");
+            widgets::toggle(ui, mute, "Mute mic");
+        },
+        (-6.0, false),
+    );
+    harness.run();
+    harness.get_by_label("mic").focus();
+    harness.run();
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run();
+    harness.key_press(egui::Key::ArrowDown);
+    harness.run();
+    assert_eq!(harness.state().0, -6.0 - 2.0 * FADER_STEP_DB);
+    assert!(harness.get_by_label("mic").is_focused());
+}
+
+#[test]
 fn a_value_outside_the_range_stays_until_the_fader_is_moved() {
     // The engine accepts -96 dB; the fader shows it at its bottom end
     // without changing it.

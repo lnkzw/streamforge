@@ -20,6 +20,7 @@ use eframe::egui;
 use crate::ui::icons::Icon;
 use crate::ui::theme::size;
 use crate::ui::widgets;
+use crate::workspace::{self, Shortcut};
 
 /// The value edit to send, if any: when a drag ends, or right away for
 /// keyboard and typed input. Mid-drag values are not sent, so a drag is
@@ -87,6 +88,38 @@ fn opacity_row(ui: &mut egui::Ui, percent: &mut f32) -> [egui::Response; 2] {
         ui.data_mut(|data| data.remove_temp::<f32>(draft));
     }
     responses
+}
+
+/// A shortcut's keys as a menu or tooltip shows them (Cmd on macOS);
+/// `None` for a scene past the ninth.
+fn key_hint(ctx: &egui::Context, shortcut: Shortcut) -> Option<String> {
+    shortcut.keys().map(|keys| ctx.format_shortcut(&keys))
+}
+
+/// Up and Down in a list whose row with focus is among `rows`: the row
+/// to select, which takes the focus. egui would move the focus to
+/// whatever lies above or below; the list keeps it, also at its ends.
+fn list_keys(ui: &egui::Ui, rows: &[egui::Response]) -> Option<usize> {
+    let focused = rows.iter().position(egui::Response::has_focus)?;
+    let (pressed, steps) = ui.input(|input| {
+        let down = input.num_presses(egui::Key::ArrowDown);
+        let up = input.num_presses(egui::Key::ArrowUp);
+        (
+            down + up > 0 && !input.modifiers.any(),
+            down as isize - up as isize,
+        )
+    });
+    if !pressed {
+        return None;
+    }
+    ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+    let target = workspace::list_step(focused, rows.len(), steps);
+    if target == focused {
+        return None;
+    }
+    rows[target].request_focus();
+    rows[target].scroll_to_me(None);
+    Some(target)
 }
 
 /// A bus's name where room is short: `PGM` for the program bus.

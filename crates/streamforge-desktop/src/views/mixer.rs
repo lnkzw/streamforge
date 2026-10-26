@@ -295,11 +295,13 @@ fn strip(ui: &mut egui::Ui, strip: Strip, meter: &mut Ballistics, height: f32) -
                         meter.peak,
                         meter.clipped,
                     );
-                    // The clip latch stays until the operator resets it.
+                    // The clip latch stays until the operator resets it. A
+                    // pointer target only: as a Tab stop it would show no
+                    // focus.
                     let latch = ui.interact(
                         meter_response.rect,
                         egui::Id::new(("clip latch", id)),
-                        egui::Sense::click(),
+                        egui::Sense::CLICK,
                     );
                     if meter.clipped && latch.on_hover_text("Clipped: click to reset").clicked() {
                         meter.reset_clip();

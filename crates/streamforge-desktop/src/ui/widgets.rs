@@ -1135,8 +1135,9 @@ pub const FADER_STEP_DB: f32 = 0.5;
 ///   plain click changes nothing, so touching a live fader never jumps it.
 ///   Grabbing the track off the thumb moves the thumb there. Near 0 dB a
 ///   drag snaps to unity, like the detent of a physical fader.
-/// - **Keyboard:** with focus, Up and Down change it by [`FADER_STEP_DB`];
-///   AccessKit's increment, decrement and set-value do the same.
+/// - **Keyboard:** with focus, Up and Down change it by [`FADER_STEP_DB`]
+///   (and do not move the focus); AccessKit's increment, decrement and
+///   set-value do the same.
 ///
 /// The response is changed whenever the value is; callers commit when a
 /// drag ends, or at once for keyboard changes, as with egui's sliders. A
@@ -1181,6 +1182,16 @@ pub fn fader(
 
     let mut steps = 0i32;
     if response.has_focus() {
+        // Up and Down step the fader instead of moving the focus.
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
         ui.input(|input| {
             steps += input.num_presses(egui::Key::ArrowUp) as i32;
             steps -= input.num_presses(egui::Key::ArrowDown) as i32;

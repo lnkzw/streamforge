@@ -10,8 +10,12 @@ use crate::model::SourceHealth;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
+use crate::workspace::Shortcut;
 
-use super::{commit, coordinate_range, kind_label, opacity_row, right_to_left, scene, source};
+use super::{
+    commit, coordinate_range, key_hint, kind_label, labelled, opacity_row, right_to_left, scene,
+    source,
+};
 
 impl DesktopApp {
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
@@ -96,8 +100,9 @@ impl DesktopApp {
             .num_columns(4)
             .spacing([size::SPACE_8, size::SPACE_6])
             .show(ui, |ui| {
-                for (row, labels) in [["X", "Y"], ["W", "H"]].iter().enumerate() {
-                    for (column, label) in labels.iter().enumerate() {
+                let rows = [[("X", "X"), ("Y", "Y")], [("W", "Width"), ("H", "Height")]];
+                for (row, labels) in rows.iter().enumerate() {
+                    for (column, (label, name)) in labels.iter().enumerate() {
                         let index = row * 2 + column;
                         ui.label(TextRole::Label.text(*label));
                         let field = ui.add(
@@ -110,6 +115,7 @@ impl DesktopApp {
                                 .max_decimals(1)
                                 .update_while_editing(false),
                         );
+                        let field = labelled(ui, field, name);
                         if let Some(value) = commit(ui, &field, rect[index]) {
                             rect[index] = value;
                             changed = true;
@@ -146,8 +152,13 @@ impl DesktopApp {
         }
 
         ui.add_space(size::SPACE_16);
+        let hint = match key_hint(ui.ctx(), Shortcut::RemoveSource) {
+            Some(keys) => format!("Remove this source from the scene ({keys}); asks first"),
+            None => "Remove this source from the scene; asks first".to_owned(),
+        };
         if ui
             .add(Button::new(ButtonKind::Danger, "Remove source…").icon(Icon::Trash))
+            .on_hover_text(hint)
             .clicked()
         {
             self.dialog = Some(Dialog::Confirm(Confirm::RemoveSource {

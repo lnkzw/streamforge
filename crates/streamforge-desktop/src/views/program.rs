@@ -8,9 +8,9 @@ use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, BadgeKind, Transport};
-use crate::workspace::fit;
+use crate::workspace::{Shortcut, fit};
 
-use super::{right_to_left, scene};
+use super::{key_hint, right_to_left, scene};
 
 /// The line of facts under the monitor.
 const FACTS_HEIGHT: f32 = 22.0;
@@ -32,7 +32,14 @@ impl DesktopApp {
         right_to_left(ui, actions, |ui| {
             ui.spacing_mut().item_spacing.x = size::SPACE_6;
             let mut preview = self.model.preview_enabled;
-            if widgets::toggle(ui, &mut preview, "Preview").changed() {
+            let hint = match key_hint(ui.ctx(), Shortcut::Preview) {
+                Some(keys) => format!("Start or stop the preview ({keys})"),
+                None => "Start or stop the preview".to_owned(),
+            };
+            if widgets::toggle(ui, &mut preview, "Preview")
+                .on_hover_text(hint)
+                .changed()
+            {
                 self.model.set_preview(preview);
             }
             ui.label(TextRole::Label.text("Preview"));
@@ -76,7 +83,9 @@ impl DesktopApp {
             0.0,
             space.top() + size::STROKE_HEAVY - monitor.top(),
         ));
-        let response = ui.allocate_rect(space, egui::Sense::click());
+        // A click selects the source under the pointer. Not focusable: the
+        // monitor has nothing to do by keyboard.
+        let response = ui.allocate_rect(space, egui::Sense::CLICK);
         self.paint_monitor(ui, monitor, recording || live);
         if response.clicked()
             && let Some(pointer) = response.interact_pointer_pos()

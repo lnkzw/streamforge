@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::accesskit::{Role, Toggled};
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::{NodeT, Queryable, by};
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
@@ -90,8 +90,12 @@ fn model(dir: &TempDir) -> Model {
 }
 
 fn harness(model: Model) -> Harness<'static, DesktopApp> {
+    harness_sized(model, [1400.0, 900.0])
+}
+
+fn harness_sized(model: Model, size: [f32; 2]) -> Harness<'static, DesktopApp> {
     let mut harness = Harness::builder()
-        .with_size([1400.0, 900.0])
+        .with_size(size)
         .build_eframe(move |cc| DesktopApp::new(&cc.egui_ctx, model));
     // Fonts apply from the second pass; let the first polls answer.
     settle(&mut harness, 5);
@@ -138,7 +142,7 @@ fn step_until(
 /// draws it from the engine's answer, so this is the engine's state.
 fn is_on(harness: &Harness<'static, DesktopApp>, label: &str) -> bool {
     harness
-        .query_by_label(label)
+        .query(by().label(label).predicate(|node| node.toggled().is_some()))
         .is_some_and(|node| node.accesskit_node().toggled() == Some(Toggled::True))
 }
 
@@ -959,4 +963,378 @@ fn a_double_click_opens_a_file_once_it_is_checked() {
     step_until(&mut harness, "the opened project", |h| {
         h.query_by_label("Project show.json").is_some() && h.query_by_label("Saved show").is_some()
     });
+}
+
+/// Press `key` with Ctrl (Cmd on macOS) and let a frame take it.
+fn command(harness: &mut Harness<'static, DesktopApp>, key: egui::Key) {
+    harness.key_press_modifiers(egui::Modifiers::COMMAND, key);
+    harness.step();
+}
+
+fn press(harness: &mut Harness<'static, DesktopApp>, key: egui::Key) {
+    harness.key_press(key);
+    harness.step();
+}
+
+/// The label of the control with keyboard focus (`Some(None)`: one
+/// without a label).
+fn focused(harness: &Harness<'static, DesktopApp>) -> Option<Option<String>> {
+    harness
+        .query(by().predicate(|node| node.is_focused()))
+        .map(|node| node.accesskit_node().label())
+}
+
+/// The list row labelled `label`, if shown (the inspector and the program
+/// header repeat names as text). A row is selected or not, which egui
+/// reports as toggled.
+fn row<'h>(
+    harness: &'h Harness<'static, DesktopApp>,
+    label: &'h str,
+) -> Option<egui_kittest::Node<'h>> {
+    harness.query(by().label(label).predicate(|node| node.toggled().is_some()))
+}
+
+/// Whether the list row labelled `label` shows as selected.
+fn is_selected(harness: &Harness<'static, DesktopApp>, label: &str) -> bool {
+    row(harness, label).is_some_and(|node| node.accesskit_node().toggled() == Some(Toggled::True))
+}
+
+#[test]
+fn space_switches_the_preview_unless_a_control_has_focus() {
+    let dir = TempDir::new("space");
+    let mut harness = harness(model(&dir));
+    press(&mut harness, egui::Key::Space);
+    step_until(&mut harness, "the preview", |h| is_on(h, "Preview"));
+
+    // A control with focus takes Space as its click: the row selects its
+    // source, and the preview stays on.
+    row(&harness, "lower third").expect("the row").focus();
+    harness.step();
+    press(&mut harness, egui::Key::Space);
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    assert!(is_on(&harness, "Preview"));
+
+    // Escape leaves the row; Space is the preview's again.
+    press(&mut harness, egui::Key::Escape);
+    assert_eq!(focused(&harness), None);
+    press(&mut harness, egui::Key::Space);
+    step_until(&mut harness, "the preview to stop", |h| {
+        !is_on(h, "Preview")
+    });
+}
+
+#[test]
+fn ctrl_r_records_and_stopping_by_key_asks_first() {
+    let dir = TempDir::new("ctrl-r");
+    let mut harness = harness(model(&dir));
+    command(&mut harness, egui::Key::R);
+    step_until(&mut harness, "the recording", |h| {
+        clickable(h, "Stop recording")
+    });
+
+    // The key asks too; Escape cancels and the recording runs on.
+    command(&mut harness, egui::Key::R);
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Stop recording?").is_some()
+    });
+    press(&mut harness, egui::Key::Escape);
+    step_until(&mut harness, "the confirmation to close", |h| {
+        h.query_by_label("Stop recording?").is_none()
+    });
+    settle(&mut harness, 10);
+    assert!(clickable(&harness, "Stop recording"), "still recording");
+
+    command(&mut harness, egui::Key::R);
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Stop recording?").is_some()
+    });
+    harness
+        .get_all_by_label("Stop recording")
+        .last()
+        .expect("the dialog's action")
+        .click();
+    step_until(&mut harness, "the recording to stop", |h| {
+        clickable(h, "Start recording")
+    });
+    assert!(dir.0.join("recording.mkv").is_file());
+}
+
+#[test]
+fn ctrl_l_asks_for_a_target_and_keys_wait_while_a_dialog_is_open() {
+    let dir = TempDir::new("ctrl-l");
+    let mut harness = harness(model(&dir));
+    command(&mut harness, egui::Key::L);
+    step_until(&mut harness, "the stream settings", |h| {
+        h.query_by_label("Server URL").is_some()
+    });
+    // Behind the dialog, Ctrl+R starts nothing.
+    command(&mut harness, egui::Key::R);
+    settle(&mut harness, 10);
+    assert!(harness.query_by_label("Stop recording").is_none());
+    press(&mut harness, egui::Key::Escape);
+    step_until(&mut harness, "the dialog to close", |h| {
+        h.query_by_label("Server URL").is_none()
+    });
+}
+
+#[test]
+fn keys_wait_while_a_text_field_has_focus() {
+    let dir = TempDir::new("typing");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("New scene").click();
+    step_until(&mut harness, "the name field", |h| {
+        h.query_by_label("Enter creates the scene, Esc cancels.")
+            .is_some()
+            && focused(h).is_some()
+    });
+    command(&mut harness, egui::Key::R);
+    press(&mut harness, egui::Key::Space);
+    settle(&mut harness, 10);
+    assert!(harness.query_by_label("Stop recording").is_none());
+    assert!(!is_on(&harness, "Preview"));
+}
+
+#[test]
+fn ctrl_and_a_digit_put_a_scene_on_program_and_arrows_move_in_the_lists() {
+    let dir = TempDir::new("scenes");
+    let mut model = model(&dir);
+    model.create_scene("Second");
+    wait(&mut model, "the second scene", |m| {
+        m.scenes
+            .as_ref()
+            .is_some_and(|list| list.scenes.iter().any(|scene| scene.name == "Second"))
+    });
+    let mut harness = harness(model);
+    // The selected scene is the program scene until another is chosen;
+    // putting it on program again is not offered.
+    assert!(!clickable(&harness, "Put on program"));
+    command(&mut harness, egui::Key::Num2);
+    step_until(&mut harness, "the second scene on program", |h| {
+        clickable(h, "Put on program")
+    });
+    command(&mut harness, egui::Key::Num1);
+    step_until(&mut harness, "the first scene on program", |h| {
+        !clickable(h, "Put on program")
+    });
+    // No third scene: nothing changes.
+    command(&mut harness, egui::Key::Num3);
+    settle(&mut harness, 10);
+    assert!(!clickable(&harness, "Put on program"));
+
+    // Down in the focused scene list selects the next scene and keeps the
+    // focus in the list, also at its end.
+    row(&harness, "Test pattern").expect("the row").focus();
+    harness.step();
+    press(&mut harness, egui::Key::ArrowDown);
+    step_until(&mut harness, "the second scene selected", |h| {
+        is_selected(h, "Second") && h.query_by_label_contains("has no sources yet").is_some()
+    });
+    assert_eq!(focused(&harness), Some(Some("Second".to_owned())));
+    press(&mut harness, egui::Key::ArrowDown);
+    settle(&mut harness, 3);
+    assert_eq!(focused(&harness), Some(Some("Second".to_owned())));
+    press(&mut harness, egui::Key::ArrowUp);
+    step_until(&mut harness, "the first scene selected", |h| {
+        is_selected(h, "Test pattern") && row(h, "lower third").is_some()
+    });
+
+    // The same in the source list, top layer first; the inspector follows.
+    row(&harness, "lower third").expect("the row").focus();
+    harness.step();
+    press(&mut harness, egui::Key::ArrowDown);
+    step_until(&mut harness, "the next source selected", |h| {
+        is_selected(h, "overlay") && h.query_by_label("Remove source…").is_some()
+    });
+    assert_eq!(focused(&harness), Some(Some("overlay".to_owned())));
+    press(&mut harness, egui::Key::ArrowUp);
+    step_until(&mut harness, "the top source selected", |h| {
+        is_selected(h, "lower third")
+    });
+}
+
+#[test]
+fn delete_asks_before_it_removes_the_selected_source() {
+    let dir = TempDir::new("delete");
+    let mut harness = harness(model(&dir));
+    // Nothing selected: nothing to remove.
+    press(&mut harness, egui::Key::Delete);
+    settle(&mut harness, 3);
+    assert!(harness.query_by_label_contains("Remove source “").is_none());
+
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    press(&mut harness, egui::Key::Delete);
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Remove source “lower third”?").is_some()
+    });
+    press(&mut harness, egui::Key::Escape);
+    step_until(&mut harness, "the confirmation to close", |h| {
+        h.query_by_label("Remove source “lower third”?").is_none()
+    });
+    assert!(row(&harness, "lower third").is_some());
+
+    // A Mac's delete key sends Backspace.
+    press(&mut harness, egui::Key::Backspace);
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Remove source “lower third”?").is_some()
+    });
+    harness.get_by_label("Remove source").click();
+    step_until(&mut harness, "the source to go", |h| {
+        row(h, "lower third").is_none()
+    });
+}
+
+#[test]
+fn project_keys_save_save_as_and_open() {
+    let dir = TempDir::new("project-keys");
+    let mut harness = harness(model(&dir));
+    // Never saved: Ctrl+S asks for a name.
+    command(&mut harness, egui::Key::S);
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    type_into_dialog(&mut harness, "show");
+    step_until(&mut harness, "the listing", |h| clickable(h, "Save"));
+    harness.get_by_label("Save").click();
+    step_until(&mut harness, "the save", |h| {
+        h.query_by_label("Project show.json").is_some()
+    });
+
+    // Saved once, Ctrl+S saves to the file without asking.
+    harness.get_by_label("Mute Tone").click();
+    step_until(&mut harness, "the change", |h| {
+        h.query_by_label("Project show.json, unsaved changes")
+            .is_some()
+    });
+    command(&mut harness, egui::Key::S);
+    step_until(&mut harness, "the save", |h| {
+        h.query_by_label("Project show.json").is_some()
+    });
+    assert!(harness.query_by_label("Save the project as").is_none());
+
+    // Ctrl+Shift+S asks for a name, Ctrl+O lists the folder.
+    harness.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::S,
+    );
+    step_until(&mut harness, "the save dialog", |h| {
+        h.query_by_label("Save the project as").is_some()
+    });
+    press(&mut harness, egui::Key::Escape);
+    step_until(&mut harness, "the dialog to close", |h| {
+        h.query_by_label("Save the project as").is_none()
+    });
+    command(&mut harness, egui::Key::O);
+    step_until(&mut harness, "the file list", |h| {
+        h.query_by_label("show.json").is_some()
+    });
+}
+
+#[test]
+fn tab_moves_through_the_docks_in_reading_order() {
+    let dir = TempDir::new("tab");
+    let mut harness = harness(model(&dir));
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    let mut order = Vec::new();
+    for _ in 0..80 {
+        press(&mut harness, egui::Key::Tab);
+        let label = focused(&harness)
+            .expect("Tab focuses a control")
+            .expect("every control that takes the focus is named");
+        if order.first() == Some(&label) {
+            break;
+        }
+        order.push(label);
+    }
+    // One control of each dock, in reading order: the top bar, scenes,
+    // sources, program, inspector, mixer, outputs.
+    let anchors = [
+        "Project Untitled, unsaved changes",
+        "Start recording",
+        "New scene",
+        "lower third",
+        "Preview",
+        "X",
+        "Remove source…",
+        "Console",
+        "Mute Tone",
+        "Monitor settings",
+    ];
+    let places: Vec<usize> = anchors
+        .iter()
+        .map(|anchor| {
+            order
+                .iter()
+                .position(|label| label == anchor)
+                .unwrap_or_else(|| panic!("{anchor} not reached: {order:?}"))
+        })
+        .collect();
+    assert!(
+        places.is_sorted(),
+        "Tab order {order:?} does not follow {anchors:?}"
+    );
+    // Shift+Tab goes back.
+    harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+    harness.step();
+    assert_eq!(focused(&harness), Some(order.last().cloned()));
+}
+
+#[test]
+fn escape_closes_the_inspector_drawer() {
+    let dir = TempDir::new("drawer");
+    let mut harness = harness_sized(model(&dir), [1280.0, 720.0]);
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the drawer", |h| {
+        h.query_by_label("Close the inspector (Esc)").is_some()
+    });
+    press(&mut harness, egui::Key::Escape);
+    step_until(&mut harness, "the drawer to close", |h| {
+        h.query_by_label("Close the inspector (Esc)").is_none()
+    });
+}
+
+/// Press at `from`, move to `to` and release there, a frame per event.
+fn drag(harness: &mut Harness<'static, DesktopApp>, from: egui::Pos2, to: egui::Pos2) {
+    harness.hover_at(from);
+    harness.step();
+    harness.drag_at(from);
+    harness.step();
+    harness.hover_at(to);
+    harness.step();
+    harness.drop_at(to);
+    settle(harness, 3);
+}
+
+#[test]
+fn dragging_a_dock_edge_resizes_the_dock() {
+    let dir = TempDir::new("resize");
+    let mut harness = harness(model(&dir));
+    // The scenes dock's add button sits at the browser's right edge.
+    let before = harness.get_by_label("New scene").rect();
+    let edge = egui::pos2(260.0, 400.0);
+    drag(&mut harness, edge, edge + egui::vec2(40.0, 0.0));
+    let after = harness.get_by_label("New scene").rect();
+    assert_eq!(after.left() - before.left(), 40.0);
+    // Past its widest, the dock stops there (420).
+    drag(
+        &mut harness,
+        egui::pos2(300.0, 400.0),
+        egui::pos2(600.0, 400.0),
+    );
+    let widest = harness.get_by_label("New scene").rect();
+    assert_eq!(widest.left() - before.left(), 160.0);
+
+    // The console grows upwards from its top edge.
+    let before = harness.get_by_label("Console").rect();
+    let edge = egui::pos2(400.0, 900.0 - 232.0);
+    drag(&mut harness, edge, edge - egui::vec2(0.0, 50.0));
+    let after = harness.get_by_label("Console").rect();
+    assert_eq!(before.top() - after.top(), 50.0);
 }

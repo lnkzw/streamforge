@@ -10,8 +10,9 @@ use crate::model::{SourceForm, SourceHealth};
 use crate::ui::icons::Icon;
 use crate::ui::theme::size;
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, MenuItem};
+use crate::workspace::Shortcut;
 
-use super::{kind_label, right_to_left, scene};
+use super::{key_hint, kind_label, list_keys, right_to_left, scene};
 
 impl DesktopApp {
     pub(crate) fn sources_dock(&mut self, ui: &mut egui::Ui) {
@@ -52,10 +53,12 @@ impl DesktopApp {
 
         let mut select = None;
         let mut remove = None;
+        let remove_keys = key_hint(ui.ctx(), Shortcut::RemoveSource).unwrap_or_default();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
+                let mut rows = Vec::with_capacity(scene.sources.len());
                 for source in scene.sources.iter().rev() {
                     let (icon, kind) = kind_label(&source.kind);
                     let meta = match &source.kind {
@@ -77,12 +80,23 @@ impl DesktopApp {
                     row.context_menu(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         if ui
-                            .add(MenuItem::new("Remove…").icon(Icon::Trash).danger(true))
+                            .add(
+                                MenuItem::new("Remove…")
+                                    .icon(Icon::Trash)
+                                    .danger(true)
+                                    .shortcut(&remove_keys),
+                            )
                             .clicked()
                         {
                             remove = Some((source.id.clone(), source.name.clone()));
                         }
                     });
+                    rows.push(row);
+                }
+                if let Some(index) = list_keys(ui, &rows)
+                    && let Some(source) = scene.sources.iter().rev().nth(index)
+                {
+                    select = Some(source.id.clone());
                 }
             });
         if let Some(id) = select {

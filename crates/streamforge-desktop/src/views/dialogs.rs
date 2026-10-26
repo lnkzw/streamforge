@@ -5,7 +5,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use command_api::{ChannelInput, MIN_GAIN_DB, StreamKey, StreamTarget};
+use command_api::{MIN_GAIN_DB, StreamKey, StreamTarget};
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
@@ -63,12 +63,9 @@ impl DesktopApp {
                     Dialog::AddChannel { name, input } => {
                         add_channel(ui, &mut self.model, name, input)
                     }
-                    Dialog::ChannelInput {
-                        id,
-                        name,
-                        current,
-                        input,
-                    } => channel_input(ui, &mut self.model, id, name, current, input),
+                    Dialog::ChannelInput { id, name, input } => {
+                        channel_input(ui, &mut self.model, id, name, input)
+                    }
                     Dialog::AddBus { name, assigned } => {
                         add_bus(ui, &mut self.model, name, assigned)
                     }
@@ -609,20 +606,29 @@ fn add_channel(
     }
 }
 
-/// Choose what a channel plays; unchanged, there is nothing to apply.
+/// Choose what a channel plays; what it plays now (another client may
+/// have changed it meanwhile) needs no change, and a channel that is gone
+/// cannot take one.
 fn channel_input(
     ui: &mut egui::Ui,
     model: &mut Model,
     id: &str,
     name: &str,
-    current: &ChannelInput,
     input: &mut InputForm,
 ) -> Outcome {
     ui.label(TextRole::Title.text(format!("Input of “{name}”")));
     input_form(ui, model, input);
     ui.add_space(size::SPACE_8);
     let chosen = input.input();
-    match buttons(ui, ButtonKind::Primary, "Use input", chosen != *current) {
+    let current = model.mixer.as_ref().and_then(|mixer| {
+        mixer
+            .channels
+            .iter()
+            .find(|channel| channel.spec.id == id)
+            .map(|channel| &channel.spec.input)
+    });
+    let changed = current.is_some_and(|current| *current != chosen);
+    match buttons(ui, ButtonKind::Primary, "Use input", changed) {
         Some(true) => {
             model.set_channel_input(id, &chosen);
             Outcome::Done
@@ -676,19 +682,24 @@ fn input_form(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
 /// that is not listed (unplugged) stays choosable under its name.
 fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
     const DEFAULT: &str = "System default input";
+    // Without a list (still asked for, or failed), nothing counts as
+    // missing.
     let listed = match &model.audio_inputs {
-        Some(Ok(inputs)) => inputs.as_slice(),
-        _ => &[],
+        Some(Ok(inputs)) => Some(inputs.as_slice()),
+        _ => None,
     };
     let chosen = form.device.clone().map(|name| {
-        let input = listed.iter().find(|input| input.name == name);
+        let input = listed.and_then(|listed| listed.iter().find(|input| input.name == name));
         (name, input)
     });
-    let missing = |name: &String| format!("{name} (not found)");
+    let unlisted = |name: &String| match listed {
+        Some(_) => format!("{name} (not found)"),
+        None => name.clone(),
+    };
     let selected = match &chosen {
         None => DEFAULT.to_owned(),
         Some((_, Some(input))) => workspace::input_name(input).to_owned(),
-        Some((name, None)) => missing(name),
+        Some((name, None)) => unlisted(name),
     };
     let combo = egui::ComboBox::from_id_salt("audio input")
         .selected_text(selected)
@@ -696,11 +707,12 @@ fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut form.device, None, DEFAULT);
             if let Some((name, None)) = &chosen {
-                let label = missing(name);
+                let label = unlisted(name);
                 ui.selectable_value(&mut form.device, Some(name.clone()), label);
             }
             for (heading, desktop) in [("Inputs", false), ("Desktop audio", true)] {
                 let mut group = listed
+                    .unwrap_or_default()
                     .iter()
                     .filter(|input| input.loopback_of.is_some() == desktop)
                     .peekable();

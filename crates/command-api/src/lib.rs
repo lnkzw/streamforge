@@ -41,8 +41,8 @@ pub use project::{
 };
 pub use registry::{
     CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
-    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, project_file_name,
-    registry,
+    DEFAULT_TONE_LEVEL_DBFS, NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name,
+    params_schema, project_file_name, registry,
 };
 pub use scenes::{
     AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,

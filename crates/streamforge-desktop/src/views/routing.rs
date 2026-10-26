@@ -11,6 +11,8 @@ use command_api::{
     BusState, MAX_AUX_BUSES, MAX_CHANNELS, MAX_EXTRA_TRACKS, MAX_GAIN_DB, MIN_GAIN_DB, MixerState,
     OutputKind, OutputProfiles, PROGRAM_BUS_ID, SendSpec, SendTap,
 };
+use std::time::Duration;
+
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
@@ -28,6 +30,8 @@ const COLUMN: f32 = 124.0;
 /// Device names are long; the field cuts them and its tooltip has all.
 const INPUT_COLUMN: f32 = 160.0;
 const ROW: f32 = 20.0;
+/// How often the matrix asks for the audio inputs again.
+const INPUTS_REFRESH: Duration = Duration::from_secs(5);
 const ROW_GAP: f32 = size::SPACE_2;
 /// Why the structure cannot change now (ADR 0017: structure while idle).
 const IDLE_BUSES: &str = "Stop the preview and the outputs to add or remove buses";
@@ -52,9 +56,14 @@ impl DesktopApp {
     pub(crate) fn routing(&mut self, ui: &mut egui::Ui, mixer: &MixerState) {
         let idle = !mixer.running;
         let profiles = self.model.profiles.clone();
-        // Device names and desktop audio need the engine's list; it is
-        // asked for once here, and again when an input is chosen.
-        if self.model.audio_inputs.is_none() {
+        // Device names, desktop audio and missing devices need the
+        // engine's list; devices come and go, so it is asked again while
+        // the matrix shows (listing is quick), and when an input is chosen.
+        if self
+            .model
+            .audio_inputs_age()
+            .is_none_or(|age| age > INPUTS_REFRESH)
+        {
             self.model.find_audio_inputs();
         }
         let inputs = match &self.model.audio_inputs {
@@ -163,7 +172,6 @@ impl DesktopApp {
                                 choose_input = Some(Dialog::ChannelInput {
                                     id: spec.id.clone(),
                                     name: spec.name.clone(),
-                                    current: spec.input.clone(),
                                     input: InputForm::new(&spec.input),
                                 });
                             }

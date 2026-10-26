@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use command_api::{
     AudioInput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
-    DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ, EngineStatus, HealthReport, MixerState,
-    OutputHealth, OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted,
-    SceneList, ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
+    DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EngineStatus, HealthReport, MixerState, OutputHealth,
+    OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted, SceneList,
+    ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -117,7 +117,7 @@ impl Default for InputForm {
             kind: InputType::Device,
             device: None,
             frequency_hz: DEFAULT_TONE_HZ,
-            level_dbfs: DEFAULT_OUTPUT_TONE_DBFS,
+            level_dbfs: DEFAULT_TONE_LEVEL_DBFS,
         }
     }
 }
@@ -204,6 +204,7 @@ pub struct Model {
     /// The audio inputs a channel can capture, or why they cannot be
     /// listed; `None` until asked for. A new list replaces it on arrival.
     pub audio_inputs: Option<Result<Vec<AudioInput>, String>>,
+    audio_inputs_received: Option<Instant>,
     /// The project directory's files, or why they cannot be listed; `None`
     /// until asked for (and after a save, which may have added one).
     pub projects: Option<Result<ProjectFileList, String>>,
@@ -238,6 +239,7 @@ impl Model {
             streaming: None,
             screen_sources: None,
             audio_inputs: None,
+            audio_inputs_received: None,
             projects: None,
             validation: None,
             project: None,
@@ -388,6 +390,12 @@ impl Model {
         if !self.finding_audio_inputs() {
             self.submit("list_audio_inputs", json!({}), Pending::AudioInputs);
         }
+    }
+
+    /// How old the list of audio inputs is; devices come and go.
+    pub fn audio_inputs_age(&self) -> Option<Duration> {
+        self.audio_inputs_received
+            .map(|received| received.elapsed())
     }
 
     /// Whether the list of audio inputs is on its way.
@@ -729,6 +737,7 @@ impl Model {
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });
+                    self.audio_inputs_received = Some(Instant::now());
                     continue;
                 }
                 Some(Pending::Projects) => {

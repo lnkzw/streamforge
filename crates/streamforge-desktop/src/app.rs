@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use command_api::ChannelInput;
 use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
@@ -102,11 +101,10 @@ pub(crate) enum Dialog {
         name: String,
         input: InputForm,
     },
-    /// A draft of what channel `id` plays; `current` is what it plays now.
+    /// A draft of what channel `id` plays.
     ChannelInput {
         id: String,
         name: String,
-        current: ChannelInput,
         input: InputForm,
     },
     /// `assigned`: the new bus feeds the program bus (a submix);

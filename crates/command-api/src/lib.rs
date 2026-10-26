@@ -33,7 +33,7 @@ pub use outputs::{
     DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, MonitorProfile, OutputKind, OutputProfileSet,
     OutputProfiles, PipelineReport, RecordingProfile, RecordingReport, RecordingRequest,
     RecordingStarted, SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport,
-    StreamingRequest, StreamingStarted,
+    StreamingRequest, StreamingStarted, VIDEO_BITRATE_KBPS,
 };
 pub use project::{
     MAX_LISTED_PROJECTS, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem,
@@ -56,11 +56,11 @@ pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats};
 use std::path::PathBuf;
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioOutput, CaptureCapabilities,
-    ScreenCaptureRequest, VideoCaptureReport,
+    AudioCaptureReport, AudioCaptureRequest, CaptureCapabilities, ScreenCaptureRequest,
+    VideoCaptureReport,
 };
 /// Capture types in results, for adapters that do not use `capture-api`.
-pub use capture_api::{AudioInput, CaptureState, ScreenSource};
+pub use capture_api::{AudioInput, AudioOutput, CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
 /// `StreamTarget` lets a client check a stream URL and show its redacted
 /// form before `start_streaming`, with the engine's own rules.

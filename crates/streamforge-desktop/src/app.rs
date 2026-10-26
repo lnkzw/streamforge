@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use command_api::EncoderPreference;
 use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
@@ -85,16 +86,25 @@ pub(crate) enum Dialog {
         scene_name: String,
         form: SourceForm,
     },
-    /// Edits a draft; Done applies it, cancelling drops it.
+    /// Edits a draft; Done applies it, cancelling drops it. The video
+    /// settings are `None` until the output profiles are known.
     RecordSettings {
         file_name: String,
+        encoder: Option<EncoderPreference>,
     },
-    /// Edits a draft of the target. `go_live`: opened from the LIVE button
-    /// without a target; its action starts the stream.
+    /// Edits a draft of the target and the video settings (as for the
+    /// recording). `go_live`: opened from the LIVE button without a
+    /// target; its action starts the stream.
     StreamSettings {
         url: String,
         key: String,
         go_live: bool,
+        encoder: Option<EncoderPreference>,
+        bitrate_kbps: Option<u32>,
+    },
+    /// A draft of the monitor's device (`None`: the system default).
+    MonitorSettings {
+        device: Option<String>,
     },
     /// A new channel's name and what it plays.
     AddChannel {
@@ -371,9 +381,11 @@ impl DesktopApp {
         }
     }
 
+    /// The video settings come from the output's profile, once known.
     pub(crate) fn open_record_settings(&mut self) {
         self.dialog = Some(Dialog::RecordSettings {
             file_name: self.record_file.clone(),
+            encoder: None,
         });
     }
 
@@ -382,6 +394,20 @@ impl DesktopApp {
             url: self.stream_url.clone(),
             key: self.stream_key.clone(),
             go_live,
+            encoder: None,
+            bitrate_kbps: None,
+        });
+    }
+
+    /// The device list is asked for again: devices come and go.
+    pub(crate) fn open_monitor_settings(&mut self) {
+        self.model.find_audio_outputs();
+        self.dialog = Some(Dialog::MonitorSettings {
+            device: self
+                .model
+                .profiles
+                .as_ref()
+                .and_then(|profiles| profiles.monitor.device.clone()),
         });
     }
 

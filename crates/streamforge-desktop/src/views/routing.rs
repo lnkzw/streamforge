@@ -278,13 +278,15 @@ impl DesktopApp {
                 ui.label(TextRole::Body.text(label));
                 if output == OutputKind::Monitor {
                     let mut on = profiles.monitor.enabled;
-                    let device = profiles
-                        .monitor
-                        .device
-                        .as_deref()
-                        .unwrap_or("the system's default output");
+                    let outputs = self.model.listed_audio_outputs();
+                    let device = match &profiles.monitor.device {
+                        None => "the system's default output".to_owned(),
+                        Some(device) => workspace::output_label(Some(device), outputs).text,
+                    };
                     if widgets::toggle(ui, &mut on, "Monitor on")
-                        .on_hover_text(format!("Plays its mix on {device}"))
+                        .on_hover_text(format!(
+                            "Plays its mix on {device}; the device is chosen in the outputs dock"
+                        ))
                         .changed()
                     {
                         self.model.set_monitor(on);

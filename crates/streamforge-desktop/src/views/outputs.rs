@@ -1,6 +1,10 @@
 //! The outputs dock: per output its state, its target and its numbers,
-//! and a settings action for the target. The transport in the top bar
-//! starts and stops them.
+//! and a settings action for the target and the video settings. The
+//! transport in the top bar starts and stops the recording and the
+//! stream; the monitor's switch and mix are in the routing matrix, and its
+//! row here shows where and whether it plays.
+
+use std::time::Duration;
 
 use command_api::{OutputHealth, StreamKey, StreamState, StreamTarget};
 use eframe::egui;
@@ -9,10 +13,31 @@ use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, BadgeKind, StatusLevel, TransportState};
+use crate::workspace::{self, MonitorState};
+
+/// How often the dock asks for the audio outputs again while the monitor
+/// is on and names a device: devices come and go.
+const OUTPUTS_REFRESH: Duration = Duration::from_secs(10);
 
 impl DesktopApp {
     pub(crate) fn outputs_dock(&mut self, ui: &mut egui::Ui) {
-        widgets::section_header(ui, "Outputs", Some(2));
+        widgets::section_header(ui, "Outputs", Some(3));
+        // A named monitor device's description, and whether it is there,
+        // need the engine's list: asked once, and again now and then while
+        // the monitor is on, where a missing device matters.
+        if let Some(monitor) = self
+            .model
+            .profiles
+            .as_ref()
+            .map(|profiles| &profiles.monitor)
+            .filter(|monitor| monitor.device.is_some())
+            && self
+                .model
+                .audio_outputs_age()
+                .is_none_or(|age| monitor.enabled && age > OUTPUTS_REFRESH)
+        {
+            self.model.find_audio_outputs();
+        }
         let health = self.model.health.as_ref();
 
         // Recording.
@@ -89,12 +114,66 @@ impl DesktopApp {
                 ),
             );
         }
+        ui.add_space(size::SPACE_6);
+        widgets::divider(ui);
+        ui.add_space(size::SPACE_6);
+
+        // Monitor.
+        let monitor_settings = self.monitor_row(ui);
         if record_settings {
             self.open_record_settings();
         }
         if stream_settings {
             self.open_stream_settings(false);
         }
+        if monitor_settings {
+            self.open_monitor_settings();
+        }
+    }
+
+    /// The monitor's state, the bus it plays and its device, once the
+    /// profiles are known. Returns whether its settings were asked for.
+    fn monitor_row(&self, ui: &mut egui::Ui) -> bool {
+        let Some(profile) = self
+            .model
+            .profiles
+            .as_ref()
+            .map(|profiles| &profiles.monitor)
+        else {
+            return false;
+        };
+        let outputs = self.model.listed_audio_outputs();
+        let device = workspace::output_label(profile.device.as_deref(), outputs);
+        let state = workspace::monitor_state(profile, self.model.health.as_ref());
+        let badge = match state {
+            MonitorState::Off => (BadgeKind::Neutral, "off"),
+            MonitorState::On => (BadgeKind::Neutral, "on"),
+            MonitorState::Playing => (BadgeKind::Ok, "playing"),
+            MonitorState::Ended(_) => (BadgeKind::Error, "ended"),
+        };
+        let bus = self.model.bus_name(&profile.mix).unwrap_or(&profile.mix);
+        let settings = output_row(
+            ui,
+            Icon::Speaker,
+            "Monitor",
+            badge,
+            (&device.text, &format!("Plays {bus}. {}", device.detail)),
+            "Monitor settings",
+        );
+        match state {
+            MonitorState::On if device.missing => {
+                widgets::status_line(ui, StatusLevel::Warn, &device.detail);
+            }
+            MonitorState::Ended(reason) => {
+                widgets::status_line(
+                    ui,
+                    StatusLevel::Error,
+                    &format!("Ended: {reason}. Switch it off and on to open the device again."),
+                );
+            }
+            _ => {}
+        }
+        settings
     }
 }
 

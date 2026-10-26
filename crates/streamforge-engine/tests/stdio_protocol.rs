@@ -33,9 +33,9 @@ fn get_status_returns_correlated_response() {
     let mut engine = EngineProcess::spawn();
     let response = engine.request(r#"{"v":1,"id":"status-1","command":"get_status"}"#);
     assert_status_ok(&response, &json!("status-1"));
-    assert_eq!(response["result"]["recording_active"], false);
-    assert_eq!(response["result"]["streaming_active"], false);
-    assert_eq!(response["result"]["media_engine_ready"], true);
+    assert_eq!(response["result"]["recording_state"], json!(null));
+    assert_eq!(response["result"]["streaming_state"], json!(null));
+    assert!(response["result"].get("media_engine_ready").is_none());
     assert_eq!(response["result"]["pipeline_running"], false);
     assert!(engine.finish().success());
 }

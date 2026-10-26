@@ -65,8 +65,8 @@ pub use capture_api::{AudioInput, AudioOutput, CaptureState, ScreenSource};
 /// `StreamTarget` lets a client check a stream URL and show its redacted
 /// form before `start_streaming`, with the engine's own rules.
 pub use encoder_api::{
-    EncoderPreference, LiveOutputStats, SkippedEncoder, StreamKey, StreamState, StreamTarget,
-    VideoEncoderInfo,
+    EncoderPreference, LiveConnectionStats, LiveOutputStats, SkippedEncoder, StreamKey,
+    StreamState, StreamTarget, VideoEncoderInfo,
 };
 use serde::{Deserialize, Serialize};
 /// Live render snapshot types in [`HealthReport`], for adapters that do not
@@ -237,24 +237,36 @@ pub struct ScreenSourceList {
 pub struct EngineStatus {
     pub application: String,
     pub version: String,
-    /// The media engine (compositor, mixer, encoders) is built in and can
-    /// start outputs. Always true since M5; kept for protocol version 1.
-    pub media_engine_ready: bool,
     /// A media pipeline runs (for outputs or the preview).
     pub pipeline_running: bool,
     pub capture_available: bool,
-    /// A stream is open and connected, connecting or reconnecting.
-    pub streaming_active: bool,
-    /// State of the open stream, if any (`failed`: reconnects exhausted;
-    /// `stop_streaming` reports why).
+    /// State of the open recording, if any (`failed`: it stopped
+    /// unexpectedly; `stop_recording` finalizes it and reports the error).
+    pub recording_state: Option<RecordingState>,
+    /// State of the open stream, if any (`failed`: reconnects exhausted or
+    /// the pipeline stopped; `stop_streaming` reports why).
     pub streaming_state: Option<StreamState>,
-    /// A recording is open and its workers are running.
-    pub recording_active: bool,
-    /// A recording is open but stopped unexpectedly (encoder, compositor or
-    /// mixer failure); `stop_recording` finalizes it and reports the error.
-    pub recording_failed: bool,
     /// The preview keeps the pipeline running (`set_preview`).
     pub preview_active: bool,
+}
+
+/// State of an open recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingState {
+    /// Its workers run.
+    Running,
+    /// It stopped unexpectedly (encoder, compositor or mixer failure).
+    Failed,
+}
+
+impl RecordingState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// Executes typed commands.
@@ -274,13 +286,10 @@ mod tests {
         let status = EngineStatus {
             application: "StreamForge".to_owned(),
             version: "0.1.0".to_owned(),
-            media_engine_ready: true,
-            pipeline_running: false,
+            pipeline_running: true,
             capture_available: false,
-            streaming_active: false,
-            streaming_state: None,
-            recording_active: false,
-            recording_failed: false,
+            recording_state: Some(RecordingState::Failed),
+            streaming_state: Some(StreamState::Reconnecting),
             preview_active: false,
         };
         let value = serde_json::to_value(CommandOutput::Status(status)).expect("serialize status");
@@ -289,13 +298,10 @@ mod tests {
             serde_json::json!({
                 "application": "StreamForge",
                 "version": "0.1.0",
-                "media_engine_ready": true,
-                "pipeline_running": false,
+                "pipeline_running": true,
                 "capture_available": false,
-                "streaming_active": false,
-                "streaming_state": null,
-                "recording_active": false,
-                "recording_failed": false,
+                "recording_state": "failed",
+                "streaming_state": "reconnecting",
                 "preview_active": false,
             })
         );

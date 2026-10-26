@@ -32,7 +32,6 @@ use command_api::{
     AudioGraphSpec, AudioInputList, AudioOutputList, Command, CommandError, CommandHandler,
     CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles, ScreenSourceList,
 };
-use encoder_ffmpeg::StreamState;
 use media_core::FrameMailbox;
 
 pub struct Engine {
@@ -76,14 +75,10 @@ impl Engine {
             status: EngineStatus {
                 application: "StreamForge".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
-                // Compositor, mixer and encoders are part of every build.
-                media_engine_ready: true,
                 pipeline_running: false,
                 capture_available: false,
-                streaming_active: false,
+                recording_state: None,
                 streaming_state: None,
-                recording_active: false,
-                recording_failed: false,
                 preview_active: false,
             },
             capture,
@@ -145,21 +140,10 @@ impl CommandHandler for Engine {
                 if self.capture_capabilities.is_none() {
                     self.refresh_capabilities();
                 }
-                let recording = self.recording_running();
-                self.status.recording_active = recording;
-                self.status.recording_failed = self.recording.is_some() && !recording;
-                let streaming = self.streaming_state();
-                self.status.streaming_state = streaming;
+                self.status.recording_state = self.recording_state();
+                self.status.streaming_state = self.streaming_state();
                 self.status.preview_active = self.preview_enabled;
                 self.status.pipeline_running = self.pipeline_running();
-                self.status.streaming_active = matches!(
-                    streaming,
-                    Some(
-                        StreamState::Connecting
-                            | StreamState::Connected
-                            | StreamState::Reconnecting
-                    )
-                );
                 Ok(CommandOutput::Status(self.status.clone()))
             }
             Command::GetHealth => Ok(CommandOutput::Health(Box::new(self.health()))),
@@ -313,7 +297,8 @@ mod tests {
         ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
         VideoStatsAccumulator, VideoStream,
     };
-    use command_api::registry;
+    use command_api::{RecordingState, registry};
+    use encoder_ffmpeg::StreamState;
     use media_core::{AudioRing, FrameBuffer, FrameMailbox, PixelFormat, VideoFrame};
     use serde_json::json;
 
@@ -607,11 +592,10 @@ mod tests {
         };
         assert_eq!(status.application, "StreamForge");
         assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
-        assert!(status.media_engine_ready);
         assert!(!status.pipeline_running);
         assert!(!status.capture_available);
-        assert!(!status.recording_active);
-        assert!(!status.streaming_active);
+        assert_eq!(status.recording_state, None);
+        assert_eq!(status.streaming_state, None);
     }
 
     #[test]
@@ -756,7 +740,7 @@ mod tests {
         let _media = media_test_lock();
         let dir = TempDir::new("lifecycle");
         let mut engine = engine().with_output_dir(&dir.0);
-        assert!(!status(&mut engine).recording_active);
+        assert_eq!(status(&mut engine).recording_state, None);
 
         run(
             &mut engine,
@@ -772,7 +756,10 @@ mod tests {
             (started.width, started.height, started.fps),
             (1920, 1080, 60)
         );
-        assert!(status(&mut engine).recording_active);
+        assert_eq!(
+            status(&mut engine).recording_state,
+            Some(RecordingState::Running)
+        );
 
         let again = start(&mut engine, json!({"file_name": "other.mkv"})).unwrap_err();
         assert_eq!(again.code, ErrorCode::InvalidState);
@@ -816,7 +803,7 @@ mod tests {
              ({} dropped, {skipped} skipped)",
             recording.video.frames_dropped
         );
-        assert!(!status(&mut engine).recording_active);
+        assert_eq!(status(&mut engine).recording_state, None);
 
         let stop_again = engine.handle(Command::StopRecording).unwrap_err();
         assert_eq!(stop_again.code, ErrorCode::InvalidState);
@@ -833,7 +820,7 @@ mod tests {
             std::fs::read(dir.0.join("keep.mkv")).expect("read"),
             b"precious"
         );
-        assert!(!status(&mut engine).recording_active);
+        assert_eq!(status(&mut engine).recording_state, None);
     }
 
     /// Start streaming to `url`, retrying while the test server is not
@@ -865,7 +852,6 @@ mod tests {
             started.target
         );
         let connected = status(&mut engine);
-        assert!(connected.streaming_active);
         assert_eq!(connected.streaming_state, Some(StreamState::Connected));
         std::thread::sleep(Duration::from_millis(1500));
         let report = match engine.handle(Command::StopStreaming).expect("stop") {
@@ -881,7 +867,7 @@ mod tests {
                 .contains("SECRET")
         );
         let stopped = status(&mut engine);
-        assert!(!stopped.streaming_active && stopped.streaming_state.is_none());
+        assert!(stopped.streaming_state.is_none());
 
         let arrived = server.join();
         assert_eq!((arrived.width, arrived.height), (1920, 1080));
@@ -914,16 +900,6 @@ mod tests {
         });
         let mut engine = engine().with_output_dir(&dir.0);
         start(&mut engine, json!({"file_name": "keep.mkv"})).expect("start recording");
-        // Outputs share the running pipeline; they cannot add a screen layer.
-        let screen_layer = Command::decode(
-            "start_streaming",
-            Some(&json!({"url": server.url(), "screen": true})),
-        )
-        .expect("decode");
-        assert_eq!(
-            engine.handle(screen_layer).unwrap_err().code,
-            ErrorCode::InvalidState
-        );
         start_streaming(
             &mut engine,
             json!({"url": server.url(), "reconnect_attempts": 1, "reconnect_delay_ms": 100,
@@ -937,18 +913,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let status_now = status(&mut engine);
-        assert!(!status_now.streaming_active);
-        assert!(status_now.recording_active, "{status_now:?}");
+        assert_eq!(status_now.streaming_state, Some(StreamState::Failed));
+        assert_eq!(
+            status_now.recording_state,
+            Some(RecordingState::Running),
+            "{status_now:?}"
+        );
         assert!(status_now.pipeline_running);
 
         // Health tells the two outputs apart while they run: the stream
         // failed after its attempts, the recording keeps encoding.
         let first = health(&mut engine);
         let stream_health = first.streaming.as_ref().expect("stream health");
-        assert_eq!(stream_health.state, Some(StreamState::Failed));
+        assert_eq!(stream_health.state, StreamState::Failed);
         assert!(!stream_health.running);
-        assert_eq!(stream_health.counters.connects, 1);
-        assert_eq!(stream_health.counters.reconnect_attempts, 1);
+        let connection = stream_health
+            .connection
+            .expect("stream connection counters");
+        assert_eq!(connection.connects, 1);
+        assert_eq!(connection.reconnect_attempts, 1);
+        let recording_health = first.recording.as_ref().expect("recording health");
+        assert_eq!(recording_health.state, RecordingState::Running);
+        assert!(recording_health.running && recording_health.connection.is_none());
         assert!(
             stream_health.target.ends_with("/live"),
             "{}",
@@ -987,7 +973,10 @@ mod tests {
             "{:?}",
             stream.warnings
         );
-        assert!(status(&mut engine).recording_active);
+        assert_eq!(
+            status(&mut engine).recording_state,
+            Some(RecordingState::Running)
+        );
 
         std::thread::sleep(Duration::from_millis(300));
         let report = match engine
@@ -1497,14 +1486,14 @@ mod tests {
             "remove_source",
             json!({"scene": "Main", "name": "desk"}),
         );
-        let ids = |engine: &mut Engine| -> Vec<Option<String>> {
+        let ids = |engine: &mut Engine| -> Vec<String> {
             health(engine)
                 .captures
                 .into_iter()
                 .map(|capture| capture.id)
                 .collect()
         };
-        assert_eq!(ids(&mut engine), [Some(brb_desk.clone())]);
+        assert_eq!(ids(&mut engine), std::slice::from_ref(&brb_desk));
         // So does deleting a scene whose capture is kept.
         run(&mut engine, "create_scene", json!({"name": "Spare"}));
         run(
@@ -1520,7 +1509,7 @@ mod tests {
             "delete_scene",
             json!({"name": "Spare", "confirm": true}),
         );
-        assert_eq!(ids(&mut engine), [Some(brb_desk)]);
+        assert_eq!(ids(&mut engine), [brb_desk]);
         let CommandOutput::PreviewState(preview) =
             run(&mut engine, "set_preview", json!({"enabled": false}))
         else {
@@ -1575,7 +1564,7 @@ mod tests {
         let running = desk(&report);
         assert_eq!(running.kind, command_api::CaptureKind::Screen);
         // The same id as in list_scenes, in captures and render sources.
-        assert_eq!(running.id.as_deref(), Some(desk_id.as_str()));
+        assert_eq!(running.id, desk_id);
         let rendered = report.render.expect("render");
         assert!(
             rendered
@@ -2553,7 +2542,7 @@ mod tests {
         let capture = health(&mut engine)
             .captures
             .into_iter()
-            .find(|capture| capture.id.as_deref() == Some(mic.as_str()))
+            .find(|capture| capture.id == mic)
             .expect("the channel's capture");
         let capture_api::CaptureState::Ended { reason } = capture.state else {
             panic!("{capture:?}");

@@ -1,8 +1,12 @@
 //! Request decoding and the blocking line-oriented serve loop.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 
-use command_api::{Command, CommandHandler};
+use command_api::{Command, CommandError, CommandHandler};
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 
 use crate::{ErrorCode, MAX_REQUEST_BYTES, PROTOCOL_VERSION, RequestId, Response, ResponseError};
@@ -15,6 +19,8 @@ struct Request {
     id: RequestId,
     command: String,
     params: Option<Value>,
+    /// The first key that occurs twice inside `params`, as a path in it.
+    duplicate_param: Option<String>,
 }
 
 type RequestFailure = (Option<RequestId>, ResponseError);
@@ -26,7 +32,18 @@ pub fn handle_line<H: CommandHandler + ?Sized>(line: &[u8], handler: &mut H) -> 
         Ok(request) => request,
         Err((id, error)) => return Response::failure(id, error),
     };
-    let outcome = Command::decode(&request.command, request.params.as_ref())
+    let decoded = Command::decode(&request.command, request.params.as_ref());
+    let decoded = match (decoded, request.duplicate_param) {
+        // An unknown command says more than its parameters.
+        (Err(error), _) if error.code == command_api::ErrorCode::UnknownCommand => Err(error),
+        (_, Some(path)) => Err(CommandError::new(
+            command_api::ErrorCode::InvalidParams,
+            format!("duplicate key `{path}` in `params`"),
+        )
+        .with_details(json!({ "command": request.command, "duplicate": path }))),
+        (decoded, None) => decoded,
+    };
+    let outcome = decoded
         .and_then(|command| handler.handle(command))
         .map_err(ResponseError::from)
         .and_then(|output| {
@@ -93,6 +110,18 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
     let Value::Object(mut object) = value else {
         return Err((None, invalid_request("request must be a JSON object")));
     };
+    // `serde_json` keeps the last of duplicate keys; find them, so a
+    // conflicting request fails instead of running with a guess.
+    let duplicate = duplicate_key(text);
+    // A key repeated at the top level (`params` too), or inside a field
+    // other than `params`.
+    let duplicate_top = duplicate
+        .as_ref()
+        .filter(|path| path.len() == 1 || path[0] != "params");
+    if duplicate_top.is_some_and(|path| path.first().is_some_and(|first| first == "id")) {
+        // Which `id` to echo is unknown.
+        return Err((None, invalid_request("duplicate key `id`")));
+    }
 
     // Resolve the ID first so every later error can still be correlated.
     let id = match object.remove("id") {
@@ -105,18 +134,17 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
         None => return Err((None, invalid_request("missing `id`"))),
     };
 
-    let unknown = object
-        .keys()
-        .find(|key| !KNOWN_FIELDS.contains(&key.as_str()))
-        .cloned();
-    if let Some(field) = unknown {
+    if let Some(path) = duplicate_top {
+        let path = display_path(path);
         return Err((
             Some(id),
-            invalid_request(format!("unknown field `{field}`"))
-                .with_details(json!({ "field": field })),
+            invalid_request(format!("duplicate key `{path}`"))
+                .with_details(json!({ "duplicate": path })),
         ));
     }
 
+    // The version before the fields: a later version may have other fields,
+    // and its client needs to hear which versions this engine speaks.
     match object.remove("v") {
         None => {}
         Some(Value::Number(v)) => match v.as_u64() {
@@ -139,6 +167,18 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
         Some(_) => return Err((Some(id), invalid_version())),
     }
 
+    let unknown = object
+        .keys()
+        .find(|key| !KNOWN_FIELDS.contains(&key.as_str()))
+        .cloned();
+    if let Some(field) = unknown {
+        return Err((
+            Some(id),
+            invalid_request(format!("unknown field `{field}`"))
+                .with_details(json!({ "field": field })),
+        ));
+    }
+
     let command = match object.remove("command") {
         Some(Value::String(command)) => command,
         Some(_) => return Err((Some(id), invalid_request("`command` must be a string"))),
@@ -149,7 +189,128 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
         id,
         command,
         params: object.remove("params"),
+        duplicate_param: duplicate
+            .filter(|path| path.len() > 1)
+            .map(|path| display_path(&path[1..])),
     })
+}
+
+/// The path of the first duplicate key in `text` (valid JSON), e.g.
+/// `["params", "tones", "0", "gain_db"]`; array indices are numbers.
+fn duplicate_key(text: &str) -> Option<Vec<String>> {
+    let found = RefCell::new(None);
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let check = DuplicateCheck {
+        path: Vec::new(),
+        found: &found,
+    };
+    // The text already parsed as JSON, so an error here is not expected;
+    // without a path, nothing is reported.
+    check.deserialize(&mut deserializer).ok()?;
+    found.into_inner()
+}
+
+/// `tones[0].gain_db` for `["tones", "0", "gain_db"]`.
+fn display_path(path: &[String]) -> String {
+    let mut shown = String::new();
+    for segment in path {
+        if segment.parse::<usize>().is_ok() {
+            shown.push('[');
+            shown.push_str(segment);
+            shown.push(']');
+        } else {
+            if !shown.is_empty() {
+                shown.push('.');
+            }
+            shown.push_str(segment);
+        }
+    }
+    shown
+}
+
+/// Walks a JSON value and records the first key that repeats in an object.
+struct DuplicateCheck<'a> {
+    path: Vec<String>,
+    found: &'a RefCell<Option<Vec<String>>>,
+}
+
+impl DuplicateCheck<'_> {
+    fn child(&self, segment: String) -> Self {
+        let mut path = self.path.clone();
+        path.push(segment);
+        DuplicateCheck {
+            path,
+            found: self.found,
+        }
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for DuplicateCheck<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for DuplicateCheck<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut index = 0usize;
+        while seq
+            .next_element_seed(self.child(index.to_string()))?
+            .is_some()
+        {
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if self.found.borrow().is_some() {
+                // Reported already; read past the rest.
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            }
+            let child = self.child(key.clone());
+            if !keys.insert(key) {
+                *self.found.borrow_mut() = Some(child.path.clone());
+            }
+            map.next_value_seed(child)?;
+        }
+        Ok(())
+    }
 }
 
 fn invalid_request(message: impl Into<String>) -> ResponseError {

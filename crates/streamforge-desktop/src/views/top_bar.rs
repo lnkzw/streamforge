@@ -2,7 +2,7 @@
 //! save as), the transport (REC and LIVE with running timers) and the
 //! health summary, which opens the details and the activity log.
 
-use command_api::StreamState;
+use command_api::{RecordingState, StreamState};
 use eframe::egui;
 
 use crate::app::{DesktopApp, HEALTH_STALE};
@@ -146,7 +146,7 @@ impl DesktopApp {
         self.transport(
             Transport::Record,
             self.model.recording.is_some(),
-            status.is_some_and(|status| status.recording_failed),
+            status.is_some_and(|status| status.recording_state == Some(RecordingState::Failed)),
         )
     }
 
@@ -163,23 +163,26 @@ impl DesktopApp {
     /// command, the status's failure flag and its health reading.
     fn transport(&self, output: Transport, open: bool, failed: bool) -> TransportState {
         let model = &self.model;
-        let (start, health) = match output {
-            Transport::Record => (
-                "start_recording",
-                model.health.as_ref().and_then(|h| h.recording.as_ref()),
-            ),
-            Transport::Live => (
-                "start_streaming",
-                model.health.as_ref().and_then(|h| h.streaming.as_ref()),
-            ),
-        };
         let age = model.health_age().unwrap_or_default();
-        transport_state(
-            open,
-            model.pending(start),
-            failed,
-            health.map(|output| (output, age)),
-        )
+        let health = model.health.as_ref();
+        match output {
+            Transport::Record => transport_state(
+                open,
+                model.pending("start_recording"),
+                failed,
+                health
+                    .and_then(|h| h.recording.as_ref())
+                    .map(|output| (output, age)),
+            ),
+            Transport::Live => transport_state(
+                open,
+                model.pending("start_streaming"),
+                failed,
+                health
+                    .and_then(|h| h.streaming.as_ref())
+                    .map(|output| (output, age)),
+            ),
+        }
     }
 
     /// On air: the output is open and has not failed. A start still

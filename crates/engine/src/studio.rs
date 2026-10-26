@@ -529,7 +529,7 @@ impl Engine {
             warnings: Vec::new(),
         };
         if enabled && !self.preview_enabled {
-            self.ensure_pipeline(None)?;
+            self.ensure_pipeline()?;
             self.preview_enabled = true;
             if let Some(pipeline) = &self.pipeline {
                 pipeline.set_preview(Some(Arc::clone(&self.preview_frames)));

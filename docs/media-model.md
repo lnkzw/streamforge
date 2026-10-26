@@ -108,7 +108,7 @@ Implemented output edges (one set per attached output, so outputs never starve e
 | Compositor → output's video copy pool | 8 frame buffers per output; with no free buffer the frame is dropped for that output | `video.frames_dropped` of that output |
 | Fan-out → output queue | 256 items shared by video and audio (about 1 s), preallocated; when full the item is dropped | `video.frames_dropped`, `audio.blocks_dropped` |
 | Audio timeline → AAC frames | gaps ≤ 1 s padded with silence, overlaps trimmed, larger jumps restart (the last frame before a restart and at the end is padded) | `gap_samples`, `overlap_samples`, `discontinuities`, `padding_samples` |
-| Recorder after a failure | finalizes the file, then counts everything still queued or sent as dropped until stopped | `frames_dropped`, `blocks_dropped`; `get_status.recording_failed` |
+| Recorder after a failure | finalizes the file, then counts everything still queued or sent as dropped until stopped | `frames_dropped`, `blocks_dropped`; `get_status.recording_state: "failed"` |
 | Streamer while disconnected (backoff, connect) or failed | everything received is dropped; audio before a connection's first video frame too | `frames_dropped_offline`, `blocks_dropped_offline` (included in the track totals); `get_status.streaming_state` |
 
 Implemented control and preview edges (M7):

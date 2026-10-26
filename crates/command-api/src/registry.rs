@@ -196,9 +196,8 @@ const START_RECORDING: CommandDescriptor = CommandDescriptor {
               mixer: the recording profile's mix and tracks, see get_output_profiles) to H.264/AAC \
               in Matroska. Params: file_name (required, plain .mkv name in the engine's output \
               directory, never overwritten); video_encoder (auto: hardware if one works here, else \
-              software; software; hardware; default: the profile's); optional screen layer \
-              (screen, source_id, source_types, cursor) only while no preview or output runs. \
-              Returns immediately with the encoder in use; recording continues until \
+              software; software; hardware; default: the profile's). Screen capture comes from \
+              the scene's screen sources (add_source). Returns immediately with the encoder in use; recording continues until \
               stop_recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -220,7 +219,7 @@ const START_STREAMING: CommandDescriptor = CommandDescriptor {
               video_bitrate_kbps (300..50000) and video_encoder (auto, software, hardware), both by \
               default the stream profile's, \
               reconnect_attempts (default 5), reconnect_delay_ms (default 1000, doubling up to \
-              30 s), and a screen layer as for start_recording. Returns once connected, with the \
+              30 s or the initial delay, whichever is larger). Returns once connected, with the \
               encoder in use; reconnects after errors; independent of recording.",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -439,7 +438,7 @@ const SET_MONITOR_DEVICE: CommandDescriptor = CommandDescriptor {
               device (a name from list_audio_outputs, or null or absent for the system default). \
               Returns the profiles.",
     access: CommandAccess::Sensitive,
-    destructive: false,
+    destructive: true,
     open_world: false,
 };
 
@@ -448,7 +447,7 @@ const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     summary: "Run the pipeline for an in-process preview (quarter resolution, 30 FPS) or stop. \
               Params: enabled.",
     access: CommandAccess::Sensitive,
-    destructive: false,
+    destructive: true,
     open_world: false,
 };
 
@@ -459,7 +458,7 @@ const SET_SCREEN_SOURCE: CommandDescriptor = CommandDescriptor {
               restart_source). Params: the source's id, or scene (or scene_id) and name; \
               source_id from list_screen_sources. Returns the scene list.",
     access: CommandAccess::Sensitive,
-    destructive: false,
+    destructive: true,
     open_world: false,
 };
 
@@ -902,14 +901,6 @@ struct StartRecordingParams {
     file_name: String,
     /// H.264 encoder: auto (hardware if one works here, else software), software or hardware.
     video_encoder: Option<EncoderPreference>,
-    /// Add a live screen layer (opens the system picker).
-    screen: Option<bool>,
-    /// Screen source id from list_screen_sources: capture it without a picker.
-    source_id: Option<String>,
-    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
-    source_types: Option<Vec<VideoSourceKind>>,
-    /// Cursor mode: hidden, embedded or metadata.
-    cursor: Option<CursorMode>,
 }
 
 fn decode_start_recording(
@@ -920,13 +911,6 @@ fn decode_start_recording(
     Ok(RecordingRequest {
         file_name: output_file(command, "file_name", params.file_name, "mkv")?,
         video_encoder: params.video_encoder,
-        screen: optional_screen(
-            command,
-            params.screen,
-            params.source_id,
-            params.source_types,
-            params.cursor,
-        )?,
     })
 }
 
@@ -951,14 +935,6 @@ struct StartStreamingParams {
     reconnect_attempts: Option<u32>,
     /// Wait before the first reconnect in ms, doubling up to 30 s (default 1000).
     reconnect_delay_ms: Option<u64>,
-    /// Add a live screen layer (opens the system picker).
-    screen: Option<bool>,
-    /// Screen source id from list_screen_sources: capture it without a picker.
-    source_id: Option<String>,
-    /// Screen source types to offer in the picker (monitor, window, virtual); default monitor and window.
-    source_types: Option<Vec<VideoSourceKind>>,
-    /// Cursor mode: hidden, embedded or metadata.
-    cursor: Option<CursorMode>,
 }
 
 /// Stands in for an adapter's fixed target while its parameters decode.
@@ -1043,13 +1019,6 @@ fn decode_start_streaming(
             initial_delay,
             max_delay: defaults.max_delay.max(initial_delay),
         },
-        screen: optional_screen(
-            command,
-            params.screen,
-            params.source_id,
-            params.source_types,
-            params.cursor,
-        )?,
     })
 }
 
@@ -2146,36 +2115,42 @@ fn output_file(
 }
 
 /// A plain file name (no directories) with `extension`; `place` says where
-/// the file lives, for the error message.
+/// the file lives, for the error message. Checked by its characters, not by
+/// the host's path rules, so a name means the same file on every system.
 fn plain_file(
     command: &str,
     field: &str,
-    path: String,
+    name: String,
     extension: &str,
     place: &str,
 ) -> Result<PathBuf, CommandError> {
-    let path = PathBuf::from(path);
-    let mut components = path.components();
-    let plain_name = matches!(
-        (components.next(), components.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    );
-    let has_extension = path
-        .extension()
-        .is_some_and(|found| found.eq_ignore_ascii_case(extension));
-    // Windows opens a device for these names, whatever the extension (e.g.
-    // `CON.json`); refused everywhere, so a name works on every system.
-    let device = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(is_windows_device_name);
-    if device {
+    // Separators and drive or stream syntax of any system, and what Windows
+    // does not allow in a name.
+    let forbidden = |c: char| matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*');
+    if name.chars().any(|c| c.is_control() || forbidden(c)) {
+        return Err(invalid_params(
+            command,
+            format!(
+                "`{field}` must be a plain file name ending in .{extension}, without \
+                 directories, control characters or any of \\ / : < > \" | ? *; {place}"
+            ),
+        ));
+    }
+    // Windows opens a device for these names, whatever follows the first
+    // dot (`CON.json`, `con.x.json`); refused everywhere, so a name works on
+    // every system.
+    let first_part = name.split('.').next().unwrap_or_default().trim_end();
+    if is_windows_device_name(first_part) {
         return Err(invalid_params(
             command,
             format!("`{field}` names a Windows device (CON, PRN, AUX, NUL, COM1-9, LPT1-9)"),
         ));
     }
-    if !plain_name || !has_extension || path.file_stem().is_none() {
+    let stem = name
+        .rsplit_once('.')
+        .filter(|(_, found)| found.eq_ignore_ascii_case(extension))
+        .map(|(stem, _)| stem);
+    if stem.is_none_or(str::is_empty) {
         return Err(invalid_params(
             command,
             format!(
@@ -2184,7 +2159,7 @@ fn plain_file(
             ),
         ));
     }
-    Ok(path)
+    Ok(PathBuf::from(name))
 }
 
 fn is_windows_device_name(stem: &str) -> bool {
@@ -2285,13 +2260,13 @@ fn duration_within(
         format!(
             "`duration_ms` must be between {} and {}",
             MIN_PROBE_DURATION.as_millis(),
-            MAX_PROBE_DURATION.as_millis()
+            max.as_millis()
         ),
     )
     .with_details(json!({
         "command": command,
         "min_ms": MIN_PROBE_DURATION.as_millis(),
-        "max_ms": MAX_PROBE_DURATION.as_millis(),
+        "max_ms": max.as_millis(),
     })))
 }
 
@@ -2300,46 +2275,34 @@ fn duration_within(
 /// Generated from the same structs `Command::decode` deserializes, so it
 /// cannot drift from validation. `None` for an unknown command.
 pub fn params_schema(name: &str) -> Option<Value> {
-    fn of<T: JsonSchema>() -> Value {
-        let generator = SchemaSettings::draft2020_12()
-            .with(|settings| settings.inline_subschemas = true)
-            .into_generator();
-        let mut schema = Value::from(generator.into_root_schema_for::<T>());
-        if let Some(object) = schema.as_object_mut() {
-            // Metadata of the Rust type, not of the command.
-            object.remove("$schema");
-            object.remove("title");
-        }
-        schema
-    }
     let schema = match name {
-        "probe_screen_capture" => of::<ScreenProbeParams>(),
-        "probe_audio_capture" => of::<AudioProbeParams>(),
-        "probe_composite" => of::<CompositeProbeParams>(),
-        "probe_audio_mix" => of::<MixProbeParams>(),
-        "start_recording" => of::<StartRecordingParams>(),
-        "start_streaming" => of::<StartStreamingParams>(),
-        "create_scene" => of::<SceneNameParams>(),
-        "set_active_scene" => of::<SetActiveSceneParams>(),
-        "delete_scene" => of::<DeleteSceneParams>(),
-        "add_source" => of::<AddSourceParams>(),
-        "update_source" => of::<UpdateSourceParams>(),
-        "remove_source" => of::<RemoveSourceParams>(),
-        "restart_source" => of::<RestartSourceParams>(),
-        "set_screen_source" => of::<SetScreenSourceParams>(),
-        "save_project" => of::<SaveProjectParams>(),
-        "load_project" | "validate_project" => of::<ProjectFileParams>(),
-        "add_channel" => of::<AddChannelParams>(),
-        "remove_channel" => of::<ChannelParams>(),
-        "update_channel" => of::<UpdateChannelParams>(),
-        "set_channel_input" => of::<SetChannelInputParams>(),
-        "add_bus" => of::<AddBusParams>(),
-        "remove_bus" => of::<BusParams>(),
-        "update_bus" => of::<UpdateBusParams>(),
-        "set_send" => of::<SetSendParams>(),
-        "set_output_profile" => of::<SetOutputProfileParams>(),
-        "set_monitor_device" => of::<SetMonitorDeviceParams>(),
-        "set_preview" => of::<PreviewParams>(),
+        "probe_screen_capture" => schema_of::<ScreenProbeParams>(),
+        "probe_audio_capture" => schema_of::<AudioProbeParams>(),
+        "probe_composite" => schema_of::<CompositeProbeParams>(),
+        "probe_audio_mix" => schema_of::<MixProbeParams>(),
+        "start_recording" => schema_of::<StartRecordingParams>(),
+        "start_streaming" => schema_of::<StartStreamingParams>(),
+        "create_scene" => schema_of::<SceneNameParams>(),
+        "set_active_scene" => schema_of::<SetActiveSceneParams>(),
+        "delete_scene" => schema_of::<DeleteSceneParams>(),
+        "add_source" => schema_of::<AddSourceParams>(),
+        "update_source" => schema_of::<UpdateSourceParams>(),
+        "remove_source" => schema_of::<RemoveSourceParams>(),
+        "restart_source" => schema_of::<RestartSourceParams>(),
+        "set_screen_source" => schema_of::<SetScreenSourceParams>(),
+        "save_project" => schema_of::<SaveProjectParams>(),
+        "load_project" | "validate_project" => schema_of::<ProjectFileParams>(),
+        "add_channel" => schema_of::<AddChannelParams>(),
+        "remove_channel" => schema_of::<ChannelParams>(),
+        "update_channel" => schema_of::<UpdateChannelParams>(),
+        "set_channel_input" => schema_of::<SetChannelInputParams>(),
+        "add_bus" => schema_of::<AddBusParams>(),
+        "remove_bus" => schema_of::<BusParams>(),
+        "update_bus" => schema_of::<UpdateBusParams>(),
+        "set_send" => schema_of::<SetSendParams>(),
+        "set_output_profile" => schema_of::<SetOutputProfileParams>(),
+        "set_monitor_device" => schema_of::<SetMonitorDeviceParams>(),
+        "set_preview" => schema_of::<PreviewParams>(),
         // Listed explicitly so a new command without a mapping has no schema
         // (and fails the registry test) instead of an empty one.
         "get_status"
@@ -2362,17 +2325,46 @@ pub fn params_schema(name: &str) -> Option<Value> {
     Some(schema)
 }
 
-fn decode_params<T: DeserializeOwned>(
+/// The JSON schema of a parameter type, inlined and without the Rust
+/// type's metadata.
+fn schema_of<T: JsonSchema>() -> Value {
+    let generator = SchemaSettings::draft2020_12()
+        .with(|settings| settings.inline_subschemas = true)
+        .into_generator();
+    let mut schema = Value::from(generator.into_root_schema_for::<T>());
+    if let Some(object) = schema.as_object_mut() {
+        // Metadata of the Rust type, not of the command.
+        object.remove("$schema");
+        object.remove("title");
+    }
+    schema
+}
+
+fn decode_params<T: DeserializeOwned + JsonSchema>(
     command: &str,
     params: Option<&Value>,
 ) -> Result<T, CommandError> {
     let object = match params {
-        None | Some(Value::Null) => Value::Object(Map::new()),
-        Some(object @ Value::Object(_)) => object.clone(),
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(object)) => object.clone(),
         Some(other) => return Err(not_an_object(command, other)),
     };
-    serde_json::from_value(object)
-        .map_err(|err| invalid_params(command, format!("invalid parameters: {err}")))
+    let keys: Vec<String> = object.keys().cloned().collect();
+    serde_json::from_value(Value::Object(object)).map_err(|err| {
+        let error = invalid_params(command, format!("invalid parameters: {err}"));
+        // Only on failure: the schema says which names are known.
+        let schema = schema_of::<T>();
+        let known = schema["properties"].as_object();
+        let unexpected: Vec<&String> = keys
+            .iter()
+            .filter(|key| known.is_none_or(|known| !known.contains_key(*key)))
+            .collect();
+        if unexpected.is_empty() {
+            error
+        } else {
+            error.with_details(json!({ "command": command, "unexpected": unexpected }))
+        }
+    })
 }
 
 fn expect_no_params(command: &str, params: Option<&Value>) -> Result<(), CommandError> {
@@ -2558,6 +2550,12 @@ mod tests {
                 file_name: PathBuf::from("show.json")
             })
         );
+        assert_eq!(
+            decode("load_project", json!({"file_name": "show.v2 (copy).json"})),
+            Ok(Command::LoadProject {
+                file_name: PathBuf::from("show.v2 (copy).json")
+            })
+        );
         // Plain .json names only: the project directory is the engine's.
         for bad in [
             "CON.json",
@@ -2568,6 +2566,15 @@ mod tests {
             "show.mkv",
             ".json",
             "",
+            // The same on every system, whatever the host's path rules.
+            "projects\\show.json",
+            "c:show.json",
+            "con.backup.json",
+            "NUL .json",
+            "show\u{0}.json",
+            "show\n.json",
+            "show?.json",
+            "a|b.json",
         ] {
             for command in ["save_project", "load_project", "validate_project"] {
                 let error = decode(command, json!({"file_name": bad})).unwrap_err();
@@ -2627,7 +2634,7 @@ mod tests {
         );
         assert_eq!(
             access("set_screen_source"),
-            Some((CommandAccess::Sensitive, false))
+            Some((CommandAccess::Sensitive, true))
         );
         assert!(NAME_RULE.contains(&MAX_NAME_CHARS.to_string()));
     }
@@ -3126,17 +3133,12 @@ mod tests {
         };
         assert_eq!(request.selection.source.as_deref(), Some("monitor:1"));
 
+        // Outputs capture through scene sources only (ADR 0018).
         let recording = Command::decode(
             "start_recording",
             Some(&json!({"file_name": "a.mkv", "screen": true, "source_id": "window:0x2a"})),
         );
-        let Ok(Command::StartRecording(request)) = recording else {
-            panic!("{recording:?}");
-        };
-        assert_eq!(
-            request.screen.and_then(|screen| screen.source).as_deref(),
-            Some("window:0x2a")
-        );
+        assert_eq!(recording.unwrap_err().code, ErrorCode::InvalidParams);
 
         let add = Command::decode(
             "add_source",
@@ -3211,6 +3213,27 @@ mod tests {
         let details = err.details.expect("details");
         assert_eq!(details["min_ms"], 100);
         assert_eq!(details["max_ms"], 60_000);
+        // The mix probe runs longer, and its error says so.
+        let err =
+            Command::decode("probe_audio_mix", Some(&json!({"duration_ms": 900_001}))).unwrap_err();
+        assert_eq!(err.details.expect("details")["max_ms"], 900_000);
+        assert!(err.message.contains("900000"), "{}", err.message);
+    }
+
+    #[test]
+    fn unknown_params_are_listed() {
+        let err = Command::decode(
+            "set_preview",
+            Some(&json!({"enabled": true, "fps": 60, "size": 2})),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.details,
+            Some(json!({"command": "set_preview", "unexpected": ["fps", "size"]}))
+        );
+        // A wrong value of a known parameter has nothing unexpected.
+        let err = Command::decode("set_preview", Some(&json!({"enabled": 1}))).unwrap_err();
+        assert_eq!(err.details, Some(json!({"command": "set_preview"})));
     }
 
     #[test]
@@ -3355,26 +3378,27 @@ mod tests {
 
     #[test]
     fn start_recording_params() {
-        let Ok(Command::StartRecording(request)) = Command::decode(
-            "start_recording",
-            Some(&json!({"file_name": "take1.MKV", "screen": true})),
-        ) else {
+        let Ok(Command::StartRecording(request)) =
+            Command::decode("start_recording", Some(&json!({"file_name": "take1.MKV"})))
+        else {
             panic!("decode");
         };
         assert_eq!(request.file_name, PathBuf::from("take1.MKV"));
-        assert!(request.screen.is_some());
-        // No screen layer, also with `screen: false`: join the pipeline or
-        // start it with the active scene.
-        for params in [
-            json!({"file_name": "a.mkv"}),
-            json!({"file_name": "a.mkv", "screen": false}),
-        ] {
-            let Ok(Command::StartRecording(no_screen)) =
-                Command::decode("start_recording", Some(&params))
-            else {
-                panic!("decode");
-            };
-            assert_eq!(no_screen.screen, None, "{params}");
+        // The output screen layer is gone (ADR 0018): screen capture comes
+        // from the scene's screen sources.
+        for field in ["screen", "source_id", "source_types", "cursor"] {
+            let mut params = json!({"file_name": "a.mkv"});
+            params[field] = json!(false);
+            let err = Command::decode("start_recording", Some(&params)).unwrap_err();
+            assert_eq!(
+                err.details.as_ref().map(|d| &d["unexpected"]),
+                Some(&json!([field])),
+                "{field}"
+            );
+            let mut params = json!({"url": "rtmp://host/app"});
+            params[field] = json!(false);
+            let err = Command::decode("start_streaming", Some(&params)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{field}");
         }
         // The audio is the configured mixer's (ADR 0017): per-run audio
         // parameters are unknown fields.
@@ -3408,7 +3432,6 @@ mod tests {
         assert_eq!(request.video_bitrate_kbps, Some(4500));
         assert_eq!(request.reconnect.max_attempts, 0);
         assert_eq!(request.reconnect.initial_delay, Duration::from_millis(250));
-        assert_eq!(request.screen, None);
         assert_eq!(
             request.target.redacted(),
             "rtmp://live.example.com/app/<stream key>"
@@ -3536,6 +3559,11 @@ mod tests {
         let get = |name: &str| *registry().iter().find(|d| d.name == name).expect(name);
         assert!(get("delete_scene").destructive && get("stop_streaming").destructive);
         assert!(!get("create_scene").destructive && !get("get_status").destructive);
+        // Ending the preview can stop the pipeline; the others replace a
+        // choice.
+        for name in ["set_preview", "set_monitor_device", "set_screen_source"] {
+            assert!(get(name).destructive, "{name}");
+        }
         assert!(get("start_streaming").open_world);
         assert_eq!(
             registry().iter().filter(|d| d.open_world).count(),

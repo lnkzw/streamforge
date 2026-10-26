@@ -2,9 +2,8 @@
 //! `start_streaming` and `stop_streaming`.
 //!
 //! Outputs share one media pipeline (compositor, mixer, captures). The first
-//! output to start brings it up, with a screen layer if it asks for one;
-//! later outputs join it and must not ask for one. The pipeline stops with
-//! the last output.
+//! output to start brings it up with the active scene; later outputs join
+//! it. The pipeline stops with the last output.
 //!
 //! Each output has a profile (ADR 0017): the bus it takes as its mix and its
 //! encoder settings. A start uses its profile; the start's own parameters
@@ -15,7 +14,7 @@
 use std::path::PathBuf;
 
 use audio_engine::MixStats;
-use capture_api::{ScreenSelection, VideoCaptureReport};
+use capture_api::VideoCaptureReport;
 use encoder_api::{
     EncoderPreference, ReconnectPolicy, RecordingStats, StreamStats, StreamTarget, VideoEncoderInfo,
 };
@@ -236,10 +235,6 @@ pub struct RecordingRequest {
     pub file_name: PathBuf,
     /// Which H.264 encoders to try (ADR 0011); `None`: the profile's.
     pub video_encoder: Option<EncoderPreference>,
-    /// A screen layer on top of the active scene, for a pipeline this
-    /// output starts; `None`: join the running pipeline, or start it with
-    /// the active scene. The audio is always the configured mixer (ADR 0017).
-    pub screen: Option<ScreenSelection>,
 }
 
 /// Start a live stream. The key lives in `target` and is never echoed.
@@ -250,8 +245,6 @@ pub struct StreamingRequest {
     pub video_bitrate_kbps: Option<u32>,
     pub video_encoder: Option<EncoderPreference>,
     pub reconnect: ReconnectPolicy,
-    /// As for [`RecordingRequest::screen`].
-    pub screen: Option<ScreenSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -290,8 +283,6 @@ pub struct PipelineReport {
     pub pipeline_stopped: bool,
     pub render: Option<RenderStats>,
     pub mix: Option<MixStats>,
-    pub screen_capture: Option<VideoCaptureReport>,
-    pub screen_capture_error: Option<ErrorSummary>,
     pub audio_captures: Vec<CaptureOutcome>,
     /// Screen captures of scene sources during this run (the most recent
     /// 64; `scene_captures_omitted` counts older ones).

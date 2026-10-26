@@ -217,7 +217,12 @@ fn gives_up_after_the_reconnect_attempts() {
     feeder.run_until(|| false, Duration::from_millis(300));
     // While failed, the live counters show the attempts and the drops.
     let live = streamer.live();
-    assert_eq!((live.connects, live.reconnect_attempts), (1, 2), "{live:?}");
+    let connection = streamer.connection();
+    assert_eq!(
+        (connection.connects, connection.reconnect_attempts),
+        (1, 2),
+        "{connection:?}"
+    );
     assert!(live.frames_encoded > 0, "{live:?}");
     assert!(
         live.frames_dropped > 0 && live.blocks_dropped > 0,

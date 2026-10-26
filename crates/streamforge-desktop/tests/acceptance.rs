@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use command_api::RecordingState;
 use engine::Engine;
 use streamforge_desktop::model::{Level, Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
@@ -154,7 +155,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
         wait(&mut model, "the status to show it", |m| {
             m.status
                 .as_ref()
-                .is_some_and(|status| status.recording_active)
+                .is_some_and(|status| status.recording_state == Some(RecordingState::Running))
         });
         // Health counts the recording while it runs.
         wait_polling(&mut model, "live recording counters", |m| {

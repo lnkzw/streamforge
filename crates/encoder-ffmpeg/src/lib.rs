@@ -26,10 +26,10 @@ use media_core::{MediaTimestamp, VideoFrame};
 
 pub use audio_fifo::{AudioFifo, FifoStats, MAX_GAP_FILL};
 pub use encoder_api::{
-    AudioSettings, AudioTrackStats, EncoderPreference, LiveOutputStats, MAX_AUDIO_TRACKS,
-    RateControl, ReconnectPolicy, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
-    SkippedEncoder, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
-    VideoEncoderInfo, VideoSettings, VideoTrackStats,
+    AudioSettings, AudioTrackStats, EncoderPreference, LiveConnectionStats, LiveOutputStats,
+    MAX_AUDIO_TRACKS, RateControl, ReconnectPolicy, RecorderConfig, RecorderError,
+    RecorderErrorKind, RecordingStats, SkippedEncoder, StreamConfig, StreamKey, StreamState,
+    StreamStats, StreamTarget, VideoEncoderInfo, VideoSettings, VideoTrackStats,
 };
 
 /// Largest interleaved audio block accepted by [`OutputInput::send_audio`].
@@ -157,6 +157,11 @@ impl Shared {
             samples_encoded: load(&self.samples_encoded),
             blocks_dropped: load(&self.blocks_dropped) + load(&self.audio_dropped),
             queue_depth: u64::try_from(self.queued.load(Ordering::Relaxed)).unwrap_or(0),
+        }
+    }
+
+    fn connection(&self) -> LiveConnectionStats {
+        LiveConnectionStats {
             connects: self.connects.load(Ordering::Relaxed),
             reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
         }
@@ -567,6 +572,12 @@ impl Streamer {
     /// Totals over all connections so far; never waits for the streamer.
     pub fn live(&self) -> LiveOutputStats {
         self.worker.input.shared.live()
+    }
+
+    /// Connections and reconnect attempts so far; never waits for the
+    /// streamer.
+    pub fn connection(&self) -> LiveConnectionStats {
+        self.worker.input.shared.connection()
     }
 
     /// Redacted target, safe to show.

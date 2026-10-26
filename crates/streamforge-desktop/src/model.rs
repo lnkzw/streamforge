@@ -1059,9 +1059,10 @@ fn source_health(health: &HealthReport, source_id: &str) -> SourceHealth {
     if !health.pipeline_running {
         return SourceHealth::NotCapturing;
     }
-    let capture = health.captures.iter().find(|capture| {
-        capture.kind == CaptureKind::Screen && capture.id.as_deref() == Some(source_id)
-    });
+    let capture = health
+        .captures
+        .iter()
+        .find(|capture| capture.kind == CaptureKind::Screen && capture.id == source_id);
     match capture.map(|capture| &capture.state) {
         None => SourceHealth::NotCapturing,
         Some(CaptureState::Ended { reason }) => SourceHealth::Ended {
@@ -1111,10 +1112,10 @@ pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
         push(level, format!("{label}: {}", output_counters(recording)));
     }
     if let Some(streaming) = &health.streaming {
-        let state = streaming.state.map_or("failed", StreamState::as_str);
+        let state = streaming.state.as_str();
         let level = match (streaming.running, streaming.state) {
             (false, _) => Level::Error,
-            (true, Some(StreamState::Connected)) => drop_level(streaming),
+            (true, StreamState::Connected) => drop_level(streaming),
             (true, _) => Level::Warning,
         };
         push(
@@ -1122,7 +1123,9 @@ pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
             format!(
                 "stream {state}: {}, {} reconnect(s)",
                 output_counters(streaming),
-                streaming.counters.reconnect_attempts
+                streaming
+                    .connection
+                    .map_or(0, |connection| connection.reconnect_attempts)
             ),
         );
     }
@@ -1195,7 +1198,7 @@ pub fn health_items(health: &HealthReport) -> Vec<HealthItem> {
     items
 }
 
-fn drop_level(output: &OutputHealth) -> Level {
+fn drop_level<S>(output: &OutputHealth<S>) -> Level {
     if output.counters.frames_dropped > 0 || output.counters.blocks_dropped > 0 {
         Level::Warning
     } else {
@@ -1203,7 +1206,7 @@ fn drop_level(output: &OutputHealth) -> Level {
     }
 }
 
-fn output_counters(output: &OutputHealth) -> String {
+fn output_counters<S>(output: &OutputHealth<S>) -> String {
     let counters = &output.counters;
     let mut text = format!(
         "{} frames, {} dropped",
@@ -1233,12 +1236,12 @@ fn encoder_label(info: &VideoEncoderInfo) -> String {
 mod tests {
     use command_api::{
         CaptureHealth, LiveInputStats, LiveMixStats, LiveOutputStats, LiveRenderStats,
-        LiveSourceStats, MonitorHealth, SourceId,
+        LiveSourceStats, MonitorHealth, RecordingState, SourceId,
     };
 
     use super::*;
 
-    fn output(running: bool, state: Option<StreamState>, dropped: u64) -> OutputHealth {
+    fn output<S>(running: bool, state: S, dropped: u64) -> OutputHealth<S> {
         OutputHealth {
             target: "out.mkv".to_owned(),
             elapsed_ms: 2000,
@@ -1255,13 +1258,14 @@ mod tests {
                 queue_depth: 1,
                 ..LiveOutputStats::default()
             },
+            connection: None,
         }
     }
 
     fn screen(id: &str, state: CaptureState) -> CaptureHealth {
         CaptureHealth {
             kind: CaptureKind::Screen,
-            id: Some(id.to_owned()),
+            id: id.to_owned(),
             name: format!("screen {}", id.trim_start_matches("src_")),
             state,
         }
@@ -1284,7 +1288,7 @@ mod tests {
                 ..LiveRenderStats::default()
             }),
             mix: Some(LiveMixStats::default()),
-            recording: Some(output(true, None, 0)),
+            recording: Some(output(true, RecordingState::Running, 0)),
             streaming: None,
             captures: vec![
                 screen("src_1", CaptureState::Running),
@@ -1378,8 +1382,8 @@ mod tests {
         assert_eq!(items[0].level, Level::Info);
         assert_eq!(items[2].level, Level::Error);
 
-        health.recording = Some(output(true, None, 3));
-        health.streaming = Some(output(true, Some(StreamState::Reconnecting), 0));
+        health.recording = Some(output(true, RecordingState::Running, 3));
+        health.streaming = Some(output(true, StreamState::Reconnecting, 0));
         if let Some(render) = &mut health.render {
             render.skipped_ticks = 2;
         }
@@ -1395,8 +1399,8 @@ mod tests {
         );
         assert_eq!(items[2].level, Level::Warning);
 
-        health.recording = Some(output(false, None, 0));
-        health.streaming = Some(output(false, Some(StreamState::Failed), 0));
+        health.recording = Some(output(false, RecordingState::Failed, 0));
+        health.streaming = Some(output(false, StreamState::Failed, 0));
         let items = health_items(&health);
         assert_eq!(items[0].level, Level::Error);
         assert!(items[0].text.starts_with("REC failed"), "{items:?}");

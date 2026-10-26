@@ -82,7 +82,7 @@ impl DesktopApp {
             (Some(started), None) => started.target.clone(),
             (None, _) => stream_target_label(&self.stream_url, &self.stream_key),
         };
-        let network = output.and_then(|output| output.state);
+        let network = output.map(|output| output.state);
         let badge = match (state, network) {
             (TransportState::Idle, _) => (BadgeKind::Neutral, "off"),
             (TransportState::Starting, Some(StreamState::Reconnecting)) => {
@@ -102,16 +102,14 @@ impl DesktopApp {
         );
         let streaming = self.model.streaming.is_some().then_some(output).flatten();
         output_numbers(ui, streaming);
-        if let Some(output) = streaming
-            && output.counters.reconnect_attempts > 0
-        {
+        let reconnects = streaming
+            .and_then(|output| output.connection)
+            .map_or(0, |connection| connection.reconnect_attempts);
+        if reconnects > 0 {
             widgets::status_line(
                 ui,
                 StatusLevel::Warn,
-                &format!(
-                    "{} reconnect attempt(s)",
-                    output.counters.reconnect_attempts
-                ),
+                &format!("{reconnects} reconnect attempt(s)"),
             );
         }
         ui.add_space(size::SPACE_6);
@@ -228,7 +226,7 @@ fn output_row(
 
 /// An output's numbers while it runs: frames, drops, queue and encoder;
 /// drops show as a warning, since media was lost.
-fn output_numbers(ui: &mut egui::Ui, output: Option<&OutputHealth>) {
+fn output_numbers<S>(ui: &mut egui::Ui, output: Option<&OutputHealth<S>>) {
     let Some(output) = output else {
         return;
     };

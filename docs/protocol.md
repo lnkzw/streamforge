@@ -24,7 +24,9 @@ Local control channel for the headless engine (`streamforge-engine`). Implemente
 | `params`  | no       | object or `null`          | Command parameters. Absent, `null` and `{}` mean the same thing. |
 | `v`       | no       | integer                   | Protocol version. Defaults to `1`. |
 
-Any other top-level field is rejected with `invalid_request`, so a typo such as `parms` fails loudly. New fields require a new protocol version.
+Any other top-level field is rejected with `invalid_request`, so a typo such as `parms` fails loudly. New fields require a new protocol version; `v` is checked first, so a request of another version gets `unsupported_version` even when it has fields this version does not know.
+
+A key may occur only once in an object. A repeated key is `invalid_request` at the top level (`details.duplicate` names it; a repeated `id` is answered with `id: null`) and `invalid_params` inside `params` (`details.duplicate` is its path there, e.g. `tones[0].gain_db`), after an unknown command, which is still `unknown_command`.
 
 ## Response
 
@@ -54,17 +56,17 @@ Requests are handled one at a time, and responses come back in request order. Cl
 | Code                  | Layer    | Meaning |
 |-----------------------|----------|---------|
 | `parse_error`         | protocol | The line is not valid UTF-8 or not valid JSON. |
-| `invalid_request`     | protocol | The JSON is valid but the envelope is wrong: not an object, `id` missing or of the wrong type, `command` missing or not a string, an unknown field, or `v` not an integer. |
+| `invalid_request`     | protocol | The JSON is valid but the envelope is wrong: not an object, `id` missing or of the wrong type, `command` missing or not a string, an unknown or repeated field, or `v` not an integer. |
 | `request_too_large`   | protocol | The line exceeds `MAX_REQUEST_BYTES`. `details.max_bytes` gives the limit. |
 | `unsupported_version` | protocol | `v` is not supported. `details.requested` and `details.supported` give the versions. |
 | `unknown_command`     | command  | No such command. `details.available` lists the valid names. |
-| `invalid_params`      | command  | `params` has the wrong shape or contains unexpected fields. `details.unexpected` lists unexpected names. |
-| `invalid_state`       | command  | The command is not allowed in the current engine state. Reserved; no current command returns it. |
+| `invalid_params`      | command  | `params` has the wrong shape, a wrong value, or unexpected or repeated fields. `details.command` names the command, `details.unexpected` lists unknown parameter names, `details.duplicate` a repeated one. |
+| `invalid_state`       | command  | The command is not allowed in the current engine state, e.g. a structure change while the pipeline runs, or a second recording. |
 | `unsupported`         | command  | The platform or backend does not offer the requested capability, e.g. a cursor mode the portal lacks. `details.available` lists alternatives where known. |
 | `unavailable`         | command  | A required system service (portal, PipeWire, D-Bus) is missing or not running. The message names a remedy. |
 | `cancelled`           | command  | The user dismissed an interactive step, such as the screen selection dialog. |
 | `permission_denied`   | command  | The system refused access. |
-| `not_found`           | command  | A referenced device does not exist, e.g. an unknown audio `input`. `details.available` lists valid names. |
+| `not_found`           | command  | A referenced device, scene, source, channel, bus or file does not exist, e.g. an unknown audio `input`. `details.available` lists valid names where known. |
 | `timeout`             | command  | A system service, or the user in a dialog, did not respond in time. |
 | `backend_error`       | command  | A media backend failed. The message carries the backend's error. |
 | `internal`            | command  | The engine failed while executing the command or encoding its result. |
@@ -75,7 +77,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 | Command                    | Params | Access      | Result |
 |----------------------------|--------|-------------|--------|
-| `get_status`               | none   | `read_only` | `{"application", "version", "media_engine_ready", "pipeline_running", "capture_available", "streaming_active", "streaming_state", "recording_active", "recording_failed", "preview_active"}` |
+| `get_status`               | none   | `read_only` | `{"application", "version", "pipeline_running", "capture_available", "recording_state", "streaming_state", "preview_active"}` |
 | `get_health`               | none   | `read_only` | Live counters of the pipeline and outputs (see below) |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access", "destructive", "open_world"}]}` |
 | `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
@@ -98,7 +100,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `update_source`            | see below | `control`, destructive | Scene list |
 | `remove_source`            | see below | `control`, destructive | Scene list |
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
-| `set_screen_source`        | see below | `sensitive` | Scene list |
+| `set_screen_source`        | see below | `sensitive`, destructive | Scene list |
 | `get_mixer`                | none   | `read_only` | Mixer state |
 | `add_channel`              | see below | `sensitive` | Mixer state |
 | `remove_channel`           | see below | `control`, destructive | Mixer state |
@@ -110,8 +112,8 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `set_send`                 | see below | `control`, destructive | Mixer state |
 | `get_output_profiles`      | none   | `read_only` | `{"recording": {"mix", "tracks", "video_encoder"}, "stream": {"mix", "video_bitrate_kbps", "video_encoder"}, "monitor": {"mix", "enabled", "device"}}` |
 | `set_output_profile`       | see below | `control`, destructive | The profiles plus `{"applied_now", "next_start", "warnings"}` |
-| `set_monitor_device`       | see below | `sensitive` | The profiles |
-| `set_preview`              | see below | `sensitive` | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
+| `set_monitor_device`       | see below | `sensitive`, destructive | The profiles |
+| `set_preview`              | see below | `sensitive`, destructive | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 | `list_projects`            | none   | `read_only` | `{"files": [{"file_name", "bytes", "modified_unix_ms"}], "omitted"}` |
 | `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
 | `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
@@ -124,7 +126,16 @@ A bad request never terminates the engine. After any error the engine keeps read
 
 Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`source_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_screen_sources` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
 
-`capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`. `media_engine_ready` is true in every build: compositor, mixer and encoders are built in (it was a placeholder that always read `false` before ADR 0012). `pipeline_running` is true while a media pipeline runs for outputs or the preview.
+`capture_available` in `get_status` is true if screen or audio capture was available at the last capability query. The engine runs that query on the first `get_status` and on every `get_capture_capabilities`. `pipeline_running` is true while a media pipeline runs for outputs or the preview. Each output has one state, `null` while it is not open:
+- `recording_state`: `running`, or `failed` when the recording stopped unexpectedly (encoder, compositor or mixer failure); `stop_recording` then finalizes the file and reports the error.
+- `streaming_state`: see Streaming.
+
+### File names
+
+Commands that create or read a file (`start_recording`, `probe_composite`'s snapshot, the project commands) take a plain file name, never a path, and the engine places it in its own directory. The rule is the same on every system, so a name means the same file everywhere:
+- It ends in the command's extension (`.mkv`, `.ppm`, `.json`, any case) with at least one character before it.
+- It contains no `/`, `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*` and no control characters.
+- Its part before the first dot, without trailing spaces, is not a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, any case): `con.backup.json` is refused too.
 
 ### Health
 
@@ -137,9 +148,9 @@ Both probes are `sensitive` because they capture private content. Screen capture
  "mix": {"elapsed_ms", "blocks_mixed", "late_blocks", "skipped_blocks", "clipped_samples", "invalid_samples", "mix_time",
          "inputs": [{"name", "kind", "warmup_frames", "underrun_frames", "trimmed_frames", "fill_ms", "drift_ppm", "overrun_frames"}],
          "aux_buses": [{"name", "clipped_samples", "invalid_samples"}]},
- "recording": {"target", "elapsed_ms", "running", "state": null, "video_encoder": {"encoder", "hardware", "skipped"},
-               "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth", "connects", "reconnect_attempts"},
- "streaming": {... the same fields; "state" is the stream state},
+ "recording": {"target", "elapsed_ms", "running", "state": "running", "video_encoder": {"encoder", "hardware", "skipped"},
+               "frames_encoded", "frames_dropped", "samples_encoded", "blocks_dropped", "queue_depth"},
+ "streaming": {... the same fields, "state" is the stream state, and "connects", "reconnect_attempts"},
  "monitor": {"device", "enabled", "state": "running", "latency_ms",
              "feed": {"fill_frames", "pull_frames", "target_frames", "drift_ppm", "padded_frames", "trimmed_frames",
                       "ring": {"capacity_frames", "written_frames", "read_frames", "warmup_frames", "underrun_frames", "overrun_frames", "max_read_frames"}}},
@@ -149,12 +160,12 @@ Both probes are `sensitive` because they capture private content. Screen capture
 
 - **Without a pipeline:** `render` and `mix` are `null`, `captures` is empty, and `recording` and `streaming` are `null` while no output is open.
 - **Freshness:** `render` and `mix` are refreshed every 250 ms; a refresh that finds a reader copying the snapshot is retried on the next frame or block. Output counters are refreshed after every item.
-- **Ended captures:** `captures` lists every running capture (ADR 0013): the scenes' screen sources (with their `id`, as in `list_scenes` and `render.sources`), the screen layer and the channels that capture a device (with the channel's `id` and name, as in `get_mixer` and `mix.inputs`). `state` is `ended`, with the system's `reason`, once the capture delivers nothing more: a closed window, an ended portal session, a removed device, a revoked permission. Outputs keep running, and the source shows its last frame.
+- **Ended captures:** `captures` lists every running capture (ADR 0013): the scenes' screen sources (with their `id`, as in `list_scenes` and `render.sources`) and the channels that capture a device (with the channel's `id` and name, as in `get_mixer` and `mix.inputs`). `state` is `ended`, with the system's `reason`, once the capture delivers nothing more: a closed window, an ended portal session, a removed device, a revoked permission. Outputs keep running, and the source shows its last frame.
 - **Stalled sources:** `sources[].last_frame_age_ms` is the time since a live source last delivered a new frame, or since it was added if it never did (`null` for static sources). Screen captures may deliver only when the content changes, so a long age alone is not an error; an ended capture's age keeps growing too. `frames_consumed: 0` means it never delivered.
 - **Silent inputs:** a live audio input whose `underrun_frames` grow while `fill_ms` stays near 0 has stopped delivering.
 - **Drops:** `frames_dropped` and `blocks_dropped` cover every cause the stop report counts: producer side (copy pool or queue full), encoder side, and, for streams, media while offline.
 - **Backpressure:** `queue_depth` is the number of items waiting for the output thread. A growing queue means the encoder or the network cannot keep up.
-- **Running:** `running` is false once the output or the pipeline it needs has failed; the stop report says why.
+- **Running:** `running` is false once the output or the pipeline it needs has failed; the stop report says why. `state` is the output's state as in `get_status` (`running` or `failed` for the recording).
 - **Monitor:** `monitor` is `null` until the monitor is switched on in a run (see Monitor). Its `state` is `ended` with a `reason` when the device did not open (`could not start: …`, then `feed` and `latency_ms` are `null`) or ended during the run. `feed.ring.underrun_frames` grows when the device ran short, and `overrun_frames` and `trimmed_frames` when the mixer was ahead; `latency_ms` is the buffered audio plus the device's largest recent pull (`pull_frames`, the current or previous second).
 - **Secrets:** `target` is the file path or the redacted stream target; it never holds the key.
 
@@ -225,7 +236,7 @@ It is `sensitive`: with `screen: true` it captures the screen, and `snapshot_pat
 | `duration_ms`   | integer 100..=60000 | 5000 | Render time. |
 | `screen`        | boolean | `false` | Add the live screen layer: the `source_id` source, else the one picked in the system dialog. |
 | `source_id`, `source_types`, `cursor` | as for `probe_screen_capture` | | Only allowed with `screen: true`. |
-| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. Directories, `..`, absolute paths and Windows device names are rejected with `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
+| `snapshot_path` | plain file name ending in `.ppm` | none | Write the last frame as binary PPM. The file is created in the engine's output directory: `--output-dir`, default the working directory. It must be a plain file name (see File names), else `invalid_params`. An existing file is never overwritten; the report records the error instead, and a partially written file is removed. |
 
 Report: `{"render": {...}, "screen_capture": <video report>|null, "screen_capture_error": {"kind", "message", "details"}|null, "snapshot": {"path", "written", "error"}|null, "warnings"}`. The `render` object contains:
 
@@ -270,22 +281,16 @@ Report: `{"mix": {...}, "captures": [{"input", "report", "error"}], "warnings"}`
 
 Outputs share one **media pipeline**: the active scene (see below; by default the `probe_composite` reference scene) at 1920×1080@60, and the audio mix. The preview uses the same pipeline.
 
-- **Start and stop:** the first output to start brings the pipeline up, with a screen layer if it names one. The pipeline stops when the last output stops.
+- **Start and stop:** the first output to start brings the pipeline up with the active scene; screen capture comes from the scene's screen sources. The pipeline stops when the last output and the preview stop.
 - **Output profiles (ADR 0017):** each output has a profile: the bus it takes as its mix, and its encoder settings (`recording`: `mix`, `tracks`, `video_encoder`; `stream`: `mix`, `video_bitrate_kbps`, `video_encoder`; `monitor`: `mix`, `enabled`, `device`, see Monitor). By default all take the program bus, with `auto` encoders and 6000 kbit/s, and the monitor is off. `start_recording` and `start_streaming` use it; their `video_encoder` and `video_bitrate_kbps` override it for that run. The stream's target is not part of the profile: the URL stays a `start_streaming` parameter, and the key is never stored.
   - **`set_output_profile {output, mix_bus_id | mix_bus, tracks, video_encoder, video_bitrate_kbps, enabled}`** (at least one; `tracks` only for `recording`, the bitrate only for `stream`, the encoder not for `monitor`, `enabled` only for `monitor`): a new mix applies to a running output now, fading over one block; tracks and encoder settings wait for its next start. A running recording's mix cannot become one of the tracks it records (`invalid_state`, `details.bus`), since its tracks are fixed until it stops. The result lists the profiles, which fields applied now (`applied_now`) or wait (`next_start`), and `warnings`, e.g. a monitor device that did not open.
   - **Recording tracks:** the mix is audio track 1; `tracks` lists up to 7 more buses (ids, or names: an entry that looks like a bus id is taken as one), each recorded as its own AAC stream in the Matroska file and named after its bus (the stream's `title`). A bus is in the list once and not as the mix too. The list is fixed when the recording starts; switching the mix live changes what track 1 carries, not its name. All tracks of a block travel as one queue item, so they share the queue's depth and are dropped together. The report's `recording.audio` is track 1 and `recording.extra_audio` has one entry per further track, each with its `name`.
   - `remove_bus` is `invalid_state` while a profile takes the bus as its mix or a track (`details.outputs`).
 - **A missing device** does not keep the pipeline from starting (ADR 0017): when a configured channel's device is not found, the channel is silent for the run, and that is reported everywhere. The `warnings` of `start_recording`, `start_streaming` and `set_preview` say so, `get_mixer` repeats it while the run lasts, `get_health` lists the channel's capture as `ended` with `reason: "could not start: …"`, and the stop report has the device's error in `audio_captures` and a warning that names the channel. Any other capture error (not permitted, no audio server, …) still fails the start, since the user has to act. A device that disappears during a run ends its capture the same way (`get_health`), and the channel goes silent; the outputs keep running. Nothing reconnects on its own: connect the device, or stop the outputs and preview and choose another input with `set_channel_input`. `probe_audio_mix` tests devices, so there a missing device is `not_found`.
-- **Joining:** an output started while another runs joins the pipeline. It cannot add a screen layer (`screen: true` is `invalid_state` then).
-- **Audio:** every run mixes the configured channels and buses (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS), so the profiles' buses are always there. The outputs have no audio parameters of their own (ADR 0017): set the channels up with the mixer commands, or load a project, before the start. `screen` adds a screen layer on top of the active scene for this run.
+- **Joining:** an output started while another output or the preview runs joins the pipeline.
+- **Audio:** every run mixes the configured channels and buses (see Mixer; initially one channel, `Tone`, a 1 kHz tone at −20 dBFS), so the profiles' buses are always there. The outputs have no audio parameters of their own (ADR 0017): set the channels up with the mixer commands, or load a project, before the start.
 - **Isolation:** each output has its own encoders, queue and thread. A failing stream never stops a recording, and vice versa.
-- **Exclusive engine:** while any output is open, the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
-
-Screen layer parameters (all optional; `screen: true` adds the layer, and the others need it; `screen: false` is the same as leaving them out):
-
-| Param            | Type | Default | Meaning |
-|------------------|------|---------|---------|
-| `screen`, `source_id`, `source_types`, `cursor` | as in `probe_composite` | `false` | Add a live screen layer (the named source, else the system picker). |
+- **Exclusive engine:** while the pipeline runs (for an output or the preview), the probe commands fail with `invalid_state`. They would compete for devices and CPU and block the engine thread.
 
 #### Recording
 
@@ -293,20 +298,20 @@ Screen layer parameters (all optional; `screen: true` adds the layer, and the ot
 
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|
-| `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir`. Directories and Windows device names (`CON`, `NUL`, `COM1`, …) are rejected; an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
-| `video_encoder`  | `"auto"`, `"software"`, `"hardware"` | `"auto"` | H.264 encoder (ADR 0011). `auto` tries this platform's hardware encoders first and falls back to libx264. `software` uses libx264 only. `hardware` fails with `unsupported` (listing each candidate and why it did not open) when no hardware encoder opens. |
+| `file_name`      | string | required | Plain file name ending in `.mkv`, created in the engine's `--output-dir` (see File names); an existing file is never overwritten (`invalid_params`). A missing output directory is `not_found`, an unwritable one `permission_denied`. |
+| `video_encoder`  | `"auto"`, `"software"`, `"hardware"` | the recording profile's (`"auto"` by default) | H.264 encoder (ADR 0011). `auto` tries this platform's hardware encoders first and falls back to software. `software` tries libx264, then OpenH264, then the build's default H.264 encoder (for FFmpeg builds without the GPL). `hardware` fails with `unsupported` (listing each candidate and why it did not open) when no hardware encoder opens. |
 
 The result's `video_encoder` is `{"encoder", "hardware", "skipped": [{"encoder", "reason"}]}`: the encoder in use and the candidates tried before it.
 
 Errors:
-- `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_failed: true`; `stop_recording` then finalizes the file and returns the error.
+- `invalid_state`: a recording is open (`details.recording` names it), or `stop_recording` was called without one. If the recorder or the pipeline stopped on its own, `get_status` reports `recording_state: "failed"`; `stop_recording` then finalizes the file. It returns the recorder's error if the recorder failed; if only the pipeline failed, it returns the report, whose pipeline fields and `warnings` say what failed.
 - `unsupported`: no recorder on this platform (Linux, Windows and macOS have one; `docs/platforms.md`), or no H.264 encoder of the requested kind opened (the message lists why for each).
 - `backend_error`: FFmpeg could not open the output or an encoder, or failed while encoding or finalizing.
 - Capture errors are the same as for the probes, except that a configured channel's missing device leaves that channel silent instead (see above).
 
 If `start_recording` fails, the file it created is removed.
 
-`stop_recording` sets one end time for every track, detaches the output, drains its queue, flushes the encoders and writes the trailer. Report: `{"recording", "pipeline_stopped", "render", "mix", "screen_capture", "screen_capture_error", "audio_captures", "warnings"}`.
+`stop_recording` sets one end time for every track, detaches the output, drains its queue, flushes the encoders and writes the trailer. Report: `{"recording", "pipeline_stopped", "render", "mix", "audio_captures", "scene_captures", "scene_captures_omitted", "monitor", "warnings"}`.
 
 - **`recording`:** `path`, `container`, `duration_ms`, `file_bytes`, plus:
   - `video` (`encoder`, `hardware`, `skipped`, `width`, `height`, `fps`, `frames_encoded`, `frames_dropped`, `frames_after_end`, `first_pts_ms`, `end_ms`)
@@ -314,7 +319,7 @@ If `start_recording` fails, the file it created is removed.
   - `extra_audio`: the further audio tracks, in order, with the same fields (see Recording tracks)
 
   Every track is cut at the stop time; `*_after_end` counts what producers emitted while stopping.
-- **`pipeline_stopped`:** whether this output was the last one, so the pipeline stopped with it. Only then are `render` (composite stats), `mix` (as in `probe_audio_mix`), the screen capture fields and `audio_captures` (as `captures` in `probe_audio_mix`) filled in. Otherwise they are `null` or empty.
+- **`pipeline_stopped`:** whether this output was the last one, so the pipeline stopped with it. Only then are `render` (composite stats), `mix` (as in `probe_audio_mix`), `audio_captures` (as `captures` in `probe_audio_mix`), the scene captures and `monitor` filled in. Otherwise they are `null` or empty.
 
 If finalizing fails, the error's `details` carry the partial `recording` stats, the pipeline fields and `warnings`. The file is kept.
 
@@ -330,21 +335,21 @@ If finalizing fails, the error's `details` carry the partial `recording` stats, 
 |----------------------|------|---------|---------|
 | `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. |
 | `stream_key`         | string | none | Appended as the last path segment when connecting. No `/` or whitespace. **Secret:** never echoed in results, errors, logs or `Debug` output; reports show `<stream key>`. |
-| `video_bitrate_kbps` | integer 300..=50000 | 6000 | Video bit rate (CBR, buffer of 2 s). |
-| `video_encoder`      | as for `start_recording` | `"auto"` | The encoder that opens on the first connection is kept for reconnects. |
+| `video_bitrate_kbps` | integer 300..=50000 | the stream profile's (6000 by default) | Video bit rate (CBR, buffer of 2 s). |
+| `video_encoder`      | as for `start_recording` | the stream profile's (`"auto"` by default) | Reconnects try the encoder that opened first, then the other candidates. |
 | `reconnect_attempts` | integer 0..=100 | 5 | Attempts after a lost connection; `0` gives up right away. The count restarts after a connection stayed up for 10 s. |
-| `reconnect_delay_ms` | integer 100..=60000 | 1000 | Wait before the first attempt; doubles per attempt, up to 30 s. |
+| `reconnect_delay_ms` | integer 100..=60000 | 1000 | Wait before the first attempt; doubles per attempt, up to 30 s or this delay, whichever is larger. |
 
 Targets are shown redacted: scheme, host and application. Deeper path segments become `***`, a query becomes `?***` and the key becomes `<stream key>`. Once streaming has been used, FFmpeg's own log output is turned off, because RTMP error messages can contain the stream path.
 
 `get_status.streaming_state` is one of `connecting`, `connected`, `reconnecting` or `failed`, or `null` without a stream. `failed` means the reconnect attempts are exhausted, or the pipeline stopped. From then on, media is dropped and counted until `stop_streaming`. `streaming_active` is true while the state is `connecting`, `connected` or `reconnecting`.
 
 Errors:
-- `invalid_state`: a stream is already open, `stop_streaming` was called without one, or sources were given while the pipeline runs.
+- `invalid_state`: a stream is already open, or `stop_streaming` was called without one.
 - `unavailable`: the server could not be reached, or the connection or publish handshake failed; `details.target` holds the redacted target.
 - `unsupported`: no streaming on this platform (Linux, Windows and macOS have it).
 
-`stop_streaming` always returns a report, also for a failed stream: `{"streaming", "pipeline_stopped", "render", ..., "warnings"}` (pipeline fields as for recording). `streaming` contains:
+`stop_streaming` returns a report, also for a failed stream: `{"streaming", "pipeline_stopped", "render", ..., "warnings"}` (pipeline fields as for recording). Only if the streamer's thread cannot be stopped cleanly (an internal failure) is it an error; its `details` then carry the pipeline fields and `warnings`, while the stream's own statistics are lost. `streaming` contains:
 
 - **Target and state:** `target` (redacted), `container` (`flv`), and `state` at the moment the stop was requested: `connected`, `reconnecting` or `failed`.
 - **Connection history:** `connects`, `disconnects`, `reconnect_attempts`, `connected_ms`, and `last_error`, which never contains the key.
@@ -373,7 +378,7 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
 - **Ids (ADR 0014):** every scene and source has a stable id that the engine assigns: `scene_` or `src_` and 12 random characters (`a-z`, `0-9`). Clients treat ids as opaque strings and take them from `list_scenes`.
   - An id never changes while its scene or source exists. Ids are random, so a removed source's id does not come back, and source ids are unique across all scenes.
   - The built-in scene and its sources have fixed ids: `scene_test_pattern`, `src_color_bars` and `src_overlay`.
-  - `render.sources[].id` (in `get_health` and the stop reports) and `captures[].id` are these source ids. The screen layer renders as `screen_layer`.
+  - `render.sources[].id` (in `get_health` and the stop reports) and `captures[].id` are these source ids.
 - **Naming a scene or source:** commands take an id or a name.
   - A scene: `scene_id`, or its name (`name` in the scene commands, `scene` in the source commands).
   - A source: its `id` alone, or its scene and `name`.
@@ -406,7 +411,7 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `source_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
   - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `source_id`, and the error is returned (e.g. `not_found` for a gone source).
   - Both captures' reports are in the output reports' `scene_captures`.
-  - Live audio inputs and the screen layer cannot be restarted: the mixer's inputs are fixed while it runs.
+  - Live audio inputs cannot be restarted: the mixer's inputs are fixed while it runs.
   - It is destructive: it ends a running capture, and a picker choice is gone.
 - **`set_screen_source`:** the source (`id`, or `scene` or `scene_id` and `name`), and `source_id` from `list_screen_sources`. Chooses what a screen source captures from now on, e.g. after `load_project`, which does not store it.
   - Only while the source has no capture; with one (running or ended), it is `invalid_state` (switch it with `restart_source` and a `source_id`). Other kinds are `invalid_params`.
@@ -432,7 +437,7 @@ Preview:
 
 A project file holds the scenes with their ids, the active scene and the audio channels and program bus (ADR 0015, ADR 0017). Files live in the engine's **project directory**, set at start with `--project-dir` (`streamforge-engine`, `streamforge-mcp`; a directory that does not exist stops them at start).
 - Without it, the project commands are `invalid_state`, and the MCP server does not offer them.
-- Commands name a file by a plain `.json` name. Directories, `..`, absolute paths and Windows device names (`CON`, `NUL`, `COM1`, …) are `invalid_params`.
+- Commands name a file by a plain `.json` name (see File names); anything else is `invalid_params`.
 - Only regular files are read or replaced. A link is followed when reading, but saving does not replace it with a file; a directory or device is `invalid_params`.
 
 - **`list_projects`:** the files a load can name: regular files (or links to one) in the project directory whose names end in `.json` and pass the file name rule above, sorted by name, each with its size in `bytes` and `modified_unix_ms` (when it was last written, `null` where the system does not say). At most 256 are listed; `omitted` counts the rest. The files are not read; `validate_project` checks one. `read_only`.
@@ -473,14 +478,15 @@ The file (`schema_version` 2):
 - **`outputs`** holds the output profiles as `get_output_profiles` shows them, every field given (but the recording's `tracks` may be left out for none, and the monitor's `device` for the default); a profile that is left out (or `outputs` as a whole) is the default. Each is checked by the `set_output_profile` rules, the monitor's `device` by the `set_monitor_device` rules; its `mix` and each of its `tracks` (by id) must name a bus of the file, and a bus is a track once and not the mix as well. A loaded profile with the monitor on plays it from the next pipeline start.
 - **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's. The audio is checked by the graph's own rules, the ones the engine keeps: channel and bus ids (form, unique, an aux bus not `bus_program`), unique channel names, unique bus names (`Program` is taken), at most 8 channels and 8 aux buses, and every send naming an existing bus once. An entry that is wrong on its own still counts for these, so every problem is reported at once.
 - **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 2.
-- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update). As in commands, `null` for an optional field means its default.
+- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 and 2 is refused (a newer one with a hint to update).
+- **Left out or `null`:** an optional single value may be left out or `null` for its default: a source's rectangle and `opacity`, a device (the system default), `assign_db` (a separate mix), `outputs` and each of its profiles. A list that may be left out (`buses`, a channel's `sends`, the recording's `tracks`) is left out for none; `null` is a problem there.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
 
 ## Example session
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"media_engine_ready":true,"pipeline_running":false,"preview_active":false,"recording_active":false,"recording_failed":false,"streaming_active":false,"streaming_state":null,"version":"0.1.0"}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
 {"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_screen_sources","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_screen_source","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
@@ -489,6 +495,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 ## Versioning policy
 
 - **Before the first release** nobody depends on the protocol yet, and its only clients (desktop, CLI, MCP server) live in this repository. Until then, v1 may change incompatibly. Each such change is listed below, and every client in the repository changes with it. From the first release on, the rules below hold.
+  - 2026-10-26, ADR 0018 step 2a: `get_status` lost `media_engine_ready`, `recording_active`, `recording_failed` and `streaming_active` and gained `recording_state` (`null`, `running` or `failed`). `start_recording` and `start_streaming` lost the screen layer (`screen`, `source_id`, `source_types`, `cursor`, now unknown fields), the stop reports and partial-error details lost `screen_capture` and `screen_capture_error`, renders no longer have a `screen_layer` source, and `get_health.captures[].id` is never `null`. In `get_health`, `recording.state` is `running` or `failed` instead of `null`, and `connects` and `reconnect_attempts` are only in `streaming`. `set_preview`, `set_monitor_device` and `set_screen_source` are destructive. File names follow one rule on every system (File names): `\`, `:`, `<`, `>`, `"`, `|`, `?`, `*`, control characters and a device name before the first dot are refused. A repeated key in a request is refused (`invalid_request`, or `invalid_params` inside `params`), and `v` is checked before unknown fields. `invalid_params` lists unknown parameters in `details.unexpected` for every command. The CLI's `record --screen` and `stream --screen` add a screen source to the active scene instead.
   - 2026-10-22, ADR 0014: scene and source `id` changed from a per-run number to a stable string, and `render.sources[].id` changed with it (in `probe_composite`: `"bars"`, `"screen"` and `"overlay"`). `add_source` no longer requires `scene` (`scene_id` works too); `update_source`, `remove_source` and `restart_source` also take `id`. `scene_captures` entries gained `id`.
   - 2026-10-25, M12 step 3: `set_output_profile` refuses a running recording's track as its new mix (`invalid_state`, `details.bus`); before, the file could carry the same bus twice until the recording stopped.
   - 2026-10-24, ADR 0017 step 5a: the monitor. `get_output_profiles` gained `monitor` (and a project file's `outputs` may hold it), `set_output_profile` takes `output: "monitor"` and `enabled` and its result gained `warnings`, `get_mixer`'s `outputs` gained the monitor's entry, `get_health` gained `monitor`, the stop reports gained `monitor`, `list_audio_inputs` entries gained `loopback_of`; `list_audio_outputs` and `set_monitor_device` are new.

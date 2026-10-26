@@ -195,7 +195,6 @@ pub(crate) struct Pipeline {
     scene_screens: Vec<SceneCapture>,
     retired_screens: Vec<SceneCaptureOutcome>,
     retired_omitted: u64,
-    extra_screen: Option<Box<dyn VideoStream>>,
     audio_streams: Vec<DeviceCapture>,
     /// The monitor's device, once it was switched on in this run; after the
     /// mixer, which feeds it.
@@ -240,16 +239,7 @@ impl Pipeline {
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
         audio: AudioGraphSpec,
-        extra_screen: Option<&ScreenSelection>,
     ) -> Result<Self, CommandError> {
-        let extra_screen = match extra_screen {
-            Some(selection) => Some(
-                capture
-                    .start_screen_stream(selection)
-                    .map_err(command_error)?,
-            ),
-            None => None,
-        };
         let scene_screens = start_screens(capture, scene, &[])?;
         // On an error, the captures already started are dropped, which
         // stops them.
@@ -262,7 +252,6 @@ impl Pipeline {
             scene,
             &LiveFrames {
                 screens: &mailboxes(&scene_screens),
-                extra_screen: extra_screen.as_ref().map(|stream| stream.frames()).as_ref(),
             },
             &mut cache,
         )?;
@@ -296,7 +285,6 @@ impl Pipeline {
             scene_screens,
             retired_screens: Vec::new(),
             retired_omitted: 0,
-            extra_screen,
             audio_streams,
             monitor: None,
             audio,
@@ -494,16 +482,8 @@ impl Pipeline {
         let started = start_screens(capture, scene, &self.scene_screens)?;
         let mut live = mailboxes(&self.scene_screens);
         live.extend(mailboxes(&started));
-        let extra = self.extra_screen.as_ref().map(|stream| stream.frames());
-        let applied = scenes::build(
-            scene,
-            &LiveFrames {
-                screens: &live,
-                extra_screen: extra.as_ref(),
-            },
-            &mut self.cache,
-        )
-        .and_then(|update| self.compositor.update(update).map_err(internal));
+        let applied = scenes::build(scene, &LiveFrames { screens: &live }, &mut self.cache)
+            .and_then(|update| self.compositor.update(update).map_err(internal));
         match applied {
             Ok(()) => {
                 let mut screens = std::mem::take(&mut self.scene_screens);
@@ -618,26 +598,20 @@ impl Pipeline {
     pub fn captures(&self) -> Vec<CaptureHealth> {
         let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
             kind: CaptureKind::Screen,
-            id: Some(screen.id.clone()),
+            id: screen.id.clone(),
             name: screen.name.clone(),
             state: screen.stream.state(),
-        });
-        let layer = self.extra_screen.iter().map(|stream| CaptureHealth {
-            kind: CaptureKind::Screen,
-            id: None,
-            name: "screen layer".to_owned(),
-            state: stream.state(),
         });
         let audio =
             audio::devices(&self.audio)
                 .zip(&self.audio_streams)
                 .map(|((channel, _), capture)| CaptureHealth {
                     kind: CaptureKind::Audio,
-                    id: Some(channel.id.clone()),
+                    id: channel.id.clone(),
                     name: channel.name.clone(),
                     state: capture.state(),
                 });
-        screens.chain(layer).chain(audio).collect()
+        screens.chain(audio).collect()
     }
 
     fn retire(&mut self, outcome: SceneCaptureOutcome) {
@@ -850,7 +824,6 @@ impl Pipeline {
             scene_screens,
             mut retired_screens,
             retired_omitted,
-            extra_screen,
             audio_streams,
             monitor,
             audio,
@@ -897,12 +870,6 @@ impl Pipeline {
                 feed,
             }
         });
-        let (screen_capture, screen_capture_error) = match extra_screen.map(|stream| stream.stop())
-        {
-            Some(Ok(report)) => (Some(report), None),
-            Some(Err(error)) => (None, Some(ErrorSummary::from(error))),
-            None => (None, None),
-        };
         retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
         // A missing device's channel was silent the whole run: say which.
         let (mut silent, mut failed) = (Vec::new(), Vec::new());
@@ -938,9 +905,6 @@ impl Pipeline {
         }
         warnings.extend(silent);
         warnings.extend(failed);
-        if let Some(error) = &screen_capture_error {
-            warnings.push(format!("screen capture failed: {}", error.message));
-        }
         for outcome in &retired_screens {
             if let Some(error) = &outcome.error {
                 warnings.push(format!(
@@ -953,8 +917,6 @@ impl Pipeline {
             pipeline_stopped: true,
             render,
             mix,
-            screen_capture,
-            screen_capture_error,
             audio_captures,
             scene_captures: retired_screens,
             scene_captures_omitted: retired_omitted,

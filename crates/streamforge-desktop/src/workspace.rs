@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use command_api::{
     AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
-    OutputHealth, SceneList, StreamState,
+    OutputHealth, RecordingState, SceneList, StreamState,
 };
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, Rect, vec2};
 
@@ -56,11 +56,11 @@ pub fn fit(outer: Rect, width: u32, height: u32) -> Rect {
 /// - `failed`: the status says it stopped unexpectedly.
 /// - `health`: the last reading for this output and its age; the timer
 ///   runs on from it between readings.
-pub fn transport_state(
+pub fn transport_state<S: OutputPhase>(
     open: bool,
     starting: bool,
     failed: bool,
-    health: Option<(&OutputHealth, Duration)>,
+    health: Option<(&OutputHealth<S>, Duration)>,
 ) -> TransportState {
     if !open {
         return if starting {
@@ -79,13 +79,41 @@ pub fn transport_state(
     if !output.running {
         return TransportState::Failed;
     }
-    match output.state {
-        Some(StreamState::Connecting | StreamState::Reconnecting) => TransportState::Starting,
-        Some(StreamState::Failed | StreamState::Stopped) => TransportState::Failed,
-        Some(StreamState::Connected) | None => {
-            let age_ms = u64::try_from(age.as_millis()).unwrap_or(u64::MAX);
-            TransportState::Running(output.elapsed_ms.saturating_add(age_ms) / 1000)
-        }
+    if output.state.failed() {
+        TransportState::Failed
+    } else if output.state.waiting() {
+        TransportState::Starting
+    } else {
+        let age_ms = u64::try_from(age.as_millis()).unwrap_or(u64::MAX);
+        TransportState::Running(output.elapsed_ms.saturating_add(age_ms) / 1000)
+    }
+}
+
+/// What an output's state means for its transport.
+pub trait OutputPhase: Copy {
+    /// It ended, or cannot deliver.
+    fn failed(self) -> bool;
+    /// Open, but not live yet: a stream connecting or reconnecting.
+    fn waiting(self) -> bool;
+}
+
+impl OutputPhase for RecordingState {
+    fn failed(self) -> bool {
+        self == Self::Failed
+    }
+
+    fn waiting(self) -> bool {
+        false
+    }
+}
+
+impl OutputPhase for StreamState {
+    fn failed(self) -> bool {
+        matches!(self, Self::Failed | Self::Stopped)
+    }
+
+    fn waiting(self) -> bool {
+        matches!(self, Self::Connecting | Self::Reconnecting)
     }
 }
 
@@ -569,7 +597,7 @@ mod tests {
         assert_eq!(fit(wide, 0, 1080).size(), vec2(0.0, 0.0));
     }
 
-    fn output(running: bool, state: Option<StreamState>, elapsed_ms: u64) -> OutputHealth {
+    fn output<S>(running: bool, state: S, elapsed_ms: u64) -> OutputHealth<S> {
         OutputHealth {
             target: "out".to_owned(),
             elapsed_ms,
@@ -581,27 +609,29 @@ mod tests {
                 skipped: Vec::new(),
             },
             counters: LiveOutputStats::default(),
+            connection: None,
         }
     }
 
     #[test]
     fn the_transport_follows_commands_status_and_health() {
         let zero = Duration::ZERO;
+        let no_reading = None::<(&OutputHealth<RecordingState>, Duration)>;
         assert_eq!(
-            transport_state(false, false, false, None),
+            transport_state(false, false, false, no_reading),
             TransportState::Idle
         );
         assert_eq!(
-            transport_state(false, true, false, None),
+            transport_state(false, true, false, no_reading),
             TransportState::Starting
         );
         // Open, before the first reading.
         assert_eq!(
-            transport_state(true, false, false, None),
+            transport_state(true, false, false, no_reading),
             TransportState::Running(0)
         );
         // The timer runs on from the reading by its age.
-        let recording = output(true, None, 61_400);
+        let recording = output(true, RecordingState::Running, 61_400);
         assert_eq!(
             transport_state(
                 true,
@@ -616,25 +646,25 @@ mod tests {
             transport_state(true, false, true, Some((&recording, zero))),
             TransportState::Failed
         );
-        let stopped = output(false, None, 5_000);
+        let stopped = output(false, RecordingState::Failed, 5_000);
         assert_eq!(
             transport_state(true, false, false, Some((&stopped, zero))),
             TransportState::Failed
         );
         // A stream waiting on the network pulses; connected runs.
         for state in [StreamState::Connecting, StreamState::Reconnecting] {
-            let stream = output(true, Some(state), 9_000);
+            let stream = output(true, state, 9_000);
             assert_eq!(
                 transport_state(true, false, false, Some((&stream, zero))),
                 TransportState::Starting
             );
         }
-        let stream = output(true, Some(StreamState::Connected), 9_000);
+        let stream = output(true, StreamState::Connected, 9_000);
         assert_eq!(
             transport_state(true, false, false, Some((&stream, zero))),
             TransportState::Running(9)
         );
-        let stream = output(true, Some(StreamState::Failed), 9_000);
+        let stream = output(true, StreamState::Failed, 9_000);
         assert_eq!(
             transport_state(true, false, false, Some((&stream, zero))),
             TransportState::Failed

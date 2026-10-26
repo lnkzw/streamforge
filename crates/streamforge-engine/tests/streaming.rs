@@ -45,7 +45,6 @@ fn streams_to_a_local_server() {
     assert!(!started.to_string().contains("SECRET"));
     thread::sleep(Duration::from_secs(2));
     let status = get_status(&mut engine);
-    assert_eq!(status["streaming_active"], true, "{status}");
     assert_eq!(status["streaming_state"], "connected", "{status}");
     let stopped = request(&mut engine, 2, "stop_streaming", json!({}));
     let wall = begun.elapsed().as_secs_f64();
@@ -134,8 +133,8 @@ fn recording_continues_when_the_stream_fails() {
         assert!(Instant::now() < deadline, "stream never failed: {status}");
         thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(status["streaming_active"], false);
-    assert_eq!(status["recording_active"], true, "{status}");
+    assert_eq!(status["streaming_state"], "failed");
+    assert_eq!(status["recording_state"], "running", "{status}");
     let stream = request(&mut engine, 2, "stop_streaming", json!({}));
     assert_eq!(stream["result"]["streaming"]["state"], "failed", "{stream}");
     assert_eq!(stream["result"]["pipeline_stopped"], false);

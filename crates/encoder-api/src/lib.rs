@@ -115,9 +115,15 @@ pub struct LiveOutputStats {
     /// Items queued for the output thread right now; a queue that keeps
     /// growing means the encoder or the network cannot keep up.
     pub queue_depth: u64,
-    /// Streams only: connections made so far.
+}
+
+/// A running stream's connection counters so far, read like
+/// [`LiveOutputStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct LiveConnectionStats {
+    /// Connections made so far.
     pub connects: u32,
-    /// Streams only: reconnect attempts so far.
+    /// Reconnect attempts so far.
     pub reconnect_attempts: u32,
 }
 

@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Print current engine status (initial scaffold only).
+    /// Print the engine status: version, capture availability, output states.
     Status {
         /// Emit machine-readable JSON.
         #[arg(long)]
@@ -103,7 +103,8 @@ enum Commands {
         /// Run time in milliseconds (100..=60000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
-        /// Add a live screen layer (the --source-id source, else the system picker).
+        /// Add the reference scene's live screen layer (the --source-id source, else the
+        /// system picker).
         #[arg(long)]
         screen: bool,
         /// With --screen: capture this source from `capture sources` (no picker).
@@ -185,10 +186,15 @@ fn main() -> Result<ExitCode> {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 println!("{} {}", status.application, status.version);
-                println!("Media engine ready: {}", status.media_engine_ready);
                 println!("Capture available: {}", status.capture_available);
-                println!("Streaming active: {}", status.streaming_active);
-                println!("Recording active: {}", status.recording_active);
+                println!(
+                    "Recording: {}",
+                    status.recording_state.map_or("off", |state| state.as_str())
+                );
+                println!(
+                    "Streaming: {}",
+                    status.streaming_state.map_or("off", |state| state.as_str())
+                );
                 println!();
                 println!(
                     "Capture probes: `streamforge capture --help`. Recording and streaming: `streamforge record --help`, `streamforge stream --help`."
@@ -218,10 +224,10 @@ fn main() -> Result<ExitCode> {
             video_encoder,
             sources,
         } => {
-            if let Some(failed) = mixer_from(&mut engine, &sources) {
+            if let Some(failed) = set_up_from(&mut engine, &sources) {
                 return Ok(failed);
             }
-            let mut params = sources.params();
+            let mut params = Map::new();
             params.insert("file_name".into(), file.into());
             if let Some(encoder) = video_encoder {
                 params.insert("video_encoder".into(), encoder.into());
@@ -267,23 +273,17 @@ fn main() -> Result<ExitCode> {
             if let Some(encoder) = &video_encoder {
                 stream_params.insert("video_encoder".into(), encoder.clone().into());
             }
-            if let Some(failed) = mixer_from(&mut engine, &sources) {
+            if let Some(failed) = set_up_from(&mut engine, &sources) {
                 return Ok(failed);
             }
-            let source_params = sources.params();
-            // The first output brings the pipeline up with the screen layer;
-            // a stream started alongside a recording joins it.
             let record_params = record.map(|file| {
-                let mut params = source_params.clone();
+                let mut params = Map::new();
                 params.insert("file_name".into(), file.into());
                 if let Some(encoder) = &video_encoder {
                     params.insert("video_encoder".into(), encoder.clone().into());
                 }
                 params
             });
-            if record_params.is_none() {
-                stream_params.extend(source_params);
-            }
             stream(
                 &mut engine,
                 record_params,
@@ -486,11 +486,12 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
 /// Read for the stream key when `--key-env` is not given.
 const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
 
-/// Source flags shared by `record` and `stream`: a screen layer, and the
-/// engine's mixer channels for this process.
+/// Source flags shared by `record` and `stream`: a screen source in the
+/// active scene, and the engine's mixer channels for this process.
 #[derive(clap::Args, Debug)]
 struct SourceArgs {
-    /// Add a live screen layer (the --source-id source, else the system picker).
+    /// Add a live screen source to the scene (the --source-id source, else the system
+    /// picker), fitted into 1152x648 at the lower right, at 90 % opacity.
     #[arg(long)]
     screen: bool,
     /// With --screen: capture this source from `capture sources` (no picker).
@@ -577,11 +578,25 @@ impl SourceArgs {
         })
     }
 
-    /// The output's own params: a screen layer.
-    fn params(&self) -> Map<String, Value> {
+    /// `add_source` params for the screen source in scene `scene_id`, if
+    /// `--screen` asks for one: where the reference scene draws its screen
+    /// (`compose --screen`), on top of the scene.
+    fn screen_source(&self, scene_id: &str) -> Option<Map<String, Value>> {
+        if !self.screen {
+            return None;
+        }
         let mut params = Map::new();
-        if self.screen {
-            params.insert("screen".into(), true.into());
+        params.insert("scene_id".into(), scene_id.into());
+        params.insert("name".into(), "Screen".into());
+        params.insert("kind".into(), "screen".into());
+        for (field, value) in [
+            ("x", 704.0),
+            ("y", 368.0),
+            ("width", 1152.0),
+            ("height", 648.0),
+            ("opacity", 0.9),
+        ] {
+            params.insert(field.into(), value.into());
         }
         if let Some(source_id) = &self.source_id {
             params.insert("source_id".into(), source_id.clone().into());
@@ -592,12 +607,13 @@ impl SourceArgs {
         if let Some(cursor) = &self.cursor {
             params.insert("cursor".into(), cursor.clone().into());
         }
-        params
+        Some(params)
     }
 }
 
-/// Set up the mixer from `sources`' flags; the exit code if that fails.
-fn mixer_from(engine: &mut Engine, sources: &SourceArgs) -> Option<ExitCode> {
+/// Set up the mixer and the screen source from `sources`' flags; the exit
+/// code if that fails.
+fn set_up_from(engine: &mut Engine, sources: &SourceArgs) -> Option<ExitCode> {
     let setup = match sources.mixer_setup() {
         Ok(setup) => setup,
         Err(message) => {
@@ -606,8 +622,28 @@ fn mixer_from(engine: &mut Engine, sources: &SourceArgs) -> Option<ExitCode> {
         }
     };
     set_up_mixer(engine, setup)
+        .and_then(|()| add_screen_source(engine, sources))
         .err()
         .map(|err| report_error(&err))
+}
+
+/// Add `--screen`'s source to the active scene; its capture starts with the
+/// pipeline.
+fn add_screen_source(
+    engine: &mut Engine,
+    sources: &SourceArgs,
+) -> Result<(), command_api::CommandError> {
+    if !sources.screen {
+        return Ok(());
+    }
+    let scene_id = match start(engine, "list_scenes", Map::new())? {
+        CommandOutput::SceneList(scenes) => scenes.active_id,
+        other => unreachable!("list_scenes returns the scene list, not {other:?}"),
+    };
+    if let Some(params) = sources.screen_source(&scene_id) {
+        start(engine, "add_source", params)?;
+    }
+    Ok(())
 }
 
 /// Apply `setup` to the engine's mixer (before anything runs).
@@ -760,11 +796,12 @@ fn run_for(engine: &mut Engine, duration: Duration) {
         std::thread::sleep(left.min(Duration::from_secs(1)));
         if let Ok(CommandOutput::Health(health)) = engine.handle(Command::GetHealth) {
             eprintln!("{}", progress_line(&health, started.elapsed()));
-            let mut outputs = [&health.recording, &health.streaming]
-                .into_iter()
-                .flatten()
-                .peekable();
-            if outputs.peek().is_some() && outputs.all(|output| !output.running) {
+            let outputs = [
+                health.recording.as_ref().map(|output| output.running),
+                health.streaming.as_ref().map(|output| output.running),
+            ];
+            let mut outputs = outputs.into_iter().flatten().peekable();
+            if outputs.peek().is_some() && outputs.all(|running| !running) {
                 eprintln!("every output stopped; ending early");
                 return;
             }
@@ -775,23 +812,23 @@ fn run_for(engine: &mut Engine, duration: Duration) {
 /// E.g. `  2.0 s  recording 120 frames, 0 dropped, queue 1 | render 0 late, 0 skipped`.
 fn progress_line(health: &command_api::HealthReport, elapsed: Duration) -> String {
     let mut parts = Vec::new();
-    let output = |name: &str, output: &command_api::OutputHealth| {
-        let state = match (output.state, output.running) {
-            (Some(state), _) => format!(" {}", state.as_str()),
-            (None, false) => " failed".to_owned(),
-            (None, true) => String::new(),
-        };
-        let counters = &output.counters;
+    let output = |name: &str, state: &str, counters: &command_api::LiveOutputStats| {
         format!(
             "{name}{state} {} frames, {} dropped, queue {}",
             counters.frames_encoded, counters.frames_dropped, counters.queue_depth
         )
     };
     if let Some(recording) = &health.recording {
-        parts.push(output("recording", recording));
+        // A running recording needs no word.
+        let state = match recording.state {
+            command_api::RecordingState::Running => String::new(),
+            state => format!(" {}", state.as_str()),
+        };
+        parts.push(output("recording", &state, &recording.counters));
     }
     if let Some(streaming) = &health.streaming {
-        parts.push(output("stream", streaming));
+        let state = format!(" {}", streaming.state.as_str());
+        parts.push(output("stream", &state, &streaming.counters));
     }
     if let Some(render) = &health.render {
         parts.push(format!(
@@ -866,33 +903,36 @@ mod tests {
     #[test]
     fn progress_lines_summarize_health() {
         use command_api::{HealthReport, OutputHealth, VideoEncoderInfo};
-        let output = |state, running| OutputHealth {
-            target: "x".into(),
-            elapsed_ms: 2000,
-            running,
-            state,
-            video_encoder: VideoEncoderInfo {
-                encoder: "libx264".into(),
-                hardware: false,
-                skipped: Vec::new(),
-            },
-            counters: command_api::LiveOutputStats {
-                frames_encoded: 120,
-                frames_dropped: 2,
-                queue_depth: 1,
-                ..Default::default()
-            },
-        };
+        fn output<S>(state: S, running: bool) -> OutputHealth<S> {
+            OutputHealth {
+                target: "x".into(),
+                elapsed_ms: 2000,
+                running,
+                state,
+                video_encoder: VideoEncoderInfo {
+                    encoder: "libx264".into(),
+                    hardware: false,
+                    skipped: Vec::new(),
+                },
+                counters: command_api::LiveOutputStats {
+                    frames_encoded: 120,
+                    frames_dropped: 2,
+                    queue_depth: 1,
+                    ..Default::default()
+                },
+                connection: None,
+            }
+        }
         let health = HealthReport {
             pipeline_running: true,
             monitor: None,
             render: None,
             mix: None,
-            recording: Some(output(None, false)),
-            streaming: Some(output(Some(command_api::StreamState::Reconnecting), true)),
+            recording: Some(output(command_api::RecordingState::Failed, false)),
+            streaming: Some(output(command_api::StreamState::Reconnecting, true)),
             captures: vec![command_api::CaptureHealth {
                 kind: command_api::CaptureKind::Screen,
-                id: Some("src_desk".to_owned()),
+                id: "src_desk".to_owned(),
                 name: "desk".into(),
                 state: command_api::CaptureState::Ended {
                     reason: "the captured window was closed".into(),
@@ -940,6 +980,25 @@ mod tests {
             no_tone,
             master_gain_db: None,
         }
+    }
+
+    #[test]
+    fn the_screen_flag_becomes_a_scene_source() {
+        assert_eq!(source_args(&[], &[], false).screen_source("scene_a"), None);
+        let mut args = source_args(&[], &[], false);
+        args.screen = true;
+        args.source_id = Some("monitor:1".to_owned());
+        args.source_types = vec!["window".to_owned()];
+        let params = args.screen_source("scene_a").expect("params");
+        assert_eq!(
+            Value::Object(params.clone()),
+            serde_json::json!({
+                "scene_id": "scene_a", "name": "Screen", "kind": "screen",
+                "x": 704.0, "y": 368.0, "width": 1152.0, "height": 648.0, "opacity": 0.9,
+                "source_id": "monitor:1", "source_types": ["window"],
+            })
+        );
+        assert!(Command::decode("add_source", Some(&Value::Object(params))).is_ok());
     }
 
     #[test]

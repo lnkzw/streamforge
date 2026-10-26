@@ -49,7 +49,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     );
     assert_eq!(responses[0]["ok"], true, "{}", responses[0]);
     assert_eq!(responses[1]["ok"], true, "{}", responses[1]);
-    assert_eq!(responses[2]["result"]["recording_active"], true);
+    assert_eq!(responses[2]["result"]["recording_state"], "running");
     assert_eq!(responses[3]["ok"], true, "{}", responses[3]);
     let report = &responses[3]["result"]["recording"];
     // Shared CI runners may not sustain 1080p60 x264, so drops are allowed,

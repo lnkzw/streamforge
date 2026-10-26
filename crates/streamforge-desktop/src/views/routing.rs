@@ -1,31 +1,42 @@
 //! The routing matrix (ADR 0017): rows are channels, columns are buses
 //! (the program bus, then the aux buses), and each cell is a send with
-//! its switch, level and tap. Under the channels come the aux buses'
-//! assignment to the program bus, then each output's mix and the
-//! recording's further tracks, in the same columns: outputs take buses,
-//! never channels. Buses are added and removed here, while the pipeline
-//! is idle.
+//! its switch, level and tap. Each channel's input comes before the
+//! buses. Under the channels come the aux buses' assignment to the program
+//! bus, then each output's mix and the recording's further tracks, in the
+//! same columns: outputs take buses, never channels. Channels and buses
+//! are added and removed here, and inputs chosen, while the pipeline is
+//! idle.
 
 use command_api::{
-    BusState, MAX_AUX_BUSES, MAX_EXTRA_TRACKS, MAX_GAIN_DB, MIN_GAIN_DB, MixerState, OutputKind,
-    OutputProfiles, PROGRAM_BUS_ID, SendSpec, SendTap,
+    BusState, MAX_AUX_BUSES, MAX_CHANNELS, MAX_EXTRA_TRACKS, MAX_GAIN_DB, MIN_GAIN_DB, MixerState,
+    OutputKind, OutputProfiles, PROGRAM_BUS_ID, SendSpec, SendTap,
 };
+use std::time::Duration;
+
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
+use crate::model::InputForm;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets;
+use crate::workspace::{self, InputLabel};
 
 use super::{commit, labelled};
 
 /// Every column is at least this wide, so a cell keeps its place when its
 /// send is switched on.
 const COLUMN: f32 = 124.0;
+/// Device names are long; the field cuts them and its tooltip has all.
+const INPUT_COLUMN: f32 = 160.0;
 const ROW: f32 = 20.0;
+/// How often the matrix asks for the audio inputs again.
+const INPUTS_REFRESH: Duration = Duration::from_secs(5);
 const ROW_GAP: f32 = size::SPACE_2;
 /// Why the structure cannot change now (ADR 0017: structure while idle).
-const IDLE_ONLY: &str = "Stop the preview and the outputs to add or remove buses";
+const IDLE_BUSES: &str = "Stop the preview and the outputs to add or remove buses";
+const IDLE_CHANNELS: &str = "Stop the preview and the outputs to add or remove channels";
+const IDLE_INPUT: &str = "Stop the preview and the outputs to choose another input";
 
 /// What the operator changed on a send this frame.
 #[derive(Default)]
@@ -45,6 +56,28 @@ impl DesktopApp {
     pub(crate) fn routing(&mut self, ui: &mut egui::Ui, mixer: &MixerState) {
         let idle = !mixer.running;
         let profiles = self.model.profiles.clone();
+        // Device names, desktop audio and missing devices need the
+        // engine's list; devices come and go, so it is asked again while
+        // the matrix shows (listing is quick), and when an input is chosen.
+        if self
+            .model
+            .audio_inputs_age()
+            .is_none_or(|age| age > INPUTS_REFRESH)
+        {
+            self.model.find_audio_inputs();
+        }
+        let inputs = match &self.model.audio_inputs {
+            Some(Ok(inputs)) => Some(inputs.as_slice()),
+            _ => None,
+        };
+        let labels: Vec<InputLabel> = mixer
+            .channels
+            .iter()
+            .map(|channel| workspace::input_label(&channel.spec.input, inputs))
+            .collect();
+        let mut add_channel = false;
+        let mut choose_input = None;
+        let mut remove_channel = None;
         let mut add_bus = false;
         let mut remove = None;
         // Where each group of rows begins, for the lines between them.
@@ -58,15 +91,31 @@ impl DesktopApp {
                 ui.spacing_mut().interact_size.y = ROW;
                 ui.spacing_mut().button_padding.y = size::SPACE_2;
                 let grid = egui::Grid::new("routing matrix")
-                    .num_columns(mixer.buses.len() + 2)
+                    .num_columns(mixer.buses.len() + 3)
                     .min_col_width(COLUMN)
                     .min_row_height(ROW)
                     .spacing([size::SPACE_8, ROW_GAP])
                     .show(ui, |ui| {
-                        ui.label(TextRole::Section.text("Channels"));
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = size::SPACE_4;
+                            ui.label(TextRole::Section.text("Channels"));
+                            let room = mixer.channels.len() < MAX_CHANNELS;
+                            add_channel = ui
+                                .add_enabled_ui(idle && room, |ui| {
+                                    widgets::icon_button(ui, Icon::Plus, "Add a channel")
+                                })
+                                .inner
+                                .on_disabled_hover_text(if room {
+                                    IDLE_CHANNELS.to_owned()
+                                } else {
+                                    format!("At most {MAX_CHANNELS} channels")
+                                })
+                                .clicked();
+                        });
+                        ui.label(TextRole::Section.text("Input"));
                         for bus in &mixer.buses {
                             let blocked = if !idle {
-                                Some(IDLE_ONLY.to_owned())
+                                Some(IDLE_BUSES.to_owned())
                             } else {
                                 profiles
                                     .as_ref()
@@ -83,14 +132,14 @@ impl DesktopApp {
                             })
                             .inner
                             .on_disabled_hover_text(if room {
-                                IDLE_ONLY.to_owned()
+                                IDLE_BUSES.to_owned()
                             } else {
                                 format!("At most {MAX_AUX_BUSES} buses besides the program bus")
                             })
                             .clicked();
                         ui.end_row();
 
-                        for channel in &mixer.channels {
+                        for (channel, label) in mixer.channels.iter().zip(&labels) {
                             let spec = &channel.spec;
                             let paths = mixer.program_paths(spec);
                             let warning = (paths.len() > 1).then(|| {
@@ -102,13 +151,29 @@ impl DesktopApp {
                                     ways.join(", ")
                                 )
                             });
-                            let header = ui
+                            let blocked = (!idle).then_some(IDLE_CHANNELS);
+                            let (header, removed) = ui
                                 .push_id(&spec.id, |ui| {
-                                    channel_header(ui, &spec.name, warning.as_deref())
+                                    channel_header(ui, &spec.name, warning.as_deref(), blocked)
+                                })
+                                .inner;
+                            let chosen = ui
+                                .push_id((&spec.id, "input"), |ui| {
+                                    input_cell(ui, &spec.name, label, idle)
                                 })
                                 .inner;
                             if groups.is_empty() {
                                 groups.push(header.top());
+                            }
+                            if removed {
+                                remove_channel = Some((spec.id.clone(), spec.name.clone()));
+                            }
+                            if chosen {
+                                choose_input = Some(Dialog::ChannelInput {
+                                    id: spec.id.clone(),
+                                    name: spec.name.clone(),
+                                    input: InputForm::new(&spec.input),
+                                });
                             }
                             for (bus, send) in mixer.buses.iter().zip(&spec.sends) {
                                 // Ids by channel and bus, so a field being dragged keeps
@@ -136,6 +201,7 @@ impl DesktopApp {
                         }
 
                         groups.push(row_header(ui, "To program").rect.top());
+                        ui.label("");
                         for bus in &mixer.buses {
                             if bus.id == PROGRAM_BUS_ID {
                                 ui.label("");
@@ -160,6 +226,20 @@ impl DesktopApp {
                         .hline(x, y, egui::Stroke::new(size::STROKE, color::LINE_SUBTLE));
                 }
             });
+        if add_channel {
+            self.model.find_audio_inputs();
+            self.dialog = Some(Dialog::AddChannel {
+                name: String::new(),
+                input: InputForm::default(),
+            });
+        }
+        if let Some(dialog) = choose_input {
+            self.model.find_audio_inputs();
+            self.dialog = Some(dialog);
+        }
+        if let Some((id, name)) = remove_channel {
+            self.dialog = Some(Dialog::Confirm(Confirm::RemoveChannel { id, name }));
+        }
         if add_bus {
             self.dialog = Some(Dialog::AddBus {
                 name: String::new(),
@@ -217,6 +297,7 @@ impl DesktopApp {
                         .circle_filled(dot.center(), 3.5, color::TALLY_PROGRAM);
                 }
             });
+            ui.label("");
             let recording = output == OutputKind::Recording;
             // A running recording keeps its tracks until it stops: it shows
             // them, and they cannot change or become its mix meanwhile.
@@ -370,25 +451,70 @@ fn row_header(ui: &mut egui::Ui, name: &str) -> egui::Response {
 }
 
 /// A channel's name in the first column, cut to fit, after a warning icon
-/// (with the reason as its tooltip) when there is one. Returns its rect.
-fn channel_header(ui: &mut egui::Ui, name: &str, warning: Option<&str>) -> egui::Rect {
-    ui.allocate_ui_with_layout(
+/// (with the reason as its tooltip) when there is one, and its removal;
+/// `blocked` says why removal is not possible now. Returns its rect and
+/// whether removal was asked for.
+fn channel_header(
+    ui: &mut egui::Ui,
+    name: &str,
+    warning: Option<&str>,
+    blocked: Option<&str>,
+) -> (egui::Rect, bool) {
+    let response = ui.allocate_ui_with_layout(
         egui::vec2(COLUMN, ROW),
-        egui::Layout::left_to_right(egui::Align::Center),
+        egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             ui.set_width(COLUMN);
             ui.spacing_mut().item_spacing.x = size::SPACE_4;
-            if let Some(reason) = warning {
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
-                Icon::Warning.paint(ui.painter(), rect, color::STATE_WARN);
-                response.on_hover_text(reason);
-            }
-            ui.add(egui::Label::new(TextRole::Body.text(name)).truncate());
+            let remove = ui
+                .add_enabled_ui(blocked.is_none(), |ui| {
+                    widgets::icon_button(ui, Icon::Trash, &format!("Remove channel {name}…"))
+                })
+                .inner;
+            let removed = match blocked {
+                Some(reason) => {
+                    remove.on_disabled_hover_text(reason);
+                    false
+                }
+                None => remove.clicked(),
+            };
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if let Some(reason) = warning {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
+                    Icon::Warning.paint(ui.painter(), rect, color::STATE_WARN);
+                    response.on_hover_text(reason);
+                }
+                ui.add(egui::Label::new(TextRole::Body.text(name)).truncate());
+            });
+            removed
         },
-    )
-    .response
-    .rect
+    );
+    (response.response.rect, response.inner)
+}
+
+/// What a channel plays, as a field that opens the choice. Returns whether
+/// it was clicked.
+fn input_cell(ui: &mut egui::Ui, channel: &str, label: &InputLabel, idle: bool) -> bool {
+    let tint = if label.missing {
+        color::STATE_WARN
+    } else {
+        color::TEXT_SECONDARY
+    };
+    ui.add_enabled_ui(idle, |ui| {
+        widgets::select_field(
+            ui,
+            label.icon,
+            tint,
+            &label.text,
+            &format!("Input of {channel}"),
+            INPUT_COLUMN,
+        )
+    })
+    .inner
+    .on_hover_text(format!("{}. Click to choose another input.", label.detail))
+    .on_disabled_hover_text(format!("{}. {IDLE_INPUT}.", label.detail))
+    .clicked()
 }
 
 /// A send's level, or a bus's into the program bus, in dB, with the

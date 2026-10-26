@@ -41,8 +41,8 @@ pub use project::{
 };
 pub use registry::{
     CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
-    NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name, params_schema, project_file_name,
-    registry,
+    DEFAULT_TONE_LEVEL_DBFS, NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name,
+    params_schema, project_file_name, registry,
 };
 pub use scenes::{
     AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
@@ -56,11 +56,11 @@ pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats};
 use std::path::PathBuf;
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput, CaptureCapabilities,
+    AudioCaptureReport, AudioCaptureRequest, AudioOutput, CaptureCapabilities,
     ScreenCaptureRequest, VideoCaptureReport,
 };
 /// Capture types in results, for adapters that do not use `capture-api`.
-pub use capture_api::{CaptureState, ScreenSource};
+pub use capture_api::{AudioInput, CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
 /// `StreamTarget` lets a client check a stream URL and show its redacted
 /// form before `start_streaming`, with the engine's own rules.

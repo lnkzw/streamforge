@@ -3,6 +3,8 @@
 //! consequential actions ask first. No rendering is involved, so these run
 //! everywhere.
 
+mod support;
+
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +17,7 @@ use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
+use support::ListedInputs;
 
 struct TempDir(PathBuf);
 
@@ -49,11 +52,16 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
     panic!("timed out waiting for {what}; log: {:?}", model.log);
 }
 
-/// A model on a fresh engine whose program scene has one source.
+/// A model on a fresh engine whose program scene has one source; the
+/// engine lists audio inputs but captures nothing.
 fn model(dir: &TempDir) -> Model {
     let out = dir.0.clone();
     let worker = EngineWorker::spawn(
-        move || Engine::new().with_output_dir(&out).with_project_dir(out),
+        move || {
+            Engine::with_capture(Box::new(ListedInputs::new()))
+                .with_output_dir(&out)
+                .with_project_dir(out)
+        },
         || {},
     )
     .expect("worker");
@@ -405,6 +413,84 @@ fn a_bus_strip_mutes_and_buses_stay_while_the_pipeline_runs() {
     });
     step_until(&mut harness, "the running mixer", |h| {
         !clickable(h, "Add a bus") && !clickable(h, "Remove bus Voice…")
+    });
+    assert!(!clickable(&harness, "Add a channel"));
+    assert!(!clickable(&harness, "Remove channel Tone…"));
+    assert!(!clickable(&harness, "Input of Tone"));
+}
+
+/// What the matrix says channel `channel` plays.
+fn input_of(harness: &Harness<'static, DesktopApp>, channel: &str) -> Option<String> {
+    harness
+        .query_by_label(&format!("Input of {channel}"))
+        .and_then(|node| node.accesskit_node().value())
+}
+
+#[test]
+fn a_channel_is_added_on_desktop_audio_turned_into_a_tone_and_removed() {
+    let dir = TempDir::new("channels");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Routing").click();
+    step_until(&mut harness, "the matrix", |h| {
+        clickable(h, "Add a channel")
+    });
+    harness.get_by_label("Add a channel").click();
+    step_until(&mut harness, "the channel dialog", |h| {
+        h.query_by_label("New channel").is_some()
+    });
+    type_into_dialog(&mut harness, "Desktop");
+
+    // The engine's inputs, desktop audio apart.
+    harness.get_by_label("Audio input").click();
+    step_until(&mut harness, "the input list", |h| {
+        h.query_by_label("Monitor of Speakers").is_some()
+    });
+    assert!(harness.query_by_label("USB Mic").is_some());
+    assert!(harness.query_by_label("DESKTOP AUDIO").is_some());
+    harness.get_by_label("Monitor of Speakers").click();
+    step_until(&mut harness, "the desktop audio note", |h| {
+        h.query_by_label_contains("Desktop audio: what an output plays")
+            .is_some()
+    });
+    harness.get_by_label("Add channel").click();
+    step_until(&mut harness, "the new channel", |h| {
+        input_of(h, "Desktop").is_some() && h.query_by_label("New channel").is_none()
+    });
+    assert_eq!(
+        input_of(&harness, "Desktop").as_deref(),
+        Some("Monitor of Speakers")
+    );
+    assert!(
+        is_on(&harness, "Send Desktop to Program"),
+        "a new channel sends to program"
+    );
+    assert!(
+        harness
+            .query_by_label("Project Untitled, unsaved changes")
+            .is_some()
+    );
+
+    // Its input becomes a test tone; unchanged, there is nothing to apply.
+    harness.get_by_label("Input of Desktop").click();
+    step_until(&mut harness, "the input dialog", |h| {
+        h.query_by_label("Input of “Desktop”").is_some()
+    });
+    assert!(!clickable(&harness, "Use input"));
+    harness.get_by_label("Test tone").click();
+    harness.step();
+    harness.get_by_label("Use input").click();
+    step_until(&mut harness, "the tone", |h| {
+        input_of(h, "Desktop").as_deref() == Some("Tone 1000 Hz")
+    });
+
+    // Removing asks first.
+    harness.get_by_label("Remove channel Desktop…").click();
+    step_until(&mut harness, "the confirmation", |h| {
+        h.query_by_label("Remove channel “Desktop”?").is_some()
+    });
+    harness.get_by_label("Remove channel").click();
+    step_until(&mut harness, "the channel to go", |h| {
+        input_of(h, "Desktop").is_none()
     });
 }
 

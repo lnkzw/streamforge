@@ -10,6 +10,8 @@
 //! It drives the same `Model` and engine as the app. Rendering needs a wgpu
 //! adapter (a GPU, or a software one), so the test is ignored by default.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,6 +26,7 @@ use serde_json::json;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
+use support::ListedInputs;
 
 struct TempDir(PathBuf);
 
@@ -76,6 +79,13 @@ enum Situation {
     OpenProject,
     /// Idle, with the save dialog on a name that exists.
     SaveAs,
+    /// Idle, with the routing matrix on channels that capture a
+    /// microphone, desktop audio and an unplugged device.
+    Inputs,
+    /// Inputs, with the desktop audio channel's input dialog.
+    InputDialog,
+    /// InputDialog, with its list of devices open.
+    InputList,
 }
 
 /// What the render does before it is taken, in order.
@@ -100,7 +110,7 @@ fn project_files(dir: &Path) {
 /// program and a separate monitor mix, so the console and the matrix show
 /// every zone, both taps and a double-routing warning.
 fn routed_engine(dir: PathBuf) -> Engine {
-    let mut engine = Engine::new().with_output_dir(dir);
+    let mut engine = engine(dir);
     let tone = |hz: f64| json!({"kind": "tone", "frequency_hz": hz, "level_dbfs": -18.0});
     for (name, params) in [
         (
@@ -146,6 +156,29 @@ fn routed_engine(dir: PathBuf) -> Engine {
     engine
 }
 
+/// An engine that lists audio inputs (`support`) but captures nothing.
+fn engine(dir: PathBuf) -> Engine {
+    Engine::with_capture(Box::new(ListedInputs::new())).with_output_dir(dir)
+}
+
+/// An idle engine with a channel on each kind of device input.
+fn inputs_engine(dir: PathBuf) -> Engine {
+    let mut engine = engine(dir);
+    let device = |name: &str| json!({"kind": "device", "device": name});
+    for (name, input) in [
+        ("Host", device("alsa_input.usb-mic")),
+        ("Desktop", device("speakers.monitor")),
+        ("Guest", device("alsa_input.usb-headset")),
+    ] {
+        let params = json!({"name": name, "input": input});
+        let command = Command::decode("add_channel", Some(&params)).expect("add_channel");
+        if let Err(error) = engine.handle(command) {
+            panic!("add_channel: {error:?}");
+        }
+    }
+    engine
+}
+
 fn model(dir: &Path, situation: Situation) -> Model {
     let dir = dir.to_owned();
     let live = matches!(
@@ -157,8 +190,13 @@ fn model(dir: &Path, situation: Situation) -> Model {
         move || {
             if live {
                 routed_engine(dir.clone()).with_project_dir(dir)
+            } else if matches!(
+                situation,
+                Situation::Inputs | Situation::InputDialog | Situation::InputList
+            ) {
+                inputs_engine(dir.clone()).with_project_dir(dir)
             } else {
-                Engine::new().with_output_dir(&dir).with_project_dir(dir)
+                engine(dir.clone()).with_project_dir(dir)
             }
         },
         || {},
@@ -253,6 +291,13 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
             Step::Click("Save as…"),
             Step::Type("show"),
         ],
+        Situation::Inputs => vec![Step::Click("Routing")],
+        Situation::InputDialog => vec![Step::Click("Routing"), Step::Click("Input of Desktop")],
+        Situation::InputList => vec![
+            Step::Click("Routing"),
+            Step::Click("Input of Desktop"),
+            Step::Click("Audio input"),
+        ],
     };
     for step in steps {
         match step {
@@ -295,7 +340,20 @@ fn render_the_workspace() {
         render(&out, &format!("idle-{label}"), Situation::Idle, size);
         render(&out, &format!("live-{label}"), Situation::Live, size);
         render(&out, &format!("routing-{label}"), Situation::Routing, size);
+        render(&out, &format!("inputs-{label}"), Situation::Inputs, size);
     }
+    render(
+        &out,
+        "input-dialog-1400x900",
+        Situation::InputDialog,
+        [1400.0, 900.0],
+    );
+    render(
+        &out,
+        "input-list-1400x900",
+        Situation::InputList,
+        [1400.0, 900.0],
+    );
     render(&out, "dialog-1400x900", Situation::Dialog, [1400.0, 900.0]);
     render(
         &out,
@@ -497,6 +555,35 @@ fn specimen(ui: &mut egui::Ui) {
                     ui.add_enabled_ui(false, |ui| widgets::chip(ui, "track", false, "full"));
                 });
                 widgets::tabs(ui, 0, &["Console", "Routing"]);
+                // A channel's input in the matrix.
+                ui.horizontal(|ui| {
+                    widgets::select_field(
+                        ui,
+                        Icon::Mic,
+                        color::TEXT_SECONDARY,
+                        "USB Mic",
+                        "Input",
+                        160.0,
+                    );
+                    widgets::select_field(
+                        ui,
+                        Icon::Warning,
+                        color::STATE_WARN,
+                        "alsa_input.usb-headset",
+                        "Missing",
+                        160.0,
+                    );
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::select_field(
+                            ui,
+                            Icon::Speaker,
+                            color::TEXT_SECONDARY,
+                            "Monitor of Speakers",
+                            "Disabled",
+                            160.0,
+                        )
+                    });
+                });
                 let mut text = "recording.mkv".to_owned();
                 ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
 

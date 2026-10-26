@@ -1,15 +1,16 @@
 //! What the production workspace shows, computed from the model's state
 //! without widgets: the scene selection, the transport states, the monitor
-//! rectangle, meter ballistics, the health summary and the project's name
-//! and files. The views draw these; keeping them here keeps them
-//! unit-tested.
+//! rectangle, meter ballistics, the health summary, the project's name
+//! and files, and what a channel plays. The views draw these; keeping
+//! them here keeps them unit-tested.
 
 use std::time::Duration;
 
-use command_api::{OutputHealth, SceneList, StreamState};
+use command_api::{AudioInput, ChannelInput, OutputHealth, SceneList, StreamState};
 use eframe::egui::{Rect, vec2};
 
 use crate::model::{HealthItem, Level};
+use crate::ui::icons::Icon;
 use crate::ui::widgets::{METER_FLOOR_DB, StatusLevel, TransportState};
 
 /// Below this window width the inspector is a drawer over the workspace
@@ -216,6 +217,100 @@ pub fn written_ago(modified: Duration, now: Duration) -> String {
         60..3_600 => format!("{} min ago", seconds / 60),
         3_600..86_400 => format!("{} h ago", seconds / 3_600),
         _ => format!("{} d ago", seconds / 86_400),
+    }
+}
+
+/// How the routing matrix shows what a channel plays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputLabel {
+    pub icon: Icon,
+    /// Short, for the matrix cell.
+    pub text: String,
+    /// All of it, for the tooltip.
+    pub detail: String,
+    /// A device the engine does not list now: the channel is silent while
+    /// it is missing.
+    pub missing: bool,
+}
+
+/// An audio input's name for people: its description, else its name.
+pub fn input_name(input: &AudioInput) -> &str {
+    input
+        .description
+        .as_deref()
+        .filter(|description| !description.trim().is_empty())
+        .unwrap_or(&input.name)
+}
+
+/// What `input` is, given the engine's audio inputs (`None` while they
+/// are not known, so nothing counts as missing). Desktop audio is an input
+/// that captures what an output plays (`loopback_of`).
+pub fn input_label(input: &ChannelInput, inputs: Option<&[AudioInput]>) -> InputLabel {
+    let label = |icon, text: &str, detail: String| InputLabel {
+        icon,
+        text: text.to_owned(),
+        detail,
+        missing: false,
+    };
+    let device = match input {
+        ChannelInput::Tone {
+            frequency_hz,
+            level_dbfs,
+        } => {
+            let hz = if frequency_hz.fract() == 0.0 {
+                format!("{frequency_hz:.0}")
+            } else {
+                format!("{frequency_hz:.1}")
+            };
+            let level = if *level_dbfs < 0.0 {
+                format!("−{:.1}", -level_dbfs)
+            } else {
+                "0.0".to_owned()
+            };
+            return label(
+                Icon::Tone,
+                &format!("Tone {hz} Hz"),
+                format!("A test tone, {hz} Hz at {level} dBFS"),
+            );
+        }
+        ChannelInput::Device { device: None } => {
+            return label(
+                Icon::Mic,
+                "Default input",
+                "The system's default input".to_owned(),
+            );
+        }
+        ChannelInput::Device {
+            device: Some(device),
+        } => device,
+    };
+    let Some(inputs) = inputs else {
+        return label(Icon::Mic, device, device.clone());
+    };
+    let Some(input) = inputs.iter().find(|input| input.name == *device) else {
+        return InputLabel {
+            icon: Icon::Warning,
+            text: device.clone(),
+            detail: format!(
+                "{device} is not among the audio inputs now; the channel is silent while it \
+                 is missing"
+            ),
+            missing: true,
+        };
+    };
+    let name = input_name(input);
+    let named = if name == device {
+        device.clone()
+    } else {
+        format!("{name} ({device})")
+    };
+    match &input.loopback_of {
+        Some(output) => label(
+            Icon::Speaker,
+            name,
+            format!("Desktop audio: what {output} plays; {named}"),
+        ),
+        None => label(Icon::Mic, name, named),
     }
 }
 
@@ -451,5 +546,69 @@ mod tests {
         assert_eq!(ago(7_200), "2 h ago");
         assert_eq!(ago(3 * 86_400), "3 d ago");
         assert_eq!(written_ago(now + Duration::from_secs(60), now), "just now");
+    }
+
+    #[test]
+    fn a_channel_input_names_its_device_and_marks_desktop_audio_and_missing_ones() {
+        let inputs = [
+            AudioInput {
+                name: "alsa_input.usb".to_owned(),
+                description: Some("USB Mic".to_owned()),
+                media_class: "Audio/Source".to_owned(),
+                loopback_of: None,
+            },
+            AudioInput {
+                name: "speakers.monitor".to_owned(),
+                description: Some("Monitor of Speakers".to_owned()),
+                media_class: "Audio/Source".to_owned(),
+                loopback_of: Some("speakers".to_owned()),
+            },
+            AudioInput {
+                name: "line".to_owned(),
+                description: None,
+                media_class: "Audio/Source".to_owned(),
+                loopback_of: None,
+            },
+        ];
+        let device = |name: Option<&str>| ChannelInput::Device {
+            device: name.map(str::to_owned),
+        };
+        let label = |input: &ChannelInput| input_label(input, Some(&inputs));
+
+        let usb = label(&device(Some("alsa_input.usb")));
+        assert_eq!((usb.icon, usb.text.as_str()), (Icon::Mic, "USB Mic"));
+        assert_eq!(usb.detail, "USB Mic (alsa_input.usb)");
+        let line = label(&device(Some("line")));
+        assert_eq!((line.text.as_str(), line.detail.as_str()), ("line", "line"));
+        let desktop = label(&device(Some("speakers.monitor")));
+        assert_eq!(
+            (desktop.icon, desktop.text.as_str()),
+            (Icon::Speaker, "Monitor of Speakers")
+        );
+        assert_eq!(
+            desktop.detail,
+            "Desktop audio: what speakers plays; Monitor of Speakers (speakers.monitor)"
+        );
+        assert_eq!(label(&device(None)).text, "Default input");
+
+        let gone = label(&device(Some("headset")));
+        assert!(gone.missing);
+        assert_eq!((gone.icon, gone.text.as_str()), (Icon::Warning, "headset"));
+        // Without a list, nothing counts as missing.
+        let unknown = input_label(&device(Some("headset")), None);
+        assert!(!unknown.missing);
+        assert_eq!(unknown.icon, Icon::Mic);
+
+        let tone = label(&ChannelInput::Tone {
+            frequency_hz: 440.0,
+            level_dbfs: -20.0,
+        });
+        assert_eq!((tone.icon, tone.text.as_str()), (Icon::Tone, "Tone 440 Hz"));
+        assert_eq!(tone.detail, "A test tone, 440 Hz at −20.0 dBFS");
+        let odd = label(&ChannelInput::Tone {
+            frequency_hz: 261.63,
+            level_dbfs: 0.0,
+        });
+        assert_eq!(odd.detail, "A test tone, 261.6 Hz at 0.0 dBFS");
     }
 }

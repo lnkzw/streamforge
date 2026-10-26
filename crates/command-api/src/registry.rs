@@ -784,7 +784,9 @@ struct ToneParams {
     mute: Option<bool>,
 }
 
-const DEFAULT_TONE_LEVEL_DBFS: f64 = -12.0;
+/// A tone channel's level when `add_channel` or `set_channel_input` gives
+/// none.
+pub const DEFAULT_TONE_LEVEL_DBFS: f64 = -12.0;
 /// The test tone outputs use when nothing else is configured: 1 kHz at
 /// −20 dBFS, quiet but audibly alive.
 pub const DEFAULT_TONE_HZ: f64 = 1000.0;

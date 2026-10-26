@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::model::{Model, SourceForm};
+use crate::model::{InputForm, Model, SourceForm};
 use crate::ui::theme::{self, color, size};
 use crate::views;
 use crate::workspace::{self, Ballistics, DRAWER_BELOW};
@@ -96,6 +96,17 @@ pub(crate) enum Dialog {
         key: String,
         go_live: bool,
     },
+    /// A new channel's name and what it plays.
+    AddChannel {
+        name: String,
+        input: InputForm,
+    },
+    /// A draft of what channel `id` plays.
+    ChannelInput {
+        id: String,
+        name: String,
+        input: InputForm,
+    },
     /// `assigned`: the new bus feeds the program bus (a submix);
     /// otherwise it is a separate mix.
     AddBus {
@@ -132,6 +143,10 @@ pub(crate) enum Confirm {
     },
     /// Restart a capture that still works.
     RestartSource {
+        id: String,
+        name: String,
+    },
+    RemoveChannel {
         id: String,
         name: String,
     },

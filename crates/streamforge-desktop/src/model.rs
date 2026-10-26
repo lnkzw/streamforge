@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_api::{
-    CaptureKind, CaptureState, CommandError, CommandOutput, EngineStatus, HealthReport, MixerState,
-    OutputHealth, OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted,
-    SceneList, ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
+    AudioInput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
+    DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EngineStatus, HealthReport, MixerState, OutputHealth,
+    OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted, SceneList,
+    ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -92,6 +93,68 @@ impl Default for SourceForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputType {
+    Device,
+    Tone,
+}
+
+/// What a channel should play; filled in by the UI. Both kinds keep their
+/// values, so switching between them loses nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputForm {
+    pub kind: InputType,
+    /// A name from [`Model::audio_inputs`]; `None`: the system's default
+    /// input.
+    pub device: Option<String>,
+    pub frequency_hz: f64,
+    pub level_dbfs: f64,
+}
+
+impl Default for InputForm {
+    fn default() -> Self {
+        Self {
+            kind: InputType::Device,
+            device: None,
+            frequency_hz: DEFAULT_TONE_HZ,
+            level_dbfs: DEFAULT_TONE_LEVEL_DBFS,
+        }
+    }
+}
+
+impl InputForm {
+    /// The form for what a channel plays now.
+    pub fn new(input: &ChannelInput) -> Self {
+        match input {
+            ChannelInput::Device { device } => Self {
+                device: device.clone(),
+                ..Self::default()
+            },
+            ChannelInput::Tone {
+                frequency_hz,
+                level_dbfs,
+            } => Self {
+                kind: InputType::Tone,
+                frequency_hz: *frequency_hz,
+                level_dbfs: *level_dbfs,
+                ..Self::default()
+            },
+        }
+    }
+
+    pub fn input(&self) -> ChannelInput {
+        match self.kind {
+            InputType::Device => ChannelInput::Device {
+                device: self.device.clone(),
+            },
+            InputType::Tone => ChannelInput::Tone {
+                frequency_hz: self.frequency_hz,
+                level_dbfs: self.level_dbfs,
+            },
+        }
+    }
+}
+
 /// What a pending request is for, so its response lands in the right place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Refresh {
@@ -109,6 +172,8 @@ enum Pending {
     Action(String),
     /// `list_screen_sources`; failing is normal where there is only a picker.
     ScreenSources,
+    /// `list_audio_inputs`, for the channels' inputs.
+    AudioInputs,
     /// `list_projects`, for the open and save dialogs.
     Projects,
     /// `validate_project` of this file, before it is opened.
@@ -136,6 +201,10 @@ pub struct Model {
     /// Sources that can be captured by id, or why there are none (e.g. the
     /// platform only has a picker); `None` until asked for.
     pub screen_sources: Option<Result<Vec<ScreenSource>, String>>,
+    /// The audio inputs a channel can capture, or why they cannot be
+    /// listed; `None` until asked for. A new list replaces it on arrival.
+    pub audio_inputs: Option<Result<Vec<AudioInput>, String>>,
+    audio_inputs_received: Option<Instant>,
     /// The project directory's files, or why they cannot be listed; `None`
     /// until asked for (and after a save, which may have added one).
     pub projects: Option<Result<ProjectFileList, String>>,
@@ -169,6 +238,8 @@ impl Model {
             recording: None,
             streaming: None,
             screen_sources: None,
+            audio_inputs: None,
+            audio_inputs_received: None,
             projects: None,
             validation: None,
             project: None,
@@ -314,6 +385,26 @@ impl Model {
         }
     }
 
+    /// Ask the engine for the audio inputs (skipped while asked).
+    pub fn find_audio_inputs(&mut self) {
+        if !self.finding_audio_inputs() {
+            self.submit("list_audio_inputs", json!({}), Pending::AudioInputs);
+        }
+    }
+
+    /// How old the list of audio inputs is; devices come and go.
+    pub fn audio_inputs_age(&self) -> Option<Duration> {
+        self.audio_inputs_received
+            .map(|received| received.elapsed())
+    }
+
+    /// Whether the list of audio inputs is on its way.
+    pub fn finding_audio_inputs(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::AudioInputs))
+    }
+
     /// Ask for the project directory's files (skipped while asked).
     pub fn list_projects(&mut self) {
         if !self
@@ -443,6 +534,24 @@ impl Model {
 
     pub fn set_preview(&mut self, enabled: bool) {
         self.act("set_preview", json!({ "enabled": enabled }));
+    }
+
+    /// Add a channel playing `input`; it sends to the program bus. Needs
+    /// an idle pipeline.
+    pub fn add_channel(&mut self, name: &str, input: &ChannelInput) {
+        self.act("add_channel", json!({ "name": name, "input": input }));
+    }
+
+    /// Choose what channel `id` plays. Needs an idle pipeline.
+    pub fn set_channel_input(&mut self, id: &str, input: &ChannelInput) {
+        self.act("set_channel_input", json!({ "id": id, "input": input }));
+    }
+
+    /// Removing a channel drops its sends; the UI asks first. Its id and
+    /// name from the mixer it showed must still agree, so a channel
+    /// replaced meanwhile is not removed.
+    pub fn remove_channel_confirmed(&mut self, id: &str, name: &str) {
+        self.act("remove_channel", json!({ "id": id, "name": name }));
     }
 
     /// Change a channel's fader or mute; `None` keeps it.
@@ -620,6 +729,15 @@ impl Model {
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });
+                    continue;
+                }
+                Some(Pending::AudioInputs) => {
+                    self.audio_inputs = Some(match response.result {
+                        Ok(CommandOutput::AudioInputs(list)) => Ok(list.inputs),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    self.audio_inputs_received = Some(Instant::now());
                     continue;
                 }
                 Some(Pending::Projects) => {

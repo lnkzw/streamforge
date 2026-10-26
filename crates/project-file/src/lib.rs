@@ -368,11 +368,8 @@ fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<Proje
         let mut sources = Vec::with_capacity(scene.sources.len());
         for (position, mut object) in scene.sources.into_iter().enumerate() {
             let at = format!("{at}.sources[{position}]");
-            if version <= 2
-                && let Err(found) = v2::migrate(&mut object, &at)
-            {
-                problems.extend(found);
-                continue;
+            if version <= 2 {
+                problems.extend(v2::migrate(&mut object, &at));
             }
             match source(object, &at, canvas, &mut source_ids) {
                 Ok(spec) => {
@@ -771,6 +768,7 @@ fn outputs(
         let device = params.remove("device");
         params.insert("output".to_owned(), json!(output));
         params.insert("bus_id".to_owned(), json!(mix));
+        // A file names track buses by id; the request takes `{bus_id}`.
         if let Some(Value::Array(tracks)) = params.get_mut("tracks") {
             let mut invalid = false;
             for (index, bus) in tracks.iter_mut().enumerate() {
@@ -796,23 +794,15 @@ fn outputs(
                 let encoder = request.video_encoder.unwrap_or_default();
                 match kind {
                     OutputKind::Recording => {
-                        // A file names track buses by id; requests name
-                        // them with explicit bus references.
-                        let mut tracks: Vec<String> = Vec::new();
-                        for (index, bus) in
-                            request.tracks.unwrap_or_default().into_iter().enumerate()
-                        {
-                            match bus.id {
-                                Some(id) => tracks.push(id),
-                                None => problems.push(problem(
-                                    &format!("{at}.tracks[{index}]"),
-                                    "a track names its bus by id".to_owned(),
-                                )),
-                            }
-                        }
                         profiles.recording = RecordingProfile {
                             mix,
-                            tracks,
+                            // Every entry is `{bus_id}` (checked above).
+                            tracks: request
+                                .tracks
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|bus| bus.id)
+                                .collect(),
                             video_encoder: encoder,
                         };
                     }

@@ -57,56 +57,44 @@ fn send_index(bus: GraphBus) -> usize {
     }
 }
 
-/// The explicit id and name parameters that reference a channel or bus.
-pub(crate) type Fields = (&'static str, &'static str);
-const CHANNEL: Fields = ("channel_id", "channel_name");
-const BUS: Fields = ("bus_id", "bus_name");
+/// How requests name a channel and a bus; the parameters are the error
+/// details' keys.
+const CHANNEL: Kind = Kind {
+    what: "channel",
+    id_field: "channel_id",
+    name_field: "channel_name",
+};
+const BUS: Kind = Kind {
+    what: "bus",
+    id_field: "bus_id",
+    name_field: "bus_name",
+};
 
-/// The position of the channel `channel` names (in the parameters
-/// `fields`): by id first; a name given as well must match it.
+/// The position of the channel `channel` names: by id first; a name given
+/// as well must match it.
 pub(crate) fn channel_index(
     graph: &AudioGraphSpec,
     channel: &ChannelRef,
-    (id_field, name_field): Fields,
 ) -> Result<usize, CommandError> {
     refs::position(
         &graph.channels,
         channel.id.as_deref(),
         channel.name.as_deref(),
-        &Kind {
-            what: "channel",
-            id_field,
-            name_field,
-        },
+        &CHANNEL,
         |channel| (&channel.id, &channel.name),
     )
 }
 
-/// The bus `bus` names (in the parameters `fields`): by id first; a name
-/// given as well must match it.
-pub(crate) fn bus_position(
-    graph: &AudioGraphSpec,
-    bus: &BusRef,
-    (id_field, name_field): Fields,
-) -> Result<GraphBus, CommandError> {
+/// The bus `bus` names: by id first; a name given as well must match it.
+pub(crate) fn bus_position(graph: &AudioGraphSpec, bus: &BusRef) -> Result<GraphBus, CommandError> {
     let (id, name) = (bus.id.as_deref(), bus.name.as_deref());
     match (id, name) {
         (Some(PROGRAM_BUS_ID), Some(name)) if name != PROGRAM_BUS_NAME => Err(mismatch(format!(
             "bus `{PROGRAM_BUS_ID}` is named `{PROGRAM_BUS_NAME}`, not `{name}`"
         ))),
         (Some(PROGRAM_BUS_ID), _) | (None, Some(PROGRAM_BUS_NAME)) => Ok(GraphBus::Program),
-        _ => refs::position(
-            &graph.buses,
-            id,
-            name,
-            &Kind {
-                what: "bus",
-                id_field,
-                name_field,
-            },
-            |bus| (&bus.id, &bus.name),
-        )
-        .map(GraphBus::Aux),
+        _ => refs::position(&graph.buses, id, name, &BUS, |bus| (&bus.id, &bus.name))
+            .map(GraphBus::Aux),
     }
 }
 
@@ -153,7 +141,7 @@ pub(crate) fn remove_channel(
     graph: &mut AudioGraphSpec,
     channel: &ChannelRef,
 ) -> Result<ChannelSpec, CommandError> {
-    let index = channel_index(graph, channel, CHANNEL)?;
+    let index = channel_index(graph, channel)?;
     let removed = graph.channels.remove(index);
     debug_assert_eq!(graph.problems(), []);
     Ok(removed)
@@ -164,7 +152,7 @@ pub(crate) fn update_channel(
     graph: &mut AudioGraphSpec,
     request: &UpdateChannelRequest,
 ) -> Result<usize, CommandError> {
-    let index = channel_index(graph, &request.channel, CHANNEL)?;
+    let index = channel_index(graph, &request.channel)?;
     let channel = &mut graph.channels[index];
     channel.gain_db = request.gain_db.unwrap_or(channel.gain_db);
     channel.muted = request.muted.unwrap_or(channel.muted);
@@ -176,7 +164,7 @@ pub(crate) fn set_channel_input(
     graph: &mut AudioGraphSpec,
     request: SetChannelInputRequest,
 ) -> Result<(), CommandError> {
-    let index = channel_index(graph, &request.channel, CHANNEL)?;
+    let index = channel_index(graph, &request.channel)?;
     graph.channels[index].input = request.input;
     Ok(())
 }
@@ -221,7 +209,7 @@ pub(crate) fn remove_bus(
     graph: &mut AudioGraphSpec,
     bus: &BusRef,
 ) -> Result<BusSpec, CommandError> {
-    let GraphBus::Aux(index) = bus_position(graph, bus, BUS)? else {
+    let GraphBus::Aux(index) = bus_position(graph, bus)? else {
         return Err(CommandError::new(
             ErrorCode::InvalidParams,
             "the program bus cannot be removed: it is the main mix",
@@ -240,7 +228,7 @@ pub(crate) fn update_bus(
     graph: &mut AudioGraphSpec,
     request: &UpdateBusRequest,
 ) -> Result<GraphBus, CommandError> {
-    let bus = bus_position(graph, &request.bus, BUS)?;
+    let bus = bus_position(graph, &request.bus)?;
     match bus {
         GraphBus::Program => {
             if request.assign_db.is_some() {
@@ -268,8 +256,8 @@ pub(crate) fn set_send(
     graph: &mut AudioGraphSpec,
     request: &SetSendRequest,
 ) -> Result<(usize, GraphBus), CommandError> {
-    let channel = channel_index(graph, &request.channel, CHANNEL)?;
-    let bus = bus_position(graph, &request.bus, BUS)?;
+    let channel = channel_index(graph, &request.channel)?;
+    let bus = bus_position(graph, &request.bus)?;
     let send = &mut graph.channels[channel].sends[send_index(bus)];
     send.enabled = request.enabled.unwrap_or(send.enabled);
     send.level_db = request.level_db.unwrap_or(send.level_db);
@@ -497,23 +485,18 @@ mod tests {
     fn channels_are_found_by_id_first_and_a_disagreeing_name_is_refused() {
         let mut graph = default_graph();
         let id = add_channel(&mut graph, tone("Music")).expect("add");
-        assert_eq!(channel_index(&graph, &ChannelRef::id(&id), CHANNEL), Ok(1));
-        assert_eq!(
-            channel_index(&graph, &ChannelRef::name("Tone"), CHANNEL),
-            Ok(0)
-        );
+        assert_eq!(channel_index(&graph, &ChannelRef::id(&id)), Ok(1));
+        assert_eq!(channel_index(&graph, &ChannelRef::name("Tone")), Ok(0));
         let both = ChannelRef {
             id: Some(id.clone()),
             name: Some("Tone".to_owned()),
         };
         assert_eq!(
-            channel_index(&graph, &both, CHANNEL)
-                .expect_err("mismatch")
-                .code,
+            channel_index(&graph, &both).expect_err("mismatch").code,
             ErrorCode::InvalidParams
         );
         assert_eq!(
-            channel_index(&graph, &ChannelRef::id("ch_missing"), CHANNEL)
+            channel_index(&graph, &ChannelRef::id("ch_missing"))
                 .expect_err("missing")
                 .code,
             ErrorCode::NotFound
@@ -671,7 +654,6 @@ mod tests {
                 id: Some(PROGRAM_BUS_ID.to_owned()),
                 name: Some("Voice".to_owned()),
             },
-            BUS,
         )
         .expect_err("mismatch");
         assert_eq!(mismatch.code, ErrorCode::InvalidParams);

@@ -206,13 +206,13 @@ impl PlaybackRequest {
 /// [`ScreenSource::id`], or (without one) whatever the user picks in the
 /// system dialog among `target_kinds`.
 ///
-/// `target_kinds` is non-empty and duplicate-free, and `source` is not
-/// empty; `command_api` enforces this.
+/// `target_kinds` is non-empty and duplicate-free, and `capture_target_id`
+/// is not empty; `command_api` enforces this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSelection {
     pub target_kinds: Vec<VideoSourceKind>,
     pub cursor_mode: CursorMode,
-    pub source: Option<String>,
+    pub capture_target_id: Option<String>,
 }
 
 /// Capture one user-selected screen source for `duration` and report diagnostics.
@@ -246,7 +246,11 @@ impl ScreenSelection {
                     .unwrap_or_else(|| "screen capture is not available".to_owned()),
             ));
         }
-        match (&self.source, capability.target_list, capability.picker) {
+        match (
+            &self.capture_target_id,
+            capability.target_list,
+            capability.picker,
+        ) {
             (Some(_), false, _) => {
                 return Err(CaptureError::unsupported(
                     "this screen capture backend cannot capture a named source; \
@@ -265,7 +269,9 @@ impl ScreenSelection {
         let missing: Vec<_> = self
             .target_kinds
             .iter()
-            .filter(|kind| self.source.is_none() && !capability.target_kinds.contains(kind))
+            .filter(|kind| {
+                self.capture_target_id.is_none() && !capability.target_kinds.contains(kind)
+            })
             .map(|kind| kind.as_str())
             .collect();
         if !missing.is_empty() {
@@ -427,7 +433,7 @@ mod tests {
         ScreenSelection {
             target_kinds: kinds.to_vec(),
             cursor_mode,
-            source: None,
+            capture_target_id: None,
         }
     }
 
@@ -445,7 +451,7 @@ mod tests {
     fn named_sources_need_a_target_list_and_pickers_a_picker() {
         let picker_only = capability(&[VideoSourceKind::Monitor], &[]);
         let mut named = request(&[VideoSourceKind::Window], CursorMode::Embedded);
-        named.source = Some("monitor:1".into());
+        named.capture_target_id = Some("monitor:1".into());
         let err = named.check_supported(&picker_only).unwrap_err();
         assert_eq!(err.kind, CaptureErrorKind::Unsupported);
         assert!(err.message.contains("capture_target_id"), "{}", err.message);

@@ -302,7 +302,7 @@ mod tests {
                 selection: ScreenSelection {
                     target_kinds: vec![VideoSourceKind::Monitor],
                     cursor_mode: CursorMode::Embedded,
-                    source: None,
+                    capture_target_id: None,
                 },
                 duration: DEFAULT_PROBE_DURATION,
             })

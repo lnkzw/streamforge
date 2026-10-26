@@ -17,7 +17,7 @@ fn selection(source: Option<&str>, cursor_mode: CursorMode) -> ScreenSelection {
     ScreenSelection {
         target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
         cursor_mode,
-        source: source.map(str::to_owned),
+        capture_target_id: source.map(str::to_owned),
     }
 }
 

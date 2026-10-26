@@ -1077,19 +1077,18 @@ fn valid_id(command: &str, field: &str, prefix: &str, id: String) -> Result<Stri
     Ok(id)
 }
 
-/// A scene named by `scene_id`, by `name_field`, or by both; `None` if
+/// A scene named by `scene_id`, by `scene_name`, or by both; `None` if
 /// neither is given.
 fn scene_ref(
     command: &str,
     id: Option<String>,
-    name_field: &str,
     name: Option<String>,
 ) -> Result<Option<SceneRef>, CommandError> {
     let id = id
         .map(|id| valid_id(command, "scene_id", SCENE_ID_PREFIX, id))
         .transpose()?;
     let name = name
-        .map(|name| valid_name(command, name_field, name))
+        .map(|name| valid_name(command, "scene_name", name))
         .transpose()?;
     Ok((id.is_some() || name.is_some()).then_some(SceneRef { id, name }))
 }
@@ -1097,11 +1096,10 @@ fn scene_ref(
 fn required_scene(
     command: &str,
     id: Option<String>,
-    name_field: &str,
     name: Option<String>,
 ) -> Result<SceneRef, CommandError> {
-    scene_ref(command, id, name_field, name)?
-        .ok_or_else(|| invalid_params(command, format!("give `scene_id` or `{name_field}`")))
+    scene_ref(command, id, name)?
+        .ok_or_else(|| invalid_params(command, "give `scene_id` or `scene_name`"))
 }
 
 /// A source named by `source_id`, or by its scene and `source_name`.
@@ -1115,7 +1113,7 @@ fn source_ref(
     let id = id
         .map(|id| valid_id(command, "source_id", SOURCE_ID_PREFIX, id))
         .transpose()?;
-    let scene = scene_ref(command, scene_id, "scene_name", scene)?;
+    let scene = scene_ref(command, scene_id, scene)?;
     let name = name
         .map(|name| valid_name(command, "source_name", name))
         .transpose()?;
@@ -1142,7 +1140,7 @@ fn decode_set_active_scene(
     params: Option<&Value>,
 ) -> Result<SceneRef, CommandError> {
     let params: SetActiveSceneParams = decode_params(command, params)?;
-    required_scene(command, params.scene_id, "scene_name", params.scene_name)
+    required_scene(command, params.scene_id, params.scene_name)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1164,7 +1162,7 @@ fn decode_delete_scene(command: &str, params: Option<&Value>) -> Result<SceneRef
             "deleting a scene cannot be undone; pass `confirm: true`",
         ));
     }
-    required_scene(command, params.scene_id, "scene_name", params.scene_name)
+    required_scene(command, params.scene_id, params.scene_name)
 }
 
 fn coordinate(command: &str, field: &str, value: f32, size: bool) -> Result<f32, CommandError> {
@@ -1290,7 +1288,7 @@ fn decode_add_source(
             SourceKind::Screen {
                 target_kinds: selection.target_kinds,
                 cursor_mode: selection.cursor_mode,
-                capture_target_id: selection.source,
+                capture_target_id: selection.capture_target_id,
             }
         }
         _ => {
@@ -1316,7 +1314,7 @@ fn decode_add_source(
         }
     };
     Ok(AddSourceRequest {
-        scene: required_scene(command, params.scene_id, "scene_name", params.scene_name)?,
+        scene: required_scene(command, params.scene_id, params.scene_name)?,
         name: valid_name(command, "name", params.name)?,
         kind,
         rect,
@@ -1615,20 +1613,21 @@ fn decode_add_channel(
     })
 }
 
-/// Something named by its id (with `prefix`), by its name, or by both;
-/// each with the parameter it came in.
+/// A `what` named by `<what>_id` (with `prefix`), by `<what>_name`, or by
+/// both.
 fn named_ref(
     command: &str,
     what: &str,
     prefix: &str,
-    (id_field, id): (&str, Option<String>),
-    (name_field, name): (&str, Option<String>),
+    id: Option<String>,
+    name: Option<String>,
 ) -> Result<(Option<String>, Option<String>), CommandError> {
+    let (id_field, name_field) = (format!("{what}_id"), format!("{what}_name"));
     let id = id
-        .map(|id| valid_id(command, id_field, prefix, id))
+        .map(|id| valid_id(command, &id_field, prefix, id))
         .transpose()?;
     let name = name
-        .map(|name| valid_name(command, name_field, name))
+        .map(|name| valid_name(command, &name_field, name))
         .transpose()?;
     if id.is_none() && name.is_none() {
         return Err(invalid_params(
@@ -1644,20 +1643,14 @@ fn channel_ref(
     id: Option<String>,
     name: Option<String>,
 ) -> Result<ChannelRef, CommandError> {
-    let (id, name) = named_ref(
-        command,
-        "channel",
-        CHANNEL_ID_PREFIX,
-        ("channel_id", id),
-        ("channel_name", name),
-    )?;
+    let (id, name) = named_ref(command, "channel", CHANNEL_ID_PREFIX, id, name)?;
     Ok(ChannelRef { id, name })
 }
 
 fn bus_ref(
     command: &str,
-    id: (&str, Option<String>),
-    name: (&str, Option<String>),
+    id: Option<String>,
+    name: Option<String>,
 ) -> Result<BusRef, CommandError> {
     let (id, name) = named_ref(command, "bus", BUS_ID_PREFIX, id, name)?;
     Ok(BusRef { id, name })
@@ -1789,11 +1782,7 @@ struct BusParams {
 
 fn decode_remove_bus(command: &str, params: Option<&Value>) -> Result<BusRef, CommandError> {
     let params: BusParams = decode_params(command, params)?;
-    bus_ref(
-        command,
-        ("bus_id", params.bus_id),
-        ("bus_name", params.bus_name),
-    )
+    bus_ref(command, params.bus_id, params.bus_name)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1824,11 +1813,7 @@ fn decode_update_bus(
         ));
     }
     Ok(UpdateBusRequest {
-        bus: bus_ref(
-            command,
-            ("bus_id", params.bus_id),
-            ("bus_name", params.bus_name),
-        )?,
+        bus: bus_ref(command, params.bus_id, params.bus_name)?,
         gain_db: params
             .gain_db
             .map(|value| gain_db(command, "gain_db", value))
@@ -1872,20 +1857,9 @@ fn decode_set_send(command: &str, params: Option<&Value>) -> Result<SetSendReque
             "give `enabled`, `level_db` or `tap`",
         ));
     }
-    let (id, name) = named_ref(
-        command,
-        "channel",
-        CHANNEL_ID_PREFIX,
-        ("channel_id", params.channel_id),
-        ("channel_name", params.channel_name),
-    )?;
     Ok(SetSendRequest {
-        channel: ChannelRef { id, name },
-        bus: bus_ref(
-            command,
-            ("bus_id", params.bus_id),
-            ("bus_name", params.bus_name),
-        )?,
+        channel: channel_ref(command, params.channel_id, params.channel_name)?,
+        bus: bus_ref(command, params.bus_id, params.bus_name)?,
         enabled: params.enabled,
         level_db: params
             .level_db
@@ -1944,13 +1918,7 @@ fn decode_set_output_profile(
 ) -> Result<SetOutputProfileRequest, CommandError> {
     let params: SetOutputProfileParams = decode_params(command, params)?;
     let mix = (params.bus_id.is_some() || params.bus_name.is_some())
-        .then(|| {
-            bus_ref(
-                command,
-                ("bus_id", params.bus_id),
-                ("bus_name", params.bus_name),
-            )
-        })
+        .then(|| bus_ref(command, params.bus_id, params.bus_name))
         .transpose()?;
     if mix.is_none()
         && params.video_encoder.is_none()
@@ -1993,7 +1961,7 @@ fn decode_set_output_profile(
             }
             tracks
                 .into_iter()
-                .map(|bus| bus_ref(command, ("bus_id", bus.bus_id), ("bus_name", bus.bus_name)))
+                .map(|bus| bus_ref(command, bus.bus_id, bus.bus_name))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
@@ -2233,7 +2201,7 @@ fn screen_selection(
     Ok(ScreenSelection {
         target_kinds: kinds,
         cursor_mode: cursor_mode.unwrap_or(DEFAULT_CURSOR),
-        source: capture_target_id,
+        capture_target_id,
     })
 }
 
@@ -2993,7 +2961,7 @@ mod tests {
             Some("bus_voice")
         );
         assert_eq!(request.video_bitrate_kbps, Some(4000));
-        // Track entries are ids when they look like one, names otherwise.
+        // Track entries are explicit bus references.
         let Command::SetOutputProfile(request) = Command::decode(
             "set_output_profile",
             Some(&json!({"output": "recording", "tracks": [{"bus_id": "bus_voice"}, {"bus_name": "Music"}]})),
@@ -3117,7 +3085,7 @@ mod tests {
                 selection: ScreenSelection {
                     target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
                     cursor_mode: CursorMode::Embedded,
-                    source: None,
+                    capture_target_id: None,
                 },
                 duration: Duration::from_secs(5),
             }))
@@ -3137,7 +3105,7 @@ mod tests {
                 selection: ScreenSelection {
                     target_kinds: vec![VideoSourceKind::Window, VideoSourceKind::Virtual],
                     cursor_mode: CursorMode::Hidden,
-                    source: None,
+                    capture_target_id: None,
                 },
                 duration: Duration::from_millis(1500),
             }))
@@ -3181,7 +3149,10 @@ mod tests {
         let Ok(Command::ProbeScreenCapture(request)) = probe else {
             panic!("{probe:?}");
         };
-        assert_eq!(request.selection.source.as_deref(), Some("monitor:1"));
+        assert_eq!(
+            request.selection.capture_target_id.as_deref(),
+            Some("monitor:1")
+        );
 
         // Outputs capture through scene sources only (ADR 0018).
         let recording = Command::decode(
@@ -3341,7 +3312,7 @@ mod tests {
                 screen: Some(ScreenSelection {
                     target_kinds: vec![VideoSourceKind::Window],
                     cursor_mode: CursorMode::Embedded,
-                    source: None,
+                    capture_target_id: None,
                 }),
                 snapshot_file_name: Some(PathBuf::from("frame.PPM")),
             }))

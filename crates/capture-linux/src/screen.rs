@@ -44,7 +44,7 @@ struct OpenCast {
 fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
     // Before any portal I/O: a named source can never work here, and the
     // caller may be the engine thread while an output runs.
-    if selection.source.is_some() {
+    if selection.capture_target_id.is_some() {
         return Err(no_target_list());
     }
     let info = portal::query(QUERY_TIMEOUT)?;

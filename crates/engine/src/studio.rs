@@ -12,6 +12,7 @@ use command_api::{
     UpdateSourceRequest,
 };
 use media_core::FrameMailbox;
+use serde_json::Value;
 
 use crate::composite::FPS;
 use crate::outputs::{mix_column, output_id};
@@ -270,25 +271,22 @@ impl Engine {
                 "`enabled` is for the monitor; the recording and the stream start and stop",
             ));
         }
-        let bus_id = |bus, fields| -> Result<String, CommandError> {
-            Ok(match audio::bus_position(&self.audio, bus, fields)? {
+        let bus_id = |bus| -> Result<String, CommandError> {
+            Ok(match audio::bus_position(&self.audio, bus)? {
                 GraphBus::Program => PROGRAM_BUS_ID.to_owned(),
                 GraphBus::Aux(index) => self.audio.buses[index].id.clone(),
             })
         };
         let mut next = self.profiles.clone();
-        let mix = request
-            .mix
-            .as_ref()
-            .map(|bus| bus_id(bus, ("bus_id", "bus_name")))
-            .transpose()?;
+        let mix = request.mix.as_ref().map(bus_id).transpose()?;
         if let Some(mix) = &mix {
             *next.mix_mut(output) = mix.clone();
         }
         if let Some(tracks) = &request.tracks {
             next.recording.tracks = tracks
                 .iter()
-                .map(|bus| bus_id(bus, ("bus_id", "bus_name")))
+                .enumerate()
+                .map(|(index, bus)| bus_id(bus).map_err(|error| in_track(error, index)))
                 .collect::<Result<_, _>>()?;
         }
         if let Some(encoder) = request.video_encoder {
@@ -465,8 +463,7 @@ impl Engine {
     /// profile never names a missing bus.
     pub(crate) fn remove_bus(&mut self, bus: &BusRef) -> Result<MixerState, CommandError> {
         self.audio_structure_idle()?;
-        if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus, ("bus_id", "bus_name"))?
-        {
+        if let GraphBus::Aux(index) = audio::bus_position(&self.audio, bus)? {
             let id = &self.audio.buses[index].id;
             let users: Vec<&str> = OutputKind::ALL
                 .into_iter()
@@ -564,4 +561,15 @@ fn no_pipeline(name: &str) -> CommandError {
         ErrorCode::InvalidState,
         format!("nothing captures `{name}`: no pipeline runs (start the preview or an output)"),
     )
+}
+
+/// A recording track's bus error, naming the entry of `tracks`
+/// (`details.track_index`, from 0), since the mix takes `bus_id` and
+/// `bus_name` too.
+fn in_track(mut error: CommandError, index: usize) -> CommandError {
+    error.message = format!("`tracks[{index}]`: {}", error.message);
+    if let Some(Value::Object(details)) = &mut error.details {
+        details.insert("track_index".to_owned(), index.into());
+    }
+    error
 }

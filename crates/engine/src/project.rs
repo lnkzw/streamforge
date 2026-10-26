@@ -125,9 +125,15 @@ impl Engine {
         self.profiles = project.outputs;
         let mut warnings = Vec::new();
         if let Some(version) = loaded.migrated_from {
+            let audio = if version == 1 {
+                " its audio inputs and tones became channels (`ch_input_1`, `ch_tone_1`, …), and"
+            } else {
+                ""
+            };
             warnings.push(format!(
-                "the file has schema version {version} and was migrated: its audio inputs and \
-                 tones became channels (`ch_input_1`, `ch_tone_1`, …); save it to write version {}",
+                "the file has schema version {version} and was migrated:{audio} its screen \
+                 sources' `source_types` and `cursor` became `target_kinds` and `cursor_mode`; \
+                 save it to write version {}",
                 project_file::SCHEMA_VERSION
             ));
         }

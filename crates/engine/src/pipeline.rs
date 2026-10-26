@@ -949,7 +949,7 @@ fn start_screens(
         let selection = ScreenSelection {
             target_kinds: target_kinds.clone(),
             cursor_mode: *cursor_mode,
-            source: capture_target_id.clone(),
+            capture_target_id: capture_target_id.clone(),
         };
         let stream = capture.start_screen_stream(&selection).map_err(|error| {
             command_error(error).with_details(serde_json::json!({ "source": source.name }))

@@ -282,7 +282,7 @@ fn resolve(id: &str) -> Result<(SCContentFilter, VideoSourceInfo), CaptureError>
 
 fn start(selection: &ScreenSelection, deliver: bool) -> Result<SckStream, CaptureError> {
     selection.check_supported(&screen_capability())?;
-    let id = selection.source.as_deref().ok_or_else(|| {
+    let id = selection.capture_target_id.as_deref().ok_or_else(|| {
         CaptureError::new(
             CaptureErrorKind::InvalidRequest,
             "name a source (`capture_target_id`) from list_capture_targets",

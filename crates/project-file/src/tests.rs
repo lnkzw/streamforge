@@ -840,6 +840,14 @@ fn old_screen_fields_in_version_3_and_stored_targets_have_paths() {
     old_screen_fields(&mut old);
     old["scenes"][1]["sources"][0]["source_id"] = json!("monitor:1");
     assert_eq!(only(&old, "not stored"), "scenes[1].sources[0].source_id");
+    // The rest of that source is still checked.
+    old["scenes"][1]["sources"][0]["id"] = json!("src_color_bars");
+    let paths: Vec<String> = problems(&old).into_iter().map(|(path, _)| path).collect();
+    assert!(
+        paths.contains(&"scenes[1].sources[0].source_id".to_owned())
+            && paths.contains(&"scenes[1].sources[0].id".to_owned()),
+        "{paths:?}"
+    );
     let mut current = file();
     current["scenes"][1]["sources"][0]["capture_target_id"] = json!("monitor:1");
     assert_eq!(

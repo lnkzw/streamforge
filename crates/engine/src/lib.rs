@@ -454,7 +454,7 @@ mod tests {
             selection: &ScreenSelection,
         ) -> Result<Box<dyn VideoStream>, CaptureError> {
             // A source that went away, e.g. a closed window.
-            if selection.source.as_deref() == Some("fake:gone") {
+            if selection.capture_target_id.as_deref() == Some("fake:gone") {
                 return Err(CaptureError::new(
                     capture_api::CaptureErrorKind::NotFound,
                     "no such source",
@@ -2341,7 +2341,7 @@ mod tests {
     #[test]
     fn a_recording_shows_the_active_scene() {
         let _media = media_test_lock();
-        let dir = TempDir::new("scene_name");
+        let dir = TempDir::new("scene");
         let mut engine = Engine::new().with_output_dir(&dir.0);
         run(&mut engine, "create_scene", json!({"name": "Green"}));
         run(
@@ -2739,22 +2739,26 @@ mod tests {
                 "bus_id",
                 "bus_missing",
             ),
-            (
-                "set_output_profile",
-                json!({"output": "recording", "tracks": [{"bus_name": "Missing"}]}),
-                "bus_name",
-                "Missing",
-            ),
-            (
-                "set_output_profile",
-                json!({"output": "recording", "tracks": [{"bus_id": "bus_missing"}]}),
-                "bus_id",
-                "bus_missing",
-            ),
         ] {
             let error = try_run(&mut engine, command, params).unwrap_err();
             assert_eq!(error.code, ErrorCode::NotFound, "{command}: {error:?}");
             assert_eq!(error.details, Some(json!({field: value})), "{command}");
+        }
+        // A track's error names its entry: the mix takes the same fields.
+        for (track, field, value) in [
+            (json!({"bus_name": "Missing"}), "bus_name", "Missing"),
+            (json!({"bus_id": "bus_missing"}), "bus_id", "bus_missing"),
+        ] {
+            let params =
+                json!({"output": "recording", "tracks": [{"bus_id": "bus_program"}, track]});
+            let error = try_run(&mut engine, "set_output_profile", params).unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+            assert_eq!(error.details, Some(json!({field: value, "track_index": 1})));
+            assert!(
+                error.message.starts_with("`tracks[1]`"),
+                "{}",
+                error.message
+            );
         }
     }
 

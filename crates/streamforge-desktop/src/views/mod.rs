@@ -50,9 +50,14 @@ fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
 /// Name a widget that has no label of its own (a number field in a
 /// table) for assistive technology and the tooltip.
 fn labelled(ui: &egui::Ui, response: egui::Response, label: &str) -> egui::Response {
-    ui.ctx()
-        .accesskit_node_builder(response.id, |builder| builder.set_label(label));
+    named(ui, &response, label);
     response.on_hover_text(label)
+}
+
+/// Name a widget for assistive technology only.
+fn named(ui: &egui::Ui, response: &egui::Response, name: &str) {
+    ui.ctx()
+        .accesskit_node_builder(response.id, |builder| builder.set_label(name));
 }
 
 /// A source's opacity in percent: a slider and, beside it, a number field
@@ -94,6 +99,14 @@ fn opacity_row(ui: &mut egui::Ui, percent: &mut f32) -> [egui::Response; 2] {
 /// `None` for a scene past the ninth.
 fn key_hint(ctx: &egui::Context, shortcut: Shortcut) -> Option<String> {
     shortcut.keys().map(|keys| ctx.format_shortcut(&keys))
+}
+
+/// A tooltip's `text` with the shortcut's keys after it.
+fn with_keys(ctx: &egui::Context, text: &str, shortcut: Shortcut) -> String {
+    match key_hint(ctx, shortcut) {
+        Some(keys) => format!("{text} ({keys})"),
+        None => text.to_owned(),
+    }
 }
 
 /// Up and Down in a list whose row with focus is among `rows`: the row

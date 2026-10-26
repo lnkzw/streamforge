@@ -12,10 +12,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 use crate::workspace::Shortcut;
 
-use super::{
-    commit, coordinate_range, key_hint, kind_label, labelled, opacity_row, right_to_left, scene,
-    source,
-};
+use super::{commit, coordinate_range, kind_label, named, opacity_row, right_to_left, with_keys};
 
 impl DesktopApp {
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
@@ -63,16 +60,7 @@ impl DesktopApp {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        let selected = self
-            .model
-            .scenes
-            .as_ref()
-            .zip(self.selected_scene.as_deref())
-            .and_then(|(scenes, id)| scene(scenes, id))
-            .zip(self.selected_source.as_deref())
-            .and_then(|(scene, id)| source(scene, id))
-            .cloned();
-        let Some(source) = selected else {
+        let Some(source) = self.selected_source_spec().cloned() else {
             widgets::empty_state(ui, Icon::Layers, "Select a source to edit it");
             return;
         };
@@ -115,7 +103,9 @@ impl DesktopApp {
                                 .max_decimals(1)
                                 .update_while_editing(false),
                         );
-                        let field = labelled(ui, field, name);
+                        // Named for assistive technology; the label beside
+                        // it says the same on screen.
+                        named(ui, &field, name);
                         if let Some(value) = commit(ui, &field, rect[index]) {
                             rect[index] = value;
                             changed = true;
@@ -152,13 +142,12 @@ impl DesktopApp {
         }
 
         ui.add_space(size::SPACE_16);
-        let hint = match key_hint(ui.ctx(), Shortcut::RemoveSource) {
-            Some(keys) => format!("Remove this source from the scene ({keys}); asks first"),
-            None => "Remove this source from the scene; asks first".to_owned(),
-        };
         if ui
             .add(Button::new(ButtonKind::Danger, "Remove source…").icon(Icon::Trash))
-            .on_hover_text(hint)
+            .on_hover_ui(|ui| {
+                let text = "Remove this source from the scene, after asking";
+                ui.label(with_keys(ui.ctx(), text, Shortcut::RemoveSource));
+            })
             .clicked()
         {
             self.dialog = Some(Dialog::Confirm(Confirm::RemoveSource {

@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
-use command_api::EncoderPreference;
+use command_api::{EncoderPreference, SourceSpec};
 use eframe::egui;
 
 use crate::model::{InputForm, Model, SourceForm};
 use crate::ui::theme::{self, color, size};
-use crate::ui::widgets::TransportState;
+use crate::ui::widgets::{Transport, TransportState};
 use crate::views;
 use crate::workspace::{self, Ballistics, DRAWER_BELOW, Shortcut};
 
@@ -448,17 +448,19 @@ impl DesktopApp {
     /// Drop a selected source that no longer exists (e.g. another client
     /// removed it), so the inspector and its drawer do not stay on it.
     fn prune_selection(&mut self) {
-        let (Some(scenes), Some(id)) = (&self.model.scenes, &self.selected_source) else {
-            return;
-        };
-        let exists = self
-            .selected_scene
-            .as_deref()
-            .and_then(|scene| views::scene(scenes, scene))
-            .is_some_and(|scene| views::source(scene, id).is_some());
-        if !exists {
+        if self.model.scenes.is_some()
+            && self.selected_source.is_some()
+            && self.selected_source_spec().is_none()
+        {
             self.select_source(None);
         }
+    }
+
+    /// The selected source, if it is still in the selected scene.
+    pub(crate) fn selected_source_spec(&self) -> Option<&SourceSpec> {
+        let scenes = self.model.scenes.as_ref()?;
+        let scene = views::scene(scenes, self.selected_scene.as_deref()?)?;
+        views::source(scene, self.selected_source.as_deref()?)
     }
 
     /// Select a source for the inspector; in a narrow window this opens
@@ -468,11 +470,20 @@ impl DesktopApp {
         self.selected_source = id;
     }
 
+    /// Whether the engine has yet to answer a start or stop of `output`;
+    /// meanwhile its button and key do nothing.
+    pub(crate) fn transport_waiting(&self, output: Transport) -> bool {
+        let (start, stop) = match output {
+            Transport::Record => ("start_recording", "stop_recording"),
+            Transport::Live => ("start_streaming", "stop_streaming"),
+        };
+        self.model.pending(start) || self.model.pending(stop)
+    }
+
     /// REC, by the button or its key: start; stopping asks; a failed
-    /// recording only needs finalizing. Nothing while the engine has yet
-    /// to answer a start or stop.
+    /// recording only needs finalizing.
     pub(crate) fn record_action(&mut self) {
-        if self.model.pending("start_recording") || self.model.pending("stop_recording") {
+        if self.transport_waiting(Transport::Record) {
             return;
         }
         match self.record_transport() {
@@ -487,7 +498,7 @@ impl DesktopApp {
     /// LIVE, as [`Self::record_action`]; without a target it asks for one
     /// and goes live from there.
     pub(crate) fn live_action(&mut self) {
-        if self.model.pending("start_streaming") || self.model.pending("stop_streaming") {
+        if self.transport_waiting(Transport::Live) {
             return;
         }
         match self.live_transport() {
@@ -505,11 +516,15 @@ impl DesktopApp {
     }
 
     /// The workspace's keys, taken out of this frame's input so no widget
-    /// acts on them too. None while a dialog or menu is open or a text
-    /// field has focus; Space also not while any control has focus (it
-    /// clicks that control).
+    /// acts on them too. None while a dialog or menu is open, a text field
+    /// has focus or the window waits for a save to close; Space also not
+    /// while any control has focus (it clicks that control).
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || egui::Popup::is_any_open(ctx) || ctx.text_edit_focused() {
+        if self.dialog.is_some()
+            || self.quit_after_save
+            || egui::Popup::is_any_open(ctx)
+            || ctx.text_edit_focused()
+        {
             return;
         }
         let focused = ctx.memory(|memory| memory.focused().is_some());
@@ -547,6 +562,9 @@ impl DesktopApp {
 
     fn shortcut(&mut self, shortcut: Shortcut) {
         match shortcut {
+            // The switch shows the engine's answer: a second press before
+            // it would send the same state again.
+            Shortcut::Preview if self.model.pending("set_preview") => {}
             Shortcut::Preview => self.model.set_preview(!self.model.preview_enabled),
             Shortcut::Record => self.record_action(),
             Shortcut::Live => self.live_action(),
@@ -563,15 +581,7 @@ impl DesktopApp {
                 }
             }
             Shortcut::RemoveSource => {
-                let source = self
-                    .model
-                    .scenes
-                    .as_ref()
-                    .zip(self.selected_scene.as_deref())
-                    .and_then(|(scenes, id)| views::scene(scenes, id))
-                    .zip(self.selected_source.as_deref())
-                    .and_then(|(scene, id)| views::source(scene, id));
-                if let Some(source) = source {
+                if let Some(source) = self.selected_source_spec() {
                     self.dialog = Some(Dialog::Confirm(Confirm::RemoveSource {
                         id: source.id.clone(),
                         name: source.name.clone(),
@@ -589,14 +599,25 @@ impl DesktopApp {
 /// `rect` with the dock's padding, clipped to it: what does not fit is
 /// cut, so a dock never pushes its neighbours.
 fn dock_in(ui: &mut egui::Ui, id: &str, rect: egui::Rect, add: impl FnOnce(&mut egui::Ui)) {
-    let mut dock = ui.new_child(
+    child_in(ui, id, rect.shrink(size::SPACE_8), rect, add);
+}
+
+/// A child `Ui` laid out top-down in `rect` and clipped to `clip`.
+fn child_in<R>(
+    ui: &mut egui::Ui,
+    id: &str,
+    rect: egui::Rect,
+    clip: egui::Rect,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut child = ui.new_child(
         egui::UiBuilder::new()
             .id_salt(id)
-            .max_rect(rect.shrink(size::SPACE_8))
+            .max_rect(rect)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    dock.set_clip_rect(rect.intersect(ui.clip_rect()));
-    add(&mut dock);
+    child.set_clip_rect(clip.intersect(ui.clip_rect()));
+    add(&mut child)
 }
 
 /// The frame of a dock: panel surface, 8 px padding.
@@ -621,14 +642,7 @@ fn fill<R>(
     panel: &egui::InnerResponse<egui::Rect>,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    let mut dock = ui.new_child(
-        egui::UiBuilder::new()
-            .id_salt(id)
-            .max_rect(panel.inner)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    dock.set_clip_rect(panel.response.rect.intersect(ui.clip_rect()));
-    add(&mut dock)
+    child_in(ui, id, panel.inner, panel.response.rect, add)
 }
 
 /// The edge of a dock that is dragged to resize it.

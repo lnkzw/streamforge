@@ -106,11 +106,14 @@ impl DesktopApp {
                         .enabled(!on_air)
                         .min_width(ui.available_width() - size::CONTROL - size::SPACE_6),
                 )
-                .on_hover_text(format!(
-                    "Show the selected scene on program (or double-click it; {} … {} put scene 1 to 9 on program)",
-                    key_hint(ui.ctx(), Shortcut::Program(0)).unwrap_or_default(),
-                    key_hint(ui.ctx(), Shortcut::Program(8)).unwrap_or_default(),
-                ));
+                .on_hover_ui(|ui| {
+                    let keys = |index| key_hint(ui.ctx(), Shortcut::Program(index)).unwrap_or_default();
+                    ui.label(format!(
+                        "Show the selected scene on program (or double-click it; {} … {} put scene 1 to 9 on program)",
+                        keys(0),
+                        keys(8),
+                    ));
+                });
             if put.clicked() {
                 take = Some((selected.clone(), name.clone()));
             }

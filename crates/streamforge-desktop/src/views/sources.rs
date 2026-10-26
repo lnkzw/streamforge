@@ -53,7 +53,6 @@ impl DesktopApp {
 
         let mut select = None;
         let mut remove = None;
-        let remove_keys = key_hint(ui.ctx(), Shortcut::RemoveSource).unwrap_or_default();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -79,6 +78,8 @@ impl DesktopApp {
                     }
                     row.context_menu(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
+                        let remove_keys =
+                            key_hint(ui.ctx(), Shortcut::RemoveSource).unwrap_or_default();
                         if ui
                             .add(
                                 MenuItem::new("Remove…")

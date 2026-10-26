@@ -14,7 +14,7 @@ use crate::ui::widgets::{
 };
 use crate::workspace::{self, Shortcut, health_level, transport_state};
 
-use super::key_hint;
+use super::{key_hint, with_keys};
 
 /// The widest the health summary grows before its text is cut.
 const HEALTH_WIDTH: f32 = 360.0;
@@ -87,26 +87,33 @@ impl DesktopApp {
         };
         let response = widgets::menu_button(ui, Icon::File, &name, unsaved, &label, width);
         let mut chosen = None;
-        let hint = |shortcut| key_hint(ui.ctx(), shortcut).unwrap_or_default();
-        let hints = [
-            hint(Shortcut::OpenProject),
-            hint(Shortcut::SaveProject),
-            hint(Shortcut::SaveProjectAs),
-        ];
         egui::Popup::menu(&response).width(220.0).show(|ui| {
             // 220 px wide with the frame, whose margin is outside the
             // content.
             ui.set_min_width(220.0 - ui.style().spacing.menu_margin.sum().x);
             ui.spacing_mut().item_spacing.y = 0.0;
-            for ((item, icon, text), keys) in [
-                (ProjectItem::Open, Some(Icon::Folder), "Open project…"),
-                (ProjectItem::Save, Some(Icon::File), "Save"),
-                (ProjectItem::SaveAs, None, "Save as…"),
-            ]
-            .into_iter()
-            .zip(&hints)
-            {
-                let mut row = MenuItem::new(text).shortcut(keys);
+            for (item, shortcut, icon, text) in [
+                (
+                    ProjectItem::Open,
+                    Shortcut::OpenProject,
+                    Some(Icon::Folder),
+                    "Open project…",
+                ),
+                (
+                    ProjectItem::Save,
+                    Shortcut::SaveProject,
+                    Some(Icon::File),
+                    "Save",
+                ),
+                (
+                    ProjectItem::SaveAs,
+                    Shortcut::SaveProjectAs,
+                    None,
+                    "Save as…",
+                ),
+            ] {
+                let keys = key_hint(ui.ctx(), shortcut).unwrap_or_default();
+                let mut row = MenuItem::new(text).shortcut(&keys);
                 if let Some(icon) = icon {
                     row = row.icon(icon);
                 }
@@ -190,11 +197,12 @@ impl DesktopApp {
 
     fn record_button(&mut self, ui: &mut egui::Ui) {
         let state = self.record_transport();
-        let waiting = self.model.pending("start_recording") || self.model.pending("stop_recording");
-        let hint = transport_hint(Transport::Record, state, ui.ctx());
+        let waiting = self.transport_waiting(Transport::Record);
         let response = ui
             .add(TransportButton::new(Transport::Record, state).enabled(!waiting))
-            .on_hover_text(hint)
+            .on_hover_ui(|ui| {
+                ui.label(transport_hint(Transport::Record, state, ui.ctx()));
+            })
             .on_disabled_hover_text("Waiting for the engine");
         if response.clicked() {
             self.record_action();
@@ -203,11 +211,12 @@ impl DesktopApp {
 
     fn live_button(&mut self, ui: &mut egui::Ui) {
         let state = self.live_transport();
-        let waiting = self.model.pending("start_streaming") || self.model.pending("stop_streaming");
-        let hint = transport_hint(Transport::Live, state, ui.ctx());
+        let waiting = self.transport_waiting(Transport::Live);
         let response = ui
             .add(TransportButton::new(Transport::Live, state).enabled(!waiting))
-            .on_hover_text(hint)
+            .on_hover_ui(|ui| {
+                ui.label(transport_hint(Transport::Live, state, ui.ctx()));
+            })
             .on_disabled_hover_text("Waiting for the engine");
         if response.clicked() {
             self.live_action();
@@ -321,13 +330,13 @@ fn transport_hint(output: Transport, state: TransportState, ctx: &egui::Context)
         Transport::Record => (
             Shortcut::Record,
             "Start recording",
-            "Stop recording; asks first",
+            "Stop recording, after asking",
             "Finish the failed recording",
         ),
         Transport::Live => (
             Shortcut::Live,
             "Go live",
-            "End the stream; asks first",
+            "End the stream, after asking",
             "End the failed stream",
         ),
     };
@@ -336,10 +345,7 @@ fn transport_hint(output: Transport, state: TransportState, ctx: &egui::Context)
         TransportState::Starting | TransportState::Running(_) => stop,
         TransportState::Failed => finalize,
     };
-    match key_hint(ctx, shortcut) {
-        Some(keys) => format!("{action} ({keys})"),
-        None => action.to_owned(),
-    }
+    with_keys(ctx, action, shortcut)
 }
 
 /// How a log or health level reads as a status.

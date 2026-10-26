@@ -10,7 +10,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, BadgeKind, Transport};
 use crate::workspace::{Shortcut, fit};
 
-use super::{key_hint, right_to_left, scene};
+use super::{right_to_left, scene, with_keys};
 
 /// The line of facts under the monitor.
 const FACTS_HEIGHT: f32 = 22.0;
@@ -32,12 +32,14 @@ impl DesktopApp {
         right_to_left(ui, actions, |ui| {
             ui.spacing_mut().item_spacing.x = size::SPACE_6;
             let mut preview = self.model.preview_enabled;
-            let hint = match key_hint(ui.ctx(), Shortcut::Preview) {
-                Some(keys) => format!("Start or stop the preview ({keys})"),
-                None => "Start or stop the preview".to_owned(),
-            };
             if widgets::toggle(ui, &mut preview, "Preview")
-                .on_hover_text(hint)
+                .on_hover_ui(|ui| {
+                    ui.label(with_keys(
+                        ui.ctx(),
+                        "Start or stop the preview",
+                        Shortcut::Preview,
+                    ));
+                })
                 .changed()
             {
                 self.model.set_preview(preview);

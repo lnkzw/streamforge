@@ -441,6 +441,26 @@ const PROGRAM_KEYS: [Key; 9] = [
 ];
 
 impl Shortcut {
+    /// Every shortcut, for matching a key press against.
+    pub const ALL: [Self; 16] = [
+        Self::Preview,
+        Self::Record,
+        Self::Live,
+        Self::RemoveSource,
+        Self::OpenProject,
+        Self::SaveProject,
+        Self::SaveProjectAs,
+        Self::Program(0),
+        Self::Program(1),
+        Self::Program(2),
+        Self::Program(3),
+        Self::Program(4),
+        Self::Program(5),
+        Self::Program(6),
+        Self::Program(7),
+        Self::Program(8),
+    ];
+
     /// What a key press asks for. Ctrl is Cmd on macOS; the modifiers must
     /// be exactly the shortcut's, so Ctrl+Shift+S is not also Ctrl+S.
     /// Backspace removes a source too: a Mac's delete key sends it.
@@ -448,18 +468,7 @@ impl Shortcut {
         if key == Key::Backspace && modifiers.is_none() {
             return Some(Self::RemoveSource);
         }
-        [
-            Self::Preview,
-            Self::Record,
-            Self::Live,
-            Self::RemoveSource,
-            Self::OpenProject,
-            Self::SaveProject,
-            Self::SaveProjectAs,
-        ]
-        .into_iter()
-        .chain((0..PROGRAM_KEYS.len()).map(Self::Program))
-        .find(|shortcut| {
+        Self::ALL.into_iter().find(|shortcut| {
             shortcut.keys().is_some_and(|keys| {
                 keys.logical_key == key && modifiers.matches_exact(keys.modifiers)
             })
@@ -935,18 +944,7 @@ mod tests {
 
     #[test]
     fn each_shortcut_has_the_keys_that_ask_for_it() {
-        let all = [
-            Shortcut::Preview,
-            Shortcut::Record,
-            Shortcut::Live,
-            Shortcut::RemoveSource,
-            Shortcut::OpenProject,
-            Shortcut::SaveProject,
-            Shortcut::SaveProjectAs,
-        ]
-        .into_iter()
-        .chain((0..9).map(Shortcut::Program));
-        for shortcut in all {
+        for shortcut in Shortcut::ALL {
             let keys = shortcut.keys().expect("keys");
             assert_eq!(
                 Shortcut::of(keys.logical_key, keys.modifiers),

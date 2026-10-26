@@ -223,3 +223,43 @@ fn a_dropdown_choice_becomes_current_and_closes_the_list() {
     assert_eq!(*harness.state(), Some("Speakers"));
     assert!(harness.query_by_label("System default").is_none(), "closed");
 }
+
+#[test]
+fn a_dropdown_choice_by_keyboard_closes_the_list_too() {
+    let mut harness = Harness::new_ui_state(
+        |ui, device: &mut Option<&'static str>| {
+            let text = device.unwrap_or("System default");
+            widgets::dropdown(ui, text, "Audio output", 200.0, |ui| {
+                widgets::choice(ui, device, None, "System default");
+                widgets::choice(ui, device, Some("Speakers"), "Speakers");
+            });
+        },
+        None,
+    );
+    harness.run();
+    harness.get_by_label("Audio output").click();
+    harness.run();
+    harness.get_by_label("Speakers").focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(*harness.state(), Some("Speakers"));
+    assert!(harness.query_by_label("System default").is_none(), "closed");
+}
+
+#[test]
+fn a_disabled_menu_item_or_button_says_so_to_its_tooltip() {
+    // `on_disabled_hover_text` shows only for a response that reports
+    // disabled, as when the `Ui` is.
+    let mut harness = Harness::new_ui_state(
+        |ui, enabled: &mut [bool; 2]| {
+            let item = ui.add(widgets::MenuItem::new("Delete…").enabled(false));
+            let button =
+                ui.add(widgets::Button::new(widgets::ButtonKind::Secondary, "Put").enabled(false));
+            *enabled = [item.enabled(), button.enabled()];
+        },
+        [true, true],
+    );
+    harness.run();
+    assert_eq!(*harness.state(), [false, false]);
+}

@@ -227,6 +227,45 @@ fn dragging_a_position_in_the_inspector_moves_the_source() {
 }
 
 #[test]
+fn dragging_the_opacity_field_moves_the_slider_with_it() {
+    let dir = TempDir::new("opacity");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("lower third").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Opacity (%)").is_some()
+    });
+    let slider = |h: &Harness<'static, DesktopApp>| {
+        h.get_by_label("Opacity")
+            .accesskit_node()
+            .numeric_value()
+            .expect("a value")
+    };
+    assert_eq!(slider(&harness), 100.0);
+    let field = harness.get_by_label("Opacity (%)").rect().center();
+    harness.hover_at(field);
+    harness.step();
+    harness.drag_at(field);
+    harness.step();
+    for step in 1..=4 {
+        harness.hover_at(field - egui::vec2(10.0 * step as f32, 0.0));
+        harness.step();
+    }
+    // Mid-drag nothing is sent yet, but the slider shows the field's value.
+    let dragged = slider(&harness);
+    assert!(dragged < 100.0, "the slider follows the drag: {dragged}");
+    assert_eq!(
+        harness
+            .get_by_label("Opacity (%)")
+            .value()
+            .as_deref()
+            .map(str::trim),
+        Some(format!("{dragged:.0} %").as_str())
+    );
+    harness.drop_at(field - egui::vec2(40.0, 0.0));
+    step_until(&mut harness, "the engine's opacity", |h| slider(h) < 100.0);
+}
+
+#[test]
 fn stopping_a_recording_asks_first() {
     let dir = TempDir::new("stop");
     let mut harness = harness(model(&dir));

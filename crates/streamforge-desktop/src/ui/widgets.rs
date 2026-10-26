@@ -61,6 +61,20 @@ fn phase(ui: &Ui, period: f64) -> f32 {
     ((time % period) / period) as f32
 }
 
+/// Add a control in a disabled scope: its response then reports disabled,
+/// so `on_disabled_hover_text` shows, and egui gives it no interaction.
+/// egui's fade of disabled content is undone, since components draw their
+/// own disabled colours.
+fn disabled(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Response {
+    ui.scope(|ui| {
+        let opacity = ui.opacity();
+        ui.disable();
+        ui.set_opacity(opacity);
+        add(ui)
+    })
+    .inner
+}
+
 /// The 2 px accent ring around a focused control, 1 px outside it.
 pub fn focus_ring(painter: &egui::Painter, rect: Rect, radius: u8) {
     painter.rect_stroke(
@@ -135,6 +149,11 @@ impl<'a> Button<'a> {
 
 impl Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
         let font = TextRole::Body.font();
         let galley = ui
             .painter()
@@ -365,7 +384,7 @@ pub fn dropdown(
     menu: impl FnOnce(&mut Ui),
 ) -> Response {
     let response = field(ui, None, text, label, width, WidgetType::ComboBox);
-    egui::Popup::menu(&response).show(|ui| {
+    egui::Popup::menu(&response).width(width).show(|ui| {
         // As wide as the field (the frame's margin is outside the content).
         let margin = ui.style().spacing.menu_margin.sum().x;
         ui.set_min_width(width - margin);
@@ -529,6 +548,11 @@ impl<'a> MenuItem<'a> {
 
 impl Widget for MenuItem<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
         let lead = size::ICON + size::SPACE_6;
         let shortcut = self.shortcut.map(|text| {
             ui.painter().layout_no_wrap(
@@ -557,6 +581,11 @@ impl Widget for MenuItem<'_> {
         // to its widest.
         let (rect, response) =
             ui.allocate_at_least(vec2(galley.size().x + fixed, size::ROW), sense);
+        // egui closes a menu on a pointer click only; Enter, Space and
+        // assistive technology choose too.
+        if response.clicked() {
+            ui.close_kind(egui::UiKind::Menu);
+        }
         response.widget_info(|| match self.selected {
             Some(selected) => WidgetInfo::selected(
                 WidgetType::SelectableLabel,
@@ -789,6 +818,11 @@ impl TransportButton {
 
 impl Widget for TransportButton {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
         let (icon, label) = match self.transport {
             Transport::Record => (Icon::Record, "REC"),
             Transport::Live => (Icon::Live, "LIVE"),
@@ -1288,6 +1322,10 @@ pub fn slider(
     label: &str,
 ) -> Response {
     const THUMB: f32 = 12.0;
+    debug_assert!(
+        range.start() < range.end() && step > 0.0,
+        "a slider needs a range and a step"
+    );
     let enabled = ui.is_enabled();
     let sense = if enabled {
         Sense::click_and_drag()
@@ -1741,21 +1779,19 @@ pub fn tabs(ui: &mut Ui, selected: usize, labels: &[&str]) -> Option<usize> {
 /// whether a click changed `current`.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, choices: &[(T, &str)]) -> bool {
     let enabled = ui.is_enabled();
-    let galleys: Vec<_> = choices
+    let segments: Vec<_> = choices
         .iter()
-        .map(|(_, label)| {
-            ui.painter().layout_no_wrap(
+        .map(|(value, label)| {
+            let galley = ui.painter().layout_no_wrap(
                 (*label).to_owned(),
                 TextRole::Body.font(),
                 Color32::PLACEHOLDER,
-            )
+            );
+            let width = galley.size().x + 2.0 * size::SPACE_12;
+            (*value, *label, galley, width)
         })
         .collect();
-    let widths: Vec<f32> = galleys
-        .iter()
-        .map(|galley| galley.size().x + 2.0 * size::SPACE_12)
-        .collect();
-    let total = widths.iter().sum::<f32>();
+    let total = segments.iter().map(|segment| segment.3).sum::<f32>();
     let mut changed = false;
     // Left to right also inside a right-to-left row.
     ui.allocate_ui_with_layout(
@@ -1766,33 +1802,36 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, choices: &[(
             let outline = Rect::from_min_size(ui.cursor().min, vec2(total, size::CONTROL));
             let radius = CornerRadius::same(size::RADIUS_CONTROL);
             ui.painter().rect_filled(outline, radius, color::BG_INSET);
-            for (index, ((value, label), galley)) in choices.iter().zip(galleys).enumerate() {
-                let on = *value == *current;
+            let mut focused = None;
+            let last = segments.len().saturating_sub(1);
+            for (index, (value, label, galley, width)) in segments.into_iter().enumerate() {
+                let on = value == *current;
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(widths[index], size::CONTROL), Sense::click());
+                    ui.allocate_exact_size(vec2(width, size::CONTROL), Sense::click());
                 response.widget_info(|| {
-                    WidgetInfo::selected(WidgetType::RadioButton, enabled, on, *label)
+                    WidgetInfo::selected(WidgetType::RadioButton, enabled, on, label)
                 });
                 if response.clicked() && !on {
-                    *current = *value;
+                    *current = value;
                     changed = true;
+                }
+                if response.has_focus() {
+                    focused = Some(rect);
                 }
                 let state = VisualState::of(&response, enabled);
                 let painter = ui.painter();
                 // The outer corners follow the outline's.
+                let first = if index == 0 { size::RADIUS_CONTROL } else { 0 };
+                let end = if index == last {
+                    size::RADIUS_CONTROL
+                } else {
+                    0
+                };
                 let corners = CornerRadius {
-                    nw: if index == 0 { size::RADIUS_CONTROL } else { 0 },
-                    sw: if index == 0 { size::RADIUS_CONTROL } else { 0 },
-                    ne: if index + 1 == choices.len() {
-                        size::RADIUS_CONTROL
-                    } else {
-                        0
-                    },
-                    se: if index + 1 == choices.len() {
-                        size::RADIUS_CONTROL
-                    } else {
-                        0
-                    },
+                    nw: first,
+                    sw: first,
+                    ne: end,
+                    se: end,
                 };
                 let (fill, text) = match (state, on) {
                     (VisualState::Disabled, true) => (color::BG_RAISED, color::TEXT_DISABLED),
@@ -1813,11 +1852,9 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, choices: &[(
                     );
                 }
                 painter.galley(rect.center() - galley.size() / 2.0, galley, text);
-                if response.has_focus() {
-                    focus_ring(painter, rect, size::RADIUS_CONTROL);
-                }
             }
-            ui.painter().rect_stroke(
+            let painter = ui.painter();
+            painter.rect_stroke(
                 outline,
                 radius,
                 Stroke::new(
@@ -1830,6 +1867,10 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, choices: &[(
                 ),
                 StrokeKind::Inside,
             );
+            // Last, so the next segment does not cover it.
+            if let Some(rect) = focused {
+                focus_ring(painter, rect, size::RADIUS_CONTROL);
+            }
         },
     );
     changed

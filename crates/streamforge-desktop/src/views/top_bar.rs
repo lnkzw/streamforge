@@ -86,7 +86,9 @@ impl DesktopApp {
         let response = widgets::menu_button(ui, Icon::File, &name, unsaved, &label, width);
         let mut chosen = None;
         egui::Popup::menu(&response).width(220.0).show(|ui| {
-            ui.set_min_width(220.0);
+            // 220 px wide with the frame, whose margin is outside the
+            // content.
+            ui.set_min_width(220.0 - ui.style().spacing.menu_margin.sum().x);
             ui.spacing_mut().item_spacing.y = 0.0;
             for (item, icon, text) in [
                 (ProjectItem::Open, Some(Icon::Folder), "Open project…"),

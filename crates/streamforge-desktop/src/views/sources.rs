@@ -9,7 +9,7 @@ use crate::app::{Confirm, DesktopApp, Dialog};
 use crate::model::{SourceForm, SourceHealth};
 use crate::ui::icons::Icon;
 use crate::ui::theme::size;
-use crate::ui::widgets::{self, Button, ButtonKind, ListRow};
+use crate::ui::widgets::{self, Button, ButtonKind, ListRow, MenuItem};
 
 use super::{kind_label, right_to_left, scene};
 
@@ -75,7 +75,11 @@ impl DesktopApp {
                         select = Some(source.id.clone());
                     }
                     row.context_menu(|ui| {
-                        if ui.button("Remove…").clicked() {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        if ui
+                            .add(MenuItem::new("Remove…").icon(Icon::Trash).danger(true))
+                            .clicked()
+                        {
                             remove = Some((source.id.clone(), source.name.clone()));
                         }
                     });

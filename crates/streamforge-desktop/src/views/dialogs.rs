@@ -18,7 +18,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
 use crate::workspace;
 
-use super::{coordinate_range, labelled};
+use super::{coordinate_range, labelled, opacity_row};
 
 const DIALOG_WIDTH: f32 = 420.0;
 /// Problems of a project file shown before the rest are counted.
@@ -232,10 +232,7 @@ impl DesktopApp {
         let mut open_now = false;
         match &self.model.projects {
             None => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(TextRole::Meta.text("Looking for project files…"));
-                });
+                widgets::loading(ui, "Looking for project files…");
             }
             Some(Err(reason)) => {
                 widgets::status_line(ui, StatusLevel::Error, reason);
@@ -592,15 +589,15 @@ fn add_source(
             .desired_width(f32::INFINITY),
     );
     ui.label(TextRole::Label.text("Kind"));
-    ui.horizontal(|ui| {
-        for (kind, label) in [
+    widgets::segmented(
+        ui,
+        &mut form.kind,
+        &[
             (SourceType::Solid, "Solid colour"),
             (SourceType::ColorBars, "Colour bars"),
             (SourceType::Screen, "Screen capture"),
-        ] {
-            ui.selectable_value(&mut form.kind, kind, label);
-        }
-    });
+        ],
+    );
     match form.kind {
         SourceType::Solid => {
             ui.horizontal(|ui| {
@@ -628,20 +625,14 @@ fn add_source(
             }
         });
     }
-    ui.horizontal(|ui| {
-        ui.label(TextRole::Label.text("Opacity"));
-        let mut percent = form.opacity * 100.0;
-        if ui
-            .add(
-                egui::Slider::new(&mut percent, 0.0..=100.0)
-                    .suffix(" %")
-                    .fixed_decimals(0),
-            )
-            .changed()
-        {
-            form.opacity = (percent / 100.0).clamp(0.0, 1.0);
-        }
-    });
+    ui.label(TextRole::Label.text("Opacity"));
+    let mut percent = form.opacity * 100.0;
+    if opacity_row(ui, &mut percent)
+        .iter()
+        .any(egui::Response::changed)
+    {
+        form.opacity = (percent / 100.0).clamp(0.0, 1.0);
+    }
     ui.add_space(size::SPACE_8);
     match buttons(
         ui,
@@ -726,14 +717,14 @@ fn channel_input(
 /// apart), the system's default input, or a test tone.
 fn input_form(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
     ui.label(TextRole::Label.text("Input"));
-    ui.horizontal(|ui| {
-        for (kind, label) in [
+    widgets::segmented(
+        ui,
+        &mut form.kind,
+        &[
             (InputType::Device, "Device"),
             (InputType::Tone, "Test tone"),
-        ] {
-            ui.selectable_value(&mut form.kind, kind, label);
-        }
-    });
+        ],
+    );
     match form.kind {
         InputType::Device => device_picker(ui, model, form),
         InputType::Tone => {
@@ -785,36 +776,34 @@ fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
         Some((_, Some(input))) => workspace::input_name(input).to_owned(),
         Some((name, None)) => unlisted(name),
     };
-    let combo = egui::ComboBox::from_id_salt("audio input")
-        .selected_text(selected)
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut form.device, None, DEFAULT);
-            if let Some((name, None)) = &chosen {
-                let label = unlisted(name);
-                ui.selectable_value(&mut form.device, Some(name.clone()), label);
+    let width = ui.available_width();
+    widgets::dropdown(ui, &selected, "Audio input", width, |ui| {
+        widgets::choice(ui, &mut form.device, None, DEFAULT);
+        if let Some((name, None)) = &chosen {
+            widgets::choice(ui, &mut form.device, Some(name.clone()), &unlisted(name));
+        }
+        for (heading, desktop) in [("Inputs", false), ("Desktop audio", true)] {
+            let mut group = listed
+                .unwrap_or_default()
+                .iter()
+                .filter(|input| input.loopback_of.is_some() == desktop)
+                .peekable();
+            if group.peek().is_none() {
+                continue;
             }
-            for (heading, desktop) in [("Inputs", false), ("Desktop audio", true)] {
-                let mut group = listed
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|input| input.loopback_of.is_some() == desktop)
-                    .peekable();
-                if group.peek().is_none() {
-                    continue;
-                }
-                ui.label(TextRole::Section.text(heading));
-                for input in group {
-                    ui.selectable_value(
-                        &mut form.device,
-                        Some(input.name.clone()),
-                        workspace::input_name(input),
-                    )
-                    .on_hover_text(&input.name);
-                }
+            widgets::menu_heading(ui, heading);
+            for input in group {
+                widgets::choice(
+                    ui,
+                    &mut form.device,
+                    Some(input.name.clone()),
+                    workspace::input_name(input),
+                )
+                .on_hover_text(&input.name);
             }
-        });
-    labelled(ui, combo.response, "Audio input");
+        }
+    })
+    .on_hover_text("Audio input");
     // One line, always there: the dialog is centred and must not jump.
     let desktop = chosen
         .and_then(|(_, input)| input)
@@ -848,15 +837,15 @@ fn device_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut InputForm) {
 /// means; one note line, always there.
 fn encoder_picker(ui: &mut egui::Ui, encoder: &mut EncoderPreference) {
     ui.label(TextRole::Label.text("Video encoder"));
-    ui.horizontal(|ui| {
-        for (choice, label) in [
+    widgets::segmented(
+        ui,
+        encoder,
+        &[
             (EncoderPreference::Auto, "Auto"),
             (EncoderPreference::Software, "Software"),
             (EncoderPreference::Hardware, "Hardware"),
-        ] {
-            ui.selectable_value(encoder, choice, label);
-        }
-    });
+        ],
+    );
     let note = match encoder {
         EncoderPreference::Auto => "A hardware encoder if one opens on this machine, else x264.",
         EncoderPreference::Software => "x264 on the CPU: the same on every machine, more load.",
@@ -906,25 +895,24 @@ fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<Strin
         Some(_) if chosen.missing => &unlisted,
         Some(_) => &chosen.text,
     };
-    let combo = egui::ComboBox::from_id_salt("audio output")
-        .selected_text(selected)
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            ui.selectable_value(device, None, DEFAULT);
-            if chosen.missing {
-                let name = device.clone();
-                ui.selectable_value(device, name, unlisted.as_str());
-            }
-            for output in listed.unwrap_or_default() {
-                ui.selectable_value(
-                    device,
-                    Some(output.name.clone()),
-                    workspace::output_name(output),
-                )
-                .on_hover_text(&output.name);
-            }
-        });
-    labelled(ui, combo.response, "Audio output");
+    let width = ui.available_width();
+    widgets::dropdown(ui, selected, "Audio output", width, |ui| {
+        widgets::choice(ui, device, None, DEFAULT);
+        if chosen.missing {
+            let name = device.clone();
+            widgets::choice(ui, device, name, &unlisted);
+        }
+        for output in listed.unwrap_or_default() {
+            widgets::choice(
+                ui,
+                device,
+                Some(output.name.clone()),
+                workspace::output_name(output),
+            )
+            .on_hover_text(&output.name);
+        }
+    })
+    .on_hover_text("Audio output");
     // One line, always there: the dialog is centred and must not jump.
     let note = match &model.audio_outputs {
         _ if !idle => "Stop the preview and the outputs to choose another device.".to_owned(),
@@ -1048,20 +1036,15 @@ fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceF
                 .as_ref()
                 .and_then(|id| sources.iter().find(|source| &source.id == id))
                 .map_or(PICKER, |source| source.name.as_str());
-            egui::ComboBox::from_id_salt("screen source")
-                .selected_text(selected)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut form.screen_source, None, PICKER);
-                    for source in sources {
-                        let label = format!("{} ({})", source.name, source.kind.as_str());
-                        ui.selectable_value(
-                            &mut form.screen_source,
-                            Some(source.id.clone()),
-                            label,
-                        );
-                    }
-                });
+            let width = ui.available_width();
+            widgets::dropdown(ui, selected, "Screen source", width, |ui| {
+                widgets::choice(ui, &mut form.screen_source, None, PICKER);
+                for source in sources {
+                    let label = format!("{} ({})", source.name, source.kind.as_str());
+                    widgets::choice(ui, &mut form.screen_source, Some(source.id.clone()), &label);
+                }
+            })
+            .on_hover_text("Screen source");
         }
         Some(Ok(_)) => {
             ui.label(TextRole::Meta.text("No screen sources found."));

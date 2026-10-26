@@ -116,6 +116,10 @@ All values are logical pixels at scale 1.
 | Button | primary (accent), secondary (raised with an outline), ghost (text only), danger (needs confirmation); each with hover, pressed, focus, disabled and busy |
 | Menu button | a ghost button that opens a menu: icon, text cut to fit, a dot for a marked state (the project's unsaved changes), a chevron |
 | Select field | shows a choice made elsewhere (a dialog), such as a channel's input: an icon in a state colour, the value cut to fit, a chevron; its value is read out by assistive technology; hover, focus, disabled |
+| Dropdown | a choice made in place, such as an audio device: a select field without the icon that opens its list under it, as wide as the field; the options are menu items, groups have a `section` heading; hover, focus, disabled |
+| Menu item | a row of a menu, a context menu or a dropdown's list: a 16 px column for an icon or the check mark (accent) of the current choice, so the texts line up; the text; the keyboard shortcut right-aligned in `meta`; hover, focus, disabled, danger (error colour; the action asks first) |
+| Segmented control | one of a few choices side by side in one outlined control, such as a source's kind or the encoder: the current one in `accent.weak` with its text in the accent; each segment reads as a radio button; hover, focus, disabled |
+| Slider | horizontal, for a setting such as opacity (live gain has the fader), with a number field beside it for the exact value: a click or drag sets the value under the pointer, Left and Right step it while it has focus; drag commits once; disabled |
 | Transport button | record, live; idle, starting, running (with a timer), failed |
 | Toggle | an on/off switch for binary settings such as the preview, mute and a send; disabled |
 | Radio | one choice of several, such as the bus an output takes as its mix; selected, hover, disabled |
@@ -129,6 +133,7 @@ All values are logical pixels at scale 1.
 | Fader | vertical, −60 to +12 dB, unity marker, drag commits once |
 | Status line | an icon plus text for ok, warn, error and info; never colour alone |
 | Empty state | an icon, one line saying what is missing, the action that fixes it |
+| Loading | a small spinner and one line saying what is awaited |
 
 States are defined once:
 - Hover lifts the background to `bg.raised`.

@@ -124,3 +124,142 @@ fn a_drag_commits_its_value_when_the_caller_rebuilds_it_each_frame() {
     let sent = harness.state().1.expect("sent on release");
     assert!((sent + 24.0).abs() < 0.11, "{sent}");
 }
+
+/// Two opacity sliders side by side (0 to 100, step 1), so a key that
+/// moved the focus would reach the second one.
+fn sliders(start: f32) -> Harness<'static, [f32; 2]> {
+    let mut harness = Harness::new_ui_state(
+        |ui, values: &mut [f32; 2]| {
+            ui.horizontal(|ui| {
+                widgets::slider(ui, &mut values[0], 0.0..=100.0, 1.0, 200.0, "first");
+                widgets::slider(ui, &mut values[1], 0.0..=100.0, 1.0, 200.0, "second");
+            });
+        },
+        [start, start],
+    );
+    harness.run();
+    harness
+}
+
+#[test]
+fn a_click_on_the_slider_sets_the_value_under_the_pointer() {
+    let mut harness = sliders(10.0);
+    let rect = harness.get_by_label("first").rect();
+    // The track spans the width less the thumb (12 px); three quarters
+    // along it is 75.
+    let x = rect.left() + 6.0 + 0.75 * (rect.width() - 12.0);
+    harness.hover_at(egui::pos2(x, rect.center().y));
+    harness.run();
+    harness.drag_at(egui::pos2(x, rect.center().y));
+    harness.run();
+    harness.drop_at(egui::pos2(x, rect.center().y));
+    harness.run();
+    assert_eq!(harness.state()[0], 75.0);
+    assert_eq!(harness.state()[1], 10.0);
+}
+
+#[test]
+fn arrow_keys_step_the_focused_slider_and_keep_its_focus() {
+    let mut harness = sliders(10.0);
+    harness.get_by_label("first").focus();
+    harness.run();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    harness.key_press(egui::Key::ArrowRight);
+    harness.run();
+    // Had the first press moved the focus, the second would step the
+    // second slider.
+    assert_eq!(*harness.state(), [12.0, 10.0]);
+    harness.key_press(egui::Key::ArrowLeft);
+    harness.run();
+    assert_eq!(*harness.state(), [11.0, 10.0]);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Encoder {
+    Auto,
+    Software,
+}
+
+#[test]
+fn a_segment_click_changes_the_choice() {
+    let mut harness = Harness::new_ui_state(
+        |ui, (encoder, changes): &mut (Encoder, usize)| {
+            let choices = [(Encoder::Auto, "Auto"), (Encoder::Software, "Software")];
+            if widgets::segmented(ui, encoder, &choices) {
+                *changes += 1;
+            }
+        },
+        (Encoder::Auto, 0),
+    );
+    harness.run();
+    // The current segment again changes nothing.
+    harness.get_by_label("Auto").click();
+    harness.run();
+    assert_eq!(*harness.state(), (Encoder::Auto, 0));
+    harness.get_by_label("Software").click();
+    harness.run();
+    assert_eq!(*harness.state(), (Encoder::Software, 1));
+}
+
+#[test]
+fn a_dropdown_choice_becomes_current_and_closes_the_list() {
+    let mut harness = Harness::new_ui_state(
+        |ui, device: &mut Option<&'static str>| {
+            let text = device.unwrap_or("System default");
+            widgets::dropdown(ui, text, "Audio output", 200.0, |ui| {
+                widgets::choice(ui, device, None, "System default");
+                widgets::choice(ui, device, Some("Speakers"), "Speakers");
+            });
+        },
+        None,
+    );
+    harness.run();
+    assert!(harness.query_by_label("Speakers").is_none(), "closed");
+    harness.get_by_label("Audio output").click();
+    harness.run();
+    harness.get_by_label("Speakers").click();
+    harness.run();
+    assert_eq!(*harness.state(), Some("Speakers"));
+    assert!(harness.query_by_label("System default").is_none(), "closed");
+}
+
+#[test]
+fn a_dropdown_choice_by_keyboard_closes_the_list_too() {
+    let mut harness = Harness::new_ui_state(
+        |ui, device: &mut Option<&'static str>| {
+            let text = device.unwrap_or("System default");
+            widgets::dropdown(ui, text, "Audio output", 200.0, |ui| {
+                widgets::choice(ui, device, None, "System default");
+                widgets::choice(ui, device, Some("Speakers"), "Speakers");
+            });
+        },
+        None,
+    );
+    harness.run();
+    harness.get_by_label("Audio output").click();
+    harness.run();
+    harness.get_by_label("Speakers").focus();
+    harness.run();
+    harness.key_press(egui::Key::Enter);
+    harness.run();
+    assert_eq!(*harness.state(), Some("Speakers"));
+    assert!(harness.query_by_label("System default").is_none(), "closed");
+}
+
+#[test]
+fn a_disabled_menu_item_or_button_says_so_to_its_tooltip() {
+    // `on_disabled_hover_text` shows only for a response that reports
+    // disabled, as when the `Ui` is.
+    let mut harness = Harness::new_ui_state(
+        |ui, enabled: &mut [bool; 2]| {
+            let item = ui.add(widgets::MenuItem::new("Delete…").enabled(false));
+            let button =
+                ui.add(widgets::Button::new(widgets::ButtonKind::Secondary, "Put").enabled(false));
+            *enabled = [item.enabled(), button.enabled()];
+        },
+        [true, true],
+    );
+    harness.run();
+    assert_eq!(*harness.state(), [false, false]);
+}

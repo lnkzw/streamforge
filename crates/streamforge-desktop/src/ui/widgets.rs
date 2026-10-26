@@ -61,6 +61,20 @@ fn phase(ui: &Ui, period: f64) -> f32 {
     ((time % period) / period) as f32
 }
 
+/// Add a control in a disabled scope: its response then reports disabled,
+/// so `on_disabled_hover_text` shows, and egui gives it no interaction.
+/// egui's fade of disabled content is undone, since components draw their
+/// own disabled colours.
+fn disabled(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Response {
+    ui.scope(|ui| {
+        let opacity = ui.opacity();
+        ui.disable();
+        ui.set_opacity(opacity);
+        add(ui)
+    })
+    .inner
+}
+
 /// The 2 px accent ring around a focused control, 1 px outside it.
 pub fn focus_ring(painter: &egui::Painter, rect: Rect, radius: u8) {
     painter.rect_stroke(
@@ -135,6 +149,11 @@ impl<'a> Button<'a> {
 
 impl Widget for Button<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
         let font = TextRole::Body.font();
         let galley = ui
             .painter()
@@ -342,20 +361,79 @@ pub fn select_field(
     label: &str,
     width: f32,
 ) -> Response {
+    field(
+        ui,
+        Some((icon, tint)),
+        text,
+        label,
+        width,
+        WidgetType::Button,
+    )
+}
+
+/// A field that shows the current choice of a list and opens the list
+/// under it, as a menu of [`choice`]s (and [`menu_heading`]s for groups).
+/// The field looks like the [`select_field`] without an icon. `label`
+/// names it for assistive technology, which reads `text` as its value;
+/// the caller adds the tooltip. Disabled with the `Ui`.
+pub fn dropdown(
+    ui: &mut Ui,
+    text: &str,
+    label: &str,
+    width: f32,
+    menu: impl FnOnce(&mut Ui),
+) -> Response {
+    let response = field(ui, None, text, label, width, WidgetType::ComboBox);
+    egui::Popup::menu(&response).width(width).show(|ui| {
+        // As wide as the field (the frame's margin is outside the content).
+        let margin = ui.style().spacing.menu_margin.sum().x;
+        ui.set_min_width(width - margin);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        menu(ui);
+    });
+    response
+}
+
+/// An option of a [`dropdown`], checked while it is `current`; a click
+/// makes it current (the response is then changed) and closes the menu.
+pub fn choice<T: PartialEq>(ui: &mut Ui, current: &mut T, value: T, text: &str) -> Response {
+    let mut response = ui.add(MenuItem::new(text).selected(*current == value));
+    if response.clicked() && *current != value {
+        *current = value;
+        response.mark_changed();
+    }
+    response
+}
+
+/// The field of a [`select_field`] or [`dropdown`]: an optional icon in
+/// its tint, the value cut to fit, a chevron.
+fn field(
+    ui: &mut Ui,
+    icon: Option<(Icon, Color32)>,
+    text: &str,
+    label: &str,
+    width: f32,
+    kind: WidgetType,
+) -> Response {
     const ICON: f32 = 14.0;
     const CHEVRON: f32 = 12.0;
     let mut job = LayoutJob::single_section(
         text.to_owned(),
         egui::TextFormat::simple(TextRole::Body.font(), Color32::PLACEHOLDER),
     );
-    let fixed = ICON + CHEVRON + 2.0 * size::SPACE_4 + 2.0 * size::SPACE_6;
+    let icon_space = if icon.is_some() {
+        ICON + size::SPACE_4
+    } else {
+        0.0
+    };
+    let fixed = icon_space + CHEVRON + size::SPACE_4 + 2.0 * size::SPACE_6;
     job.wrap = egui::text::TextWrapping::truncate_at_width((width - fixed).max(0.0));
     let galley = ui.painter().layout_job(job);
     let enabled = ui.is_enabled();
     let height = ui.spacing().interact_size.y;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     response.widget_info(|| {
-        let mut info = WidgetInfo::labeled(WidgetType::Button, enabled, label);
+        let mut info = WidgetInfo::labeled(kind, enabled, label);
         info.current_text_value = Some(text.to_owned());
         info
     });
@@ -371,13 +449,15 @@ pub fn select_field(
             StrokeKind::Inside,
         );
         let mut x = rect.left() + size::SPACE_6;
-        let tint = if enabled { tint } else { color::TEXT_DISABLED };
-        icon.paint(
-            painter,
-            icon_rect(pos2(x + ICON / 2.0, rect.center().y), ICON),
-            tint,
-        );
-        x += ICON + size::SPACE_4;
+        if let Some((icon, tint)) = icon {
+            let tint = if enabled { tint } else { color::TEXT_DISABLED };
+            icon.paint(
+                painter,
+                icon_rect(pos2(x + ICON / 2.0, rect.center().y), ICON),
+                tint,
+            );
+            x += icon_space;
+        }
         painter.galley(
             pos2(x, rect.center().y - galley.size().y / 2.0),
             galley,
@@ -399,6 +479,202 @@ pub fn select_field(
         }
     }
     response
+}
+
+/// A row of a menu (a popup, a context menu, a [`dropdown`]'s list): a
+/// 16 px column for an icon, or for the check mark of the current choice,
+/// then the text, and the keyboard shortcut that does the same,
+/// right-aligned. The column is there in every row, so the texts of a
+/// menu line up. A danger item is destructive and drawn in the error
+/// colour; the caller asks before acting.
+pub struct MenuItem<'a> {
+    label: &'a str,
+    icon: Option<Icon>,
+    shortcut: Option<&'a str>,
+    /// Set in a list of choices: whether this one is current.
+    selected: Option<bool>,
+    enabled: bool,
+    danger: bool,
+    forced: Option<VisualState>,
+}
+
+impl<'a> MenuItem<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self {
+            label,
+            icon: None,
+            shortcut: None,
+            selected: None,
+            enabled: true,
+            danger: false,
+            forced: None,
+        }
+    }
+
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// The shortcut as the platform writes it (e.g. "Ctrl+S", "⌘S").
+    pub fn shortcut(mut self, shortcut: &'a str) -> Self {
+        self.shortcut = Some(shortcut);
+        self
+    }
+
+    /// An option of a list of choices; the current one has a check mark
+    /// in the icon column.
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = Some(selected);
+        self
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn danger(mut self, danger: bool) -> Self {
+        self.danger = danger;
+        self
+    }
+
+    /// Draw in `state` regardless of the pointer (specimen only).
+    pub fn forced(mut self, state: VisualState) -> Self {
+        self.forced = Some(state);
+        self
+    }
+}
+
+impl Widget for MenuItem<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
+        let lead = size::ICON + size::SPACE_6;
+        let shortcut = self.shortcut.map(|text| {
+            ui.painter().layout_no_wrap(
+                text.to_owned(),
+                TextRole::Meta.font(),
+                Color32::PLACEHOLDER,
+            )
+        });
+        let trail = shortcut
+            .as_ref()
+            .map_or(0.0, |galley| galley.size().x + size::SPACE_24);
+        let fixed = 2.0 * size::SPACE_6 + lead + trail;
+        let mut job = LayoutJob::single_section(
+            self.label.to_owned(),
+            egui::TextFormat::simple(TextRole::Body.font(), Color32::PLACEHOLDER),
+        );
+        job.wrap =
+            egui::text::TextWrapping::truncate_at_width((ui.available_width() - fixed).max(0.0));
+        let galley = ui.painter().layout_job(job);
+        let sense = if self.enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
+        // At least the content; a menu's justified layout widens every row
+        // to its widest.
+        let (rect, response) =
+            ui.allocate_at_least(vec2(galley.size().x + fixed, size::ROW), sense);
+        // egui closes a menu on a pointer click only; Enter, Space and
+        // assistive technology choose too.
+        if response.clicked() {
+            ui.close_kind(egui::UiKind::Menu);
+        }
+        response.widget_info(|| match self.selected {
+            Some(selected) => WidgetInfo::selected(
+                WidgetType::SelectableLabel,
+                self.enabled,
+                selected,
+                self.label,
+            ),
+            None => WidgetInfo::labeled(WidgetType::Button, self.enabled, self.label),
+        });
+        if !ui.is_rect_visible(rect) {
+            return response;
+        }
+        let state = self
+            .forced
+            .unwrap_or_else(|| VisualState::of(&response, self.enabled));
+        let painter = ui.painter();
+        if matches!(state, VisualState::Hovered | VisualState::Pressed) {
+            let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+            painter.rect_filled(rect, CornerRadius::same(size::RADIUS_CONTROL), fill);
+        }
+        let (text, icon_tint) = match (state, self.danger) {
+            (VisualState::Disabled, _) => (color::TEXT_DISABLED, color::TEXT_DISABLED),
+            (_, true) => (color::STATE_ERROR, color::STATE_ERROR),
+            _ => (color::TEXT_PRIMARY, color::TEXT_SECONDARY),
+        };
+        let icon_center = pos2(
+            rect.left() + size::SPACE_6 + size::ICON / 2.0,
+            rect.center().y,
+        );
+        if self.selected == Some(true) {
+            let tint = if self.enabled {
+                color::ACCENT
+            } else {
+                color::TEXT_DISABLED
+            };
+            Icon::Check.paint(painter, icon_rect(icon_center, 14.0), tint);
+        } else if let Some(icon) = self.icon {
+            icon.paint(painter, icon_rect(icon_center, 14.0), icon_tint);
+        }
+        painter.galley(
+            pos2(
+                rect.left() + size::SPACE_6 + lead,
+                rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            text,
+        );
+        if let Some(galley) = shortcut {
+            let tint = if state == VisualState::Disabled {
+                color::TEXT_DISABLED
+            } else {
+                color::TEXT_TERTIARY
+            };
+            painter.galley(
+                pos2(
+                    rect.right() - size::SPACE_6 - galley.size().x,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                tint,
+            );
+        }
+        if shows_focus(self.forced, &response) {
+            focus_ring(painter, rect, size::RADIUS_CONTROL);
+        }
+        response
+    }
+}
+
+/// The heading of a group in a menu (e.g. desktop audio apart from the
+/// other inputs): a section label in line with the rows' padding.
+pub fn menu_heading(ui: &mut Ui, text: &str) {
+    ui.add_space(size::SPACE_4);
+    ui.horizontal(|ui| {
+        ui.add_space(size::SPACE_6);
+        ui.label(TextRole::Section.text(text));
+    });
+    ui.add_space(size::SPACE_2);
+}
+
+/// Waiting for something to arrive: a small spinner and one line saying
+/// what.
+pub fn loading(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = size::SPACE_6;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size::ICON), Sense::hover());
+        spinner(ui, icon_rect(rect.center(), 12.0), color::TEXT_TERTIARY);
+        ui.label(TextRole::Meta.text(text));
+    });
 }
 
 /// Where a dock has nothing to show: an icon and one line saying what is
@@ -542,6 +818,11 @@ impl TransportButton {
 
 impl Widget for TransportButton {
     fn ui(self, ui: &mut Ui) -> Response {
+        // Disabled through the `Ui`, so the response says so (and a
+        // disabled tooltip shows).
+        if !self.enabled && ui.is_enabled() {
+            return disabled(ui, |ui| self.ui(ui));
+        }
         let (icon, label) = match self.transport {
             Transport::Record => (Icon::Record, "REC"),
             Transport::Live => (Icon::Live, "LIVE"),
@@ -905,16 +1186,9 @@ pub fn fader(
             steps -= input.num_presses(egui::Key::ArrowDown) as i32;
         });
     }
-    ui.input(|input| {
-        use egui::accesskit::{Action, ActionData};
-        steps += input.num_accesskit_action_requests(response.id, Action::Increment) as i32;
-        steps -= input.num_accesskit_action_requests(response.id, Action::Decrement) as i32;
-        for request in input.accesskit_action_requests(response.id, Action::SetValue) {
-            if let Some(ActionData::NumericValue(target)) = request.data {
-                value = Some(target as f32);
-            }
-        }
-    });
+    let (asked, set) = numeric_requests(ui, response.id);
+    steps += asked;
+    value = set.or(value);
     if steps != 0 {
         value = Some(*gain_db + steps as f32 * FADER_STEP_DB);
     }
@@ -925,21 +1199,15 @@ pub fn fader(
         response.mark_changed();
     }
 
-    response.widget_info(|| WidgetInfo::slider(true, f64::from(*gain_db), label));
-    let current = *gain_db;
-    ui.ctx().accesskit_node_builder(response.id, |builder| {
-        use egui::accesskit::Action;
-        builder.set_min_numeric_value(f64::from(min));
-        builder.set_max_numeric_value(f64::from(max));
-        builder.set_numeric_value_step(f64::from(FADER_STEP_DB));
-        builder.add_action(Action::SetValue);
-        if current < max {
-            builder.add_action(Action::Increment);
-        }
-        if current > min {
-            builder.add_action(Action::Decrement);
-        }
-    });
+    describe_numeric(
+        ui,
+        &response,
+        true,
+        *gain_db,
+        (min, max),
+        FADER_STEP_DB,
+        label,
+    );
 
     let painter = ui.painter();
     painter.rect_filled(track, 0.0, color::BG_INSET);
@@ -980,6 +1248,169 @@ pub fn fader(
     );
     if response.has_focus() {
         focus_ring(painter, rect, size::RADIUS_CONTROL);
+    }
+    response
+}
+
+/// What assistive technology asked of a numeric control this frame: the
+/// steps up (increment) less those down (decrement), and a value it set.
+fn numeric_requests(ui: &Ui, id: egui::Id) -> (i32, Option<f32>) {
+    use egui::accesskit::{Action, ActionData};
+    ui.input(|input| {
+        let steps = input.num_accesskit_action_requests(id, Action::Increment) as i32
+            - input.num_accesskit_action_requests(id, Action::Decrement) as i32;
+        let set = input
+            .accesskit_action_requests(id, Action::SetValue)
+            .filter_map(|request| match request.data {
+                Some(ActionData::NumericValue(target)) => Some(target as f32),
+                _ => None,
+            })
+            .last();
+        (steps, set)
+    })
+}
+
+/// Describe a numeric control (a fader, a slider) to assistive
+/// technology: its value, range and step, and the actions it takes.
+fn describe_numeric(
+    ui: &Ui,
+    response: &Response,
+    enabled: bool,
+    value: f32,
+    (min, max): (f32, f32),
+    step: f32,
+    label: &str,
+) {
+    use egui::accesskit::Action;
+    response.widget_info(|| WidgetInfo::slider(enabled, f64::from(value), label));
+    ui.ctx().accesskit_node_builder(response.id, |builder| {
+        builder.set_min_numeric_value(f64::from(min));
+        builder.set_max_numeric_value(f64::from(max));
+        builder.set_numeric_value_step(f64::from(step));
+        if !enabled {
+            return;
+        }
+        builder.add_action(Action::SetValue);
+        if value < max {
+            builder.add_action(Action::Increment);
+        }
+        if value > min {
+            builder.add_action(Action::Decrement);
+        }
+    });
+}
+
+/// A horizontal slider over `range`, for a setting such as a source's
+/// opacity (live gain has the [`fader`]); the caller puts a number field
+/// for the exact value beside it.
+///
+/// - **Pointer:** a click or drag on the track sets the value under the
+///   pointer, rounded to `step`.
+/// - **Keyboard:** with focus, Left and Right change it by `step` (and do
+///   not move the focus); AccessKit's increment, decrement and set-value do
+///   the same.
+///
+/// The response is changed whenever the value is; callers commit as for
+/// the fader. `label` names it for assistive technology. Disabled with the
+/// `Ui`.
+pub fn slider(
+    ui: &mut Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    step: f32,
+    width: f32,
+    label: &str,
+) -> Response {
+    const THUMB: f32 = 12.0;
+    debug_assert!(
+        range.start() < range.end() && step > 0.0,
+        "a slider needs a range and a step"
+    );
+    let enabled = ui.is_enabled();
+    let sense = if enabled {
+        Sense::click_and_drag()
+    } else {
+        Sense::hover()
+    };
+    let (rect, mut response) = ui.allocate_exact_size(vec2(width, size::CONTROL), sense);
+    let (min, max) = (*range.start(), *range.end());
+    let track = Rect::from_center_size(rect.center(), vec2(width - THUMB, 4.0));
+    let to_x = |v: f32| track.left() + (v.clamp(min, max) - min) / (max - min) * track.width();
+    let snap = |v: f32| ((v - min) / step).round() * step + min;
+    let mut new = None;
+    // Also on the release frame, as for the fader.
+    if (response.clicked() || response.dragged() || response.drag_stopped())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let t = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        new = Some(snap(min + t * (max - min)));
+    }
+    let mut steps = 0i32;
+    if response.has_focus() {
+        ui.memory_mut(|memory| {
+            memory.set_focus_lock_filter(
+                response.id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+        ui.input(|input| {
+            steps += input.num_presses(egui::Key::ArrowRight) as i32;
+            steps -= input.num_presses(egui::Key::ArrowLeft) as i32;
+        });
+    }
+    let (asked, set) = numeric_requests(ui, response.id);
+    steps += asked;
+    new = set.or(new);
+    if steps != 0 {
+        new = Some(snap(*value) + steps as f32 * step);
+    }
+    if enabled
+        && let Some(new) = new.map(|new| new.clamp(min, max))
+        && new != *value
+    {
+        *value = new;
+        response.mark_changed();
+    }
+    describe_numeric(ui, &response, enabled, *value, (min, max), step, label);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(track, CornerRadius::same(2), color::BG_INSET);
+    let x = to_x(*value);
+    let filled = Rect::from_min_max(track.min, pos2(x, track.bottom()));
+    painter.rect_filled(
+        filled,
+        CornerRadius::same(2),
+        if enabled {
+            color::TEXT_TERTIARY
+        } else {
+            color::LINE_SUBTLE
+        },
+    );
+    let thumb = Rect::from_center_size(pos2(x, rect.center().y), Vec2::splat(THUMB));
+    let (fill, outline) = if !enabled {
+        (color::BG_RAISED, color::LINE_SUBTLE)
+    } else if response.dragged() {
+        (Color32::from_rgb(0x3A, 0x3D, 0x42), color::ACCENT)
+    } else if response.hovered() {
+        (Color32::from_rgb(0x3A, 0x3D, 0x42), color::TEXT_TERTIARY)
+    } else {
+        (Color32::from_rgb(0x2E, 0x31, 0x35), color::LINE_STRONG)
+    };
+    painter.rect(
+        thumb,
+        CornerRadius::same(2),
+        fill,
+        Stroke::new(size::STROKE, outline),
+        StrokeKind::Inside,
+    );
+    if response.has_focus() {
+        focus_ring(painter, thumb, 2);
     }
     response
 }
@@ -1339,6 +1770,110 @@ pub fn tabs(ui: &mut Ui, selected: usize, labels: &[&str]) -> Option<usize> {
         },
     );
     clicked
+}
+
+/// One choice of a few, side by side in one outlined control (a source's
+/// kind, a channel's input, an encoder): the current one is filled in the
+/// weak accent with its text in the accent. Each segment is a radio
+/// button for assistive technology. Disabled with the `Ui`. Returns
+/// whether a click changed `current`.
+pub fn segmented<T: PartialEq + Copy>(ui: &mut Ui, current: &mut T, choices: &[(T, &str)]) -> bool {
+    let enabled = ui.is_enabled();
+    let segments: Vec<_> = choices
+        .iter()
+        .map(|(value, label)| {
+            let galley = ui.painter().layout_no_wrap(
+                (*label).to_owned(),
+                TextRole::Body.font(),
+                Color32::PLACEHOLDER,
+            );
+            let width = galley.size().x + 2.0 * size::SPACE_12;
+            (*value, *label, galley, width)
+        })
+        .collect();
+    let total = segments.iter().map(|segment| segment.3).sum::<f32>();
+    let mut changed = false;
+    // Left to right also inside a right-to-left row.
+    ui.allocate_ui_with_layout(
+        vec2(total, size::CONTROL),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let outline = Rect::from_min_size(ui.cursor().min, vec2(total, size::CONTROL));
+            let radius = CornerRadius::same(size::RADIUS_CONTROL);
+            ui.painter().rect_filled(outline, radius, color::BG_INSET);
+            let mut focused = None;
+            let last = segments.len().saturating_sub(1);
+            for (index, (value, label, galley, width)) in segments.into_iter().enumerate() {
+                let on = value == *current;
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(width, size::CONTROL), Sense::click());
+                response.widget_info(|| {
+                    WidgetInfo::selected(WidgetType::RadioButton, enabled, on, label)
+                });
+                if response.clicked() && !on {
+                    *current = value;
+                    changed = true;
+                }
+                if response.has_focus() {
+                    focused = Some(rect);
+                }
+                let state = VisualState::of(&response, enabled);
+                let painter = ui.painter();
+                // The outer corners follow the outline's.
+                let first = if index == 0 { size::RADIUS_CONTROL } else { 0 };
+                let end = if index == last {
+                    size::RADIUS_CONTROL
+                } else {
+                    0
+                };
+                let corners = CornerRadius {
+                    nw: first,
+                    sw: first,
+                    ne: end,
+                    se: end,
+                };
+                let (fill, text) = match (state, on) {
+                    (VisualState::Disabled, true) => (color::BG_RAISED, color::TEXT_DISABLED),
+                    (VisualState::Disabled, false) => (Color32::TRANSPARENT, color::TEXT_DISABLED),
+                    (_, true) => (color::ACCENT_WEAK, color::ACCENT),
+                    (VisualState::Hovered | VisualState::Pressed, false) => {
+                        let (fill, _, _) = button_colors(ButtonKind::Ghost, state);
+                        (fill, color::TEXT_PRIMARY)
+                    }
+                    (_, false) => (Color32::TRANSPARENT, color::TEXT_SECONDARY),
+                };
+                painter.rect_filled(rect, corners, fill);
+                if index > 0 {
+                    painter.vline(
+                        rect.left(),
+                        rect.y_range().shrink(size::SPACE_4),
+                        Stroke::new(size::STROKE, color::LINE_SUBTLE),
+                    );
+                }
+                painter.galley(rect.center() - galley.size() / 2.0, galley, text);
+            }
+            let painter = ui.painter();
+            painter.rect_stroke(
+                outline,
+                radius,
+                Stroke::new(
+                    size::STROKE,
+                    if enabled {
+                        color::LINE_STRONG
+                    } else {
+                        color::LINE_SUBTLE
+                    },
+                ),
+                StrokeKind::Inside,
+            );
+            // Last, so the next segment does not cover it.
+            if let Some(rect) = focused {
+                focus_ring(painter, rect, size::RADIUS_CONTROL);
+            }
+        },
+    );
+    changed
 }
 
 /// A small button that shows a mode by its text, e.g. a send's tap (PRE or

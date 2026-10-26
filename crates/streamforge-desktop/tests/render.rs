@@ -93,11 +93,17 @@ enum Situation {
     /// The preview on, and the monitor switched on to a device that is
     /// not there: it ended.
     MonitorEnded,
+    /// Live, with a scene's context menu open.
+    SceneMenu,
+    /// Live, with the health details and the activity log open.
+    Health,
 }
 
 /// What the render does before it is taken, in order.
 enum Step {
     Click(&'static str),
+    /// A secondary click: a context menu.
+    RightClick(&'static str),
     Type(&'static str),
 }
 
@@ -216,7 +222,11 @@ fn model(dir: &Path, situation: Situation) -> Model {
     let dir = dir.to_owned();
     let live = matches!(
         situation,
-        Situation::Live | Situation::Dialog | Situation::Routing
+        Situation::Live
+            | Situation::Dialog
+            | Situation::Routing
+            | Situation::SceneMenu
+            | Situation::Health
     );
     project_files(&dir);
     let worker = EngineWorker::spawn(
@@ -342,10 +352,13 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
             vec![Step::Click("Monitor settings"), Step::Click("Audio output")]
         }
         Situation::MonitorEnded => vec![],
+        Situation::SceneMenu => vec![Step::RightClick("Test pattern")],
+        Situation::Health => vec![Step::Click("All healthy")],
     };
     for step in steps {
         match step {
             Step::Click(label) => harness.get_by_label(label).click(),
+            Step::RightClick(label) => harness.get_by_label(label).click_secondary(),
             Step::Type(text) => {
                 let field = || harness.get_all_by_role(Role::TextInput).next();
                 field().expect("a text field").focus();
@@ -424,6 +437,13 @@ fn render_the_workspace() {
         Situation::MonitorList,
         [1400.0, 900.0],
     );
+    render(
+        &out,
+        "scene-menu-1280x720",
+        Situation::SceneMenu,
+        [1280.0, 720.0],
+    );
+    render(&out, "health-1400x900", Situation::Health, [1400.0, 900.0]);
     for (size, label) in [
         ([1280.0, 720.0], "1280x720"),
         ([1920.0, 1080.0], "1920x1080"),
@@ -444,8 +464,8 @@ fn specimen(ui: &mut egui::Ui) {
     use streamforge_desktop::ui::icons::Icon;
     use streamforge_desktop::ui::theme::{TextRole, color};
     use streamforge_desktop::ui::widgets::{
-        self, BadgeKind, Button, ButtonKind, ListRow, StatusLevel, Transport, TransportButton,
-        TransportState, VisualState,
+        self, BadgeKind, Button, ButtonKind, ListRow, MenuItem, StatusLevel, Transport,
+        TransportButton, TransportState, VisualState,
     };
 
     egui::Frame::new()
@@ -651,8 +671,58 @@ fn specimen(ui: &mut egui::Ui) {
                         )
                     });
                 });
+                // Choices made in place: a dropdown, segments, a slider.
+                ui.horizontal(|ui| {
+                    widgets::dropdown(ui, "System default output", "Output", 200.0, |_| {});
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::dropdown(ui, "USB Headset", "Disabled", 140.0, |_| {})
+                    });
+                });
+                ui.horizontal(|ui| {
+                    let mut kind = 0;
+                    widgets::segmented(
+                        ui,
+                        &mut kind,
+                        &[(0, "Auto"), (1, "Software"), (2, "Hardware")],
+                    );
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::segmented(ui, &mut kind, &[(0, "Device"), (1, "Test tone")])
+                    });
+                });
+                ui.horizontal(|ui| {
+                    let mut opacity = 70.0;
+                    widgets::slider(ui, &mut opacity, 0.0..=100.0, 1.0, 180.0, "opacity");
+                    ui.add_enabled_ui(false, |ui| {
+                        widgets::slider(ui, &mut opacity, 0.0..=100.0, 1.0, 120.0, "disabled")
+                    });
+                });
                 let mut text = "recording.mkv".to_owned();
                 ui.add(egui::TextEdit::singleline(&mut text).desired_width(220.0));
+                // A menu: icons, the current choice, a shortcut, states.
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(240.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add(
+                        MenuItem::new("Open project…")
+                            .icon(Icon::Folder)
+                            .shortcut("Ctrl+O"),
+                    );
+                    ui.add(
+                        MenuItem::new("Save")
+                            .icon(Icon::File)
+                            .shortcut("Ctrl+S")
+                            .forced(VisualState::Hovered),
+                    );
+                    ui.add(
+                        MenuItem::new("Save as…")
+                            .shortcut("Ctrl+Shift+S")
+                            .enabled(false),
+                    );
+                    widgets::menu_heading(ui, "Desktop audio");
+                    ui.add(MenuItem::new("Monitor of Speakers").selected(true));
+                    ui.add(MenuItem::new("Monitor of USB Headset").selected(false));
+                    ui.add(MenuItem::new("Delete…").icon(Icon::Trash).danger(true));
+                });
 
                 let ui = &mut columns[2];
                 widgets::section_header(ui, "Scenes", Some(3));
@@ -732,7 +802,7 @@ fn render_the_design_system_specimen() {
     std::fs::create_dir_all(&out).expect("output dir");
     let mut themed = false;
     let mut harness = Harness::builder()
-        .with_size([1400.0, 900.0])
+        .with_size([1400.0, 1200.0])
         .build_ui(move |ui| {
             // Fonts take effect from the next pass, as at app start.
             if !themed {

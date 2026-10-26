@@ -200,6 +200,13 @@ fn malformed_requests_never_reach_the_handler() {
             json!(null),
             "invalid_request",
         ),
+        // Whatever comes first: an earlier repeated parameter does not hide
+        // a repeated `id`.
+        (
+            r#"{"params":{"enabled":true,"enabled":false},"id":1,"id":2,"command":"set_preview"}"#,
+            json!(null),
+            "invalid_request",
+        ),
         (
             r#"{"id":"m","command":"set_preview","params":{"enabled":true,"enabled":false}}"#,
             json!("m"),

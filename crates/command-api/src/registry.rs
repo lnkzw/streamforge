@@ -2344,21 +2344,25 @@ fn decode_params<T: DeserializeOwned + JsonSchema>(
     command: &str,
     params: Option<&Value>,
 ) -> Result<T, CommandError> {
+    let empty = Value::Object(Map::new());
     let object = match params {
-        None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(object)) => object.clone(),
+        None | Some(Value::Null) => &empty,
+        Some(object @ Value::Object(_)) => object,
         Some(other) => return Err(not_an_object(command, other)),
     };
-    let keys: Vec<String> = object.keys().cloned().collect();
-    serde_json::from_value(Value::Object(object)).map_err(|err| {
+    T::deserialize(object).map_err(|err| {
         let error = invalid_params(command, format!("invalid parameters: {err}"));
-        // Only on failure: the schema says which names are known.
+        // Only on failure: the schema says which names are known. A schema
+        // without properties names none, and nothing is reported then.
         let schema = schema_of::<T>();
-        let known = schema["properties"].as_object();
-        let unexpected: Vec<&String> = keys
-            .iter()
-            .filter(|key| known.is_none_or(|known| !known.contains_key(*key)))
-            .collect();
+        let unexpected: Vec<&String> = match (object.as_object(), schema["properties"].as_object())
+        {
+            (Some(given), Some(known)) => given
+                .keys()
+                .filter(|key| !known.contains_key(*key))
+                .collect(),
+            _ => Vec::new(),
+        };
         if unexpected.is_empty() {
             error
         } else {

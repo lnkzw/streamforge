@@ -1,12 +1,11 @@
 //! Request decoding and the blocking line-oriented serve loop.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 
 use command_api::{Command, CommandError, CommandHandler};
-use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Value, json};
 
 use crate::{ErrorCode, MAX_REQUEST_BYTES, PROTOCOL_VERSION, RequestId, Response, ResponseError};
@@ -112,13 +111,8 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
     };
     // `serde_json` keeps the last of duplicate keys; find them, so a
     // conflicting request fails instead of running with a guess.
-    let duplicate = duplicate_key(text);
-    // A key repeated at the top level (`params` too), or inside a field
-    // other than `params`.
-    let duplicate_top = duplicate
-        .as_ref()
-        .filter(|path| path.len() == 1 || path[0] != "params");
-    if duplicate_top.is_some_and(|path| path.first().is_some_and(|first| first == "id")) {
+    let duplicates = duplicate_keys(text);
+    if duplicates.id {
         // Which `id` to echo is unknown.
         return Err((None, invalid_request("duplicate key `id`")));
     }
@@ -134,7 +128,7 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
         None => return Err((None, invalid_request("missing `id`"))),
     };
 
-    if let Some(path) = duplicate_top {
+    if let Some(path) = &duplicates.envelope {
         let path = display_path(path);
         return Err((
             Some(id),
@@ -189,60 +183,84 @@ fn parse_request(line: &[u8]) -> Result<Request, RequestFailure> {
         id,
         command,
         params: object.remove("params"),
-        duplicate_param: duplicate
-            .filter(|path| path.len() > 1)
-            .map(|path| display_path(&path[1..])),
+        duplicate_param: duplicates.params.map(|path| display_path(&path[1..])),
     })
 }
 
-/// The path of the first duplicate key in `text` (valid JSON), e.g.
-/// `["params", "tones", "0", "gain_db"]`; array indices are numbers.
-fn duplicate_key(text: &str) -> Option<Vec<String>> {
-    let found = RefCell::new(None);
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    let check = DuplicateCheck {
-        path: Vec::new(),
-        found: &found,
-    };
-    // The text already parsed as JSON, so an error here is not expected;
-    // without a path, nothing is reported.
-    check.deserialize(&mut deserializer).ok()?;
-    found.into_inner()
+/// Repeated keys of a request, each kind reported on its own, so one never
+/// hides another: a repeated `id` decides how the request is answered.
+#[derive(Debug, Default, PartialEq)]
+struct Duplicates {
+    /// `id` occurs twice at the top level.
+    id: bool,
+    /// The first other key repeated at the top level (`params` too), or
+    /// inside a field other than `params`.
+    envelope: Option<Vec<Segment>>,
+    /// The first key repeated inside `params`, from `params` on.
+    params: Option<Vec<Segment>>,
 }
 
-/// `tones[0].gain_db` for `["tones", "0", "gain_db"]`.
-fn display_path(path: &[String]) -> String {
+/// One step of a path into a JSON value.
+#[derive(Debug, Clone, PartialEq)]
+enum Segment {
+    Key(String),
+    Index(usize),
+}
+
+impl Duplicates {
+    fn record(&mut self, path: &[Segment]) {
+        let key =
+            |segment: &Segment, name: &str| matches!(segment, Segment::Key(key) if key == name);
+        match path {
+            [only] if key(only, "id") => self.id = true,
+            [first, _, ..] if key(first, "params") => {
+                self.params.get_or_insert_with(|| path.to_vec());
+            }
+            _ => {
+                self.envelope.get_or_insert_with(|| path.to_vec());
+            }
+        }
+    }
+}
+
+/// The repeated keys in `text` (valid JSON).
+fn duplicate_keys(text: &str) -> Duplicates {
+    let mut walk = Walk::default();
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    // The text already parsed as JSON, so an error here is not expected;
+    // it would only end the search early.
+    let _ = DuplicateCheck { walk: &mut walk }.deserialize(&mut deserializer);
+    walk.found
+}
+
+/// `tones[0].gain_db`; a key that looks like a number stays a key (`map.0`).
+fn display_path(path: &[Segment]) -> String {
     let mut shown = String::new();
     for segment in path {
-        if segment.parse::<usize>().is_ok() {
-            shown.push('[');
-            shown.push_str(segment);
-            shown.push(']');
-        } else {
-            if !shown.is_empty() {
-                shown.push('.');
+        match segment {
+            Segment::Index(index) => shown.push_str(&format!("[{index}]")),
+            Segment::Key(key) => {
+                if !shown.is_empty() {
+                    shown.push('.');
+                }
+                shown.push_str(key);
             }
-            shown.push_str(segment);
         }
     }
     shown
 }
 
-/// Walks a JSON value and records the first key that repeats in an object.
-struct DuplicateCheck<'a> {
-    path: Vec<String>,
-    found: &'a RefCell<Option<Vec<String>>>,
+/// Where the walk is, and what it found.
+#[derive(Default)]
+struct Walk {
+    path: Vec<Segment>,
+    found: Duplicates,
 }
 
-impl DuplicateCheck<'_> {
-    fn child(&self, segment: String) -> Self {
-        let mut path = self.path.clone();
-        path.push(segment);
-        DuplicateCheck {
-            path,
-            found: self.found,
-        }
-    }
+/// Walks a JSON value and records the keys that repeat in an object; the
+/// path is copied only for a repeated key.
+struct DuplicateCheck<'a> {
+    walk: &'a mut Walk,
 }
 
 impl<'de> DeserializeSeed<'de> for DuplicateCheck<'_> {
@@ -285,12 +303,15 @@ impl<'de> Visitor<'de> for DuplicateCheck<'_> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        let mut index = 0usize;
-        while seq
-            .next_element_seed(self.child(index.to_string()))?
-            .is_some()
-        {
-            index += 1;
+        for index in 0.. {
+            self.walk.path.push(Segment::Index(index));
+            let element = seq.next_element_seed(DuplicateCheck {
+                walk: &mut *self.walk,
+            })?;
+            self.walk.path.pop();
+            if element.is_none() {
+                break;
+            }
         }
         Ok(())
     }
@@ -298,16 +319,16 @@ impl<'de> Visitor<'de> for DuplicateCheck<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         let mut keys = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            if self.found.borrow().is_some() {
-                // Reported already; read past the rest.
-                map.next_value::<IgnoredAny>()?;
-                continue;
+            let repeated = !keys.insert(key.clone());
+            self.walk.path.push(Segment::Key(key));
+            if repeated {
+                let path = self.walk.path.clone();
+                self.walk.found.record(&path);
             }
-            let child = self.child(key.clone());
-            if !keys.insert(key) {
-                *self.found.borrow_mut() = Some(child.path.clone());
-            }
-            map.next_value_seed(child)?;
+            map.next_value_seed(DuplicateCheck {
+                walk: &mut *self.walk,
+            })?;
+            self.walk.path.pop();
         }
         Ok(())
     }
@@ -425,5 +446,35 @@ mod tests {
     #[test]
     fn empty_input_is_eof() {
         assert!(read_all(b"", 4).is_empty());
+    }
+
+    #[test]
+    fn one_repeated_key_does_not_hide_another() {
+        let key = |name: &str| Segment::Key(name.to_owned());
+        assert_eq!(
+            duplicate_keys(r#"{"params":{"a":1,"a":2},"id":1,"id":2,"command":"x","command":"y"}"#),
+            Duplicates {
+                id: true,
+                envelope: Some(vec![key("command")]),
+                params: Some(vec![key("params"), key("a")]),
+            }
+        );
+        // A repeated `params` is the envelope's; a nested `id` is not the
+        // request's.
+        assert_eq!(
+            duplicate_keys(r#"{"id":1,"params":{"id":1,"id":2},"params":{}}"#),
+            Duplicates {
+                id: false,
+                envelope: Some(vec![key("params")]),
+                params: Some(vec![key("params"), key("id")]),
+            }
+        );
+        let found = duplicate_keys(r#"{"id":1,"a":[{"b":1},{"b":1,"b":2}]}"#).envelope;
+        assert_eq!(found, Some(vec![key("a"), Segment::Index(1), key("b")]));
+        assert_eq!(display_path(&found.unwrap_or_default()), "a[1].b");
+        // A key that looks like a number is still a key.
+        let found = duplicate_keys(r#"{"id":1,"map":{"0":1,"0":2}}"#).envelope;
+        assert_eq!(display_path(&found.unwrap_or_default()), "map.0");
+        assert_eq!(duplicate_keys(r#"{"id":1}"#), Duplicates::default());
     }
 }

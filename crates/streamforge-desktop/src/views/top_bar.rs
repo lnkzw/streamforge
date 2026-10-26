@@ -2,7 +2,7 @@
 //! save as), the transport (REC and LIVE with running timers) and the
 //! health summary, which opens the details and the activity log.
 
-use command_api::{RecordingState, StreamState};
+use command_api::{OutputHealth, RecordingState, StreamState};
 use eframe::egui;
 
 use crate::app::{DesktopApp, HEALTH_STALE};
@@ -12,7 +12,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{
     self, MenuItem, StatusLevel, TRANSPORT_WIDTH, Transport, TransportButton, TransportState,
 };
-use crate::workspace::{self, Shortcut, health_level, transport_state};
+use crate::workspace::{self, OutputPhase, Shortcut, health_level, transport_state};
 
 use super::{key_hint, with_keys};
 
@@ -162,27 +162,38 @@ impl DesktopApp {
     /// An output's transport state from whether it is open, its start
     /// command, the status's failure flag and its health reading.
     fn transport(&self, output: Transport, open: bool, failed: bool) -> TransportState {
-        let model = &self.model;
-        let age = model.health_age().unwrap_or_default();
-        let health = model.health.as_ref();
+        let health = self.model.health.as_ref();
         match output {
-            Transport::Record => transport_state(
+            Transport::Record => self.transport_of(
+                "start_recording",
                 open,
-                model.pending("start_recording"),
                 failed,
-                health
-                    .and_then(|h| h.recording.as_ref())
-                    .map(|output| (output, age)),
+                health.and_then(|h| h.recording.as_ref()),
             ),
-            Transport::Live => transport_state(
+            Transport::Live => self.transport_of(
+                "start_streaming",
                 open,
-                model.pending("start_streaming"),
                 failed,
-                health
-                    .and_then(|h| h.streaming.as_ref())
-                    .map(|output| (output, age)),
+                health.and_then(|h| h.streaming.as_ref()),
             ),
         }
+    }
+
+    /// [`Self::transport`] for one output's health type.
+    fn transport_of<S: OutputPhase>(
+        &self,
+        start: &str,
+        open: bool,
+        failed: bool,
+        health: Option<&OutputHealth<S>>,
+    ) -> TransportState {
+        let age = self.model.health_age().unwrap_or_default();
+        transport_state(
+            open,
+            self.model.pending(start),
+            failed,
+            health.map(|output| (output, age)),
+        )
     }
 
     /// On air: the output is open and has not failed. A start still

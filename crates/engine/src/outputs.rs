@@ -72,7 +72,9 @@ impl Engine {
                 .map(|(output, state)| OutputHealth {
                     target: output.streamer.target().to_owned(),
                     elapsed_ms: elapsed_ms(output.t0),
-                    running: state != StreamState::Failed,
+                    // `stopped` comes only after the stop request; not running
+                    // either way.
+                    running: !matches!(state, StreamState::Failed | StreamState::Stopped),
                     state,
                     video_encoder: output.streamer.video_encoder().clone(),
                     counters: output.streamer.live(),

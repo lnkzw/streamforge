@@ -41,7 +41,7 @@ enum Commands {
     Record {
         /// Plain .mkv file name, created in --output-dir; never overwritten.
         #[arg(long)]
-        file: String,
+        file_name: String,
         /// Recording length in milliseconds.
         #[arg(long, default_value_t = 10_000)]
         duration_ms: u64,
@@ -63,13 +63,13 @@ enum Commands {
         /// Environment variable holding the stream key (must be set if given; without this
         /// flag, STREAMFORGE_STREAM_KEY is used if set).
         #[arg(long)]
-        key_env: Option<String>,
+        stream_key_env: Option<String>,
         /// Streaming length in milliseconds.
         #[arg(long, default_value_t = 10_000)]
         duration_ms: u64,
         /// Video bit rate in kbit/s (constant).
         #[arg(long)]
-        bitrate_kbps: Option<u32>,
+        video_bitrate_kbps: Option<u32>,
         /// H.264 encoder for the stream (and the recording): auto, software or hardware.
         #[arg(long)]
         video_encoder: Option<String>,
@@ -103,23 +103,23 @@ enum Commands {
         /// Run time in milliseconds (100..=60000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
-        /// Add the reference scene's live screen layer (the --source-id source, else the
+        /// Add the reference scene's live screen layer (the --capture-target-id target, else the
         /// system picker).
         #[arg(long)]
         screen: bool,
-        /// With --screen: capture this source from `capture sources` (no picker).
+        /// With --screen: capture this target from `capture targets` (no picker).
         #[arg(long, requires = "screen")]
-        source_id: Option<String>,
-        /// With --screen: offered source type (monitor, window, virtual). Repeatable.
-        #[arg(long = "source", requires = "screen")]
-        sources: Vec<String>,
+        capture_target_id: Option<String>,
+        /// With --screen: offered target kind (monitor, window, virtual). Repeatable.
+        #[arg(long = "target-kind", requires = "screen")]
+        target_kinds: Vec<String>,
         /// With --screen: cursor mode (hidden, embedded, metadata).
         #[arg(long, requires = "screen")]
-        cursor: Option<String>,
+        cursor_mode: Option<String>,
         /// Write the last composited frame to this new .ppm file. A plain file
         /// name (no directories), created in --output-dir; never overwritten.
         #[arg(long)]
-        snapshot: Option<String>,
+        snapshot_file_name: Option<String>,
     },
 }
 
@@ -141,22 +141,22 @@ enum CaptureCommand {
     /// List audio input devices.
     Inputs,
     /// List monitors and windows that can be captured by id (where the platform allows it).
-    Sources,
-    /// Capture a screen or window and report diagnostics: the --source-id source, or the one
+    Targets,
+    /// Capture a screen or window and report diagnostics: the --capture-target-id target, or the one
     /// chosen in the system dialog.
     Screen {
         /// Probe duration in milliseconds (100..=60000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
-        /// Source id from `capture sources`.
+        /// Capture target id from `capture targets`.
         #[arg(long)]
-        source_id: Option<String>,
-        /// Offered source type: monitor, window or virtual. Repeatable; default monitor and window.
-        #[arg(long = "source")]
-        sources: Vec<String>,
+        capture_target_id: Option<String>,
+        /// Offered target kind: monitor, window or virtual. Repeatable; default monitor and window.
+        #[arg(long = "target-kind")]
+        target_kinds: Vec<String>,
         /// Cursor mode: hidden, embedded (default) or metadata.
         #[arg(long)]
-        cursor: Option<String>,
+        cursor_mode: Option<String>,
     },
     /// Capture an audio input and report format, levels and drops. No audio is stored.
     Audio {
@@ -219,7 +219,7 @@ fn main() -> Result<ExitCode> {
             }
         },
         Commands::Record {
-            file,
+            file_name,
             duration_ms,
             video_encoder,
             sources,
@@ -228,7 +228,7 @@ fn main() -> Result<ExitCode> {
                 return Ok(failed);
             }
             let mut params = Map::new();
-            params.insert("file_name".into(), file.into());
+            params.insert("file_name".into(), file_name.into());
             if let Some(encoder) = video_encoder {
                 params.insert("video_encoder".into(), encoder.into());
             }
@@ -236,26 +236,26 @@ fn main() -> Result<ExitCode> {
         }
         Commands::Stream {
             url,
-            key_env,
+            stream_key_env,
             duration_ms,
-            bitrate_kbps,
+            video_bitrate_kbps,
             video_encoder,
             reconnect_attempts,
             record,
             sources,
         } => {
-            let explicit = key_env.is_some();
-            let key_env = key_env.unwrap_or_else(|| DEFAULT_KEY_ENV.to_owned());
-            let key = match std::env::var(&key_env) {
+            let explicit = stream_key_env.is_some();
+            let stream_key_env = stream_key_env.unwrap_or_else(|| DEFAULT_KEY_ENV.to_owned());
+            let key = match std::env::var(&stream_key_env) {
                 Ok(key) => key,
                 // A named but missing variable is a mistake, not "no key".
                 Err(std::env::VarError::NotPresent) if explicit => {
-                    eprintln!("error: --key-env names ${key_env}, which is not set");
+                    eprintln!("error: --stream-key-env names ${stream_key_env}, which is not set");
                     return Ok(ExitCode::FAILURE);
                 }
                 Err(std::env::VarError::NotPresent) => String::new(),
                 Err(std::env::VarError::NotUnicode(_)) => {
-                    eprintln!("error: ${key_env} is not valid UTF-8");
+                    eprintln!("error: ${stream_key_env} is not valid UTF-8");
                     return Ok(ExitCode::FAILURE);
                 }
             };
@@ -264,7 +264,7 @@ fn main() -> Result<ExitCode> {
             if !key.is_empty() {
                 stream_params.insert("stream_key".into(), key.into());
             }
-            if let Some(kbps) = bitrate_kbps {
+            if let Some(kbps) = video_bitrate_kbps {
                 stream_params.insert("video_bitrate_kbps".into(), kbps.into());
             }
             if let Some(attempts) = reconnect_attempts {
@@ -276,9 +276,9 @@ fn main() -> Result<ExitCode> {
             if let Some(failed) = set_up_from(&mut engine, &sources) {
                 return Ok(failed);
             }
-            let record_params = record.map(|file| {
+            let record_params = record.map(|file_name| {
                 let mut params = Map::new();
-                params.insert("file_name".into(), file.into());
+                params.insert("file_name".into(), file_name.into());
                 if let Some(encoder) = &video_encoder {
                     params.insert("video_encoder".into(), encoder.clone().into());
                 }
@@ -294,10 +294,10 @@ fn main() -> Result<ExitCode> {
         Commands::Compose {
             duration_ms,
             screen,
-            source_id,
-            sources,
-            cursor,
-            snapshot,
+            capture_target_id,
+            target_kinds,
+            cursor_mode,
+            snapshot_file_name,
         } => {
             let mut params = Map::new();
             if let Some(duration_ms) = duration_ms {
@@ -306,17 +306,17 @@ fn main() -> Result<ExitCode> {
             if screen {
                 params.insert("screen".into(), true.into());
             }
-            if let Some(source_id) = source_id {
-                params.insert("source_id".into(), source_id.into());
+            if let Some(capture_target_id) = capture_target_id {
+                params.insert("capture_target_id".into(), capture_target_id.into());
             }
-            if !sources.is_empty() {
-                params.insert("source_types".into(), sources.into());
+            if !target_kinds.is_empty() {
+                params.insert("target_kinds".into(), target_kinds.into());
             }
-            if let Some(cursor) = cursor {
-                params.insert("cursor".into(), cursor.into());
+            if let Some(cursor_mode) = cursor_mode {
+                params.insert("cursor_mode".into(), cursor_mode.into());
             }
-            if let Some(snapshot) = snapshot {
-                params.insert("snapshot_path".into(), snapshot.into());
+            if let Some(snapshot_file_name) = snapshot_file_name {
+                params.insert("snapshot_file_name".into(), snapshot_file_name.into());
             }
             run_command(&mut engine, "probe_composite", params)
         }
@@ -449,24 +449,24 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
     let name = match command {
         CaptureCommand::Caps => "get_capture_capabilities",
         CaptureCommand::Inputs => "list_audio_inputs",
-        CaptureCommand::Sources => "list_screen_sources",
+        CaptureCommand::Targets => "list_capture_targets",
         CaptureCommand::Screen {
             duration_ms,
-            source_id,
-            sources,
-            cursor,
+            capture_target_id,
+            target_kinds,
+            cursor_mode,
         } => {
             if let Some(duration_ms) = duration_ms {
                 params.insert("duration_ms".into(), duration_ms.into());
             }
-            if let Some(source_id) = source_id {
-                params.insert("source_id".into(), source_id.into());
+            if let Some(capture_target_id) = capture_target_id {
+                params.insert("capture_target_id".into(), capture_target_id.into());
             }
-            if !sources.is_empty() {
-                params.insert("source_types".into(), sources.into());
+            if !target_kinds.is_empty() {
+                params.insert("target_kinds".into(), target_kinds.into());
             }
-            if let Some(cursor) = cursor {
-                params.insert("cursor".into(), cursor.into());
+            if let Some(cursor_mode) = cursor_mode {
+                params.insert("cursor_mode".into(), cursor_mode.into());
             }
             "probe_screen_capture"
         }
@@ -483,26 +483,26 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
     (name, params)
 }
 
-/// Read for the stream key when `--key-env` is not given.
+/// Read for the stream key when `--stream-key-env` is not given.
 const DEFAULT_KEY_ENV: &str = "STREAMFORGE_STREAM_KEY";
 
 /// Source flags shared by `record` and `stream`: a screen source in the
 /// active scene, and the engine's mixer channels for this process.
 #[derive(clap::Args, Debug)]
 struct SourceArgs {
-    /// Add a live screen source to the scene (the --source-id source, else the system
+    /// Add a live screen source to the scene (the --capture-target-id target, else the system
     /// picker), fitted into 1152x648 at the lower right, at 90 % opacity.
     #[arg(long)]
     screen: bool,
-    /// With --screen: capture this source from `capture sources` (no picker).
+    /// With --screen: capture this target from `capture targets` (no picker).
     #[arg(long, requires = "screen")]
-    source_id: Option<String>,
-    /// With --screen: offered source type (monitor, window, virtual). Repeatable.
-    #[arg(long = "source", requires = "screen")]
-    source_types: Vec<String>,
+    capture_target_id: Option<String>,
+    /// With --screen: offered target kind (monitor, window, virtual). Repeatable.
+    #[arg(long = "target-kind", requires = "screen")]
+    target_kinds: Vec<String>,
     /// With --screen: cursor mode (hidden, embedded, metadata).
     #[arg(long, requires = "screen")]
-    cursor: Option<String>,
+    cursor_mode: Option<String>,
     /// Live input as NAME or NAME=GAIN_DB, as a mixer channel. Repeatable. A device that is
     /// not found leaves its channel silent (with a warning).
     #[arg(long = "input")]
@@ -598,14 +598,14 @@ impl SourceArgs {
         ] {
             params.insert(field.into(), value.into());
         }
-        if let Some(source_id) = &self.source_id {
-            params.insert("source_id".into(), source_id.clone().into());
+        if let Some(capture_target_id) = &self.capture_target_id {
+            params.insert("capture_target_id".into(), capture_target_id.clone().into());
         }
-        if !self.source_types.is_empty() {
-            params.insert("source_types".into(), self.source_types.clone().into());
+        if !self.target_kinds.is_empty() {
+            params.insert("target_kinds".into(), self.target_kinds.clone().into());
         }
-        if let Some(cursor) = &self.cursor {
-            params.insert("cursor".into(), cursor.clone().into());
+        if let Some(cursor_mode) = &self.cursor_mode {
+            params.insert("cursor_mode".into(), cursor_mode.clone().into());
         }
         Some(params)
     }
@@ -637,7 +637,7 @@ fn add_screen_source(
         return Ok(());
     }
     let scene_id = match start(engine, "list_scenes", Map::new())? {
-        CommandOutput::SceneList(scenes) => scenes.active_id,
+        CommandOutput::SceneList(scenes) => scenes.active_scene_id,
         other => unreachable!("list_scenes returns the scene list, not {other:?}"),
     };
     if let Some(params) = sources.screen_source(&scene_id) {
@@ -655,7 +655,7 @@ fn set_up_mixer(engine: &mut Engine, setup: MixerSetup) -> Result<(), command_ap
         };
         for channel in configured {
             let mut params = Map::new();
-            params.insert("id".into(), channel.spec.id.into());
+            params.insert("channel_id".into(), channel.spec.id.into());
             start(engine, "remove_channel", params)?;
         }
         for params in channels {
@@ -664,7 +664,7 @@ fn set_up_mixer(engine: &mut Engine, setup: MixerSetup) -> Result<(), command_ap
     }
     if let Some(gain) = setup.master_gain_db {
         let mut params = Map::new();
-        params.insert("id".into(), command_api::PROGRAM_BUS_ID.into());
+        params.insert("bus_id".into(), command_api::PROGRAM_BUS_ID.into());
         params.insert("gain_db".into(), gain);
         start(engine, "update_bus", params)?;
     }
@@ -876,27 +876,30 @@ mod tests {
     fn screen_arguments_become_protocol_params() {
         let (name, params) = capture_request(CaptureCommand::Screen {
             duration_ms: Some(1500),
-            source_id: None,
-            sources: vec!["window".into()],
-            cursor: Some("hidden".into()),
+            capture_target_id: None,
+            target_kinds: vec!["window".into()],
+            cursor_mode: Some("hidden".into()),
         });
         assert_eq!(name, "probe_screen_capture");
         assert_eq!(
             Value::Object(params),
-            serde_json::json!({"duration_ms": 1500, "source_types": ["window"], "cursor": "hidden"})
+            serde_json::json!({"duration_ms": 1500, "target_kinds": ["window"], "cursor_mode": "hidden"})
         );
         let (_, params) = capture_request(CaptureCommand::Screen {
             duration_ms: None,
-            source_id: Some("monitor:1".into()),
-            sources: Vec::new(),
-            cursor: None,
+            capture_target_id: Some("monitor:1".into()),
+            target_kinds: Vec::new(),
+            cursor_mode: None,
         });
         let params = Value::Object(params);
-        assert_eq!(params, serde_json::json!({"source_id": "monitor:1"}));
+        assert_eq!(
+            params,
+            serde_json::json!({"capture_target_id": "monitor:1"})
+        );
         assert!(Command::decode("probe_screen_capture", Some(&params)).is_ok());
         assert_eq!(
-            capture_request(CaptureCommand::Sources).0,
-            "list_screen_sources"
+            capture_request(CaptureCommand::Targets).0,
+            "list_capture_targets"
         );
     }
 
@@ -972,9 +975,9 @@ mod tests {
     fn source_args(inputs: &[&str], tones: &[&str], no_tone: bool) -> SourceArgs {
         SourceArgs {
             screen: false,
-            source_id: None,
-            source_types: Vec::new(),
-            cursor: None,
+            capture_target_id: None,
+            target_kinds: Vec::new(),
+            cursor_mode: None,
             inputs: inputs.iter().map(|&input| input.to_owned()).collect(),
             tones: tones.iter().map(|&tone| tone.to_owned()).collect(),
             no_tone,
@@ -987,15 +990,15 @@ mod tests {
         assert_eq!(source_args(&[], &[], false).screen_source("scene_a"), None);
         let mut args = source_args(&[], &[], false);
         args.screen = true;
-        args.source_id = Some("monitor:1".to_owned());
-        args.source_types = vec!["window".to_owned()];
+        args.capture_target_id = Some("monitor:1".to_owned());
+        args.target_kinds = vec!["window".to_owned()];
         let params = args.screen_source("scene_a").expect("params");
         assert_eq!(
             Value::Object(params.clone()),
             serde_json::json!({
                 "scene_id": "scene_a", "name": "Screen", "kind": "screen",
                 "x": 704.0, "y": 368.0, "width": 1152.0, "height": 648.0, "opacity": 0.9,
-                "source_id": "monitor:1", "source_types": ["window"],
+                "capture_target_id": "monitor:1", "target_kinds": ["window"],
             })
         );
         assert!(Command::decode("add_source", Some(&Value::Object(params))).is_ok());
@@ -1072,5 +1075,89 @@ mod tests {
         assert_eq!(name, "probe_audio_capture");
         assert!(params.is_empty());
         assert!(Command::decode(name, Some(&Value::Object(params))).is_ok());
+    }
+    #[test]
+    fn renamed_cli_flags_are_accepted_without_aliases() {
+        for args in [
+            vec![
+                "streamforge",
+                "record",
+                "--file-name",
+                "take.mkv",
+                "--screen",
+                "--capture-target-id",
+                "monitor:1",
+                "--target-kind",
+                "monitor",
+                "--target-kind",
+                "window",
+                "--cursor-mode",
+                "hidden",
+            ],
+            vec![
+                "streamforge",
+                "stream",
+                "--url",
+                "rtmp://localhost/live",
+                "--stream-key-env",
+                "TEST_KEY",
+                "--video-bitrate-kbps",
+                "4500",
+                "--record",
+                "take.mkv",
+            ],
+            vec![
+                "streamforge",
+                "compose",
+                "--snapshot-file-name",
+                "frame.ppm",
+            ],
+            vec!["streamforge", "capture", "targets"],
+            vec![
+                "streamforge",
+                "capture",
+                "screen",
+                "--capture-target-id",
+                "monitor:1",
+                "--target-kind",
+                "window",
+                "--cursor-mode",
+                "hidden",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+        }
+        for args in [
+            vec!["streamforge", "record", "--file", "take.mkv"],
+            vec![
+                "streamforge",
+                "stream",
+                "--url",
+                "rtmp://localhost/live",
+                "--key-env",
+                "TEST_KEY",
+            ],
+            vec![
+                "streamforge",
+                "stream",
+                "--url",
+                "rtmp://localhost/live",
+                "--bitrate-kbps",
+                "4500",
+            ],
+            vec!["streamforge", "compose", "--snapshot", "frame.ppm"],
+            vec!["streamforge", "capture", "sources"],
+            vec![
+                "streamforge",
+                "capture",
+                "screen",
+                "--source-id",
+                "monitor:1",
+            ],
+            vec!["streamforge", "capture", "screen", "--source", "window"],
+            vec!["streamforge", "capture", "screen", "--cursor", "hidden"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
     }
 }

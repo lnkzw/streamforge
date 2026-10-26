@@ -88,8 +88,8 @@ impl SceneCollection {
         SceneList {
             canvas_width: CANVAS_WIDTH,
             canvas_height: CANVAS_HEIGHT,
-            active: active.name.clone(),
-            active_id: active.id.clone(),
+            active_scene_name: active.name.clone(),
+            active_scene_id: active.id.clone(),
             scenes: self.scenes.clone(),
         }
     }
@@ -124,7 +124,7 @@ impl SceneCollection {
             &Kind {
                 what: "scene",
                 id_field: "scene_id",
-                name_field: "scene",
+                name_field: "scene_name",
             },
             |scene| (&scene.id, &scene.name),
         )
@@ -142,7 +142,7 @@ impl SceneCollection {
                     let index = spec.sources.iter().position(|source| source.id == *id)?;
                     Some((scene, index))
                 })
-                .ok_or_else(|| not_found_id("source", "id", id))?;
+                .ok_or_else(|| not_found_id("source", "source_id", id))?;
             // A scene that does not exist does not hold it either: the
             // reference disagrees (`invalid_params`), the source exists.
             if let Some(wanted) = &source.scene
@@ -165,7 +165,7 @@ impl SceneCollection {
         }
         let (Some(scene), Some(name)) = (&source.scene, &source.name) else {
             return Err(mismatch(
-                "no source given: pass its `id`, or its scene and name",
+                "no source given: pass `source_id`, or `scene_id`/`scene_name` and `source_name`",
             ));
         };
         let scene = self.scene_index(scene)?;
@@ -173,7 +173,7 @@ impl SceneCollection {
             .sources
             .iter()
             .position(|source| source.name == *name)
-            .ok_or_else(|| not_found("source", "name", name))?;
+            .ok_or_else(|| not_found("source", "source_name", name))?;
         Ok((scene, index))
     }
 
@@ -283,7 +283,7 @@ impl SceneCollection {
     }
 
     /// Capture screen source `source` from `screen` from now on.
-    pub fn set_screen_source_id(
+    pub fn set_capture_target_id(
         &mut self,
         source: &SourceRef,
         screen: &str,
@@ -291,8 +291,10 @@ impl SceneCollection {
         let (scene, index) = self.source_index(source)?;
         let spec = &mut self.scenes[scene].sources[index];
         match &mut spec.kind {
-            SourceKind::Screen { source_id, .. } => {
-                *source_id = Some(screen.to_owned());
+            SourceKind::Screen {
+                capture_target_id, ..
+            } => {
+                *capture_target_id = Some(screen.to_owned());
                 Ok(())
             }
             _ => Err(CommandError::new(
@@ -478,7 +480,7 @@ mod tests {
     fn default_scene_matches_the_reference_scene() {
         let collection = SceneCollection::new();
         let list = collection.list();
-        assert_eq!(list.active, DEFAULT_SCENE);
+        assert_eq!(list.active_scene_name, DEFAULT_SCENE);
         let names: Vec<_> = list.scenes[0].sources.iter().map(|s| &s.name).collect();
         assert_eq!(names, ["color_bars", "overlay"]);
         let update = build(
@@ -584,7 +586,7 @@ mod tests {
     fn scenes_and_sources_have_stable_ids_and_are_found_by_id_or_name() {
         let mut collection = SceneCollection::new();
         let list = collection.list();
-        assert_eq!(list.active_id, DEFAULT_SCENE_ID);
+        assert_eq!(list.active_scene_id, DEFAULT_SCENE_ID);
         let builtin: Vec<_> = list.scenes[0].sources.iter().map(|s| &s.id).collect();
         assert_eq!(builtin, [BUILTIN_BARS, BUILTIN_OVERLAY]);
 
@@ -625,7 +627,7 @@ mod tests {
                 name: Some("Show".to_owned()),
             })
             .expect("activate by both");
-        assert_eq!(collection.list().active, "Show");
+        assert_eq!(collection.list().active_scene_name, "Show");
 
         // An id and a name that disagree are refused, not resolved by id.
         for wrong in [
@@ -656,7 +658,7 @@ mod tests {
         );
         let unknown = collection.source(&SourceRef::id("src_gone")).unwrap_err();
         assert_eq!(unknown.code, ErrorCode::NotFound);
-        assert_eq!(unknown.details, Some(json!({"id": "src_gone"})));
+        assert_eq!(unknown.details, Some(json!({"source_id": "src_gone"})));
 
         // Ids are random, not derived from names: adding a removed source's
         // name again gives a new id.
@@ -679,9 +681,9 @@ mod tests {
             (
                 "screen",
                 SourceKind::Screen {
-                    source_types: vec![capture_api::VideoSourceKind::Monitor],
-                    cursor: capture_api::CursorMode::Embedded,
-                    source_id: None,
+                    target_kinds: vec![capture_api::VideoSourceKind::Monitor],
+                    cursor_mode: capture_api::CursorMode::Embedded,
+                    capture_target_id: None,
                 },
             ),
         ] {

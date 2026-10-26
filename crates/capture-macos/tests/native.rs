@@ -12,11 +12,11 @@ use capture_api::{
 };
 use capture_macos::SckCapture;
 
-fn selection(source: Option<&str>, cursor: CursorMode) -> ScreenSelection {
+fn selection(source: Option<&str>, cursor_mode: CursorMode) -> ScreenSelection {
     ScreenSelection {
-        source_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
-        cursor,
-        source: source.map(str::to_owned),
+        target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
+        cursor_mode,
+        capture_target_id: source.map(str::to_owned),
     }
 }
 
@@ -43,7 +43,7 @@ fn capabilities_describe_named_sources_without_a_picker() {
     println!("{capabilities:#?}");
     assert_eq!(capabilities.platform, "macos");
     let screen = &capabilities.screen;
-    assert!(screen.available && screen.source_list && !screen.picker);
+    assert!(screen.available && screen.target_list && !screen.picker);
     assert!(!capabilities.audio.available, "audio comes from cpal");
 }
 

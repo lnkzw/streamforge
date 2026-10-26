@@ -41,7 +41,7 @@ Acceptance:
 - Manual test captures a selected screen/window:
   - [x] Monitor capture verified 2026-10-19 on Hyprland 0.56.2 / xdph 1.4.1: 2560×1440 BGRx, PTS present, 0 drops.
   - [x] Picker cancellation verified 2026-10-19: `cancelled`, exit code 1.
-  - [ ] Window capture: pending. A run with `--source window` delivered a monitor (2560×1440, 252 frames in 3 s, 84 FPS, 0 drops) because xdph's picker offers every type. The report now warns about such mismatches. Repeat the run and pick an entry in the picker's window tab.
+  - [ ] Window capture: pending. A run with `--target-kind window` delivered a monitor (2560×1440, 252 frames in 3 s, 84 FPS, 0 drops) because xdph's picker offers every type. The report now warns about such mismatches. Repeat the run and pick an entry in the picker's window tab.
 - [x] Capture diagnostics report dimensions, timestamps (explicit time base), FPS, frame intervals and drops: sequence gaps, buffer starvation, empty and corrupted buffers, and the audio frame deficit.
 - [x] Unsupported capabilities fail with a useful message:
   - `unsupported` with `details.available` for source types and cursor modes the portal does not offer.
@@ -202,10 +202,10 @@ Delivered in steps (ADR 0009):
 
 - [x] Windows capture/audio backend:
   - [x] Audio through `cpal` (WASAPI), converted to 48 kHz stereo (M9a).
-  - [x] Screen capture through Windows.Graphics.Capture: monitors and windows named by `list_screen_sources`, verified on the CI runner (M9b, ADR 0010). A system picker is not offered yet.
+  - [x] Screen capture through Windows.Graphics.Capture: monitors and windows named by `list_capture_targets`, verified on the CI runner (M9b, ADR 0010). A system picker is not offered yet.
 - [x] macOS capture/audio backend:
   - [x] Audio through `cpal` (CoreAudio) (M9a).
-  - [x] Screen capture through ScreenCaptureKit: displays and windows named by `list_screen_sources`, verified on the CI runner, whose image allows screen recording (M9b, ADR 0010). Without the permission, capture fails with a structured `permission_denied`.
+  - [x] Screen capture through ScreenCaptureKit: displays and windows named by `list_capture_targets`, verified on the CI runner, whose image allows screen recording (M9b, ADR 0010). Without the permission, capture fails with a structured `permission_denied`.
 - [x] Recording and streaming on Windows and macOS: FFmpeg linked on every OS (M9a).
 - [x] Hardware encoding paths where beneficial (M9c, ADR 0011): `video_encoder` (`auto` by default) tries VAAPI or NVENC (Linux), NVENC, Quick Sync or AMF (Windows), VideoToolbox (macOS), then libx264. Verified with VAAPI on an AMD GPU (half the CPU time of libx264 for the reference recording); without a GPU on the CI runners, only the fallback and error paths are tested there.
 - [x] Document capability matrix and run platform CI (`docs/platforms.md`): FFmpeg on all three runners; recording, streaming and acceptance tests run natively on each.
@@ -221,10 +221,10 @@ From the architecture assessment (`docs/architecture/CURRENT_STATE_ASSESSMENT.md
 - [x] Steps 0–2: live counters in compositor, mixer and outputs, the `get_health` command, a truthful `get_status` (`media_engine_ready`, `pipeline_running`), CLI progress lines, stale documentation fixed (ADR 0012).
 - [x] Step 3: health in the desktop UI: a health strip (outputs, render and mix trouble, ended captures), and each screen source's capture state, frame age and a restart button.
 - [x] Step 4: capture stream state (`running`, or `ended` with a reason) from every backend, shown in `get_health` (`captures`). Stalls show through the frame age, not as a state. Verified on the Windows runner by closing a captured window (ADR 0013).
-- [x] Step 5: `restart_source` without stopping outputs, for screen sources with a running capture, optionally on another `source_id` (a closed window's id does not come back). Picker sources only while no output is open, which on Linux means every screen source (ADR 0013).
+- [x] Step 5: `restart_source` without stopping outputs, for screen sources with a running capture, optionally on another `capture_target_id` (a closed window's id does not come back). Picker sources only while no output is open, which on Linux means every screen source (ADR 0013).
 - [x] Step 6: versioned project file (save, load, validate; atomic write; no secrets).
   - [x] 6a: stable scene and source ids (`scene_…`, `src_…`); commands take an id or a name (ADR 0014).
-  - [x] 6b: `save_project`, `load_project`, `validate_project` in a project directory set at start (`--project-dir`), `set_screen_source` for loaded screen sources, `streamforge project validate` (ADR 0015). No desktop UI for projects yet.
+  - [x] 6b: `save_project`, `load_project`, `validate_project` in a project directory set at start (`--project-dir`), `set_capture_target` for loaded screen sources, `streamforge project validate` (ADR 0015). No desktop UI for projects yet.
 - [x] Step 7: measurement harness (`streamforge-bench`): render, drop and CPU figures for one and two outputs, with and without health polling; baseline in `docs/testing.md`, informational CI job on all three runners.
 
 Acceptance:
@@ -279,7 +279,7 @@ Linux first; Windows and macOS follow with tests on real machines.
 - [ ] Protocol review before the freeze: the breaking changes still wanted (e.g. `media_engine_ready`, the legacy `screen: true` output layer, the name `source_id` for capture targets). From 0.1.0 on, the versioning policy in `docs/protocol.md` applies.
   - [x] Step 1: review of the whole surface, decisions in ADR 0018 (2026-10-26).
   - [x] Step 2a: legacy, state and strictness: `media_engine_ready` and the output screen layer removed, one state per output in `get_status` and `get_health`, destructive flags, one file name rule on every system, repeated keys refused, `details.unexpected` for every command.
-  - [ ] Step 2b: names (capture targets, `<entity>_id`/`<entity>_name` references, explicit recording tracks, CLI flags).
+  - [x] Step 2b: names (capture targets, `<entity>_id`/`<entity>_name` references, explicit recording tracks, CLI flags).
   - [ ] Step 2c: report shapes (`audio_tracks`, nested `pipeline`, embedded errors, units, fractional frame rates), then wire-shape tests on every result.
 - [ ] Soak test on the development machine, after the UI changes: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end.
 - [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.

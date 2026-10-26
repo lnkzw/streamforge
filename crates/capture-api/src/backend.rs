@@ -75,7 +75,7 @@ pub trait CaptureBackend {
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError>;
 
     /// Screen sources that can be captured by id, for backends whose
-    /// capability has `source_list`; the default has none.
+    /// capability has `target_list`; the default has none.
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
         Err(CaptureError::unsupported(
             "this capture backend cannot list screen sources",
@@ -300,9 +300,9 @@ mod tests {
         let err = backend
             .probe_screen(&ScreenCaptureRequest {
                 selection: ScreenSelection {
-                    source_kinds: vec![VideoSourceKind::Monitor],
-                    cursor: CursorMode::Embedded,
-                    source: None,
+                    target_kinds: vec![VideoSourceKind::Monitor],
+                    cursor_mode: CursorMode::Embedded,
+                    capture_target_id: None,
                 },
                 duration: DEFAULT_PROBE_DURATION,
             })

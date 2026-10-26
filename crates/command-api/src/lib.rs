@@ -92,7 +92,7 @@ pub enum Command {
     /// List audio output devices, for the monitor.
     ListAudioOutputs,
     /// List screen sources that can be captured by id (no picker).
-    ListScreenSources,
+    ListCaptureTargets,
     /// Capture a screen source (named or user-picked) briefly and report diagnostics.
     ProbeScreenCapture(ScreenCaptureRequest),
     /// Capture an audio input briefly and report diagnostics; no audio is stored.
@@ -125,13 +125,13 @@ pub enum Command {
     RestartSource {
         source: SourceRef,
         /// Capture this screen source from now on (the scene keeps it).
-        source_id: Option<String>,
+        capture_target_id: Option<String>,
     },
     /// Choose what a screen source captures while it has no running
     /// capture (e.g. after loading a project, which does not store it).
-    SetScreenSource {
+    SetCaptureTarget {
         source: SourceRef,
-        source_id: String,
+        capture_target_id: String,
     },
     /// List the project files in the project directory.
     ListProjects,
@@ -195,7 +195,7 @@ pub enum CommandOutput {
     CaptureCapabilities(CaptureCapabilities),
     AudioInputs(AudioInputList),
     AudioOutputs(AudioOutputList),
-    ScreenSources(ScreenSourceList),
+    CaptureTargets(CaptureTargetList),
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
@@ -227,10 +227,10 @@ pub struct AudioOutputList {
     pub outputs: Vec<AudioOutput>,
 }
 
-/// Result of `list_screen_sources`.
+/// Result of `list_capture_targets`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ScreenSourceList {
-    pub sources: Vec<ScreenSource>,
+pub struct CaptureTargetList {
+    pub targets: Vec<ScreenSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

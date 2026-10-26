@@ -27,25 +27,26 @@ fn a_recording_takes_its_profiles_mix_and_switches_live() {
     ok(engine
         .request(r#"{"id":1,"command":"add_bus","params":{"name":"Quiet","assign_db":null}}"#));
     ok(engine.request(
-        r#"{"id":2,"command":"set_send","params":{"channel":"Tone","bus":"Quiet","enabled":true,"level_db":-20}}"#,
+        r#"{"id":2,"command":"set_send","params":{"channel_name":"Tone","bus_name":"Quiet","enabled":true,"level_db":-20}}"#,
     ));
     let set = ok(engine.request(
-        r#"{"id":3,"command":"set_output_profile","params":{"output":"recording","mix_bus":"Quiet"}}"#,
+        r#"{"id":3,"command":"set_output_profile","params":{"output":"recording","bus_name":"Quiet"}}"#,
     ));
     assert_eq!(set["applied_now"], serde_json::json!([]), "{set}");
     let quiet = set["recording"]["mix"].as_str().expect("bus id").to_owned();
     // A profile's bus cannot be removed.
-    let removed = engine.request(r#"{"id":4,"command":"remove_bus","params":{"name":"Quiet"}}"#);
+    let removed =
+        engine.request(r#"{"id":4,"command":"remove_bus","params":{"bus_name":"Quiet"}}"#);
     assert_eq!(removed["error"]["code"], "invalid_state", "{removed}");
 
     ok(engine.request(r#"{"id":5,"command":"start_recording","params":{"file_name":"mix.mkv"}}"#));
     let mixer = ok(engine.request(r#"{"id":6,"command":"get_mixer"}"#));
-    assert_eq!(mixer["outputs"][0]["bus"], quiet.as_str(), "{mixer}");
+    assert_eq!(mixer["outputs"][0]["bus_id"], quiet.as_str(), "{mixer}");
     assert_eq!(mixer["outputs"][0]["running"], true);
     std::thread::sleep(SPAN);
     // The new mix applies now; the encoder would wait for the next start.
     let set = ok(engine.request(
-        r#"{"id":7,"command":"set_output_profile","params":{"output":"recording","mix_bus":"Program","video_encoder":"software"}}"#,
+        r#"{"id":7,"command":"set_output_profile","params":{"output":"recording","bus_name":"Program","video_encoder":"software"}}"#,
     ));
     assert_eq!(set["applied_now"], serde_json::json!(["mix"]), "{set}");
     assert_eq!(
@@ -54,7 +55,7 @@ fn a_recording_takes_its_profiles_mix_and_switches_live() {
         "{set}"
     );
     let mixer = ok(engine.request(r#"{"id":8,"command":"get_mixer"}"#));
-    assert_eq!(mixer["outputs"][0]["bus"], "bus_program", "{mixer}");
+    assert_eq!(mixer["outputs"][0]["bus_id"], "bus_program", "{mixer}");
     std::thread::sleep(SPAN);
     ok(engine.request(r#"{"id":9,"command":"stop_recording"}"#));
     assert!(engine.finish().success());
@@ -129,17 +130,18 @@ fn a_recording_carries_its_tracks_named_after_their_buses() {
     ok(engine
         .request(r#"{"id":1,"command":"add_bus","params":{"name":"Quiet","assign_db":null}}"#));
     ok(engine.request(
-        r#"{"id":2,"command":"set_send","params":{"channel":"Tone","bus":"Quiet","enabled":true,"level_db":-20}}"#,
+        r#"{"id":2,"command":"set_send","params":{"channel_name":"Tone","bus_name":"Quiet","enabled":true,"level_db":-20}}"#,
     ));
     let set = ok(engine.request(
-        r#"{"id":3,"command":"set_output_profile","params":{"output":"recording","tracks":["Quiet"]}}"#,
+        r#"{"id":3,"command":"set_output_profile","params":{"output":"recording","tracks":[{"bus_name": "Quiet"}]}}"#,
     ));
     let quiet = set["recording"]["tracks"][0]
         .as_str()
         .expect("id")
         .to_owned();
     // A track's bus cannot be removed.
-    let removed = engine.request(r#"{"id":4,"command":"remove_bus","params":{"name":"Quiet"}}"#);
+    let removed =
+        engine.request(r#"{"id":4,"command":"remove_bus","params":{"bus_name":"Quiet"}}"#);
     assert_eq!(removed["error"]["code"], "invalid_state", "{removed}");
     ok(engine
         .request(r#"{"id":5,"command":"start_recording","params":{"file_name":"tracks.mkv"}}"#));
@@ -157,7 +159,7 @@ fn a_recording_carries_its_tracks_named_after_their_buses() {
     // Its running track cannot become its mix as well, although the next
     // profile no longer has it as a track.
     let refused = engine.request(
-        r#"{"id":8,"command":"set_output_profile","params":{"output":"recording","mix_bus":"Quiet"}}"#,
+        r#"{"id":8,"command":"set_output_profile","params":{"output":"recording","bus_name":"Quiet"}}"#,
     );
     assert_eq!(refused["error"]["code"], "invalid_state", "{refused}");
     assert_eq!(

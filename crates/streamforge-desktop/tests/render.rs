@@ -134,31 +134,31 @@ fn routed_engine(dir: PathBuf) -> Engine {
         ("add_bus", json!({"name": "Headphones"})),
         (
             "set_send",
-            json!({"channel": "Guest", "bus": "Program", "enabled": false}),
+            json!({"channel_name": "Guest", "bus_name": "Program", "enabled": false}),
         ),
         (
             "set_send",
-            json!({"channel": "Guest", "bus": "Voice", "enabled": true}),
+            json!({"channel_name": "Guest", "bus_name": "Voice", "enabled": true}),
         ),
         (
             "set_send",
-            json!({"channel": "Tone", "bus": "Voice", "enabled": true, "level_db": -6.0}),
+            json!({"channel_name": "Tone", "bus_name": "Voice", "enabled": true, "level_db": -6.0}),
         ),
         (
             "set_send",
-            json!({"channel": "Guest", "bus": "Headphones", "enabled": true, "tap": "pre_fader"}),
+            json!({"channel_name": "Guest", "bus_name": "Headphones", "enabled": true, "tap": "pre_fader"}),
         ),
         (
             "set_send",
-            json!({"channel": "Tone", "bus": "Headphones", "enabled": true}),
+            json!({"channel_name": "Tone", "bus_name": "Headphones", "enabled": true}),
         ),
         (
             "set_output_profile",
-            json!({"output": "monitor", "mix_bus": "Headphones"}),
+            json!({"output": "monitor", "bus_name": "Headphones"}),
         ),
         (
             "set_output_profile",
-            json!({"output": "recording", "tracks": ["Voice"]}),
+            json!({"output": "recording", "tracks": [{"bus_name": "Voice"}]}),
         ),
         (
             "set_monitor_device",
@@ -298,7 +298,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
         wait(&mut model, "the scene on program", |m| {
             m.scenes
                 .as_ref()
-                .is_some_and(|list| list.active == "Interview")
+                .is_some_and(|list| list.active_scene_name == "Interview")
         });
         model.set_preview(true);
         wait(&mut model, "the preview", |m| m.preview_enabled);

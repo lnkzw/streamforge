@@ -54,7 +54,7 @@ On other operating systems, `capture-linux` compiles to an empty crate. The bina
   Then restart the portals with `systemctl --user restart xdg-desktop-portal-hyprland xdg-desktop-portal`, or log in again.
 - **Damage-driven frames:** Hyprland only sends a frame when the captured content changes. A static screen yields few or no frames, and the negotiated frame rate is `0/1` (variable). Move something on screen during a probe.
 - **Buffers:** StreamForge offers no DMA-BUF modifiers, so xdph sends shared-memory (`memfd`) buffers in a packed RGB format (BGRx observed).
-- **Picker ignores requested types:** `hyprland-share-picker` shows its screen, window and region tabs whatever `source_types` asks for. The report's `source.kind` shows what was actually selected, and a warning is added when it is not one of the requested types.
+- **Picker ignores requested types:** `hyprland-share-picker` shows its screen, window and region tabs whatever `target_kinds` asks for. The report's `source.kind` shows what was actually selected, and a warning is added when it is not one of the requested types.
 - **Cursor modes:** this xdph version offers `hidden` and `embedded`, but not `metadata`. Asking for `metadata` fails with `unsupported`.
 
 ### Measured on the development machine (2026-10-19)
@@ -95,17 +95,17 @@ Run each command from the workspace root.
 1. Capabilities: `cargo run -p streamforge-cli -- capture caps`
    - Check that `screen.available` and `audio.available` are `true`.
    - If either is false, `unavailable_reason` says why.
-2. Screen, monitor: `cargo run -p streamforge-cli -- capture screen --source monitor --duration-ms 5000`
+2. Screen, monitor: `cargo run -p streamforge-cli -- capture screen --target-kind monitor --duration-ms 5000`
    - The picker appears. Choose a monitor and move a window around for 5 s.
    - The report should show the source size, the negotiated `format`, `stats.frames > 0`, `measured_fps`, and `first_pts`/`last_pts` with time base 1/1000000000. Under load, `dropped_frames` and `buffer_starvation` may be non-zero.
-3. Screen, window: repeat step 2 with `--source window` and pick an entry in the picker's **window** tab. Check that `source.kind` is `window` and the size matches the window.
+3. Screen, window: repeat step 2 with `--target-kind window` and pick an entry in the picker's **window** tab. Check that `source.kind` is `window` and the size matches the window.
 4. Cancel: run step 2 again and close the picker without choosing. The command must exit with code 1 and print `cancelled`.
 5. Audio inputs: `cargo run -p streamforge-cli -- capture inputs`
    - Each sink appears as `<sink>.monitor` with `loopback_of` set.
 6. Audio probe: `cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000`
    - The report should show the format, `frames ≈ expected_frames` (within one buffer), and levels.
    - `peak_dbfs: null` means digital silence.
-7. Unsupported capability: `cargo run -p streamforge-cli -- capture screen --cursor metadata` must fail with `unsupported`, and `details.available` lists the offered modes.
+7. Unsupported capability: `cargo run -p streamforge-cli -- capture screen --cursor-mode metadata` must fail with `unsupported`, and `details.available` lists the offered modes.
 
 The same operations are available over the JSON-lines protocol (`docs/protocol.md`).
 
@@ -139,4 +139,4 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 - The monitor of the system default sink has no name of its own; capture a sink's monitor by the sink's name. The default output's name is not known to the engine, so the feedback warning does not cover it.
 - The portal session is closed on every failure path: cancellation, a selection timeout, errors after `Start`, and capture errors. Because ashpd shares one D-Bus connection per process, an unclosed session would keep the compositor sharing until the process exits. One case remains: if *creating* the session itself times out, there is no handle to close.
 - Microphone access is not consent-gated on the desktop (outside Flatpak). Both probes are classified `sensitive`; enforcement arrives with M8.
-- ScreenCast portals older than interface version 2 cannot select a cursor mode. The request's `cursor` is then ignored with a warning instead of failing.
+- ScreenCast portals older than interface version 2 cannot select a cursor mode. The request's `cursor_mode` is then ignored with a warning instead of failing.

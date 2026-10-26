@@ -66,15 +66,15 @@ jobs:
         # For the record: which H.264 encoder `auto` picks here, and why
         # the hardware candidates were skipped (runners have no GPU).
         run: |
-          cargo run --locked -q -p streamforge-cli -- record --file ci-encoder.mkv \
+          cargo run --locked -q -p streamforge-cli -- record --file-name ci-encoder.mkv \
             --output-dir "$RUNNER_TEMP" --duration-ms 1000 > "$RUNNER_TEMP/encoder.json"
           py=$(command -v python3 || command -v python)
           "$py" -c "import json,sys; t=open(sys.argv[1]).read(); v=json.loads(t[t.index('{'):])['recording']['video']; print(json.dumps({k: v[k] for k in ('encoder', 'hardware', 'skipped')}, indent=2))" "$RUNNER_TEMP/encoder.json"
-      - name: Screen sources of this runner
+      - name: Capture targets of this runner
         # For the record: Windows lists its monitor; macOS needs a
         # screen-recording permission (`permission_denied` without it);
         # Linux has only the portal picker. Failing here is expected.
-        run: cargo run --locked -q -p streamforge-cli -- capture sources || true
+        run: cargo run --locked -q -p streamforge-cli -- capture targets || true
       - name: Test
         # All failures in one run, not just the first failing test binary.
         run: cargo test --workspace --locked --no-fail-fast

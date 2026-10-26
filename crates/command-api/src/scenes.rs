@@ -101,11 +101,11 @@ pub enum SourceKind {
     /// Live screen capture, fitted into the rectangle with its aspect
     /// ratio kept: the named source, or the one the user picks.
     Screen {
-        source_types: Vec<VideoSourceKind>,
-        cursor: CursorMode,
-        /// From `list_screen_sources`; `None` opens the system picker.
+        target_kinds: Vec<VideoSourceKind>,
+        cursor_mode: CursorMode,
+        /// From `list_capture_targets`; `None` opens the system picker.
         #[serde(skip_serializing_if = "Option::is_none")]
-        source_id: Option<String>,
+        capture_target_id: Option<String>,
     },
 }
 
@@ -156,8 +156,8 @@ pub struct SceneList {
     pub canvas_width: u32,
     pub canvas_height: u32,
     /// Name of the active scene.
-    pub active: String,
-    pub active_id: String,
+    pub active_scene_name: String,
+    pub active_scene_id: String,
     pub scenes: Vec<SceneSpec>,
 }
 

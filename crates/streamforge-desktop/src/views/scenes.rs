@@ -46,7 +46,7 @@ impl DesktopApp {
                         1 => "1 source".to_owned(),
                         count => format!("{count} sources"),
                     };
-                    let on_air = scene.id == scenes.active_id;
+                    let on_air = scene.id == scenes.active_scene_id;
                     let row = ui.add(
                         ListRow::new(Icon::Scene, &scene.name)
                             .meta(&meta)
@@ -97,7 +97,7 @@ impl DesktopApp {
         let name = scene(scenes, &selected)
             .map(|scene| scene.name.clone())
             .unwrap_or_default();
-        let on_air = selected == scenes.active_id;
+        let on_air = selected == scenes.active_scene_id;
         ui.add_space(size::SPACE_8);
         ui.horizontal(|ui| {
             let put = ui

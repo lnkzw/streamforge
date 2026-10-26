@@ -27,9 +27,9 @@ const STREAM_BUFFERS: usize = 4;
 pub(crate) const BACKEND: &str = "xdg-desktop-portal+pipewire";
 
 /// The portal always asks the user and cannot capture a named source.
-pub(crate) fn no_source_list() -> CaptureError {
+pub(crate) fn no_target_list() -> CaptureError {
     CaptureError::unsupported(
-        "the ScreenCast portal cannot capture a named source (`source_id`); \
+        "the ScreenCast portal cannot capture a named source (`capture_target_id`); \
          omit it and the user picks one in the system dialog",
     )
 }
@@ -44,8 +44,8 @@ struct OpenCast {
 fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
     // Before any portal I/O: a named source can never work here, and the
     // caller may be the engine thread while an output runs.
-    if selection.source.is_some() {
-        return Err(no_source_list());
+    if selection.capture_target_id.is_some() {
+        return Err(no_target_list());
     }
     let info = portal::query(QUERY_TIMEOUT)?;
     selection.check_supported(&ScreenCaptureCapability {
@@ -53,27 +53,27 @@ fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
         available: true,
         unavailable_reason: None,
         portal_version: Some(info.version),
-        source_kinds: info.source_kinds,
+        target_kinds: info.target_kinds,
         cursor_modes: info.cursor_modes,
         // The portal always asks the user; it cannot capture a named source.
         picker: true,
-        source_list: false,
+        target_list: false,
     })?;
     let mut warnings = Vec::new();
-    // ScreenCast v1 has no cursor modes; the requested cursor is ignored there.
-    let cursor = if info.version >= 2 {
-        Some(selection.cursor)
+    // ScreenCast v1 has no cursor modes; the requested cursor mode is ignored there.
+    let cursor_mode = if info.version >= 2 {
+        Some(selection.cursor_mode)
     } else {
         warnings.push(format!(
             "portal interface version {} cannot select a cursor mode; `{}` was ignored",
             info.version,
-            selection.cursor.as_str()
+            selection.cursor_mode.as_str()
         ));
         None
     };
     let cast = portal::start(
-        &selection.source_kinds,
-        cursor,
+        &selection.target_kinds,
+        cursor_mode,
         SELECTION_TIMEOUT,
         CLOSE_TIMEOUT,
     )?;
@@ -82,7 +82,7 @@ fn open_cast(selection: &ScreenSelection) -> Result<OpenCast, CaptureError> {
         width: cast.size.map(|(w, _)| w),
         height: cast.size.map(|(_, h)| h),
     };
-    warnings.extend(source_kind_mismatch(&selection.source_kinds, source.kind));
+    warnings.extend(source_kind_mismatch(&selection.target_kinds, source.kind));
     Ok(OpenCast {
         cast,
         source,

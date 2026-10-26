@@ -171,8 +171,8 @@ enum Pending {
     Refresh(Refresh),
     /// A command the user asked for, by name.
     Action(String),
-    /// `list_screen_sources`; failing is normal where there is only a picker.
-    ScreenSources,
+    /// `list_capture_targets`; failing is normal where there is only a picker.
+    CaptureTargets,
     /// `list_audio_inputs`, for the channels' inputs.
     AudioInputs,
     /// `list_audio_outputs`, for the monitor's device.
@@ -397,9 +397,9 @@ impl Model {
         if !self
             .pending
             .values()
-            .any(|pending| matches!(pending, Pending::ScreenSources))
+            .any(|pending| matches!(pending, Pending::CaptureTargets))
         {
-            self.submit("list_screen_sources", json!({}), Pending::ScreenSources);
+            self.submit("list_capture_targets", json!({}), Pending::CaptureTargets);
         }
     }
 
@@ -528,12 +528,15 @@ impl Model {
     pub fn delete_scene_confirmed(&mut self, id: &str, name: &str) {
         self.act(
             "delete_scene",
-            json!({ "scene_id": id, "name": name, "confirm": true }),
+            json!({ "scene_id": id, "scene_name": name, "confirm": true }),
         );
     }
 
     pub fn activate_scene(&mut self, id: &str, name: &str) {
-        self.act("set_active_scene", json!({ "scene_id": id, "name": name }));
+        self.act(
+            "set_active_scene",
+            json!({ "scene_id": id, "scene_name": name }),
+        );
     }
 
     /// Add a source to the scene with id `scene_id`.
@@ -553,7 +556,7 @@ impl Model {
             }
             SourceType::Screen => {
                 if let Some(id) = &form.screen_source {
-                    params.insert("source_id".into(), id.clone().into());
+                    params.insert("capture_target_id".into(), id.clone().into());
                 }
                 "screen"
             }
@@ -573,7 +576,7 @@ impl Model {
     /// `list_scenes`.
     pub fn update_source(&mut self, id: &str, rect: Option<[f32; 4]>, opacity: Option<f32>) {
         let mut params = Map::new();
-        params.insert("id".into(), id.into());
+        params.insert("source_id".into(), id.into());
         if let Some([x, y, width, height]) = rect {
             for (key, value) in [("x", x), ("y", y), ("width", width), ("height", height)] {
                 params.insert(key.into(), value.into());
@@ -586,17 +589,17 @@ impl Model {
     }
 
     pub fn remove_source(&mut self, id: &str) {
-        self.act("remove_source", json!({ "id": id }));
+        self.act("remove_source", json!({ "source_id": id }));
     }
 
     /// Start a screen source's capture again, optionally on another source
     /// from [`Model::screen_sources`]; outputs keep running. It ends the
     /// running capture, so the UI asks first while that one still works.
-    pub fn restart_source(&mut self, id: &str, source_id: Option<&str>) {
+    pub fn restart_source(&mut self, id: &str, capture_target_id: Option<&str>) {
         let mut params = Map::new();
-        params.insert("id".into(), id.into());
-        if let Some(id) = source_id {
-            params.insert("source_id".into(), id.into());
+        params.insert("source_id".into(), id.into());
+        if let Some(id) = capture_target_id {
+            params.insert("capture_target_id".into(), id.into());
         }
         self.act("restart_source", Value::Object(params));
     }
@@ -613,20 +616,26 @@ impl Model {
 
     /// Choose what channel `id` plays. Needs an idle pipeline.
     pub fn set_channel_input(&mut self, id: &str, input: &ChannelInput) {
-        self.act("set_channel_input", json!({ "id": id, "input": input }));
+        self.act(
+            "set_channel_input",
+            json!({ "channel_id": id, "input": input }),
+        );
     }
 
     /// Removing a channel drops its sends; the UI asks first. Its id and
     /// name from the mixer it showed must still agree, so a channel
     /// replaced meanwhile is not removed.
     pub fn remove_channel_confirmed(&mut self, id: &str, name: &str) {
-        self.act("remove_channel", json!({ "id": id, "name": name }));
+        self.act(
+            "remove_channel",
+            json!({ "channel_id": id, "channel_name": name }),
+        );
     }
 
     /// Change a channel's fader or mute; `None` keeps it.
     pub fn update_channel(&mut self, id: &str, gain_db: Option<f32>, muted: Option<bool>) {
         let mut params = Map::new();
-        params.insert("id".into(), id.into());
+        params.insert("channel_id".into(), id.into());
         if let Some(gain_db) = gain_db {
             params.insert("gain_db".into(), gain_db.into());
         }
@@ -646,7 +655,7 @@ impl Model {
         assign_db: Option<Option<f32>>,
     ) {
         let mut params = Map::new();
-        params.insert("id".into(), id.into());
+        params.insert("bus_id".into(), id.into());
         if let Some(gain_db) = gain_db {
             params.insert("gain_db".into(), gain_db.into());
         }
@@ -701,7 +710,7 @@ impl Model {
     /// and name from the mixer it showed must still agree, so a bus
     /// replaced meanwhile is not removed.
     pub fn remove_bus_confirmed(&mut self, id: &str, name: &str) {
-        self.act("remove_bus", json!({ "id": id, "name": name }));
+        self.act("remove_bus", json!({ "bus_id": id, "bus_name": name }));
     }
 
     /// Take bus `bus_id` as `output`'s mix. A recording track on that bus
@@ -710,7 +719,7 @@ impl Model {
     pub fn set_output_mix(&mut self, output: OutputKind, bus_id: &str) {
         let mut params = Map::new();
         params.insert("output".into(), output.as_str().into());
-        params.insert("mix_bus_id".into(), bus_id.into());
+        params.insert("bus_id".into(), bus_id.into());
         if let Some(profiles) = &mut self.profiles {
             if output == OutputKind::Recording
                 && profiles
@@ -720,7 +729,7 @@ impl Model {
                     .any(|track| track == bus_id)
             {
                 profiles.recording.tracks.retain(|track| track != bus_id);
-                params.insert("tracks".into(), json!(profiles.recording.tracks));
+                params.insert("tracks".into(), track_refs(&profiles.recording.tracks));
             }
             // Shown at once, so a second click builds on this one; the
             // engine's answer replaces it.
@@ -743,7 +752,7 @@ impl Model {
         }
         self.act(
             "set_output_profile",
-            json!({ "output": "recording", "tracks": tracks }),
+            json!({ "output": "recording", "tracks": track_refs(tracks) }),
         );
     }
 
@@ -832,9 +841,9 @@ impl Model {
         for response in responses {
             let pending = self.pending.remove(&response.id);
             match pending {
-                Some(Pending::ScreenSources) => {
+                Some(Pending::CaptureTargets) => {
                     self.screen_sources = Some(match response.result {
-                        Ok(CommandOutput::ScreenSources(list)) => Ok(list.sources),
+                        Ok(CommandOutput::CaptureTargets(list)) => Ok(list.targets),
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });
@@ -1052,6 +1061,11 @@ pub enum SourceHealth {
     },
     /// The system ended the capture; `restart_source` starts it again.
     Ended { reason: String },
+}
+
+/// Recording tracks (bus ids) as `set_output_profile` takes them.
+fn track_refs(tracks: &[String]) -> Value {
+    tracks.iter().map(|id| json!({ "bus_id": id })).collect()
 }
 
 fn source_health(health: &HealthReport, source_id: &str) -> SourceHealth {

@@ -29,8 +29,8 @@ use capture_api::{
     CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
 };
 use command_api::{
-    AudioGraphSpec, AudioInputList, AudioOutputList, Command, CommandError, CommandHandler,
-    CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles, ScreenSourceList,
+    AudioGraphSpec, AudioInputList, AudioOutputList, CaptureTargetList, Command, CommandError,
+    CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles,
 };
 use media_core::FrameMailbox;
 
@@ -161,10 +161,12 @@ impl CommandHandler for Engine {
                 .audio_outputs()
                 .map(|outputs| CommandOutput::AudioOutputs(AudioOutputList { outputs }))
                 .map_err(command_error),
-            Command::ListScreenSources => self
+            Command::ListCaptureTargets => self
                 .capture
                 .screen_sources()
-                .map(|sources| CommandOutput::ScreenSources(ScreenSourceList { sources }))
+                .map(|sources| {
+                    CommandOutput::CaptureTargets(CaptureTargetList { targets: sources })
+                })
                 .map_err(command_error),
             Command::ProbeScreenCapture(request) => {
                 self.ensure_idle("probe_screen_capture")?;
@@ -215,8 +217,11 @@ impl CommandHandler for Engine {
             Command::RemoveSource(source) => {
                 self.remove_source(&source).map(CommandOutput::SceneList)
             }
-            Command::RestartSource { source, source_id } => self
-                .restart_source(&source, source_id.as_deref())
+            Command::RestartSource {
+                source,
+                capture_target_id,
+            } => self
+                .restart_source(&source, capture_target_id.as_deref())
                 .map(CommandOutput::SceneList),
             Command::GetMixer => Ok(CommandOutput::MixerState(self.mixer_state())),
             Command::AddChannel(request) => {
@@ -245,8 +250,11 @@ impl CommandHandler for Engine {
             Command::SetPreview { enabled } => self
                 .set_preview(enabled)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
-            Command::SetScreenSource { source, source_id } => self
-                .set_screen_source(&source, &source_id)
+            Command::SetCaptureTarget {
+                source,
+                capture_target_id,
+            } => self
+                .set_capture_target(&source, &capture_target_id)
                 .map(CommandOutput::SceneList),
             Command::ListProjects => self.list_projects().map(CommandOutput::ProjectFiles),
             Command::SaveProject(request) => {
@@ -327,10 +335,10 @@ mod tests {
                     available: true,
                     unavailable_reason: None,
                     portal_version: Some(5),
-                    source_kinds: vec![capture_api::VideoSourceKind::Monitor],
+                    target_kinds: vec![capture_api::VideoSourceKind::Monitor],
                     cursor_modes: vec![capture_api::CursorMode::Embedded],
                     picker: true,
-                    source_list: false,
+                    target_list: false,
                 },
                 audio: AudioCaptureCapability::unavailable(Some("fake"), "no server"),
             }
@@ -376,7 +384,7 @@ mod tests {
             Ok(VideoCaptureReport {
                 backend: "fake".into(),
                 source: VideoSourceInfo {
-                    kind: request.selection.source_kinds.first().copied(),
+                    kind: request.selection.target_kinds.first().copied(),
                     width: Some(1920),
                     height: Some(1080),
                 },
@@ -446,7 +454,7 @@ mod tests {
             selection: &ScreenSelection,
         ) -> Result<Box<dyn VideoStream>, CaptureError> {
             // A source that went away, e.g. a closed window.
-            if selection.source.as_deref() == Some("fake:gone") {
+            if selection.capture_target_id.as_deref() == Some("fake:gone") {
                 return Err(CaptureError::new(
                     capture_api::CaptureErrorKind::NotFound,
                     "no such source",
@@ -630,36 +638,37 @@ mod tests {
                     // Keep probes short; their defaults run for seconds.
                     name if name.starts_with("probe_") => Some(json!({"duration_ms": 100})),
                     "start_recording" => Some(json!({"file_name": format!("all-{index}.mkv")})),
-                    "create_scene" | "set_active_scene" => Some(json!({"name": "Scene"})),
-                    "delete_scene" => Some(json!({"name": "Scene", "confirm": true})),
+                    "create_scene" => Some(json!({"name": "Scene"})),
+                    "set_active_scene" => Some(json!({"scene_name": "Scene"})),
+                    "delete_scene" => Some(json!({"scene_name": "Scene", "confirm": true})),
                     "add_source" => {
-                        Some(json!({"scene": "Scene", "name": "bars", "kind": "color_bars"}))
+                        Some(json!({"scene_name": "Scene", "name": "bars", "kind": "color_bars"}))
                     }
                     "update_source" => {
-                        Some(json!({"scene": "Scene", "name": "bars", "opacity": 0.5}))
+                        Some(json!({"scene_name": "Scene", "source_name": "bars", "opacity": 0.5}))
                     }
                     "remove_source" | "restart_source" => {
-                        Some(json!({"scene": "Scene", "name": "bars"}))
+                        Some(json!({"scene_name": "Scene", "source_name": "bars"}))
                     }
                     "add_channel" => Some(json!({"name": "Extra",
                         "input": {"kind": "tone", "frequency_hz": 440}})),
-                    "remove_channel" => Some(json!({"name": "Extra"})),
-                    "update_channel" => Some(json!({"name": "Tone", "mute": true})),
-                    "set_channel_input" => Some(json!({"name": "Tone",
+                    "remove_channel" => Some(json!({"channel_name": "Extra"})),
+                    "update_channel" => Some(json!({"channel_name": "Tone", "mute": true})),
+                    "set_channel_input" => Some(json!({"channel_name": "Tone",
                         "input": {"kind": "tone", "frequency_hz": 500}})),
                     "add_bus" => Some(json!({"name": "Voice", "assign_db": 0})),
-                    "remove_bus" => Some(json!({"name": "Voice"})),
-                    "update_bus" => Some(json!({"id": "bus_program", "gain_db": -3.0})),
-                    "set_send" => {
-                        Some(json!({"channel": "Tone", "bus": "Program", "enabled": false}))
-                    }
+                    "remove_bus" => Some(json!({"bus_name": "Voice"})),
+                    "update_bus" => Some(json!({"bus_id": "bus_program", "gain_db": -3.0})),
+                    "set_send" => Some(
+                        json!({"channel_name": "Tone", "bus_name": "Program", "enabled": false}),
+                    ),
                     "set_output_profile" => {
                         Some(json!({"output": "stream", "video_bitrate_kbps": 4000}))
                     }
                     "set_preview" => Some(json!({"enabled": false})),
-                    "set_screen_source" => {
-                        Some(json!({"scene": "Scene", "name": "bars", "source_id": "fake:1"}))
-                    }
+                    "set_capture_target" => Some(
+                        json!({"scene_name": "Scene", "source_name": "bars", "capture_target_id": "fake:1"}),
+                    ),
                     "save_project" => Some(json!({"file_name": format!("all-{index}.json")})),
                     "load_project" | "validate_project" => {
                         Some(json!({"file_name": format!("all-{index}.json")}))
@@ -745,7 +754,7 @@ mod tests {
         run(
             &mut engine,
             "set_channel_input",
-            json!({"name": "Tone", "input": {"kind": "device", "device": "mic"}}),
+            json!({"channel_name": "Tone", "input": {"kind": "device", "device": "mic"}}),
         );
         let started = start(&mut engine, json!({"file_name": "take.mkv"})).expect("start");
         let CommandOutput::RecordingStarted(started) = started else {
@@ -1051,7 +1060,7 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Show", "name": "red", "kind": "solid", "color": "#ff0000"}),
+            json!({"scene_name": "Show", "name": "red", "kind": "solid", "color": "#ff0000"}),
         );
         let CommandOutput::PreviewState(preview) =
             run(&mut engine, "set_preview", json!({"enabled": true}))
@@ -1062,13 +1071,17 @@ mod tests {
         assert!(status(&mut engine).preview_active);
         // The default scene starts with color bars: white at the top left.
         wait_for_preview_pixel(&engine, 10, 10, [255, 255, 255, 255]);
-        run(&mut engine, "set_active_scene", json!({"name": "Show"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Show"}),
+        );
         wait_for_preview_pixel(&engine, 10, 10, [0, 0, 255, 255]);
         // A blue box over the top left quarter (canvas pixels).
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Show", "name": "blue", "kind": "solid", "color": "#0000ff",
+            json!({"scene_name": "Show", "name": "blue", "kind": "solid", "color": "#0000ff",
                    "x": 0, "y": 0, "width": 960, "height": 540}),
         );
         wait_for_preview_pixel(&engine, 10, 10, [255, 0, 0, 255]);
@@ -1076,7 +1089,7 @@ mod tests {
         run(
             &mut engine,
             "update_source",
-            json!({"scene": "Show", "name": "blue", "opacity": 0.0}),
+            json!({"scene_name": "Show", "source_name": "blue", "opacity": 0.0}),
         );
         wait_for_preview_pixel(&engine, 10, 10, [0, 0, 255, 255]);
         // Probes would compete with the running pipeline.
@@ -1102,7 +1115,7 @@ mod tests {
         };
         let add = Command::decode(
             "add_source",
-            Some(&json!({"scene": "Test pattern", "name": "desk", "kind": "screen"})),
+            Some(&json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen"})),
         )
         .expect("decode");
         assert_eq!(engine.handle(add).unwrap_err().code, ErrorCode::Unsupported);
@@ -1114,7 +1127,7 @@ mod tests {
         // Deleting needs confirmation, and the active scene cannot go.
         let delete = Command::decode(
             "delete_scene",
-            Some(&json!({"name": "Test pattern", "confirm": true})),
+            Some(&json!({"scene_name": "Test pattern", "confirm": true})),
         )
         .expect("decode");
         assert_eq!(
@@ -1159,12 +1172,12 @@ mod tests {
         let muted = mixer(run(
             &mut engine,
             "update_channel",
-            json!({"id": audio::DEFAULT_CHANNEL_ID, "mute": true}),
+            json!({"channel_id": audio::DEFAULT_CHANNEL_ID, "mute": true}),
         ));
         assert!(muted.channels[0].spec.muted);
         let missing = Command::decode(
             "update_channel",
-            Some(&json!({"name": "Mic", "mute": true})),
+            Some(&json!({"channel_name": "Mic", "mute": true})),
         )
         .expect("decode");
         assert_eq!(
@@ -1179,7 +1192,7 @@ mod tests {
         run(
             &mut engine,
             "update_channel",
-            json!({"name": "Tone", "mute": false}),
+            json!({"channel_name": "Tone", "mute": false}),
         );
         // The default tone peaks at -20 dBFS.
         // Past the unmute ramp, the window holds full-level blocks.
@@ -1197,7 +1210,7 @@ mod tests {
         let gain = mixer(run(
             &mut engine,
             "update_bus",
-            json!({"name": "Program", "gain_db": -6.0}),
+            json!({"bus_name": "Program", "gain_db": -6.0}),
         ));
         assert_eq!(gain.buses[0].gain_db, -6.0);
         // Hard left takes the right side away: the peak stays (left), and
@@ -1205,7 +1218,7 @@ mod tests {
         let panned = mixer(run(
             &mut engine,
             "update_channel",
-            json!({"name": "Tone", "balance": -1.0}),
+            json!({"channel_name": "Tone", "balance": -1.0}),
         ));
         assert_eq!(panned.channels[0].spec.balance, -1.0);
         // Channels are fixed while running; faders are not.
@@ -1214,10 +1227,10 @@ mod tests {
                 "add_channel",
                 json!({"name": "Mic", "input": {"kind": "device"}}),
             ),
-            ("remove_channel", json!({"name": "Tone"})),
+            ("remove_channel", json!({"channel_name": "Tone"})),
             (
                 "set_channel_input",
-                json!({"name": "Tone", "input": {"kind": "device"}}),
+                json!({"channel_name": "Tone", "input": {"kind": "device"}}),
             ),
         ] {
             let structure = Command::decode(command, Some(&params)).expect("decode");
@@ -1241,11 +1254,15 @@ mod tests {
         ));
         assert_eq!(added.channels.len(), 2);
         assert!(added.channels[1].spec.id.starts_with("ch_"));
-        let silent = mixer(run(&mut engine, "remove_channel", json!({"name": "Tone"})));
         let silent = mixer(run(
             &mut engine,
             "remove_channel",
-            json!({"id": silent.channels[0].spec.id}),
+            json!({"channel_name": "Tone"}),
+        ));
+        let silent = mixer(run(
+            &mut engine,
+            "remove_channel",
+            json!({"channel_id": silent.channels[0].spec.id}),
         ));
         assert!(silent.channels.is_empty());
     }
@@ -1297,17 +1314,17 @@ mod tests {
         }
         let unknown = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "recording", "mix_bus": "Voice"})),
+            Some(&json!({"output": "recording", "bus_name": "Voice"})),
         )
         .expect("decode");
         let error = engine.handle(unknown).unwrap_err();
         assert_eq!(error.code, ErrorCode::NotFound);
-        assert_eq!(error.details, Some(json!({"mix_bus": "Voice"})));
+        assert_eq!(error.details, Some(json!({"bus_name": "Voice"})));
         run(&mut engine, "add_bus", json!({"name": "Voice"}));
         let CommandOutput::OutputProfileSet(set) = run(
             &mut engine,
             "set_output_profile",
-            json!({"output": "recording", "mix_bus": "Voice", "video_encoder": "hardware"}),
+            json!({"output": "recording", "bus_name": "Voice", "video_encoder": "hardware"}),
         ) else {
             panic!("unexpected output");
         };
@@ -1316,13 +1333,13 @@ mod tests {
         let voice = set.profiles.recording.mix.clone();
         assert!(voice.starts_with("bus_") && voice != "bus_program");
         let state = mixer(run(&mut engine, "get_mixer", json!({})));
-        assert_eq!(state.outputs[0].bus, voice);
+        assert_eq!(state.outputs[0].bus_id, voice);
         assert!(!state.outputs[0].running);
         // Tracks: existing buses, each once, not the mix again.
         for tracks in [
-            json!(["Voice"]),
-            json!(["Program", "Program"]),
-            json!(["Gone"]),
+            json!([{"bus_name": "Voice"}]),
+            json!([{"bus_name": "Program"}, {"bus_name": "Program"}]),
+            json!([{"bus_name": "Gone"}]),
         ] {
             let command = Command::decode(
                 "set_output_profile",
@@ -1338,7 +1355,7 @@ mod tests {
         let CommandOutput::OutputProfileSet(set) = run(
             &mut engine,
             "set_output_profile",
-            json!({"output": "recording", "tracks": ["Program"]}),
+            json!({"output": "recording", "tracks": [{"bus_name": "Program"}]}),
         ) else {
             panic!("unexpected output");
         };
@@ -1347,7 +1364,7 @@ mod tests {
         let before = run(&mut engine, "get_output_profiles", json!({}));
         let mixed = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "recording", "mix_bus": "Program", "tracks": ["Gone"]})),
+            Some(&json!({"output": "recording", "bus_name": "Program", "tracks": [{"bus_name": "Gone"}]})),
         )
         .expect("decode");
         assert_eq!(engine.handle(mixed).unwrap_err().code, ErrorCode::NotFound);
@@ -1355,7 +1372,7 @@ mod tests {
         // A mix that is already a track is refused, as a file would be.
         let onto_track = Command::decode(
             "set_output_profile",
-            Some(&json!({"output": "recording", "mix_bus": "Program"})),
+            Some(&json!({"output": "recording", "bus_name": "Program"})),
         )
         .expect("decode");
         let error = engine.handle(onto_track).unwrap_err();
@@ -1367,16 +1384,16 @@ mod tests {
         );
         // The profile keeps its bus.
         let remove =
-            Command::decode("remove_bus", Some(&json!({"name": "Voice"}))).expect("decode");
+            Command::decode("remove_bus", Some(&json!({"bus_name": "Voice"}))).expect("decode");
         let error = engine.handle(remove).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidState);
         assert_eq!(error.details, Some(json!({"outputs": ["recording"]})));
         run(
             &mut engine,
             "set_output_profile",
-            json!({"output": "recording", "mix_bus_id": "bus_program", "tracks": []}),
+            json!({"output": "recording", "bus_id": "bus_program", "tracks": []}),
         );
-        run(&mut engine, "remove_bus", json!({"name": "Voice"}));
+        run(&mut engine, "remove_bus", json!({"bus_name": "Voice"}));
     }
 
     #[test]
@@ -1393,12 +1410,12 @@ mod tests {
         run(
             &mut engine,
             "set_send",
-            json!({"channel": "Tone", "bus": "Monitor", "enabled": true, "tap": "pre_fader"}),
+            json!({"channel_name": "Tone", "bus_name": "Monitor", "enabled": true, "tap": "pre_fader"}),
         );
         run(
             &mut engine,
             "update_channel",
-            json!({"name": "Tone", "gain_db": -12.0}),
+            json!({"channel_name": "Tone", "gain_db": -12.0}),
         );
         let near =
             |peak: Option<f64>, dbfs: f64| peak.is_some_and(|peak| (peak - dbfs).abs() < 0.3);
@@ -1418,7 +1435,7 @@ mod tests {
         run(
             &mut engine,
             "set_send",
-            json!({"channel": "Tone", "bus": "Monitor", "level_db": -6.0}),
+            json!({"channel_name": "Tone", "bus_name": "Monitor", "level_db": -6.0}),
         );
         let lowered = wait_mixer(&mut engine, |state| near(state.buses[1].peak_dbfs, -26.0));
         assert!(near(lowered.buses[1].peak_dbfs, -26.0), "{lowered:?}");
@@ -1428,7 +1445,7 @@ mod tests {
         let assigned = mixer(run(
             &mut engine,
             "update_bus",
-            json!({"name": "Monitor", "assign_db": 0.0}),
+            json!({"bus_name": "Monitor", "assign_db": 0.0}),
         ));
         assert_eq!(assigned.buses[1].assign_db, Some(0.0));
         assert_eq!(assigned.warnings.len(), 1, "{assigned:?}");
@@ -1438,7 +1455,7 @@ mod tests {
         // Buses are fixed while running.
         for (command, params) in [
             ("add_bus", json!({"name": "Voice"})),
-            ("remove_bus", json!({"name": "Monitor"})),
+            ("remove_bus", json!({"bus_name": "Monitor"})),
         ] {
             let structure = Command::decode(command, Some(&params)).expect("decode");
             assert_eq!(
@@ -1452,7 +1469,11 @@ mod tests {
         let after = mixer(run(&mut engine, "get_mixer", json!({})));
         assert_eq!(after.buses[1].assign_db, Some(0.0));
         assert_eq!(after.channels[0].spec.sends[1].level_db, -6.0);
-        let removed = mixer(run(&mut engine, "remove_bus", json!({"name": "Monitor"})));
+        let removed = mixer(run(
+            &mut engine,
+            "remove_bus",
+            json!({"bus_name": "Monitor"}),
+        ));
         assert_eq!(removed.buses.len(), 1);
         assert_eq!(removed.channels[0].spec.sends.len(), 1);
         assert!(removed.warnings.is_empty());
@@ -1467,16 +1488,32 @@ mod tests {
             run(
                 &mut engine,
                 "add_source",
-                json!({"scene": scene, "name": "desk", "kind": "screen"}),
+                json!({"scene_name": scene, "name": "desk", "kind": "screen"}),
             );
         }
-        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Main"}),
+        );
         run(&mut engine, "set_preview", json!({"enabled": true}));
         assert_eq!(starts.get(), 1);
         // Each scene's source starts once; switching back reuses it.
-        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
-        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
-        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "BRB"}),
+        );
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Main"}),
+        );
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "BRB"}),
+        );
         assert_eq!(starts.get(), 2);
         // Removing a source from every scene ends its capture at once, also
         // when its scene is not the rendered one.
@@ -1484,7 +1521,7 @@ mod tests {
         run(
             &mut engine,
             "remove_source",
-            json!({"scene": "Main", "name": "desk"}),
+            json!({"scene_name": "Main", "source_name": "desk"}),
         );
         let ids = |engine: &mut Engine| -> Vec<String> {
             health(engine)
@@ -1499,15 +1536,23 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Spare", "name": "cam", "kind": "screen"}),
+            json!({"scene_name": "Spare", "name": "cam", "kind": "screen"}),
         );
-        run(&mut engine, "set_active_scene", json!({"name": "Spare"}));
-        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Spare"}),
+        );
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "BRB"}),
+        );
         assert_eq!(ids(&mut engine).len(), 2);
         run(
             &mut engine,
             "delete_scene",
-            json!({"name": "Spare", "confirm": true}),
+            json!({"scene_name": "Spare", "confirm": true}),
         );
         assert_eq!(ids(&mut engine), [brb_desk]);
         let CommandOutput::PreviewState(preview) =
@@ -1531,8 +1576,8 @@ mod tests {
         let CommandOutput::SceneList(scenes) = run(
             &mut engine,
             "add_source",
-            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
-                   "source_id": "fake:1"}),
+            json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen",
+                   "capture_target_id": "fake:1"}),
         ) else {
             panic!("unexpected output");
         };
@@ -1600,14 +1645,14 @@ mod tests {
             try_run(
                 engine,
                 "restart_source",
-                json!({"scene": scene, "name": name}),
+                json!({"scene_name": scene, "source_name": name}),
             )
         };
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
-                   "source_id": "fake:1"}),
+            json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen",
+                   "capture_target_id": "fake:1"}),
         );
         // Nothing captures yet.
         assert_eq!(
@@ -1661,7 +1706,7 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Other", "name": "cam", "kind": "screen", "source_id": "fake:2"}),
+            json!({"scene_name": "Other", "name": "cam", "kind": "screen", "capture_target_id": "fake:2"}),
         );
         assert_eq!(
             restart(&mut engine, "Other", "cam").unwrap_err().code,
@@ -1707,14 +1752,14 @@ mod tests {
             try_run(
                 engine,
                 "restart_source",
-                json!({"scene": "Test pattern", "name": "desk"}),
+                json!({"scene_name": "Test pattern", "source_name": "desk"}),
             )
         };
         run(&mut engine, "set_preview", json!({"enabled": true}));
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Test pattern", "name": "desk", "kind": "screen"}),
+            json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen"}),
         );
         assert_eq!(starts.get(), 1);
         start(&mut engine, json!({"file_name": "picker.mkv"})).expect("start");
@@ -1751,16 +1796,20 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Show", "name": "red", "kind": "solid", "color": "#ff000080",
+            json!({"scene_name": "Show", "name": "red", "kind": "solid", "color": "#ff000080",
                    "x": 10, "y": 20, "width": 300, "height": 200, "opacity": 0.5}),
         );
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Show", "name": "desk", "kind": "screen", "source_id": "fake:1",
-                   "cursor": "hidden"}),
+            json!({"scene_name": "Show", "name": "desk", "kind": "screen", "capture_target_id": "fake:1",
+                   "cursor_mode": "hidden"}),
         );
-        run(&mut engine, "set_active_scene", json!({"name": "Show"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Show"}),
+        );
         run(
             &mut engine,
             "add_channel",
@@ -1770,7 +1819,7 @@ mod tests {
         run(
             &mut engine,
             "update_bus",
-            json!({"id": "bus_program", "gain_db": -4, "mute": true}),
+            json!({"bus_id": "bus_program", "gain_db": -4, "mute": true}),
         );
         run(
             &mut engine,
@@ -1780,13 +1829,13 @@ mod tests {
         run(
             &mut engine,
             "set_send",
-            json!({"channel": "A", "bus": "Voice", "enabled": true, "level_db": -6,
+            json!({"channel_name": "A", "bus_name": "Voice", "enabled": true, "level_db": -6,
                    "tap": "pre_fader"}),
         );
         run(
             &mut engine,
             "set_output_profile",
-            json!({"output": "stream", "mix_bus": "Voice", "video_bitrate_kbps": 4500}),
+            json!({"output": "stream", "bus_name": "Voice", "video_bitrate_kbps": 4500}),
         );
         let profiles_before = run(&mut engine, "get_output_profiles", json!({}));
         let before = scene_list(&mut engine);
@@ -1812,12 +1861,13 @@ mod tests {
             panic!("unexpected output");
         };
         let mut expected = before.clone();
-        let command_api::SourceKind::Screen { source_id, .. } =
-            &mut expected.scenes[1].sources[1].kind
+        let command_api::SourceKind::Screen {
+            capture_target_id, ..
+        } = &mut expected.scenes[1].sources[1].kind
         else {
             panic!("screen source");
         };
-        *source_id = None;
+        *capture_target_id = None;
         assert_eq!(loaded.scenes, expected);
         assert_eq!(scene_list(&mut fresh), expected);
         assert_eq!(loaded.mixer, mixer_before);
@@ -1826,7 +1876,7 @@ mod tests {
             profiles_before
         );
         assert!(
-            loaded.warnings[0].contains("set_screen_source"),
+            loaded.warnings[0].contains("set_capture_target"),
             "{:?}",
             loaded.warnings
         );
@@ -1834,8 +1884,8 @@ mod tests {
         let desk = before.scenes[1].sources[1].id.clone();
         run(
             &mut fresh,
-            "set_screen_source",
-            json!({"id": desk, "source_id": "fake:2"}),
+            "set_capture_target",
+            json!({"source_id": desk, "capture_target_id": "fake:2"}),
         );
         let CommandOutput::ProjectValidation(validation) = run(
             &mut fresh,
@@ -1845,7 +1895,7 @@ mod tests {
             panic!("unexpected output");
         };
         assert!(validation.valid && validation.problems.is_empty());
-        assert_eq!(validation.schema_version, Some(2));
+        assert_eq!(validation.schema_version, Some(3));
         assert!(!validation.migrates);
     }
 
@@ -1917,7 +1967,7 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.0.join("old.json")).expect("read"))
                 .expect("json");
-        assert_eq!(written["schema_version"], 2);
+        assert_eq!(written["schema_version"], 3);
         assert_eq!(written["audio"]["channels"][1]["name"], "Tone 1");
         let CommandOutput::ProjectLoaded(again) = run(
             &mut engine,
@@ -2079,29 +2129,29 @@ mod tests {
     }
 
     #[test]
-    fn set_screen_source_chooses_a_target_only_while_nothing_captures() {
+    fn set_capture_target_chooses_a_target_only_while_nothing_captures() {
         let _media = media_test_lock();
         let (engine, starts, _ends) = engine_with_screen_streams();
         let mut engine = engine;
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
-                   "source_id": "fake:1"}),
+            json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen",
+                   "capture_target_id": "fake:1"}),
         );
         let desk = source_id(&mut engine, "Test pattern", "desk");
         let bars = source_id(&mut engine, "Test pattern", "color_bars");
         let not_screen = try_run(
             &mut engine,
-            "set_screen_source",
-            json!({"id": bars, "source_id": "fake:2"}),
+            "set_capture_target",
+            json!({"source_id": bars, "capture_target_id": "fake:2"}),
         )
         .unwrap_err();
         assert_eq!(not_screen.code, ErrorCode::InvalidParams);
         run(
             &mut engine,
-            "set_screen_source",
-            json!({"id": desk, "source_id": "fake:2"}),
+            "set_capture_target",
+            json!({"source_id": desk, "capture_target_id": "fake:2"}),
         );
         assert_eq!(
             screen_ids(&mut engine, "Test pattern"),
@@ -2112,8 +2162,8 @@ mod tests {
         assert_eq!(starts.get(), 1);
         let capturing = try_run(
             &mut engine,
-            "set_screen_source",
-            json!({"id": desk, "source_id": "fake:3"}),
+            "set_capture_target",
+            json!({"source_id": desk, "capture_target_id": "fake:3"}),
         )
         .unwrap_err();
         assert_eq!(capturing.code, ErrorCode::InvalidState);
@@ -2138,7 +2188,7 @@ mod tests {
             .expect("source")
     }
 
-    /// Screen sources of `scene`: (name, source_id).
+    /// Screen sources of `scene`: (name, capture_target_id).
     fn screen_ids(engine: &mut Engine, scene: &str) -> Vec<(String, Option<String>)> {
         let CommandOutput::SceneList(list) = run(engine, "list_scenes", json!({})) else {
             panic!("unexpected output");
@@ -2152,14 +2202,16 @@ mod tests {
             .sources
             .into_iter()
             .filter_map(|source| match source.kind {
-                command_api::SourceKind::Screen { source_id, .. } => Some((source.name, source_id)),
+                command_api::SourceKind::Screen {
+                    capture_target_id, ..
+                } => Some((source.name, capture_target_id)),
                 _ => None,
             })
             .collect()
     }
 
     #[test]
-    fn a_source_restarts_on_another_source_id_and_a_failed_restart_changes_nothing() {
+    fn a_source_restarts_on_another_capture_target_id_and_a_failed_restart_changes_nothing() {
         let _media = media_test_lock();
         let dir = TempDir::new("retarget");
         let (engine, starts, ends) = engine_with_screen_streams();
@@ -2167,8 +2219,8 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Test pattern", "name": "desk", "kind": "screen",
-                   "source_id": "fake:1"}),
+            json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen",
+                   "capture_target_id": "fake:1"}),
         );
         start(&mut engine, json!({"file_name": "retarget.mkv"})).expect("start");
         ends.borrow()[0].end(|| "the captured window was closed".to_owned());
@@ -2178,7 +2230,7 @@ mod tests {
         let err = try_run(
             &mut engine,
             "restart_source",
-            json!({"scene": "Test pattern", "name": "desk", "source_id": "fake:gone"}),
+            json!({"scene_name": "Test pattern", "source_name": "desk", "capture_target_id": "fake:gone"}),
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound, "{err}");
@@ -2195,7 +2247,7 @@ mod tests {
         run(
             &mut engine,
             "restart_source",
-            json!({"scene": "Test pattern", "name": "desk", "source_id": "fake:2"}),
+            json!({"scene_name": "Test pattern", "source_name": "desk", "capture_target_id": "fake:2"}),
         );
         assert_eq!(starts.get(), 2);
         assert_eq!(
@@ -2217,18 +2269,26 @@ mod tests {
             run(
                 &mut engine,
                 "add_source",
-                json!({"scene": scene, "name": "cam", "kind": "screen", "source_id": id}),
+                json!({"scene_name": scene, "name": "cam", "kind": "screen", "capture_target_id": id}),
             );
         }
-        run(&mut engine, "set_active_scene", json!({"name": "Main"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Main"}),
+        );
         run(&mut engine, "set_preview", json!({"enabled": true}));
-        run(&mut engine, "set_active_scene", json!({"name": "BRB"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "BRB"}),
+        );
         assert_eq!(starts.get(), 2);
         // Main's capture keeps running off air, and ends there.
         ends.borrow()[0].end(|| "the captured window was closed".to_owned());
         // By id alone: source ids are unique across scenes.
         let cam = source_id(&mut engine, "Main", "cam");
-        run(&mut engine, "restart_source", json!({"id": cam}));
+        run(&mut engine, "restart_source", json!({"source_id": cam}));
         assert_eq!(starts.get(), 3);
         let captures = health(&mut engine).captures;
         assert_eq!(captures.len(), 2, "{captures:?}");
@@ -2257,7 +2317,7 @@ mod tests {
         start(&mut engine, json!({"file_name": "live.mkv"})).expect("start");
         let add = Command::decode(
             "add_source",
-            Some(&json!({"scene": "Test pattern", "name": "desk", "kind": "screen"})),
+            Some(&json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen"})),
         )
         .expect("decode");
         let err = engine.handle(add).unwrap_err();
@@ -2273,7 +2333,7 @@ mod tests {
         run(
             &mut engine,
             "update_source",
-            json!({"scene": "Test pattern", "name": "overlay", "opacity": 0.5}),
+            json!({"scene_name": "Test pattern", "source_name": "overlay", "opacity": 0.5}),
         );
         engine.handle(Command::StopRecording).expect("stop");
     }
@@ -2287,9 +2347,13 @@ mod tests {
         run(
             &mut engine,
             "add_source",
-            json!({"scene": "Green", "name": "fill", "kind": "solid", "color": "#00ff00"}),
+            json!({"scene_name": "Green", "name": "fill", "kind": "solid", "color": "#00ff00"}),
         );
-        run(&mut engine, "set_active_scene", json!({"name": "Green"}));
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Green"}),
+        );
         start(&mut engine, json!({"file_name": "green.mkv"})).expect("start");
         std::thread::sleep(Duration::from_millis(400));
         let report = match engine.handle(Command::StopRecording).expect("stop") {
@@ -2458,7 +2522,7 @@ mod tests {
             std::env::temp_dir().join(format!("streamforge-engine-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let mut engine = engine().with_output_dir(&dir);
-        let params = json!({"duration_ms": 100, "snapshot_path": "snapshot.ppm"});
+        let params = json!({"duration_ms": 100, "snapshot_file_name": "snapshot.ppm"});
 
         let first = composite(&mut engine, params.clone())
             .snapshot
@@ -2604,5 +2668,143 @@ mod tests {
         .expect("decode");
         let err = engine().handle(command).unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
+    }
+    #[test]
+    fn missing_references_report_the_supplied_selector_field() {
+        let mut engine = Engine::new();
+        for (command, params, field, value) in [
+            (
+                "set_active_scene",
+                json!({"scene_id": "scene_missing"}),
+                "scene_id",
+                "scene_missing",
+            ),
+            (
+                "set_active_scene",
+                json!({"scene_name": "Missing"}),
+                "scene_name",
+                "Missing",
+            ),
+            (
+                "remove_source",
+                json!({"source_id": "src_missing"}),
+                "source_id",
+                "src_missing",
+            ),
+            (
+                "remove_source",
+                json!({"scene_name": "Test pattern", "source_name": "Missing"}),
+                "source_name",
+                "Missing",
+            ),
+            (
+                "remove_channel",
+                json!({"channel_id": "ch_missing"}),
+                "channel_id",
+                "ch_missing",
+            ),
+            (
+                "remove_channel",
+                json!({"channel_name": "Missing"}),
+                "channel_name",
+                "Missing",
+            ),
+            (
+                "remove_bus",
+                json!({"bus_id": "bus_missing"}),
+                "bus_id",
+                "bus_missing",
+            ),
+            (
+                "remove_bus",
+                json!({"bus_name": "Missing"}),
+                "bus_name",
+                "Missing",
+            ),
+            (
+                "set_send",
+                json!({"channel_name": "Missing", "bus_name": "Program", "enabled": true}),
+                "channel_name",
+                "Missing",
+            ),
+            (
+                "set_send",
+                json!({"channel_name": "Tone", "bus_name": "Missing", "enabled": true}),
+                "bus_name",
+                "Missing",
+            ),
+            (
+                "set_output_profile",
+                json!({"output": "recording", "bus_id": "bus_missing"}),
+                "bus_id",
+                "bus_missing",
+            ),
+        ] {
+            let error = try_run(&mut engine, command, params).unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotFound, "{command}: {error:?}");
+            assert_eq!(error.details, Some(json!({field: value})), "{command}");
+        }
+        // A track's error names its entry: the mix takes the same fields.
+        for (track, field, value) in [
+            (json!({"bus_name": "Missing"}), "bus_name", "Missing"),
+            (json!({"bus_id": "bus_missing"}), "bus_id", "bus_missing"),
+        ] {
+            let params =
+                json!({"output": "recording", "tracks": [{"bus_id": "bus_program"}, track]});
+            let error = try_run(&mut engine, "set_output_profile", params).unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+            assert_eq!(error.details, Some(json!({field: value, "track_index": 1})));
+            assert!(
+                error.message.starts_with("`tracks[1]`"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn source_selectors_and_track_references_must_agree() {
+        let mut engine = Engine::new();
+        run(
+            &mut engine,
+            "update_source",
+            json!({"source_id": "src_color_bars", "scene_id": "scene_test_pattern", "scene_name": "Test pattern", "source_name": "color_bars", "x": 1}),
+        );
+        for params in [
+            json!({"source_id": "src_color_bars", "source_name": "overlay", "x": 2}),
+            json!({"source_id": "src_color_bars", "scene_name": "Missing", "x": 2}),
+            json!({"source_id": "src_color_bars", "scene_id": "scene_test_pattern", "scene_name": "Missing", "x": 2}),
+        ] {
+            assert_eq!(
+                try_run(&mut engine, "update_source", params)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParams
+            );
+        }
+        run(&mut engine, "add_bus", json!({"name": "bus_program"}));
+        let CommandOutput::OutputProfileSet(set) = run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "tracks": [{"bus_name": "bus_program"}]}),
+        ) else {
+            panic!("profiles");
+        };
+        let track = set.profiles.recording.tracks[0].clone();
+        assert_ne!(track, "bus_program", "the id-looking name resolves by name");
+        run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "tracks": [{"bus_id": track, "bus_name": "bus_program"}]}),
+        );
+        let before = run(&mut engine, "get_output_profiles", json!({}));
+        let error = try_run(
+            &mut engine,
+            "set_output_profile",
+            json!({"output": "recording", "tracks": [{"bus_id": track, "bus_name": "Program"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(run(&mut engine, "get_output_profiles", json!({})), before);
     }
 }

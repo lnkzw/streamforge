@@ -135,10 +135,13 @@ impl DesktopApp {
                 .update_source(&source.id, None, Some((percent / 100.0).clamp(0.0, 1.0)));
         }
 
-        if let SourceKind::Screen { source_id, .. } = &source.kind {
+        if let SourceKind::Screen {
+            capture_target_id, ..
+        } = &source.kind
+        {
             ui.add_space(size::SPACE_8);
             widgets::section_header(ui, "Capture", None);
-            self.capture(ui, &source, source_id.is_none());
+            self.capture(ui, &source, capture_target_id.is_none());
         }
 
         ui.add_space(size::SPACE_16);

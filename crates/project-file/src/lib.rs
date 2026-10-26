@@ -1,16 +1,16 @@
-//! The StreamForge project file, schema version 2 (ADR 0015, ADR 0017):
+//! The StreamForge project file, schema version 3 (ADR 0015, ADR 0017, ADR 0018):
 //! the scenes with their ids, the active scene and the audio graph, as JSON.
 //!
 //! The file reuses the command vocabulary instead of a second set of rules:
 //! a source is the object `list_scenes` shows for it, without the screen
-//! `source_id`, and it is checked by the `add_source` decoder; a channel is
+//! `capture_target_id`, and it is checked by the `add_source` decoder; a channel is
 //! its `get_mixer` object without the level, checked by the `add_channel`
 //! decoder, and the program bus by the `update_bus` decoder. This crate adds
 //! what the commands cannot see: ids, unique names, references and limits
 //! across the whole file. Every problem names its JSON path.
 //!
-//! Version 1 files (with the audio of the former `set_audio_sources`) are
-//! migrated on load ([`v1`]); saving writes version 2.
+//! Version 1 audio is migrated on load ([`v1`]); version 1 and 2 screen
+//! fields are migrated by [`v2`]. Saving writes version 3.
 //!
 //! Not stored: stream keys, file paths, and what screen sources capture
 //! (machine-specific, and window titles can be private, ADR 0010).
@@ -18,6 +18,7 @@
 mod store;
 mod strict;
 mod v1;
+mod v2;
 
 use std::collections::HashSet;
 
@@ -34,9 +35,9 @@ use serde_json::{Map, Value, json};
 
 pub use store::{Entry, MAX_FILE_BYTES, Saved, list, read, write};
 
-/// The schema version this build writes. It also reads version 1 and
-/// migrates it.
-pub const SCHEMA_VERSION: u64 = 2;
+/// The schema version this build writes. It also reads versions 1 and 2
+/// and migrates them.
+pub const SCHEMA_VERSION: u64 = 3;
 /// Most problems reported for one file; a last one says how many more
 /// there were.
 pub const MAX_PROBLEMS: usize = 100;
@@ -252,14 +253,17 @@ pub fn to_json(project: &Project, canvas: Canvas) -> Vec<u8> {
 
 fn without_screen_target(source: &SourceSpec) -> SourceSpec {
     let mut source = source.clone();
-    if let SourceKind::Screen { source_id, .. } = &mut source.kind {
-        *source_id = None;
+    if let SourceKind::Screen {
+        capture_target_id, ..
+    } = &mut source.kind
+    {
+        *capture_target_id = None;
     }
     source
 }
 
-/// Read and check a project file for a `canvas`-sized engine; a version 1
-/// file is migrated.
+/// Read and check a project file for a `canvas`-sized engine; version 1 and 2
+/// files are migrated.
 pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Loaded, Invalid> {
     let invalid = |schema_version, path: &str, message: String| Invalid {
         schema_version,
@@ -273,20 +277,20 @@ pub fn parse(bytes: &[u8], canvas: Canvas) -> Result<Loaded, Invalid> {
     };
     let Some(version) = version else {
         let found = if value.is_object() {
-            "`schema_version` must be a whole number (this build reads 1 and 2)"
+            "`schema_version` must be a whole number (this build reads 1, 2 and 3)"
         } else {
             "a project file is a JSON object"
         };
         return Err(invalid(None, "schema_version", found.to_owned()));
     };
-    if version != 1 && version != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         let message = if version > SCHEMA_VERSION {
             format!(
                 "schema version {version} is newer than this build reads \
                  ({SCHEMA_VERSION}); update StreamForge"
             )
         } else {
-            format!("schema version {version} is not supported (this build reads 1 and 2)")
+            format!("schema version {version} is not supported (this build reads 1, 2 and 3)")
         };
         return Err(invalid(Some(version), "schema_version", message));
     }
@@ -362,8 +366,11 @@ fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<Proje
         }
         let mut names = HashSet::new();
         let mut sources = Vec::with_capacity(scene.sources.len());
-        for (position, object) in scene.sources.into_iter().enumerate() {
+        for (position, mut object) in scene.sources.into_iter().enumerate() {
             let at = format!("{at}.sources[{position}]");
+            if version <= 2 {
+                problems.extend(v2::migrate(&mut object, &at));
+            }
             match source(object, &at, canvas, &mut source_ids) {
                 Ok(spec) => {
                     if !names.insert(spec.name.clone()) {
@@ -428,7 +435,7 @@ fn check(file: FileIn, version: u64, canvas: Canvas) -> Result<Loaded, Vec<Proje
 }
 
 /// One source object: an id, then exactly what `add_source` accepts, except
-/// the screen `source_id`.
+/// the screen `capture_target_id`.
 fn source(
     mut object: Map<String, Value>,
     at: &str,
@@ -451,18 +458,27 @@ fn source(
             String::new()
         }
     };
-    if object.contains_key("source_id") {
+    for old in ["source_types", "cursor"] {
+        if object.contains_key(old) {
+            problems.push(problem(
+                &format!("{at}.{old}"),
+                format!("unknown field `{old}`"),
+            ));
+        }
+    }
+    if object.contains_key("capture_target_id") {
         problems.push(problem(
-            &format!("{at}.source_id"),
+            &format!("{at}.capture_target_id"),
             "what a screen source captures is not stored: it is machine-specific \
-             (choose it after loading with set_screen_source)"
+             (choose it after loading with set_capture_target)"
                 .to_owned(),
         ));
     }
-    if object.contains_key("scene") || object.contains_key("scene_id") {
+    if object.contains_key("scene_name") || object.contains_key("scene_id") {
         problems.push(problem(
             at,
-            "a source's scene is the one it is listed in; remove `scene` and `scene_id`".to_owned(),
+            "a source's scene is the one it is listed in; remove `scene_name` and `scene_id`"
+                .to_owned(),
         ));
     }
     if !problems.is_empty() {
@@ -557,7 +573,7 @@ fn audio(audio: Value) -> Result<AudioGraphSpec, Vec<ProjectProblem>> {
             let Value::Object(mut params) = audio.program else {
                 unreachable!("the structure is an object");
             };
-            params.insert("id".to_owned(), json!(PROGRAM_BUS_ID));
+            params.insert("bus_id".to_owned(), json!(PROGRAM_BUS_ID));
             match Command::decode("update_bus", Some(&Value::Object(params))) {
                 Ok(Command::UpdateBus(request)) => Some(ProgramBusSpec {
                     gain_db: request.gain_db.unwrap_or(0.0),
@@ -751,30 +767,42 @@ fn outputs(
         };
         let device = params.remove("device");
         params.insert("output".to_owned(), json!(output));
-        params.insert("mix_bus_id".to_owned(), json!(mix));
+        params.insert("bus_id".to_owned(), json!(mix));
+        // A file names track buses by id; the request takes `{bus_id}`.
+        if let Some(Value::Array(tracks)) = params.get_mut("tracks") {
+            let mut invalid = false;
+            for (index, bus) in tracks.iter_mut().enumerate() {
+                if !bus
+                    .as_str()
+                    .is_some_and(|id| is_valid_id(BUS_ID_PREFIX, id))
+                {
+                    problems.push(problem(
+                        &format!("{at}.tracks[{index}]"),
+                        "a track names its bus by id".to_owned(),
+                    ));
+                    invalid = true;
+                }
+                *bus = json!({ "bus_id": bus.take() });
+            }
+            if invalid {
+                continue;
+            }
+        }
         match Command::decode("set_output_profile", Some(&Value::Object(params))) {
             Ok(Command::SetOutputProfile(request)) => {
                 decoded.push(kind);
                 let encoder = request.video_encoder.unwrap_or_default();
                 match kind {
                     OutputKind::Recording => {
-                        // A file names track buses by id (the decoder takes
-                        // anything else as a name).
-                        let mut tracks: Vec<String> = Vec::new();
-                        for (index, bus) in
-                            request.tracks.unwrap_or_default().into_iter().enumerate()
-                        {
-                            match bus.id {
-                                Some(id) => tracks.push(id),
-                                None => problems.push(problem(
-                                    &format!("{at}.tracks[{index}]"),
-                                    "a track names its bus by id".to_owned(),
-                                )),
-                            }
-                        }
                         profiles.recording = RecordingProfile {
                             mix,
-                            tracks,
+                            // Every entry is `{bus_id}` (checked above).
+                            tracks: request
+                                .tracks
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|bus| bus.id)
+                                .collect(),
                             video_encoder: encoder,
                         };
                     }
@@ -841,7 +869,8 @@ pub(crate) fn structure<T: DeserializeOwned>(at: &str, value: &Value) -> Result<
 }
 
 /// serde's unknown-field message lists the command's fields, among them
-/// `scene` and `source_id`, which a file must not use; keep the first part.
+/// `scene_id`, `scene_name` and `capture_target_id`, which a file must not
+/// use; keep the first part.
 fn without_expected(message: String) -> String {
     match message.find(", expected one of") {
         Some(end) if message.contains("unknown field") => message[..end].to_owned(),

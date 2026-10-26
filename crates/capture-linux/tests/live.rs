@@ -51,7 +51,7 @@ fn capabilities_report_running_services() {
         "{:?}",
         caps.screen.unavailable_reason
     );
-    assert!(!caps.screen.source_kinds.is_empty());
+    assert!(!caps.screen.target_kinds.is_empty());
 }
 
 #[test]

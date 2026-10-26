@@ -48,19 +48,19 @@ Capture diagnostics (Linux; output is JSON):
 cargo run -p streamforge-cli -- capture caps
 cargo run -p streamforge-cli -- capture inputs
 cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker (Linux)
-cargo run -p streamforge-cli -- capture sources                         # monitors and windows by id (Windows, macOS)
-cargo run -p streamforge-cli -- record --file take.mkv --video-encoder hardware  # GPU encoder or an error saying why
-cargo run -p streamforge-cli -- capture screen --source-id 'monitor:\\.\DISPLAY1'  # no picker
+cargo run -p streamforge-cli -- capture targets                         # monitors and windows by id (Windows, macOS)
+cargo run -p streamforge-cli -- record --file-name take.mkv --video-encoder hardware  # GPU encoder or an error saying why
+cargo run -p streamforge-cli -- capture screen --capture-target-id 'monitor:\\.\DISPLAY1'  # no picker
 cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
 
 # Audio mixer (live inputs and/or test tones; no audio is stored)
 cargo run --release -p streamforge-cli -- mix --input <name>=-6 --tone 1000@-12 --duration-ms 10000
 
 # Compositor (1920x1080@60 test scene; --screen adds a live capture layer)
-cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 --snapshot frame.ppm
+cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 --snapshot-file-name frame.ppm
 
 # Recording (H.264 + AAC in Matroska; never overwrites an existing file)
-cargo run --release -p streamforge-cli -- --output-dir /tmp record --file take.mkv --duration-ms 10000 [--screen] [--input <name>]
+cargo run --release -p streamforge-cli -- --output-dir /tmp record --file-name take.mkv --duration-ms 10000 [--screen] [--input <name>]
 
 # MCP server for agents (stdio). Read-only unless you allow more; streaming
 # only to the target you configure, with the key from an environment variable.

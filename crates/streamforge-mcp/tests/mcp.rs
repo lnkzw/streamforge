@@ -130,7 +130,7 @@ async fn read_only_by_default() {
     let bars = call(
         &client,
         "add_source",
-        json!({"scene": "Test pattern", "name": "b", "kind": "color_bars"}),
+        json!({"scene_name": "Test pattern", "name": "b", "kind": "color_bars"}),
     )
     .await;
     assert_eq!(error_code(&bars), "permission_denied");
@@ -163,13 +163,13 @@ async fn control_lets_an_agent_create_a_test_scene() {
     // The scene by `scene_id` or by name: neither is required alone.
     assert_eq!(schema["required"], json!(["name", "kind"]));
     let properties = schema["properties"].as_object().expect("properties");
-    assert!(properties.contains_key("scene_id") && properties.contains_key("scene"));
+    assert!(properties.contains_key("scene_id") && properties.contains_key("scene_name"));
 
     ok(&call(&client, "create_scene", json!({"name": "Agent test"})).await);
     ok(&call(
         &client,
         "add_source",
-        json!({"scene": "Agent test", "name": "bars", "kind": "color_bars"}),
+        json!({"scene_name": "Agent test", "name": "bars", "kind": "color_bars"}),
     )
     .await);
     let scenes = call(&client, "list_scenes", json!({})).await;
@@ -184,20 +184,20 @@ async fn control_lets_an_agent_create_a_test_scene() {
     // An agent can name the source by its id alone.
     let id = scene["sources"][0]["id"].as_str().expect("source id");
     assert!(id.starts_with("src_"), "{id}");
-    let moved = call(&client, "update_source", json!({"id": id, "x": 8})).await;
+    let moved = call(&client, "update_source", json!({"source_id": id, "x": 8})).await;
     assert_eq!(ok(&moved)["scenes"][1]["sources"][0]["x"], 8.0);
     // Screen capture and deleting need sensitive access.
     let screen = call(
         &client,
         "add_source",
-        json!({"scene": "Agent test", "name": "desk", "kind": "screen"}),
+        json!({"scene_name": "Agent test", "name": "desk", "kind": "screen"}),
     )
     .await;
     assert_eq!(error_code(&screen), "permission_denied");
     let delete = call(
         &client,
         "delete_scene",
-        json!({"name": "Agent test", "confirm": true}),
+        json!({"scene_name": "Agent test", "confirm": true}),
     )
     .await;
     assert_eq!(error_code(&delete), "permission_denied");
@@ -478,4 +478,53 @@ fn sigterm_finalizes_an_open_recording() {
     ffmpeg_next::init().expect("init");
     let input = ffmpeg_next::format::input(&dir.0.join("signal.mkv")).expect("open recording");
     assert!(input.duration() > 0, "duration {}", input.duration());
+}
+
+#[tokio::test]
+async fn sensitive_tools_use_capture_target_names_and_explicit_references() {
+    let dir = TempDir::new("protocol-names");
+    let client = connect(&dir, &["--allow", "sensitive"], &[]).await;
+    let tools = tools(&client).await;
+    let listed = names(&tools);
+    assert!(listed.contains(&"list_capture_targets") && listed.contains(&"set_capture_target"));
+    assert!(!listed.contains(&"list_screen_sources") && !listed.contains(&"set_screen_source"));
+    let target = tools
+        .iter()
+        .find(|tool| tool.name == "set_capture_target")
+        .unwrap();
+    let properties = target.input_schema["properties"].as_object().unwrap();
+    for field in [
+        "source_id",
+        "source_name",
+        "scene_id",
+        "scene_name",
+        "capture_target_id",
+    ] {
+        assert!(properties.contains_key(field), "{field}");
+    }
+    assert!(!properties.contains_key("id") && !properties.contains_key("name"));
+    assert!(
+        target
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("capture_target_id")
+    );
+    let probe = tools
+        .iter()
+        .find(|tool| tool.name == "probe_screen_capture")
+        .unwrap();
+    for field in ["capture_target_id", "target_kinds", "cursor_mode"] {
+        assert!(
+            probe.input_schema["properties"].get(field).is_some(),
+            "{field}"
+        );
+    }
+    let profile = tools
+        .iter()
+        .find(|tool| tool.name == "set_output_profile")
+        .unwrap();
+    let tracks = &profile.input_schema["properties"]["tracks"];
+    assert!(tracks.to_string().contains("bus_name"), "{tracks}");
+    client.cancel().await.expect("close");
 }

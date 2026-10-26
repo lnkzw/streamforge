@@ -68,6 +68,21 @@ impl MediaTimestamp {
     }
 }
 
+/// Exact rational number, e.g. a frame rate of 60000/1001. Nominal frame
+/// rates are reported this way, so a fractional rate needs no type change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rational {
+    pub num: u32,
+    pub den: u32,
+}
+
+impl Rational {
+    /// A whole number, e.g. 60 frames per second as `60/1`.
+    pub const fn integer(value: u32) -> Self {
+        Self { num: value, den: 1 }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MediaTimeError {
     #[error("time base numerator and denominator must be non-zero")]

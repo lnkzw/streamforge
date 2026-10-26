@@ -184,7 +184,7 @@ const PROBE_AUDIO_MIX: CommandDescriptor = CommandDescriptor {
     summary: "Mix live audio inputs and test tones at 48 kHz stereo and report meters, buffer \
               latency over time, underruns and clipping; no audio is stored. Params: duration_ms \
               (100..=900000, default 5000), inputs ([{input, gain_db, mute}]), tones \
-              ([{frequency_hz, level_dbfs, gain_db, mute}]), master_gain_db; up to 8 sources, \
+              ([{frequency_hz, level_dbfs, gain_db, mute}]), program_gain_db; up to 8 sources, \
               default one 1 kHz test tone.",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -756,8 +756,8 @@ struct MixProbeParams {
     /// Test tones.
     #[serde(default)]
     tones: Vec<ToneParams>,
-    /// Master gain in dB, -96 to 24.
-    master_gain_db: Option<f32>,
+    /// Program bus gain in dB, -96 to 24.
+    program_gain_db: Option<f32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -803,19 +803,19 @@ fn decode_mix_probe(command: &str, params: Option<&Value>) -> Result<MixRequest,
             mute: None,
         });
     }
-    let sources = mix_sources(command, params.inputs, params.tones, params.master_gain_db)?;
+    let sources = mix_sources(command, params.inputs, params.tones, params.program_gain_db)?;
     Ok(MixRequest {
         duration: duration_within(command, params.duration_ms, MAX_MIX_DURATION)?,
         inputs: sources.inputs,
         tones: sources.tones,
-        master_gain_db: sources.master_gain_db,
+        program_gain_db: sources.program_gain_db,
     })
 }
 
 struct MixSources {
     inputs: Vec<LiveInputSpec>,
     tones: Vec<ToneSpec>,
-    master_gain_db: f32,
+    program_gain_db: f32,
 }
 
 /// Validate live inputs, tones and gains shared by mixing commands.
@@ -823,7 +823,7 @@ fn mix_sources(
     command: &str,
     inputs: Vec<LiveInputParams>,
     tones: Vec<ToneParams>,
-    master_gain_db: Option<f32>,
+    program_gain_db: Option<f32>,
 ) -> Result<MixSources, CommandError> {
     let sources = inputs.len() + tones.len();
     if sources > MAX_INPUTS {
@@ -866,7 +866,7 @@ fn mix_sources(
     Ok(MixSources {
         inputs: live,
         tones: generated,
-        master_gain_db: gain("master_gain_db", master_gain_db)?,
+        program_gain_db: gain("program_gain_db", program_gain_db)?,
     })
 }
 
@@ -3368,7 +3368,7 @@ mod tests {
                     gain_db: 0.0,
                     muted: false,
                 }],
-                master_gain_db: 0.0,
+                program_gain_db: 0.0,
             }))
         );
     }
@@ -3391,7 +3391,7 @@ mod tests {
             json!({"tones": [{"frequency_hz": 0.0}]}),
             json!({"tones": [{"frequency_hz": 24_000.0}]}),
             json!({"tones": [{"frequency_hz": 440.0, "level_dbfs": 3.0}]}),
-            json!({"tones": [{"frequency_hz": 440.0}], "master_gain_db": 30.0}),
+            json!({"tones": [{"frequency_hz": 440.0}], "program_gain_db": 30.0}),
             json!({"inputs": [{"input": "", "gain_db": 0.0}]}),
             json!({"inputs": [{"gain_db": -200.0}]}),
             json!({"inputs": [{"volume": 1}]}),

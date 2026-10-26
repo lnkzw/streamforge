@@ -187,7 +187,7 @@ pub struct PreviewState {
     pub enabled: bool,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: capture_api::Rational,
     /// When turning the preview off: frames published, and frames dropped
     /// because no buffer was free (the viewer held them).
     pub frames_published: Option<u64>,

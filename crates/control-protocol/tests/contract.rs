@@ -382,6 +382,7 @@ fn renamed_commands_and_selectors_have_no_wire_aliases() {
         ("probe_screen_capture", json!({"source_types": ["monitor"]})),
         ("probe_screen_capture", json!({"cursor": "hidden"})),
         ("probe_composite", json!({"snapshot_path": "frame.ppm"})),
+        ("probe_audio_mix", json!({"master_gain_db": -6})),
     ] {
         let response = respond(
             &mut handler,

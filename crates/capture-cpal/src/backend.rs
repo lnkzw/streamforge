@@ -746,7 +746,7 @@ fn run(
         input: request.input.clone(),
         format: Some(AudioFormatInfo {
             sample_format: format!("{format:?}"),
-            rate: config.sample_rate,
+            sample_rate_hz: config.sample_rate,
             channels: u32::from(config.channels),
         }),
         stats,

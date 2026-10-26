@@ -80,10 +80,9 @@ pub(crate) fn run(
         duration_ms: video.end_ms().max(audio.end_ms()),
         file_bytes: std::fs::metadata(&config.path).ok().map(|m| m.len()),
         video: video.stats(shared.video_dropped.load(Ordering::Relaxed)),
-        audio: audio.stats(shared.audio_dropped.load(Ordering::Relaxed)),
         // Queue drops take every track's block at once.
-        extra_audio: extra
-            .iter()
+        audio_tracks: std::iter::once(&audio)
+            .chain(&extra)
             .map(|track| track.stats(shared.audio_dropped.load(Ordering::Relaxed)))
             .collect(),
     };

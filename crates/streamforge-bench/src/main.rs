@@ -508,7 +508,8 @@ fn print_warnings(label: &str, output: &str, warnings: &[String]) {
 }
 
 fn recording_output(report: &RecordingReport) -> OutputRun {
-    let (video, audio) = (&report.recording.video, &report.recording.audio);
+    // Track 1, the mix; the others share its queue drops.
+    let (video, audio) = (&report.recording.video, &report.recording.audio_tracks[0]);
     OutputRun {
         output: "recording",
         encoder: video.encoder.encoder.clone(),
@@ -524,6 +525,7 @@ fn recording_output(report: &RecordingReport) -> OutputRun {
 
 fn stream_output(report: &StreamingReport) -> OutputRun {
     let stream = &report.streaming;
+    let [audio] = &stream.audio_tracks;
     OutputRun {
         output: "stream",
         encoder: stream.video.encoder.encoder.clone(),
@@ -531,9 +533,9 @@ fn stream_output(report: &StreamingReport) -> OutputRun {
         frames_encoded: stream.video.frames_encoded,
         // The track counts include media dropped while offline.
         frames_dropped: stream.video.frames_dropped,
-        blocks_dropped: stream.audio.blocks_dropped,
-        gap_samples: stream.audio.gap_samples,
-        discontinuities: stream.audio.discontinuities,
+        blocks_dropped: audio.blocks_dropped,
+        gap_samples: audio.gap_samples,
+        discontinuities: audio.discontinuities,
         frames_dropped_offline: Some(stream.frames_dropped_offline),
         blocks_dropped_offline: Some(stream.blocks_dropped_offline),
         frames_undelivered: Some(stream.frames_undelivered),

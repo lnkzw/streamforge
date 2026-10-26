@@ -38,7 +38,7 @@ use video_compositor::{
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::scenes::{self, FrameCache, LiveFrames};
-use crate::{audio, command_error, mix};
+use crate::{audio, mix};
 
 /// Copies of rendered frames per output waiting for its encoder; beyond
 /// this, that output's frames are dropped and counted.
@@ -99,7 +99,7 @@ impl DeviceCapture {
             Err(error) if error.kind == CaptureErrorKind::NotFound => {
                 Ok(Self::Missing(ErrorSummary::from(error)))
             }
-            Err(error) => Err(command_error(error)),
+            Err(error) => Err(CommandError::from(error)),
         }
     }
 
@@ -909,12 +909,12 @@ impl Pipeline {
             if let Some(error) = &outcome.error {
                 warnings.push(format!(
                     "screen capture of source `{}` failed: {}",
-                    outcome.source, error.message
+                    outcome.name, error.message
                 ));
             }
         }
         let report = PipelineReport {
-            pipeline_stopped: true,
+            stopped: true,
             render,
             mix,
             audio_captures,
@@ -952,7 +952,7 @@ fn start_screens(
             capture_target_id: capture_target_id.clone(),
         };
         let stream = capture.start_screen_stream(&selection).map_err(|error| {
-            command_error(error).with_details(serde_json::json!({ "source": source.name }))
+            CommandError::from(error).with_details(serde_json::json!({ "source": source.name }))
         })?;
         started.push(SceneCapture {
             id: source.id.clone(),
@@ -974,13 +974,13 @@ fn stop_scene_capture(screen: SceneCapture) -> SceneCaptureOutcome {
     match screen.stream.stop() {
         Ok(report) => SceneCaptureOutcome {
             id: screen.id,
-            source: screen.name,
+            name: screen.name,
             report: Some(report),
             error: None,
         },
         Err(error) => SceneCaptureOutcome {
             id: screen.id,
-            source: screen.name,
+            name: screen.name,
             report: None,
             error: Some(ErrorSummary::from(error)),
         },

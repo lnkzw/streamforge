@@ -1,5 +1,7 @@
 use std::fmt;
 
+use capture_api::{CaptureError, CaptureErrorKind};
+use serde::{Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -94,5 +96,93 @@ impl CommandError {
     pub fn with_details(mut self, details: Value) -> Self {
         self.details = Some(details);
         self
+    }
+}
+
+impl From<CaptureError> for CommandError {
+    fn from(error: CaptureError) -> Self {
+        let code = match error.kind {
+            CaptureErrorKind::Unsupported => ErrorCode::Unsupported,
+            CaptureErrorKind::Unavailable => ErrorCode::Unavailable,
+            CaptureErrorKind::Cancelled => ErrorCode::Cancelled,
+            CaptureErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+            CaptureErrorKind::NotFound => ErrorCode::NotFound,
+            CaptureErrorKind::Timeout => ErrorCode::Timeout,
+            CaptureErrorKind::InvalidRequest => ErrorCode::InvalidParams,
+            CaptureErrorKind::Backend => ErrorCode::BackendError,
+        };
+        Self {
+            code,
+            message: error.message,
+            details: error.details,
+        }
+    }
+}
+
+/// An error inside a report (a capture that failed, a snapshot that was not
+/// written), in a command error's shape: `{code, message, details}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ErrorSummary {
+    #[serde(serialize_with = "code_name")]
+    pub code: ErrorCode,
+    pub message: String,
+    pub details: Option<Value>,
+}
+
+impl From<CommandError> for ErrorSummary {
+    fn from(error: CommandError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            details: error.details,
+        }
+    }
+}
+
+impl From<CaptureError> for ErrorSummary {
+    fn from(error: CaptureError) -> Self {
+        CommandError::from(error).into()
+    }
+}
+
+/// Codes are written by their wire name (see [`ErrorCode`]).
+fn code_name<S: Serializer>(code: &ErrorCode, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(code.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn capture_error_kinds_map_to_distinct_codes() {
+        let kinds = [
+            (CaptureErrorKind::Unsupported, ErrorCode::Unsupported),
+            (CaptureErrorKind::Unavailable, ErrorCode::Unavailable),
+            (CaptureErrorKind::Cancelled, ErrorCode::Cancelled),
+            (
+                CaptureErrorKind::PermissionDenied,
+                ErrorCode::PermissionDenied,
+            ),
+            (CaptureErrorKind::NotFound, ErrorCode::NotFound),
+            (CaptureErrorKind::Timeout, ErrorCode::Timeout),
+            (CaptureErrorKind::InvalidRequest, ErrorCode::InvalidParams),
+            (CaptureErrorKind::Backend, ErrorCode::BackendError),
+        ];
+        for (kind, code) in kinds {
+            assert_eq!(CommandError::from(CaptureError::new(kind, "x")).code, code);
+        }
+    }
+
+    #[test]
+    fn errors_in_reports_have_the_command_error_shape() {
+        let error = CaptureError::new(CaptureErrorKind::NotFound, "the window is gone")
+            .with_details(json!({"capture_target_id": "window:7"}));
+        assert_eq!(
+            json!(ErrorSummary::from(error)),
+            json!({"code": "not_found", "message": "the window is gone",
+                   "details": {"capture_target_id": "window:7"}})
+        );
     }
 }

@@ -16,7 +16,7 @@ use command_api::{
 use media_core::AudioRing;
 use serde_json::{Value, json};
 
-use crate::{audio, command_error};
+use crate::audio;
 
 /// How often the waiting engine thread checks whether the mixer died.
 const WATCH_INTERVAL: Duration = Duration::from_millis(50);
@@ -36,7 +36,7 @@ pub(crate) fn probe(
     let mixer = MixerThread::spawn(MixerConfig::plain(
         inputs,
         BusConfig {
-            gain_db: request.master_gain_db,
+            gain_db: request.program_gain_db,
             ..BusConfig::UNITY
         },
         request.duration,
@@ -94,7 +94,7 @@ fn start_live_inputs<'a>(
 ) -> Result<Vec<Box<dyn AudioStream>>, CommandError> {
     devices
         .into_iter()
-        .map(|device| start_device(capture, device).map_err(command_error))
+        .map(|device| start_device(capture, device).map_err(CommandError::from))
         .collect()
 }
 

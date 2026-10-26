@@ -3,10 +3,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use capture_api::{CaptureError, CaptureErrorKind, ScreenSelection, VideoCaptureReport};
+use capture_api::{ScreenSelection, VideoCaptureReport};
 use serde::Serialize;
-use serde_json::Value;
 use video_compositor::RenderStats;
+
+use crate::ErrorSummary;
 
 /// Composite the reference scene for `duration` and report render
 /// diagnostics. `duration` is validated by `Command::decode`; a
@@ -30,27 +31,13 @@ pub struct CompositeReport {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ErrorSummary {
-    pub kind: CaptureErrorKind,
-    pub message: String,
-    pub details: Option<Value>,
-}
-
-impl From<CaptureError> for ErrorSummary {
-    fn from(error: CaptureError) -> Self {
-        Self {
-            kind: error.kind,
-            message: error.message,
-            details: error.details,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SnapshotResult {
     /// Full path of the file in the engine's output directory.
     pub path: String,
     pub written: bool,
-    pub error: Option<String>,
+    /// Why it was not written: the file exists (`invalid_params`), the
+    /// directory is missing (`not_found`) or not writable
+    /// (`permission_denied`), or writing failed (`backend_error`).
+    pub error: Option<ErrorSummary>,
 }

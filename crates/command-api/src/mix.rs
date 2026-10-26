@@ -20,7 +20,8 @@ pub struct MixRequest {
     pub duration: Duration,
     pub inputs: Vec<LiveInputSpec>,
     pub tones: Vec<ToneSpec>,
-    pub master_gain_db: f32,
+    /// The program bus fader.
+    pub program_gain_db: f32,
 }
 
 /// Serialized as the `inputs` entries of the mixing commands' parameters.

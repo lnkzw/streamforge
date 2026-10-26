@@ -58,7 +58,7 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     let count = |value: &Value| value.as_u64().unwrap_or_else(|| panic!("{report}"));
     let encoded = count(&report["video"]["frames_encoded"]);
     let dropped = count(&report["video"]["frames_dropped"]);
-    let skipped = count(&responses[3]["result"]["render"]["skipped_ticks"]);
+    let skipped = count(&responses[3]["result"]["pipeline"]["render"]["skipped_ticks"]);
     // Ticks from the output's first frame (its epoch starts at attach, so
     // the first frame may be a tick later) to the cut-off, which the audio
     // end marks (audio has no drops; trailing video frames may be dropped).
@@ -68,7 +68,9 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
     let first_ms = report["video"]["first_pts_ms"]
         .as_f64()
         .expect("video start");
-    let end_ms = report["audio"]["end_ms"].as_f64().expect("audio end");
+    let end_ms = report["audio_tracks"][0]["end_ms"]
+        .as_f64()
+        .expect("audio end");
     let ticks = ((end_ms - first_ms) * 60.0 / 1000.0).round() as u64;
     assert!(
         encoded + dropped + skipped + 2 >= ticks,
@@ -91,8 +93,8 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
         encoded * den >= ticks * num,
         "fewer than {num}/{den} of the frames encoded: {report}"
     );
-    assert_eq!(report["audio"]["blocks_dropped"], 0, "{report}");
-    assert_eq!(report["audio"]["gap_samples"], 0, "{report}");
+    assert_eq!(report["audio_tracks"][0]["blocks_dropped"], 0, "{report}");
+    assert_eq!(report["audio_tracks"][0]["gap_samples"], 0, "{report}");
 
     let path = dir.0.join("accept.mkv");
     ff::init().expect("init");

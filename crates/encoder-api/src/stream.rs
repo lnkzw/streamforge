@@ -252,7 +252,9 @@ pub struct StreamStats {
     pub last_error: Option<String>,
     /// Totals over all connections.
     pub video: VideoTrackStats,
-    pub audio: AudioTrackStats,
+    /// A stream's one audio track, the mix; a list like a recording's
+    /// `audio_tracks`.
+    pub audio_tracks: [AudioTrackStats; 1],
     /// Media the streamer discarded because it was not connected (backoff,
     /// failed), including audio before a connection's first video frame.
     /// Included in the track `frames_dropped` / `blocks_dropped`, which also

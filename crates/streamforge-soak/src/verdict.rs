@@ -22,6 +22,14 @@ const STREAM_AV_TOLERANCE_S: f64 = 0.15;
 /// A stream read back from a server starts at a key frame after the reader
 /// joined: it may miss this much of the start.
 const READ_BACK_JOIN_S: f64 = 10.0;
+/// Samples per AAC packet.
+const AAC_FRAME_SAMPLES: u64 = 1024;
+/// The engine is read every 10 s; the readings must reach this close to
+/// the run's end.
+const READINGS_SLACK_S: f64 = 20.0;
+/// The file and the stream must cover the run, less this much: the stream
+/// starts with its first video frame after the start command returned.
+const COVERAGE_SLACK_S: f64 = 1.0;
 /// AAC decoders add priming and padding: up to two 1024-sample frames.
 const AUDIO_SAMPLE_TOLERANCE: u64 = 2048;
 const MIB: f64 = 1024.0 * 1024.0;
@@ -52,8 +60,10 @@ pub struct Outcome<'a> {
     pub streaming: Result<StreamingStop, String>,
     /// `Ok(())` for a clean exit.
     pub engine_exit: Result<(), String>,
-    /// Engine readings with their time since the outputs started.
+    /// Engine readings with their time since the outputs started, and
+    /// whether this system has them.
     pub process: &'a [(f64, ProcessReading)],
+    pub measured: bool,
     pub file: Result<FileCheck, String>,
     pub received: &'a Received,
 }
@@ -179,14 +189,15 @@ fn recording_loss(outcome: &Outcome) -> Check {
     let frames = recording.video.frames_dropped;
     let blocks: u64 = tracks.iter().map(|track| track.blocks_dropped).sum();
     let gaps: u64 = tracks.iter().map(|track| track.gap_samples).sum();
+    let overlaps: u64 = tracks.iter().map(|track| track.overlap_samples).sum();
     let jumps: u64 = tracks.iter().map(|track| track.discontinuities).sum();
     let summary = format!(
-        "{frames} frames and {blocks} audio blocks dropped, {gaps} gap samples, {jumps} \
-         discontinuities ({} frames encoded, {} audio track(s))",
+        "{frames} frames and {blocks} audio blocks dropped, {gaps} gap and {overlaps} overlap \
+         samples, {jumps} discontinuities ({} frames encoded, {} audio track(s))",
         recording.video.frames_encoded,
         tracks.len()
     );
-    let lost = frames + blocks + gaps + jumps > 0;
+    let lost = frames + blocks + gaps + overlaps + jumps > 0;
     check(
         "recording loss",
         if lost {
@@ -221,14 +232,15 @@ fn stream_loss(outcome: &Outcome) -> Check {
         .saturating_sub(start_blocks);
     let gaps =
         tracks.iter().map(|track| track.gap_samples).sum::<u64>() + stream.samples_undelivered;
+    let overlaps: u64 = tracks.iter().map(|track| track.overlap_samples).sum();
     let jumps: u64 = tracks.iter().map(|track| track.discontinuities).sum();
     let summary = format!(
-        "{frames} frames and {blocks} audio blocks lost, {gaps} gap or undelivered samples, \
-         {jumps} discontinuities ({} frames encoded; dropped at the start by design: \
-         {start_frames} frames, {start_blocks} blocks)",
+        "{frames} frames and {blocks} audio blocks lost, {gaps} gap or undelivered and \
+         {overlaps} overlap samples, {jumps} discontinuities ({} frames encoded; dropped at the \
+         start by design: {start_frames} frames, {start_blocks} blocks)",
         stream.video.frames_encoded
     );
-    let lost = frames + blocks + gaps + jumps > 0;
+    let lost = frames + blocks + gaps + overlaps + jumps > 0;
     check(
         "stream loss",
         if lost {
@@ -352,9 +364,25 @@ fn readings(outcome: &Outcome, value: impl Fn(&ProcessReading) -> f64) -> Vec<(f
         .collect()
 }
 
+/// Readings that should cover the run but do not: none came, or they
+/// stopped before its end (the trend would judge an old window).
+fn missing_readings(outcome: &Outcome) -> Option<String> {
+    if !outcome.measured {
+        return None;
+    }
+    match outcome.process.last() {
+        None => Some("no readings of the engine from /proc".to_owned()),
+        Some((t, _)) if *t < outcome.seconds_run - READINGS_SLACK_S => Some(format!(
+            "the readings of the engine stopped at {t:.0} of {:.0} s",
+            outcome.seconds_run
+        )),
+        Some(_) => None,
+    }
+}
+
 /// Why a resource trend is not judged.
 fn unjudged(outcome: &Outcome) -> String {
-    if outcome.process.is_empty() {
+    if !outcome.measured {
         format!("not measured on {}", std::env::consts::OS)
     } else {
         format!(
@@ -365,6 +393,9 @@ fn unjudged(outcome: &Outcome) -> String {
 }
 
 fn memory(outcome: &Outcome) -> Check {
+    if let Some(problem) = missing_readings(outcome) {
+        return check("memory", vec![problem], String::new());
+    }
     let Some(rss) = trend(&readings(outcome, |reading| reading.rss_bytes as f64)) else {
         return skip("memory", unjudged(outcome));
     };
@@ -392,6 +423,9 @@ fn memory(outcome: &Outcome) -> Check {
 /// Threads and file descriptors: the late window's highest count must not
 /// exceed the early one's.
 fn handles(outcome: &Outcome) -> Check {
+    if let Some(problem) = missing_readings(outcome) {
+        return check("threads and fds", vec![problem], String::new());
+    }
     let threads = trend(&readings(outcome, |reading| reading.threads as f64));
     let fds = trend(&readings(outcome, |reading| reading.fds as f64));
     let (Some(threads), Some(fds)) = (threads, fds) else {
@@ -439,6 +473,15 @@ fn file(outcome: &Outcome) -> Check {
         problems.push(format!(
             "{} gaps between frames, the longest {:.3} s",
             video.gaps, video.longest_step_s
+        ));
+    }
+    // Independent of the engine's counts: the recording starts before the
+    // stream and covers the whole run.
+    let span = video.end_s - video.start_s;
+    if span < outcome.seconds_run - COVERAGE_SLACK_S {
+        problems.push(format!(
+            "the video covers {span:.1} s of the {:.1} s run",
+            outcome.seconds_run
         ));
     }
     if let Ok(stop) = &outcome.recording {
@@ -513,48 +556,76 @@ fn delivery(outcome: &Outcome) -> Check {
     let span = video.end_s - video.first_s;
     if received.read_back {
         // The reader joined late, so packets are not counted against the
-        // sender's: nothing may be missing between them, and they must
-        // cover the run.
-        if received.video_gaps > 0 {
-            problems.push(format!(
-                "{} gaps between video packets, the longest {:.3} s",
-                received.video_gaps, received.longest_video_step_s
-            ));
+        // sender's: nothing may be missing between them, and from its join
+        // they must reach the run's end.
+        for (name, track) in [("video", video), ("audio", audio)] {
+            if track.gaps > 0 {
+                problems.push(format!(
+                    "{} gaps between {name} packets, the longest {:.3} s",
+                    track.gaps, track.longest_step_s
+                ));
+            }
         }
-        if span < outcome.seconds_run - READ_BACK_JOIN_S {
+        match received.joined_after_s {
+            Some(joined) if joined > READ_BACK_JOIN_S => {
+                problems.push(format!("the reader joined {joined:.1} s after the start"));
+            }
+            Some(joined) if span + joined < outcome.seconds_run - COVERAGE_SLACK_S => {
+                problems.push(format!(
+                    "from its join at {joined:.1} s, the read-back covers {span:.1} s of the \
+                     {:.1} s run",
+                    outcome.seconds_run
+                ));
+            }
+            _ => {}
+        }
+    } else {
+        if span < outcome.seconds_run - COVERAGE_SLACK_S {
             problems.push(format!(
-                "the read-back covers {span:.1} s of {:.1} s",
+                "the video covers {span:.1} s of the {:.1} s run",
                 outcome.seconds_run
             ));
         }
-    } else if let Ok(stop) = &outcome.streaming {
-        let stream = &stop.streaming;
-        let sent = stream
-            .video
-            .frames_encoded
-            .saturating_sub(stream.frames_undelivered);
-        if video.packets != sent {
-            problems.push(format!(
-                "{} video packets arrived, {sent} were delivered",
-                video.packets
-            ));
+        if let Ok(stop) = &outcome.streaming {
+            let stream = &stop.streaming;
+            let sent = stream
+                .video
+                .frames_encoded
+                .saturating_sub(stream.frames_undelivered);
+            if video.packets != sent {
+                problems.push(format!(
+                    "{} video packets arrived, {sent} were delivered",
+                    video.packets
+                ));
+            }
+            let samples = stream
+                .audio_tracks
+                .first()
+                .map_or(0, |track| track.samples_encoded)
+                .saturating_sub(stream.samples_undelivered);
+            let expected = samples.div_ceil(AAC_FRAME_SAMPLES);
+            if audio.packets.abs_diff(expected) > 2 {
+                problems.push(format!(
+                    "{} audio packets arrived, {expected} were delivered",
+                    audio.packets
+                ));
+            }
         }
     }
     let end = audio.end_s - video.end_s;
     if end.abs() >= STREAM_AV_TOLERANCE_S {
         problems.push(format!("audio ends {end:+.3} s from the video"));
     }
-    let source = if received.read_back {
-        "read back from the server"
-    } else {
-        "at the local ingest"
+    let source = match received.joined_after_s {
+        Some(joined) => format!("read back from the server (joined at {joined:.1} s)"),
+        None => "at the local ingest".to_owned(),
     };
     check(
         "stream delivery",
         problems,
         format!(
-            "{} video and {} audio packets {source} ({}x{}, {span:.1} s), no gaps; A/V end apart \
-             {:.3} s",
+            "{} video and {} audio packets {source} ({}x{}, {span:.1} s), none missing; A/V end \
+             apart {:.3} s",
             video.packets,
             audio.packets,
             received.width,
@@ -644,6 +715,7 @@ mod tests {
                 last_error: None,
                 video: video(),
                 audio_tracks: vec![AudioTrack {
+                    samples_encoded: 172_800_000,
                     blocks_dropped: 1,
                     ..AudioTrack::default()
                 }],
@@ -676,6 +748,7 @@ mod tests {
             packets,
             first_s: 0.0,
             end_s: 3600.0,
+            ..Track::default()
         };
         Received {
             video: Some(track(FRAMES)),
@@ -717,6 +790,7 @@ mod tests {
             streaming: Ok(streaming()),
             engine_exit: Ok(()),
             process,
+            measured: true,
             file: Ok(file()),
             received,
         }
@@ -789,6 +863,34 @@ mod tests {
     }
 
     #[test]
+    fn overlaps_short_files_and_missing_audio_packets_fail() {
+        let watch = watch(health(1, "running"));
+        let process = process(|_| 400.0);
+        let received = received();
+        let mut outcome = outcome(&watch, &process, &received);
+        let mut recording = recording();
+        recording.recording.audio_tracks[0].overlap_samples = 1024;
+        outcome.recording = Ok(recording);
+        // The same short media in the file and the report: counts agree.
+        let mut file = file();
+        file.video.end_s = 1800.0;
+        file.audio[0].end_s = 1800.01;
+        outcome.file = Ok(file);
+        let mut fewer = received.clone();
+        fewer.audio.as_mut().unwrap().packets -= 100;
+        let outcome = Outcome {
+            received: &fewer,
+            ..outcome
+        };
+        let checks = judge(&outcome);
+        assert_eq!(
+            failed(&checks),
+            ["recording loss", "file", "stream delivery"],
+            "{checks:#?}"
+        );
+    }
+
+    #[test]
     fn a_read_back_stream_is_judged_by_gaps_and_coverage_not_by_count() {
         let watch = watch(health(1, "running"));
         let process = process(|_| 400.0);
@@ -801,6 +903,7 @@ mod tests {
         // Joined 2 s late: fewer packets than sent, still whole.
         let mut late = received();
         late.read_back = true;
+        late.joined_after_s = Some(2.0);
         let video = late.video.as_mut().unwrap();
         video.packets = FRAMES - 120;
         video.first_s = 2.0;
@@ -811,38 +914,71 @@ mod tests {
             delivery(&late)
         );
         let mut gaps = late.clone();
-        gaps.video_gaps = 2;
-        gaps.longest_video_step_s = 0.5;
+        gaps.audio.as_mut().unwrap().gaps = 2;
         assert_eq!(delivery(&gaps).status, Status::Fail);
-        let mut short = late;
+        // The start missing beyond the join, or the tail missing.
+        let mut short = late.clone();
         short.video.as_mut().unwrap().first_s = 20.0;
         let check = delivery(&short);
         assert_eq!(check.status, Status::Fail);
         assert!(
-            check.detail.contains("covers 3580.0 s of 3600.0 s"),
+            check.detail.contains("covers 3580.0 s of the 3600.0 s run"),
             "{}",
             check.detail
         );
+        let mut tail = late.clone();
+        tail.video.as_mut().unwrap().end_s = 3590.0;
+        tail.audio.as_mut().unwrap().end_s = 3590.0;
+        assert_eq!(delivery(&tail).status, Status::Fail);
+        let mut slow = late;
+        slow.joined_after_s = Some(12.0);
+        assert_eq!(delivery(&slow).status, Status::Fail);
     }
 
     #[test]
-    fn short_or_unmeasured_runs_skip_the_resource_checks() {
+    fn resource_checks_skip_short_or_unmeasured_runs_and_fail_missing_readings() {
         let watch = watch(health(1, "running"));
         let received = received();
-        let checks = judge(&outcome(&watch, &[], &received));
-        let skipped: Vec<_> = checks
-            .iter()
-            .filter(|check| check.status == Status::Skip)
-            .map(|check| check.name)
-            .collect();
-        assert_eq!(skipped, ["memory", "threads and fds"]);
-        assert!(passed(&checks));
+        let status = |outcome: &Outcome| {
+            judge(outcome)
+                .into_iter()
+                .filter(|check| check.name == "memory" || check.name == "threads and fds")
+                .map(|check| (check.status, check.detail))
+                .collect::<Vec<_>>()
+        };
+        // Another system: not measured.
+        let unmeasured = Outcome {
+            measured: false,
+            ..outcome(&watch, &[], &received)
+        };
+        assert!(
+            status(&unmeasured)
+                .iter()
+                .all(|(status, _)| *status == Status::Skip)
+        );
+        assert!(passed(&judge(&unmeasured)));
+        // Linux without readings, or readings that stopped: fail.
+        let none = status(&outcome(&watch, &[], &received));
+        assert!(
+            none.iter().all(|(status, _)| *status == Status::Fail),
+            "{none:?}"
+        );
+        let stopped = process(|_| 400.0)[..101].to_vec();
+        let stopped = status(&outcome(&watch, &stopped, &received));
+        assert!(
+            stopped[0].1.contains("stopped at 1000 of 3600 s"),
+            "{stopped:?}"
+        );
+        // A run shorter than warm-up and both windows: skip.
         let short = process(|_| 400.0)[..60].to_vec();
-        let memory = judge(&outcome(&watch, &short, &received))
-            .into_iter()
-            .find(|check| check.name == "memory")
-            .unwrap();
-        assert_eq!(memory.status, Status::Skip);
-        assert!(memory.detail.contains("too short"), "{}", memory.detail);
+        let short = status(&Outcome {
+            seconds_run: 590.0,
+            ..outcome(&watch, &short, &received)
+        });
+        assert!(
+            short.iter().all(|(status, _)| *status == Status::Skip),
+            "{short:?}"
+        );
+        assert!(short[0].1.contains("too short"), "{short:?}");
     }
 }

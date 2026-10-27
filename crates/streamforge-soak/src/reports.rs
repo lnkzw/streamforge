@@ -136,5 +136,8 @@ pub struct AudioTrack {
     pub samples_encoded: u64,
     pub blocks_dropped: u64,
     pub gap_samples: u64,
+    /// Samples that arrived again for a time already written, and were
+    /// dropped.
+    pub overlap_samples: u64,
     pub discontinuities: u64,
 }

@@ -1,6 +1,8 @@
 //! Decodes a recording from start to end: every video frame and every
-//! audio track, counting decoder errors, timestamps that go backwards and
-//! gaps between frames, and where each track starts and ends.
+//! audio track, counting demuxer and decoder errors and corrupt packets
+//! and frames (decoders run with `err_detect=explode`, so they report
+//! damage instead of concealing it), timestamps that go backwards and gaps
+//! between frames, and where each track starts and ends.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -66,7 +68,7 @@ pub fn inspect(path: &Path, fps: f64, mut progress: impl FnMut(f64)) -> Result<F
             context.set_threading(ff::codec::threading::Config::kind(
                 ff::codec::threading::Type::Frame,
             ));
-            let decoder = context.decoder().video().context("no video decoder")?;
+            let decoder = strict(context)?.video().context("no video decoder")?;
             let check = VideoCheck {
                 width: decoder.width(),
                 height: decoder.height(),
@@ -75,7 +77,7 @@ pub fn inspect(path: &Path, fps: f64, mut progress: impl FnMut(f64)) -> Result<F
             };
             Decoder::Video(decoder, check, None)
         } else if stream.parameters().medium() == ff::media::Type::Audio {
-            let decoder = context.decoder().audio().context("no audio decoder")?;
+            let decoder = strict(context)?.audio().context("no audio decoder")?;
             let check = AudioCheck {
                 start_s: f64::MAX,
                 ..AudioCheck::default()
@@ -93,10 +95,23 @@ pub fn inspect(path: &Path, fps: f64, mut progress: impl FnMut(f64)) -> Result<F
     let mut picture = ff::frame::Video::empty();
     let mut sound = ff::frame::Audio::empty();
     let mut reported = Instant::now();
-    for (stream, packet) in input.packets() {
+    let mut packet = ff::Packet::empty();
+    loop {
+        // Read packets one by one: an iterator would skip a demuxer error.
+        match packet.read(&mut input) {
+            Ok(()) => {}
+            Err(ff::Error::Eof) => break,
+            Err(error) => {
+                errors.count(format!("reading the file: {error}"));
+                break;
+            }
+        }
+        if packet.is_corrupt() {
+            errors.count(format!("a corrupt packet in track {}", packet.stream()));
+        }
         let Some((_, time_base, decoder)) = decoders
             .iter_mut()
-            .find(|(index, ..)| *index == stream.index())
+            .find(|(index, ..)| *index == packet.stream())
         else {
             continue;
         };
@@ -173,6 +188,18 @@ pub fn inspect(path: &Path, fps: f64, mut progress: impl FnMut(f64)) -> Result<F
     Ok(check)
 }
 
+/// Open a decoder that reports the damage it detects instead of hiding it:
+/// by default decoders conceal errors and return the frame.
+fn strict(context: ff::codec::context::Context) -> Result<ff::codec::decoder::Opened> {
+    let decoder = context.decoder();
+    let codec = ff::decoder::find(decoder.id()).context("no decoder for a track")?;
+    let mut options = ff::Dictionary::new();
+    options.set("err_detect", "crccheck+bitstream+buffer+explode");
+    decoder
+        .open_as_with(codec, options)
+        .context("cannot open a decoder")
+}
+
 #[derive(Default)]
 struct Errors {
     count: u64,
@@ -211,6 +238,9 @@ fn receive_pictures(
             }
         }
         video.frames += 1;
+        if picture.is_corrupt() {
+            errors.count(format!("a corrupt video frame (number {})", video.frames));
+        }
         let Some(pts) = picture.timestamp() else {
             continue;
         };
@@ -237,7 +267,12 @@ fn receive_sound(
 ) {
     loop {
         match decoder.receive_frame(sound) {
-            Ok(()) => audio.samples += sound.samples() as u64,
+            Ok(()) => {
+                audio.samples += sound.samples() as u64;
+                if sound.is_corrupt() {
+                    errors.count("a corrupt audio frame".to_owned());
+                }
+            }
             Err(error) if drained(&error) => return,
             Err(error) => {
                 errors.count(format!("audio frame: {error}"));

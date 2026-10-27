@@ -2,6 +2,8 @@
 //! RTMP ingest, or a server elsewhere (e.g. MediaMTX on the local network)
 //! that the harness reads the stream back from, as a player would.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,11 @@ use serde::Serialize;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the reader tries to open the stream after it was published.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// After the stream stopped, the server ends the reader's session; if it
+/// has not after this long, the reader is cancelled.
+const FINISH_TIMEOUT: Duration = Duration::from_secs(15);
+/// Samples per AAC frame, for the audio packets' expected step.
+const AAC_FRAME_SAMPLES: f64 = 1024.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Received {
@@ -25,13 +32,14 @@ pub struct Received {
     pub height: u32,
     pub first_video_is_key: bool,
     /// Read back from a server: the reader joined after the stream started,
-    /// so it has not seen the start and counts no packets against the
-    /// sender's.
+    /// so it counts no packets against the sender's.
     pub read_back: bool,
-    /// Read back: steps between video packets (in decode order) longer than
-    /// one and a half frames, and the longest step.
-    pub video_gaps: u64,
-    pub longest_video_step_s: f64,
+    /// Read back: seconds from the outputs' start until the first packet
+    /// arrived.
+    pub joined_after_s: Option<f64>,
+    /// Read back: how the reading ended (the server closing the session
+    /// after the stream stopped, a timeout, a cancel).
+    pub ended_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -40,6 +48,10 @@ pub struct Track {
     /// First and last-ending packet timestamps.
     pub first_s: f64,
     pub end_s: f64,
+    /// Read back: steps between packets (in decode order) longer than one
+    /// and a half packet durations, and the longest step.
+    pub gaps: u64,
+    pub longest_step_s: f64,
 }
 
 impl From<ServerReport> for Received {
@@ -48,6 +60,7 @@ impl From<ServerReport> for Received {
             packets: track.packets as u64,
             first_s: track.first_s,
             end_s: track.end_s,
+            ..Track::default()
         };
         Self {
             error: report.error,
@@ -64,7 +77,10 @@ impl From<ServerReport> for Received {
 /// The receiving end of a run's stream.
 pub enum Receiver {
     Local(TestServer),
-    ReadBack(JoinHandle<Received>),
+    ReadBack {
+        reader: JoinHandle<Received>,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 impl Receiver {
@@ -80,23 +96,34 @@ impl Receiver {
     }
 
     /// Read `url` back from its server, once the stream publishes there.
-    /// `fps` is the stream's frame rate, for finding gaps.
-    pub fn read_back(url: String, fps: f64) -> Result<Self> {
+    /// `fps` is the stream's frame rate, for finding gaps; `started` is
+    /// when the outputs started.
+    pub fn read_back(url: String, fps: f64, started: Instant) -> Result<Self> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::clone(&cancel);
         let reader = thread::Builder::new()
             .name("stream-reader".to_owned())
-            .spawn(move || read(&url, fps))?;
-        Ok(Self::ReadBack(reader))
+            .spawn(move || read(&url, fps, started, &cancelled))?;
+        Ok(Self::ReadBack { reader, cancel })
     }
 
     /// Wait until the stream ended at the receiver.
     pub fn finish(self) -> Received {
         match self {
             Self::Local(server) => server.join().into(),
-            Self::ReadBack(reader) => reader.join().unwrap_or_else(|_| Received {
-                error: Some("the stream reader panicked".to_owned()),
-                read_back: true,
-                ..Received::default()
-            }),
+            Self::ReadBack { reader, cancel } => {
+                let deadline = Instant::now() + FINISH_TIMEOUT;
+                while !reader.is_finished() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                // FFmpeg's interrupt callback ends any blocking read.
+                cancel.store(true, Ordering::Relaxed);
+                reader.join().unwrap_or_else(|_| Received {
+                    error: Some("the stream reader panicked".to_owned()),
+                    read_back: true,
+                    ..Received::default()
+                })
+            }
         }
     }
 }
@@ -122,89 +149,126 @@ pub fn split_stream_url(url: &str) -> Result<(String, String)> {
 /// Open `url` for reading. Right after the publisher connected, the server
 /// may not offer the stream yet (MediaMTX refuses readers until the first
 /// media arrived), so failures are retried for a while.
-fn open(url: &str) -> Result<ff::format::context::Input, ff::Error> {
+fn open(url: &str, cancel: &Arc<AtomicBool>) -> Result<ff::format::context::Input, ff::Error> {
     let deadline = Instant::now() + OPEN_TIMEOUT;
     loop {
         let mut options = ff::Dictionary::new();
-        // In microseconds; without it a silent server blocks the read forever.
+        // In microseconds; without it a silent server blocks a read until
+        // the cancel.
         options.set("rw_timeout", &READ_TIMEOUT.as_micros().to_string());
-        match ff::format::input_with_dictionary(url, options) {
+        let cancelled = Arc::clone(cancel);
+        let interrupt = move || cancelled.load(Ordering::Relaxed);
+        match ff::format::input_with_interrupt_and_dictionary(url, interrupt, options) {
             Ok(input) => return Ok(input),
-            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(error) if Instant::now() >= deadline || cancel.load(Ordering::Relaxed) => {
+                return Err(error);
+            }
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
     }
 }
 
-fn read(url: &str, fps: f64) -> Received {
+/// Counts one track's packets and the steps between them.
+struct Follow {
+    kind: ff::media::Type,
+    time_base: f64,
+    /// Steps longer than this are gaps.
+    step_limit: f64,
+    last_dts: Option<i64>,
+}
+
+fn read(url: &str, fps: f64, started: Instant, cancel: &Arc<AtomicBool>) -> Received {
     let mut received = Received {
         read_back: true,
         ..Received::default()
     };
-    let mut input = match open(url) {
+    let mut input = match open(url, cancel) {
         Ok(input) => input,
         Err(error) => {
             received.error = Some(format!("cannot read the stream back: {error}"));
             return received;
         }
     };
-    let mut tracks = Vec::new();
+    let mut follows = Vec::new();
     for stream in input.streams() {
         let parameters = stream.parameters();
         let kind = parameters.medium();
-        if kind == ff::media::Type::Video
-            && let Ok(decoder) = ff::codec::context::Context::from_parameters(parameters)
-                .and_then(|context| context.decoder().video())
-        {
-            received.width = decoder.width();
-            received.height = decoder.height();
-        }
-        tracks.push((stream.index(), kind, f64::from(stream.time_base())));
+        let context = ff::codec::context::Context::from_parameters(parameters);
+        let step_limit = match kind {
+            ff::media::Type::Video => {
+                if let Ok(decoder) = context.and_then(|context| context.decoder().video()) {
+                    received.width = decoder.width();
+                    received.height = decoder.height();
+                }
+                1.5 / fps
+            }
+            ff::media::Type::Audio => {
+                let rate = context
+                    .and_then(|context| context.decoder().audio())
+                    .map_or(48_000, |decoder| decoder.rate());
+                1.5 * AAC_FRAME_SAMPLES / f64::from(rate.max(1))
+            }
+            _ => continue,
+        };
+        follows.push((
+            stream.index(),
+            Follow {
+                kind,
+                time_base: f64::from(stream.time_base()),
+                step_limit,
+                last_dts: None,
+            },
+        ));
     }
-    let step_limit = 1.5 / fps;
-    let mut last_video_dts = None;
     let mut packet = ff::Packet::empty();
-    // The stream ends with a read error: the publisher stopped and the
-    // server closed the session (or the read timed out).
-    while packet.read(&mut input).is_ok() {
-        let Some((_, kind, time_base)) =
-            tracks.iter().find(|(index, ..)| *index == packet.stream())
+    // The stream ends with a read error: the server closed the session
+    // after the stream stopped, or the read timed out or was cancelled.
+    loop {
+        if let Err(error) = packet.read(&mut input) {
+            received.ended_by = Some(error.to_string());
+            break;
+        }
+        let Some((_, follow)) = follows
+            .iter_mut()
+            .find(|(index, _)| *index == packet.stream())
         else {
             continue;
         };
         let Some(pts) = packet.pts() else { continue };
+        received
+            .joined_after_s
+            .get_or_insert_with(|| started.elapsed().as_secs_f64());
+        let time_base = follow.time_base;
         let (start, end) = (
             pts as f64 * time_base,
             (pts + packet.duration()) as f64 * time_base,
         );
-        let track = match kind {
-            ff::media::Type::Video => {
-                if received.video.is_none() {
-                    received.first_video_is_key = packet.is_key();
-                }
-                if let Some(dts) = packet.dts() {
-                    if let Some(last) = last_video_dts {
-                        let step = (dts - last) as f64 * time_base;
-                        received.longest_video_step_s = received.longest_video_step_s.max(step);
-                        if step > step_limit {
-                            received.video_gaps += 1;
-                        }
-                    }
-                    last_video_dts = Some(dts);
-                }
-                &mut received.video
+        let track = if follow.kind == ff::media::Type::Video {
+            if received.video.is_none() {
+                received.first_video_is_key = packet.is_key();
             }
-            ff::media::Type::Audio => &mut received.audio,
-            _ => continue,
+            &mut received.video
+        } else {
+            &mut received.audio
         };
         let track = track.get_or_insert(Track {
-            packets: 0,
             first_s: start,
             end_s: end,
+            ..Track::default()
         });
         track.packets += 1;
         track.first_s = track.first_s.min(start);
         track.end_s = track.end_s.max(end);
+        if let Some(dts) = packet.dts() {
+            if let Some(last) = follow.last_dts {
+                let step = (dts - last) as f64 * time_base;
+                track.longest_step_s = track.longest_step_s.max(step);
+                if step > follow.step_limit {
+                    track.gaps += 1;
+                }
+            }
+            follow.last_dts = Some(dts);
+        }
     }
     if received.video.is_none() && received.audio.is_none() {
         received.error = Some("the stream reader received nothing".to_owned());

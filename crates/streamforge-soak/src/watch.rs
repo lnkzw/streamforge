@@ -42,11 +42,17 @@ impl fmt::Display for Event {
     }
 }
 
-/// The readings of one run, from the first one after the outputs started.
+/// The readings of one run: a baseline before the outputs start, one
+/// reading after another while they run, and an end reading after they
+/// stopped, while the pipeline still runs for the preview.
 #[derive(Debug, Default)]
 pub struct Watch {
     pub first: Option<Health>,
+    /// The last reading while the outputs ran.
     pub last: Option<Health>,
+    /// The reading after the outputs stopped: the pipeline's counters
+    /// cover the stops too.
+    pub end: Option<Health>,
     pub events: Vec<Event>,
     /// The deepest output queues seen in any reading.
     pub max_queue_depth: QueueDepths,
@@ -65,32 +71,15 @@ impl Watch {
     pub fn observe(&mut self, t_s: f64, health: Health) -> &[Event] {
         let start = self.events.len();
         if let Some(last) = &self.last {
-            let before = loss_counters(last);
-            let stream_started = last
-                .streaming
-                .as_ref()
-                .is_some_and(|stream| stream.frames_encoded > 0);
-            for (what, now) in loss_counters(&health) {
-                let previous = before
-                    .iter()
-                    .find(|(name, _)| *name == what)
-                    .map_or(0, |(_, value)| *value);
-                if now > previous {
-                    let note =
-                        (what.starts_with("streaming.") && !stream_started).then_some(STREAM_START);
-                    self.events.push(Event {
-                        t_s,
-                        what,
-                        delta: Some(now - previous),
-                        now: now.to_string(),
-                        note,
-                    });
-                }
-            }
+            push_losses(&mut self.events, t_s, last, &health, |_| true);
+            // A state that appears (an output starting) is not an event;
+            // a state that changes is.
             let before = states(last);
             for (what, now) in states(&health) {
-                let previous = before.iter().find(|(name, _)| *name == what);
-                if previous.is_none_or(|(_, value)| *value != now) {
+                if before
+                    .iter()
+                    .any(|(name, value)| *name == what && *value != now)
+                {
                     self.events.push(Event {
                         t_s,
                         what,
@@ -116,34 +105,85 @@ impl Watch {
         &self.events[start..]
     }
 
+    /// Take the reading after the outputs stopped; returns the pipeline
+    /// losses since the last reading.
+    pub fn observe_end(&mut self, t_s: f64, health: Health) -> &[Event] {
+        let start = self.events.len();
+        if let Some(last) = &self.last {
+            push_losses(&mut self.events, t_s, last, &health, is_pipeline);
+        }
+        self.end = Some(health);
+        &self.events[start..]
+    }
+
     /// How much `counter` (a name from [`loss_counters`]) grew from the
-    /// first reading to the last.
+    /// first reading to the end reading (or the last one).
     pub fn growth(&self, counter: &str) -> u64 {
-        let value = |health: &Option<Health>| {
-            health.as_ref().map_or(0, |health| {
+        let value = |health: Option<&Health>| {
+            health.map_or(0, |health| {
                 loss_counters(health)
                     .into_iter()
                     .find(|(name, _)| name == counter)
                     .map_or(0, |(_, value)| value)
             })
         };
-        value(&self.last).saturating_sub(value(&self.first))
+        value(self.end.as_ref().or(self.last.as_ref())).saturating_sub(value(self.first.as_ref()))
     }
 
-    /// The loss counters whose growth the verdict judges, with that growth;
-    /// the outputs' own drops are judged from their stop reports instead.
+    /// The pipeline's loss counters with their growth over the run; the
+    /// outputs' own drops are judged from their stop reports instead.
     pub fn pipeline_losses(&self) -> Vec<(String, u64)> {
-        self.last
+        self.end
             .as_ref()
+            .or(self.last.as_ref())
             .map(loss_counters)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(name, _)| !name.starts_with("recording.") && !name.starts_with("streaming."))
+            .filter(|(name, _)| is_pipeline(name))
             .map(|(name, _)| {
                 let grown = self.growth(&name);
                 (name, grown)
             })
             .collect()
+    }
+}
+
+fn is_pipeline(counter: &str) -> bool {
+    !counter.starts_with("recording.") && !counter.starts_with("streaming.")
+}
+
+/// An event for each loss counter (that `wanted` names) that grew from
+/// `last` to `health`.
+fn push_losses(
+    events: &mut Vec<Event>,
+    t_s: f64,
+    last: &Health,
+    health: &Health,
+    wanted: impl Fn(&str) -> bool,
+) {
+    let before = loss_counters(last);
+    let stream_started = last
+        .streaming
+        .as_ref()
+        .is_some_and(|stream| stream.frames_encoded > 0);
+    for (what, now) in loss_counters(health) {
+        if !wanted(&what) {
+            continue;
+        }
+        let previous = before
+            .iter()
+            .find(|(name, _)| *name == what)
+            .map_or(0, |(_, value)| *value);
+        if now > previous {
+            let note = (what.starts_with("streaming.") && !stream_started).then_some(STREAM_START);
+            events.push(Event {
+                t_s,
+                what,
+                delta: Some(now - previous),
+                now: now.to_string(),
+                note,
+            });
+        }
     }
 }
 
@@ -319,5 +359,25 @@ mod tests {
             later[0].to_string(),
             "[01:01] streaming.blocks_dropped 3 (+1)"
         );
+    }
+
+    #[test]
+    fn the_end_reading_counts_losses_during_the_stops() {
+        let mut watch = Watch::default();
+        watch.observe(0.0, reading(1, 0, 0, "running"));
+        watch.observe(60.0, reading(1, 0, 0, "running"));
+        // After the stops: no outputs, but a skipped tick and an underrun.
+        let mut end = reading(2, 96, 0, "running");
+        end.recording = None;
+        let found = watch.observe_end(60.5, end).to_vec();
+        let names: Vec<_> = found.iter().map(|event| event.what.as_str()).collect();
+        assert_eq!(
+            names,
+            ["render.skipped_ticks", "mix.inputs[Desk].underrun_frames"]
+        );
+        assert_eq!(watch.growth("render.skipped_ticks"), 1);
+        assert_eq!(watch.growth("mix.inputs[Desk].underrun_frames"), 96);
+        // The outputs' state at the end is the last reading's.
+        assert!(watch.last.as_ref().unwrap().recording.is_some());
     }
 }

@@ -43,6 +43,9 @@ use crate::watch::{QueueDepths, Watch};
 /// status and meters, health, and the scene list.
 const STATUS_EVERY: Duration = Duration::from_millis(100);
 const HEALTH_EVERY: Duration = Duration::from_millis(250);
+/// How often the engine refreshes the pipeline's health counters, plus a
+/// margin.
+const HEALTH_REFRESH: Duration = Duration::from_millis(300);
 const SCENES_EVERY: Duration = Duration::from_secs(2);
 /// A timeline sample with the engine's resources.
 const SAMPLE_EVERY: Duration = Duration::from_secs(10);
@@ -213,6 +216,10 @@ fn run(args: &Args) -> Result<bool> {
         )?;
     }
     let mixer = engine.request("get_mixer", Value::Null, REQUEST_TIMEOUT)?;
+    // The baseline of the pipeline's counters, so that losses while the
+    // outputs start count too.
+    let mut watch = Watch::default();
+    watch.observe(0.0, health(&mut engine)?);
 
     let (local, mut stream) = match &read_back {
         Some((server, key)) => (None, json!({"url": server, "stream_key": key})),
@@ -240,7 +247,7 @@ fn run(args: &Args) -> Result<bool> {
         (None, Some(url)) => {
             let fps = streaming_start["fps"]["num"].as_f64().unwrap_or(60.0)
                 / streaming_start["fps"]["den"].as_f64().unwrap_or(1.0);
-            Receiver::read_back(url.clone(), fps)?
+            Receiver::read_back(url.clone(), fps, started)?
         }
         (None, None) => unreachable!("a local ingest when no --url is given"),
     };
@@ -269,13 +276,13 @@ fn run(args: &Args) -> Result<bool> {
         engine: &mut engine,
         timeline: &mut timeline,
         started,
-        watch: Watch::default(),
+        watch,
         process: Vec::new(),
         max_load: None,
     };
     let aborted = soak.poll(Duration::from_secs(args.seconds)).err();
     let Soak {
-        watch,
+        mut watch,
         process,
         max_load,
         ..
@@ -287,6 +294,20 @@ fn run(args: &Args) -> Result<bool> {
 
     let streaming = stop::<StreamingStop>(&mut engine, "stop_streaming");
     let recording = stop::<RecordingStop>(&mut engine, "stop_recording");
+    // The pipeline still runs for the preview: a reading after its next
+    // refresh covers the stops too.
+    thread::sleep(HEALTH_REFRESH);
+    match health(&mut engine) {
+        Ok(end) if end.render.is_some() && end.mix.is_some() => {
+            let t_s = started.elapsed().as_secs_f64();
+            for event in watch.observe_end(t_s, end).to_vec() {
+                eprintln!("{event}");
+                timeline.write("event", serde_json::to_value(&event)?)?;
+            }
+        }
+        Ok(_) => eprintln!("No pipeline counters after the stops; the last reading counts."),
+        Err(error) => eprintln!("No reading after the stops ({error:#}); the last one counts."),
+    }
     let preview = engine.request("set_preview", json!({"enabled": false}), STOP_TIMEOUT);
     let engine_exit = match engine.finish(EXIT_TIMEOUT) {
         Ok(status) if status.success() => Ok(()),
@@ -314,6 +335,7 @@ fn run(args: &Args) -> Result<bool> {
         streaming,
         engine_exit,
         process: &process,
+        measured: cfg!(target_os = "linux"),
         file,
         received: &received,
     };
@@ -515,6 +537,11 @@ impl Next {
             .min()
             .unwrap_or_else(Instant::now)
     }
+}
+
+fn health(engine: &mut Engine) -> Result<Health> {
+    let health = engine.request("get_health", Value::Null, REQUEST_TIMEOUT)?;
+    serde_json::from_value(health).context("an unexpected get_health result")
 }
 
 /// Stop an output and read its report; a failed stop keeps its message and

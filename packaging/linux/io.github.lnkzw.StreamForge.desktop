@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=StreamForge
+GenericName=Streaming and Recording
+Comment=Compose scenes, mix audio, record and stream
+Exec=streamforge-desktop
+Icon=io.github.lnkzw.StreamForge
+StartupWMClass=io.github.lnkzw.StreamForge
+Terminal=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=stream;streaming;record;recording;rtmp;broadcast;mixer;

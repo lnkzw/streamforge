@@ -1,125 +1,55 @@
 # StreamForge
 
-An experimental, cross-platform, agent-friendly streaming application. The project aims to build its own real-time media graph and application workflow rather than wrapping OBS/libobs.
+StreamForge is a streaming and recording application with its own real-time media engine. It composes scenes, mixes audio with buses and sends, and records and streams the result. A desktop app, a command line, a JSON-lines protocol and an MCP server for AI agents all drive the same engine through the same commands. It does not use OBS or libobs.
 
-## Current status
+![The StreamForge desktop app while recording](docs/images/desktop.png)
 
-This repository is an **architecture and workflow scaffold**, not a working streaming engine yet. In place so far:
+## Status
 
-- M0 (workspace) and M1 (command boundary): typed commands, a headless engine process, and a local JSON-lines control protocol.
-- M2 (Linux capture spike): screen capture through the XDG portal and PipeWire, plus audio input capture. Both run as short diagnostic probes.
-- M3 (first compositor): CPU compositor with scene graph, a 1080p/60 render loop on its own thread, and continuous screen capture as a live source.
-- M4 (audio mixer): a 48 kHz stereo mixer with gain, mute, meters and an explicit clipping and drift policy. It takes continuous audio capture and test tones.
-- M5 (first recording, Linux): the composited scene and the audio mix are recorded to H.264 + AAC in Matroska through the FFmpeg libraries.
-- M6 (live output, Linux): RTMP streaming with reconnects, running alongside a recording; the two fail independently.
-- M7 (desktop UI): scenes and sources edited live, preview, mixer with meters, and recording/stream controls in an egui app on top of the command API.
-- M8 (agent integration): an MCP server exposing the commands as tools, read-only by default. More access must be granted explicitly, and agents never see stream keys.
+Version 0.1.0 is the first release, for **Linux** (packages for Ubuntu 24.04 and Arch Linux). Windows and macOS build from source and pass the test suite in CI; packages for them follow after tests on real machines.
 
-## Prerequisites
+What works:
 
-- Rust stable toolchain, 1.95 or newer (`rustup`, `cargo`, `rustfmt`, `clippy`; eframe needs 1.95)
-- Git
-- Linux: PipeWire headers (≥ 0.3.44), `clang`/libclang and `pkg-config`, for `capture-linux`. Runtime needs PipeWire and xdg-desktop-portal with a ScreenCast backend. See `docs/capture-linux.md`.
-- FFmpeg libraries for `encoder-ffmpeg` (FFmpeg 6.1 or newer with libx264; 6.1, 8.1 and 9.0 are tested):
-  - Linux: development packages, on Debian/Ubuntu `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`.
-  - macOS: `brew install ffmpeg pkgconf`.
-  - Windows: a shared build with headers and import libraries (e.g. BtbN's `win64-gpl-shared`). Set `FFMPEG_DIR` to it and put its `bin` on `PATH`; `LIBCLANG_PATH` must point to LLVM.
-  - See `docs/platforms.md`, which also has the capability matrix per OS (screen capture is Linux-only so far; audio input works on all three).
+- **Scenes** of solid colours, colour bars and screen or window capture (XDG portal and PipeWire on Linux), composed at 1920×1080 and 60 fps, with a live preview.
+- **Audio** from microphones, desktop audio and test tones: channels with gain, mute and balance, aux buses, sends before or after the fader, and a headphone monitor.
+- **Recording** to Matroska (H.264 and AAC), with further audio tracks if you want them.
+- **Streaming** over RTMP or RTMPS at the same time as recording, with reconnects. The two fail independently.
+- **Hardware encoding** with VAAPI or NVENC when available, with a fallback to libx264.
+- **Projects** that save scenes, audio setup and output settings to a JSON file.
+- **Control** from the desktop app, the `streamforge` command line, scripts (`streamforge-engine`), and AI agents over MCP with access levels. Agents never see stream keys.
 
-Install Rust using the official instructions: <https://www.rust-lang.org/tools/install>
+The [known limitations](docs/user-guide.md#known-limitations) list what is missing, such as cameras, effects and transitions.
 
-## Start locally
+## Install
 
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo run -p streamforge-cli -- --help
-cargo run -p streamforge-cli -- status
+Download the package for your distribution from the [releases page](https://github.com/lnkzw/streamforge/releases), then:
 
-# Headless engine: one JSON request per line on stdin, one response per line on stdout
-printf '%s\n' '{"id":1,"command":"get_status"}' | cargo run -q -p streamforge-engine
+```sh
+sha256sum -c streamforge-*.tar.gz.sha256
+tar -xzf streamforge-*.tar.gz
+cd streamforge-*/
+./install.sh          # into ~/.local, with an entry in the application menu
+streamforge status
 ```
 
-The protocol is specified in `docs/protocol.md`.
+It needs FFmpeg, PipeWire and xdg-desktop-portal from your distribution. The [user guide](docs/user-guide.md#install) has the details and how to build from source.
 
-Capture diagnostics (Linux; output is JSON):
+## Quick start
 
-```bash
-cargo run -p streamforge-cli -- capture caps
-cargo run -p streamforge-cli -- capture inputs
-cargo run -p streamforge-cli -- capture screen --duration-ms 5000      # opens the system picker (Linux)
-cargo run -p streamforge-cli -- capture targets                         # monitors and windows by id (Windows, macOS)
-cargo run -p streamforge-cli -- record --file-name take.mkv --video-encoder hardware  # GPU encoder or an error saying why
-cargo run -p streamforge-cli -- capture screen --capture-target-id 'monitor:\\.\DISPLAY1'  # no picker
-cargo run -p streamforge-cli -- capture audio --input <name> --duration-ms 3000
+- **Desktop:** start *StreamForge* from the application menu, or `streamforge-desktop --output-dir ~/Videos`. Add sources and audio channels, then press **REC** or **LIVE**.
+- **Command line:** `streamforge record --file-name test.mkv` records ten seconds of a test scene; `streamforge capture caps` shows what your system can capture.
+- **AI agents:** `claude mcp add streamforge -- ~/.local/bin/streamforge-mcp --allow control` lets Claude Code edit scenes and the mixer.
 
-# Audio mixer (live inputs and/or test tones; no audio is stored)
-cargo run --release -p streamforge-cli -- mix --input <name>=-6 --tone 1000@-12 --duration-ms 10000
+## Documentation
 
-# Compositor (1920x1080@60 test scene; --screen adds a live capture layer)
-cargo run --release -p streamforge-cli -- --output-dir /tmp compose --duration-ms 5000 --snapshot-file-name frame.ppm
+- [User guide](docs/user-guide.md): install, desktop app, command line, scripting, MCP setup, troubleshooting, known limitations
+- [Control protocol](docs/protocol.md): the JSON-lines commands, results and errors
+- [Platforms](docs/platforms.md): what each operating system supports
+- [Development](docs/development.md): building from source, tests, repository layout
+- [Architecture](docs/architecture.md), [roadmap](docs/roadmap.md) and [decisions](docs/decisions)
 
-# Recording (H.264 + AAC in Matroska; never overwrites an existing file)
-cargo run --release -p streamforge-cli -- --output-dir /tmp record --file-name take.mkv --duration-ms 10000 [--screen] [--input <name>]
+## Licence
 
-# MCP server for agents (stdio). Read-only unless you allow more; streaming
-# only to the target you configure, with the key from an environment variable.
-cargo build --release -p streamforge-mcp
-claude mcp add streamforge -- "$PWD/target/release/streamforge-mcp" --allow control --output-dir /tmp
-#   --allow sensitive --stream-url rtmp://live.example.com/app --stream-key-env STREAMFORGE_STREAM_KEY
+StreamForge is licensed under either of the [MIT licence](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1 (`crates/streamforge-desktop/assets/fonts`).
 
-# Desktop UI (scenes, preview, mixer, record and stream controls, projects);
-# both directories default to the working directory
-cargo run --release -p streamforge-desktop -- --output-dir /tmp --project-dir ~/shows
-
-# Streaming over RTMP; the key comes from an environment variable, never from the command line
-export STREAMFORGE_STREAM_KEY=…   # e.g. read it with `read -rs STREAMFORGE_STREAM_KEY`
-cargo run --release -p streamforge-cli -- --output-dir /tmp stream --url rtmp://live.example.com/app --duration-ms 60000 [--record take.mkv]
-```
-
-StreamForge is not a replacement for OBS yet.
-
-## Licensing
-
-The StreamForge source code is licensed under either of the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1 (`crates/streamforge-desktop/assets/fonts`).
-
-Builds link the system FFmpeg libraries dynamically, so a binary is also subject to the license of the FFmpeg build it links. With libx264 (`--enable-gpl`), as in most distribution packages, that is the GPL. Anyone distributing binaries must comply with it (ADR 0005).
-
-## Repository layout
-
-- `crates/media-core`: platform-independent media types and time model
-- `crates/capture-api`: platform-neutral capture interface and diagnostics
-- `crates/capture-linux`: Linux capture backend (XDG portal + PipeWire)
-- `crates/capture-cpal`: audio capture on Windows and macOS (cpal)
-- `crates/capture-windows`: screen capture on Windows (Windows.Graphics.Capture)
-- `crates/capture-macos`: screen capture on macOS (ScreenCaptureKit)
-- `crates/capture-platform`: selects the capture backend for the target OS
-- `crates/video-compositor`: scene graph, CPU renderer and render loop
-- `crates/audio-engine`: mixer, meters, test tones and mixer thread
-- `crates/encoder-api`: recording and streaming settings, secret stream key, statistics and errors
-- `crates/encoder-ffmpeg`: recorder (H.264 + AAC → Matroska) and streamer (→ FLV over RTMP) via FFmpeg
-- `crates/rtmp-test-server`: in-process RTMP ingest for tests
-- `crates/streamforge-desktop`: desktop UI (egui/eframe) over the command API
-- `crates/streamforge-mcp`: MCP server for agents, with access levels
-- `crates/command-api`: typed commands, registry, structured results/errors, `CommandHandler` trait
-- `crates/project-file`: project file format (scenes, ids, audio setup), its checks and atomic writes
-- `crates/engine`: engine controller implementing the command handlers
-- `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)
-- `crates/streamforge-engine`: headless engine process serving the protocol on stdio
-- `crates/streamforge-cli`: CLI entry point (calls the same command handlers)
-- `crates/streamforge-bench`: measurement harness for render, drop and CPU figures
-- `.github/workflows/ci.yml`: CI (fmt, clippy, tests on Linux/Windows/macOS)
-- `docs/`: architecture, media model, control protocol, Linux capture, roadmap, testing strategy, decisions (ADRs)
-- `AGENTS.md`: instructions for coding agents
-
-## Development rules
-
-Read `AGENTS.md` before making changes. Keep platform-specific APIs behind traits in `media-core` or dedicated backend crates. Do not add a dependency or implement a subsystem before documenting why it is needed.
-
-## Design principles
-
-1. Cross-platform APIs first; platform-specific backends behind explicit interfaces.
-2. No OBS/libobs dependency in the media engine.
-3. Audio and video have explicit timestamps and bounded queues.
-4. The engine must be controllable headlessly through the same command API used by the UI and MCP server.
-5. Every milestone must have an executable acceptance test.
+The programs link the system's FFmpeg libraries, so a binary is also subject to the licence of the FFmpeg build it links. With libx264, as in the Ubuntu and Arch Linux packages, that is the GPL. Anyone distributing StreamForge binaries must comply with it ([ADR 0005](docs/decisions/0005-recording-with-ffmpeg.md)).

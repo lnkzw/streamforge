@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
+use streamforge_desktop::identity;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
 
@@ -55,6 +56,8 @@ fn main() -> ExitCode {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("StreamForge")
+            .with_app_id(identity::APP_ID)
+            .with_icon(identity::window_icon())
             .with_inner_size([1400.0, 900.0]),
         ..Default::default()
     };

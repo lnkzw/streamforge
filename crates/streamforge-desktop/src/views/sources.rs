@@ -76,9 +76,11 @@ impl DesktopApp {
                     };
                     let layer = workspace::layer_of_row(row_index, len);
                     // Rows keep their widgets by source, so the focus moves
-                    // with a source when the order changes.
+                    // with a source when the order changes. An explicit id:
+                    // `push_id` would still mix in the row's position.
+                    let row_id = egui::Id::new(("source row", &source.id));
                     let row = ui
-                        .push_id(&source.id, |ui| {
+                        .scope_builder(egui::UiBuilder::new().id(row_id), |ui| {
                             let row = ui.add(
                                 ListRow::new(icon, &source.name)
                                     .meta(meta)

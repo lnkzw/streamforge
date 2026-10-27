@@ -1301,10 +1301,14 @@ fn keys_move_the_selected_source_between_layers() {
     step_until(&mut harness, "the inspector", |h| {
         h.query_by_label("Remove source…").is_some()
     });
+    row(&harness, "lower third").expect("the row").focus();
+    harness.step();
     command(&mut harness, egui::Key::ArrowDown);
     step_until(&mut harness, "one layer down", |h| {
         above(h, "overlay", "lower third") && above(h, "lower third", "color_bars")
     });
+    // The focus moves with the source's row.
+    assert_eq!(focused(&harness), Some(Some("lower third".to_owned())));
     command(&mut harness, egui::Key::ArrowDown);
     step_until(&mut harness, "the bottom", |h| {
         above(h, "color_bars", "lower third")
@@ -1316,6 +1320,12 @@ fn keys_move_the_selected_source_between_layers() {
     command(&mut harness, egui::Key::ArrowUp);
     step_until(&mut harness, "one layer up", |h| {
         above(h, "lower third", "color_bars") && above(h, "overlay", "lower third")
+    });
+    // Plain Up still moves the selection from the moved row.
+    assert_eq!(focused(&harness), Some(Some("lower third".to_owned())));
+    press(&mut harness, egui::Key::ArrowUp);
+    step_until(&mut harness, "the row above selected", |h| {
+        is_selected(h, "overlay")
     });
 }
 

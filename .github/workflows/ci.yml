@@ -94,6 +94,8 @@ jobs:
     # nobody gates on). No thresholds: shared runners vary. A failing
     # measurement only leaves a warning; setup and build failures still
     # fail the job. Compare numbers on one machine (docs/testing.md).
+    # A one-minute soak run keeps the soak harness working against the
+    # engine; the real soak test is an hour on a real machine.
     name: bench (${{ matrix.os }})
     if: github.event_name != 'pull_request'
     strategy:
@@ -111,11 +113,18 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/build-setup
       - name: Build (release)
-        run: cargo build --release --locked -p streamforge-bench
+        run: cargo build --release --locked -p streamforge-bench -p streamforge-engine -p streamforge-soak
       - name: Measure
         continue-on-error: true
         run: |
           target/release/streamforge-bench --seconds 5 --runs 2 || {
             echo "::warning::streamforge-bench failed on ${{ matrix.os }} (informational)"
+            exit 1
+          }
+      - name: Soak (one minute)
+        continue-on-error: true
+        run: |
+          target/release/streamforge-soak --seconds 60 --output-dir "$RUNNER_TEMP" || {
+            echo "::warning::streamforge-soak failed on ${{ matrix.os }} (informational)"
             exit 1
           }

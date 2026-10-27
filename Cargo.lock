@@ -3999,6 +3999,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "streamforge-soak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ffmpeg-next",
+ "libc",
+ "rtmp-test-server",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

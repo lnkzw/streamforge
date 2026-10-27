@@ -1,0 +1,22 @@
+[package]
+name = "streamforge-soak"
+description = "Soak test harness: runs streamforge-engine for a long recording and stream under desktop-like polling, then judges loss, resource growth, the file and what the ingest received"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rtmp-test-server = { path = "../rtmp-test-server" }
+# Decodes the recording from start to end; already in the build through
+# encoder-ffmpeg and rtmp-test-server.
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }
+
+# The engine's CPU time from /proc is in clock ticks; sysconf names their
+# rate. Already in the build through other dependencies.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

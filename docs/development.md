@@ -38,7 +38,7 @@ cargo build --release -p streamforge-mcp   # then point an MCP client at target/
 
 ## Release packages
 
-`packaging/linux/package.sh <distro>` builds the release binaries, checks them on the system it runs on, and packs `dist/streamforge-<version>-x86_64-linux-<distro>.tar.gz` with the launcher, icon, documentation and `install.sh`. The release workflow (`.github/workflows/release.yml`) runs it on Ubuntu 24.04 and Arch Linux; a pushed `v*` tag creates a draft release from both.
+`packaging/linux/package.sh <distro>` builds the release binaries, checks them on the system it runs on, and packs `dist/streamforge-<version>-x86_64-linux-<distro>.tar.gz` with the launcher, icon, documentation and `install.sh`. The release workflow (`.github/workflows/release.yml`) runs it on Ubuntu 24.04 and Arch Linux; a pushed `v*` tag creates a draft release from both. Its notes are the version's section of `CHANGELOG.md` (`packaging/release-notes.sh <version>`); every run checks that the workspace version has one, so add the section before tagging.
 
 ## Repository layout
 

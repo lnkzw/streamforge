@@ -286,6 +286,7 @@ Linux first; Windows and macOS follow with tests on real machines.
 - [x] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries. The README is the project's front page; `docs/user-guide.md` is the guide (shipped in the packages with the rest of `docs/`), `docs/development.md` the developer part. The packages gained `install.sh` (into `~/.local` by default, `--uninstall`), an application-menu launcher and an app icon; the desktop window reports the launcher's app id.
 - [ ] Version 0.1.0: changelog, tag, published release.
   - [x] Step 5a: three gaps found while writing the user guide, closed before the tag. The desktop names each recording by its start time unless a name is typed, so a second take no longer fails on the existing file; closing the window while recording or live asks first; Ctrl+C or SIGTERM to the CLI, the engine process or the desktop stops and finalizes the outputs, as the MCP server already did (new crate `quit-signal`, now also used by the MCP server; a second signal quits at once; SIGHUP keeps its default, so `nohup` works).
+  - [x] Step 5b: `CHANGELOG.md`, shipped in the packages; the release notes come from the version's section, checked on every release run; protocol v1 is stable from 0.1.0 on.
 
 Acceptance:
 - The soak test passes, and CI on `main` stays green over several runs.

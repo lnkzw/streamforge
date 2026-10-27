@@ -40,6 +40,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check the release notes
+        # Every run, so a tag never finds the version's changelog section
+        # missing.
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          packaging/release-notes.sh "$version"
       - uses: ./.github/actions/build-setup
       - name: Build, check and pack
         run: packaging/linux/package.sh ubuntu24.04
@@ -108,6 +114,8 @@ jobs:
           pattern: linux-*
           path: dist
           merge-multiple: true
+      - name: Write the release notes
+        run: packaging/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -118,4 +126,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --draft --verify-tag \
             --title "StreamForge ${GITHUB_REF_NAME#v}" \
-            --notes "Linux packages for Ubuntu 24.04 and Arch Linux; see INSTALL.md in each. Windows and macOS packages follow later. Draft: check the packages before publishing."
+            --notes-file notes.md

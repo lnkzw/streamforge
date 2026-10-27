@@ -26,7 +26,7 @@ mkdir -p "$out/bin"
 for bin in "${bins[@]}"; do
   install -m 0755 "target/release/$bin" "$out/bin/"
 done
-cp LICENSE-MIT LICENSE-APACHE README.md packaging/linux/INSTALL.md packaging/linux/install.sh "$out/"
+cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md packaging/linux/INSTALL.md packaging/linux/install.sh "$out/"
 # The documentation the README and the user guide link to, at the same
 # relative paths as in the repository.
 cp -R docs "$out/"
@@ -47,7 +47,7 @@ fi
 # package (they are read there, not on GitHub). The developer documents
 # may point into the source tree.
 broken=0
-for doc in "$out/README.md" "$out/INSTALL.md" "$out/docs/user-guide.md"; do
+for doc in "$out/README.md" "$out/CHANGELOG.md" "$out/INSTALL.md" "$out/docs/user-guide.md"; do
   dir=$(dirname "$doc")
   while IFS= read -r target; do
     target=${target%%#*}
@@ -101,6 +101,7 @@ grep -qxF "Exec=\"$prefix/with space/bin/streamforge-desktop\"" \
   "$prefix/with space/share/applications/$app_id.desktop"
 test -f "$prefix/with space/share/icons/hicolor/scalable/apps/$app_id.svg"
 test -f "$prefix/with space/share/doc/streamforge/docs/user-guide.md"
+test -f "$prefix/with space/share/doc/streamforge/CHANGELOG.md"
 if command -v desktop-file-validate > /dev/null; then
   desktop-file-validate "$prefix/with space/share/applications/$app_id.desktop"
 fi

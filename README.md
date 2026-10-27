@@ -46,6 +46,7 @@ It needs FFmpeg, PipeWire and xdg-desktop-portal from your distribution. The [us
 - [Control protocol](docs/protocol.md): the JSON-lines commands, results and errors
 - [Platforms](docs/platforms.md): what each operating system supports
 - [Development](docs/development.md): building from source, tests, repository layout
+- [Changelog](CHANGELOG.md): what changed in each version
 - [Architecture](docs/architecture.md), [roadmap](docs/roadmap.md) and [decisions](docs/decisions)
 
 ## Licence

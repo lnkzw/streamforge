@@ -294,3 +294,22 @@ Acceptance:
 - The release installs from its tarball on the development machine and works there.
 
 After 0.1.0, additive: effects in the processing slots (EQ, compressor, gate, ducking), per-output video compositions, production states and automation, plugins.
+
+## M14 — Sources and layers
+
+Cameras, images and layer control (ADR 0019). Everything is additive to protocol v1; the project file moves to schema 4.
+
+- [x] Step 1: ADR 0019 with the project owner's decisions (2026-10-27).
+- [ ] Step 2: layers. `move_source` changes the drawing order, `visible` hides a source without stopping its capture, project file schema 4 migrates version 3; the desktop reorders by drag and keys and has an eye toggle.
+- [ ] Step 3: image source. PNG and JPEG by plain file name in the project folder (`list_images`), decoded by the new crate `frame-decode`, with size limits; a missing image does not block loading a project.
+- [ ] Step 4: Linux camera.
+  - [ ] 4a: `CaptureBackend` split into `ScreenCapture`, `AudioDevices` and `CameraCapture`, without behaviour change.
+  - [ ] 4b: cameras through PipeWire, YUV and MJPEG conversion, `list_cameras`, the `camera` kind (it starts with its scene, also on air), health; the desktop's camera dialog.
+- [ ] Step 5: Windows (Media Foundation, 5a) and macOS (AVFoundation, 5b) cameras; real cameras go to the manual hardware tests.
+
+Acceptance:
+- A scene with a camera, an image and a screen records and streams on the development machine (its camera is a test one: PipeWire's `videotestsrc` or a v4l2loopback device, since it has no webcam), with the layers reordered and one hidden on air.
+- A project with all three kinds saves, loads and migrates from schema 3; a missing camera or image loads with a warning.
+- The camera conversion and render cost are measured against the `docs/testing.md` baseline.
+
+Not in M14: text, media file and browser sources, cropping and flipping, camera controls, an image file dialog or import.

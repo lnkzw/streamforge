@@ -24,7 +24,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use media_core::{
-    FrameMailbox, MailboxStats, PixelFormat, VideoFrame, VideoFrameError, duration_millis,
+    FrameMailbox, MailboxStats, PixelFormat, Rational, VideoFrame, VideoFrameError, duration_millis,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -124,7 +124,8 @@ pub struct RenderStats {
     pub threads: usize,
     pub width: u32,
     pub height: u32,
-    pub target_fps: u32,
+    /// Nominal frame rate.
+    pub target_fps: Rational,
     pub elapsed_ms: u64,
     pub frames_rendered: u64,
     /// Ticks skipped because rendering fell at least one frame behind.
@@ -580,7 +581,7 @@ fn run(
         threads: renderer.threads(),
         width: scene.width,
         height: scene.height,
-        target_fps: fps,
+        target_fps: Rational::integer(fps),
         elapsed_ms: duration_millis(elapsed),
         frames_rendered: rendered,
         skipped_ticks: skipped,

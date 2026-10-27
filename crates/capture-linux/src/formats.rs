@@ -293,7 +293,7 @@ pub(crate) fn parse_audio_format(param: &Pod) -> Result<AudioFormatInfo, String>
     }
     Ok(AudioFormatInfo {
         sample_format: "f32le".to_owned(),
-        rate: info.rate(),
+        sample_rate_hz: info.rate(),
         channels: info.channels(),
     })
 }

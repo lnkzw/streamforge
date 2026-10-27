@@ -13,3 +13,6 @@ capture-api = { path = "../capture-api" }
 video-compositor = { path = "../video-compositor" }
 audio-engine = { path = "../audio-engine" }
 encoder-api = { path = "../encoder-api" }
+
+[dev-dependencies]
+media-core = { path = "../media-core" }

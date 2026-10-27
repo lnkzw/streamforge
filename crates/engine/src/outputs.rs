@@ -13,18 +13,18 @@ use audio_engine::{CHANNELS, RATE};
 use command_api::{
     CommandError, ErrorCode, HealthReport, OutputHealth, OutputKind, OutputProfiles,
     PipelineReport, RecordingReport, RecordingRequest, RecordingStarted, RecordingState,
-    StreamingReport, StreamingRequest, StreamingStarted,
+    StopFailure, StreamingReport, StreamingRequest, StreamingStarted,
 };
 use encoder_ffmpeg::{
     AudioSettings, Recorder, RecorderConfig, RecorderError, RecorderErrorKind, RecordingStats,
     StreamConfig, StreamState, StreamStats, Streamer, VideoSettings,
 };
-use media_core::{MediaTimestamp, duration_millis};
-use serde_json::{Map, Value, json};
+use media_core::{MediaTimestamp, Rational, duration_millis};
+use serde_json::{Value, json};
 
-use crate::Engine;
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
 use crate::pipeline::{OutputId, Pipeline, since};
+use crate::{Engine, file_error_code};
 
 /// Bound for each blocking network operation of a stream (connect, write).
 const STREAM_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -254,8 +254,8 @@ impl Engine {
             path: display_path(&path),
             width: CANVAS_WIDTH,
             height: CANVAS_HEIGHT,
-            fps: FPS,
-            sample_rate: RATE,
+            fps: Rational::integer(FPS),
+            sample_rate_hz: RATE,
             channels: CHANNELS,
             video_encoder: recorder.video_encoder().clone(),
             warnings,
@@ -293,15 +293,12 @@ impl Engine {
                 })
             }
             Err(error) => {
-                let mut details = Map::new();
-                if let Some(partial) = &error.partial {
-                    details.insert("recording".into(), to_value(partial));
-                }
-                if let Value::Object(pipeline) = to_value(&pipeline) {
-                    details.extend(pipeline);
-                }
-                details.insert("warnings".into(), to_value(&warnings));
-                Err(output_error("recording", error).with_details(Value::Object(details)))
+                let details = to_value(&StopFailure {
+                    recording: error.partial.as_deref().cloned(),
+                    pipeline,
+                    warnings,
+                });
+                Err(output_error("recording", error).with_details(details))
             }
         }
     }
@@ -355,9 +352,9 @@ impl Engine {
             target: streamer.target().to_owned(),
             width: CANVAS_WIDTH,
             height: CANVAS_HEIGHT,
-            fps: FPS,
+            fps: Rational::integer(FPS),
             video_bitrate_kbps,
-            sample_rate: RATE,
+            sample_rate_hz: RATE,
             channels: CHANNELS,
             video_encoder: streamer.video_encoder().clone(),
             warnings,
@@ -390,12 +387,12 @@ impl Engine {
             Err(error) => {
                 // Keep what the pipeline reported even though the stream's
                 // own statistics are lost.
-                let mut details = Map::new();
-                if let Value::Object(pipeline) = to_value(&pipeline) {
-                    details.extend(pipeline);
-                }
-                details.insert("warnings".into(), to_value(&warnings));
-                Err(output_error("streaming", error).with_details(Value::Object(details)))
+                let details = to_value(&StopFailure {
+                    recording: None,
+                    pipeline,
+                    warnings,
+                });
+                Err(output_error("streaming", error).with_details(details))
             }
         }
     }
@@ -409,22 +406,14 @@ fn reserve(path: &Path) -> Result<PathBuf, CommandError> {
         .open(path)
         .map(|_| path.to_owned())
         .map_err(|err| {
-            let (code, hint) = match err.kind() {
-                IoErrorKind::AlreadyExists => {
-                    (ErrorCode::InvalidParams, "; choose another file_name")
-                }
-                IoErrorKind::NotFound => (
-                    ErrorCode::NotFound,
-                    "; the engine's output directory does not exist",
-                ),
-                IoErrorKind::PermissionDenied => (
-                    ErrorCode::PermissionDenied,
-                    "; the engine's output directory is not writable",
-                ),
-                _ => (ErrorCode::BackendError, ""),
+            let hint = match err.kind() {
+                IoErrorKind::AlreadyExists => "; choose another file_name",
+                IoErrorKind::NotFound => "; the engine's output directory does not exist",
+                IoErrorKind::PermissionDenied => "; the engine's output directory is not writable",
+                _ => "",
             };
             CommandError::new(
-                code,
+                file_error_code(&err),
                 format!("cannot create {}: {err}{hint}", path.display()),
             )
             .with_details(json!({ "path": path.display().to_string() }))
@@ -441,16 +430,20 @@ fn now_since(t0: Instant) -> MediaTimestamp {
 
 fn recording_warnings(recording: &RecordingStats) -> Vec<String> {
     let mut warnings = Vec::new();
-    if recording.video.frames_dropped > 0 || recording.audio.blocks_dropped > 0 {
+    // The mix's track; the others travel with it (one queue item per block).
+    let Some(audio) = recording.audio_tracks.first() else {
+        return warnings;
+    };
+    if recording.video.frames_dropped > 0 || audio.blocks_dropped > 0 {
         warnings.push(format!(
             "recorder dropped {} video frame(s) and {} audio block(s); the encoder fell behind",
-            recording.video.frames_dropped, recording.audio.blocks_dropped
+            recording.video.frames_dropped, audio.blocks_dropped
         ));
     }
-    if recording.audio.gap_samples > 0 || recording.audio.discontinuities > 0 {
+    if audio.gap_samples > 0 || audio.discontinuities > 0 {
         warnings.push(format!(
             "audio timeline: {} sample(s) of silence inserted, {} discontinuities",
-            recording.audio.gap_samples, recording.audio.discontinuities
+            audio.gap_samples, audio.discontinuities
         ));
     }
     warnings
@@ -490,8 +483,7 @@ fn streaming_warnings(stream: &StreamStats) -> Vec<String> {
         .video
         .frames_dropped
         .saturating_sub(stream.frames_dropped_offline);
-    let queue_blocks = stream
-        .audio
+    let queue_blocks = stream.audio_tracks[0]
         .blocks_dropped
         .saturating_sub(stream.blocks_dropped_offline);
     if queue_frames > 0 || queue_blocks > 0 {

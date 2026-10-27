@@ -111,16 +111,16 @@ pub(crate) fn capture(
                 };
                 match formats::parse_audio_format(param) {
                     Ok(format) => {
-                        state.stats.set_rate(format.rate);
+                        state.stats.set_rate(format.sample_rate_hz);
                         state.channels = usize::try_from(format.channels).unwrap_or(0);
                         state.deliverable = wanted.is_none_or(|(rate, channels)| {
-                            format.rate == rate && format.channels == channels
+                            format.sample_rate_hz == rate && format.channels == channels
                         });
                         if !state.deliverable {
                             state.warnings.push(format!(
                                 "PipeWire negotiated {} Hz / {} channel(s) instead of the \
                                  requested format; buffers are not delivered",
-                                format.rate, format.channels
+                                format.sample_rate_hz, format.channels
                             ));
                         }
                         state.format = Some(format);

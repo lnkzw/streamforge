@@ -280,7 +280,7 @@ Linux first; Windows and macOS follow with tests on real machines.
   - [x] Step 1: review of the whole surface, decisions in ADR 0018 (2026-10-26).
   - [x] Step 2a: legacy, state and strictness: `media_engine_ready` and the output screen layer removed, one state per output in `get_status` and `get_health`, destructive flags, one file name rule on every system, repeated keys refused, `details.unexpected` for every command.
   - [x] Step 2b: names (capture targets, `<entity>_id`/`<entity>_name` references, explicit recording tracks, CLI flags).
-  - [ ] Step 2c: report shapes (`audio_tracks`, nested `pipeline`, embedded errors, units, fractional frame rates), then wire-shape tests on every result.
+  - [x] Step 2c: report shapes (`audio_tracks`, nested `pipeline`, embedded errors, units, fractional frame rates), then wire-shape tests on every result.
 - [ ] Soak test on the development machine, after the UI changes: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end.
 - [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.
 - [ ] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries.

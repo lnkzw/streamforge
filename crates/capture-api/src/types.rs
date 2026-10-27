@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+pub use media_core::Rational;
 use media_core::SampleReader;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -53,13 +54,6 @@ impl CursorMode {
             Self::Metadata => "metadata",
         }
     }
-}
-
-/// Exact rational number, e.g. a frame rate of 60000/1001.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Rational {
-    pub num: u32,
-    pub den: u32,
 }
 
 /// Capture capabilities discovered at runtime, never assumed per OS.
@@ -398,7 +392,7 @@ pub struct VideoCaptureReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioFormatInfo {
     pub sample_format: String,
-    pub rate: u32,
+    pub sample_rate_hz: u32,
     pub channels: u32,
 }
 

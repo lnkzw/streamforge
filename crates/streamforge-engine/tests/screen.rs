@@ -69,10 +69,12 @@ fn a_listed_monitor_is_recorded_from_a_scene() {
     println!("{stopped}");
     assert_eq!(stopped["ok"], true, "{stopped}");
     let report = &stopped["result"];
-    let captures = report["scene_captures"].as_array().expect("scene captures");
+    let captures = report["pipeline"]["scene_captures"]
+        .as_array()
+        .expect("scene captures");
     let capture = captures
         .iter()
-        .find(|capture| capture["source"] == "monitor")
+        .find(|capture| capture["name"] == "monitor")
         .unwrap_or_else(|| panic!("no capture outcome: {report}"));
     assert!(capture["error"].is_null(), "{capture}");
     let frames = capture["report"]["stats"]["frames"].as_u64().unwrap_or(0);

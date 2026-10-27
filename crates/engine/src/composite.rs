@@ -22,7 +22,7 @@ use video_compositor::{
     SourceInput, Transform, pattern, snapshot,
 };
 
-use crate::command_error;
+use crate::file_error_code;
 
 pub const CANVAS_WIDTH: u32 = 1920;
 pub const CANVAS_HEIGHT: u32 = 1080;
@@ -53,7 +53,7 @@ pub(crate) fn probe(
         Some(selection) => Some(
             capture
                 .start_screen_stream(selection)
-                .map_err(command_error)?,
+                .map_err(CommandError::from)?,
         ),
         None => None,
     };
@@ -201,7 +201,11 @@ fn write_snapshot(path: &Path, frame: &media_core::VideoFrame) -> SnapshotResult
             return SnapshotResult {
                 path: display,
                 written: false,
-                error: Some(err.to_string()),
+                error: Some(ErrorSummary {
+                    code: file_error_code(&err),
+                    message: format!("cannot create the snapshot: {err}"),
+                    details: None,
+                }),
             };
         }
     };
@@ -213,7 +217,11 @@ fn write_snapshot(path: &Path, frame: &media_core::VideoFrame) -> SnapshotResult
                 .err()
                 .map(|e| format!("; removing the partial file failed: {e}"))
                 .unwrap_or_default();
-            Some(format!("{err}{cleanup}"))
+            Some(ErrorSummary {
+                code: ErrorCode::BackendError,
+                message: format!("cannot write the snapshot: {err}{cleanup}"),
+                details: None,
+            })
         }
     };
     SnapshotResult {

@@ -11,7 +11,7 @@ use command_api::{
     SetSendRequest, SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest,
     UpdateSourceRequest,
 };
-use media_core::FrameMailbox;
+use media_core::{FrameMailbox, Rational};
 use serde_json::Value;
 
 use crate::composite::FPS;
@@ -520,7 +520,7 @@ impl Engine {
             enabled: self.preview_enabled,
             width: PREVIEW_WIDTH,
             height: PREVIEW_HEIGHT,
-            fps: (u64::from(FPS) / PREVIEW_EVERY) as u32,
+            fps: Rational::integer((u64::from(FPS) / PREVIEW_EVERY) as u32),
             frames_published: None,
             frames_dropped: None,
             pipeline: None,
@@ -546,7 +546,7 @@ impl Engine {
             // A drained mailbox does not show a stale last frame later.
             let _ = self.preview_frames.take();
             let (pipeline, warnings) = self.release_pipeline();
-            if pipeline.pipeline_stopped {
+            if pipeline.stopped {
                 state.pipeline = Some(pipeline);
             }
             state.warnings = warnings;

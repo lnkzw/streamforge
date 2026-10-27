@@ -25,15 +25,15 @@ pub use audio::{
     PROGRAM_BUS_NAME, ProgramBusSpec, ProgramPath, SendSpec, SendTap, SetChannelInputRequest,
     SetSendRequest, UpdateBusRequest, UpdateChannelRequest, id_rule, program_paths,
 };
-pub use composite::{CompositeReport, CompositeRequest, ErrorSummary, SnapshotResult};
-pub use error::{CommandError, ErrorCode};
+pub use composite::{CompositeReport, CompositeRequest, SnapshotResult};
+pub use error::{CommandError, ErrorCode, ErrorSummary};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, MonitorHealth, OutputHealth};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, MonitorProfile, OutputKind, OutputProfileSet,
     OutputProfiles, PipelineReport, RecordingProfile, RecordingReport, RecordingRequest,
-    RecordingStarted, SceneCaptureOutcome, SetOutputProfileRequest, StreamProfile, StreamingReport,
-    StreamingRequest, StreamingStarted, VIDEO_BITRATE_KBPS,
+    RecordingStarted, SceneCaptureOutcome, SetOutputProfileRequest, StopFailure, StreamProfile,
+    StreamingReport, StreamingRequest, StreamingStarted, VIDEO_BITRATE_KBPS,
 };
 pub use project::{
     MAX_LISTED_PROJECTS, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem,

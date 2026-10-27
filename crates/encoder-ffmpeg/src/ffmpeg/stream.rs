@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use ff::Dictionary;
 use ffmpeg_next as ff;
-use media_core::MediaTimestamp;
+use media_core::{MediaTimestamp, Rational};
 
 use super::{AudioTrack, EncoderChoice, Session, VideoTrack, init};
 use crate::{
@@ -336,7 +336,7 @@ impl<'a> Stream<'a> {
             },
             width: settings.video.width,
             height: settings.video.height,
-            fps: settings.video.fps,
+            fps: Rational::integer(settings.video.fps),
             frames_encoded: 0,
             frames_dropped: 0,
             frames_after_end: 0,
@@ -346,9 +346,9 @@ impl<'a> Stream<'a> {
         let mut audio = self.audio.unwrap_or_else(|| AudioTrackStats {
             name: None,
             encoder: "aac".to_owned(),
-            rate: settings.audio.rate,
+            sample_rate_hz: settings.audio.rate,
             channels: settings.audio.channels,
-            bitrate: settings.audio.bitrate,
+            bitrate_bps: settings.audio.bitrate,
             samples_encoded: 0,
             blocks_dropped: 0,
             blocks_after_end: 0,
@@ -373,7 +373,7 @@ impl<'a> Stream<'a> {
             connected_ms: self.connected.as_secs_f64() * 1000.0,
             last_error: self.last_error,
             video,
-            audio,
+            audio_tracks: [audio],
             frames_dropped_offline: self.frames_offline,
             blocks_dropped_offline: self.blocks_offline,
             frames_undelivered: self.frames_undelivered,

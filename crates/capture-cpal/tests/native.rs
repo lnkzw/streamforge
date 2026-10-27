@@ -68,7 +68,7 @@ fn the_default_input_captures_or_reports_that_there_is_none() {
         Ok(report) => {
             println!("{report:#?}");
             let format = report.format.as_ref().expect("format");
-            assert!(format.rate > 0 && format.channels > 0);
+            assert!(format.sample_rate_hz > 0 && format.channels > 0);
             assert!(report.stats.frames > 0, "no audio arrived: {report:#?}");
         }
         Err(error) => {
@@ -143,7 +143,7 @@ fn a_monitor_captures_while_nothing_plays() {
     // delivers even when nothing else plays.
     assert!(report.stats.frames > 0, "no audio arrived: {report:#?}");
     let format = report.format.as_ref().expect("format");
-    assert!(format.rate > 0 && format.channels > 0);
+    assert!(format.sample_rate_hz > 0 && format.channels > 0);
 }
 
 #[test]

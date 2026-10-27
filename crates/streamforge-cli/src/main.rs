@@ -91,9 +91,9 @@ enum Commands {
         /// when no input or tone is given.
         #[arg(long = "tone")]
         tones: Vec<String>,
-        /// Master gain in dB (default 0).
-        #[arg(long)]
-        master_gain_db: Option<f32>,
+        /// Program bus gain in dB (default 0).
+        #[arg(long, allow_negative_numbers = true)]
+        program_gain_db: Option<f32>,
         /// Run time in milliseconds (100..=900000, default 5000).
         #[arg(long)]
         duration_ms: Option<u64>,
@@ -209,9 +209,9 @@ fn main() -> Result<ExitCode> {
         Commands::Mix {
             inputs,
             tones,
-            master_gain_db,
+            program_gain_db,
             duration_ms,
-        } => match mix_params(&inputs, &tones, master_gain_db, duration_ms) {
+        } => match mix_params(&inputs, &tones, program_gain_db, duration_ms) {
             Ok(params) => run_command(&mut engine, "probe_audio_mix", params),
             Err(message) => {
                 eprintln!("error: {message}");
@@ -394,11 +394,11 @@ fn tone_spec(spec: &str) -> Result<Map<String, Value>, String> {
     Ok(tone)
 }
 
-/// A finite master gain as a protocol value.
-fn master_gain(gain: Option<f32>) -> Result<Option<Value>, String> {
+/// A finite program bus gain as a protocol value.
+fn program_gain(gain: Option<f32>) -> Result<Option<Value>, String> {
     match gain {
         Some(gain) if !gain.is_finite() => Err(format!(
-            "invalid master gain `{gain}`: expected a finite number"
+            "invalid program gain `{gain}`: expected a finite number"
         )),
         gain => Ok(gain.map(Value::from)),
     }
@@ -409,7 +409,7 @@ fn master_gain(gain: Option<f32>) -> Result<Option<Value>, String> {
 fn mix_params(
     inputs: &[String],
     tones: &[String],
-    master_gain_db: Option<f32>,
+    program_gain_db: Option<f32>,
     duration_ms: Option<u64>,
 ) -> Result<Map<String, Value>, String> {
     let mut params = Map::new();
@@ -433,8 +433,8 @@ fn mix_params(
     if !tone_list.is_empty() {
         params.insert("tones".into(), tone_list.into());
     }
-    if let Some(gain) = master_gain(master_gain_db)? {
-        params.insert("master_gain_db".into(), gain);
+    if let Some(gain) = program_gain(program_gain_db)? {
+        params.insert("program_gain_db".into(), gain);
     }
     if let Some(duration_ms) = duration_ms {
         params.insert("duration_ms".into(), duration_ms.into());
@@ -517,7 +517,7 @@ struct SourceArgs {
     no_tone: bool,
     /// Program bus fader in dB (default 0).
     #[arg(long, allow_negative_numbers = true)]
-    master_gain_db: Option<f32>,
+    program_gain_db: Option<f32>,
 }
 
 /// How `record` and `stream` set up the engine's mixer before they start,
@@ -527,18 +527,18 @@ struct MixerSetup {
     /// `add_channel` params for channels that replace the configured ones.
     channels: Option<Vec<Map<String, Value>>>,
     /// The program bus fader.
-    master_gain_db: Option<Value>,
+    program_gain_db: Option<Value>,
 }
 
 impl SourceArgs {
     /// Inputs, then tones, become channels named `Input 1`, `Tone 1`, ...
     /// (as a version 1 project's sources do).
     fn mixer_setup(&self) -> Result<MixerSetup, String> {
-        let master_gain_db = master_gain(self.master_gain_db)?;
+        let program_gain_db = program_gain(self.program_gain_db)?;
         if self.inputs.is_empty() && self.tones.is_empty() && !self.no_tone {
             return Ok(MixerSetup {
                 channels: None,
-                master_gain_db,
+                program_gain_db,
             });
         }
         // Checked before the mixer changes, so nothing is left half set up.
@@ -574,7 +574,7 @@ impl SourceArgs {
         }
         Ok(MixerSetup {
             channels: Some(channels),
-            master_gain_db,
+            program_gain_db,
         })
     }
 
@@ -662,7 +662,7 @@ fn set_up_mixer(engine: &mut Engine, setup: MixerSetup) -> Result<(), command_ap
             start(engine, "add_channel", params)?;
         }
     }
-    if let Some(gain) = setup.master_gain_db {
+    if let Some(gain) = setup.program_gain_db {
         let mut params = Map::new();
         params.insert("bus_id".into(), command_api::PROGRAM_BUS_ID.into());
         params.insert("gain_db".into(), gain);
@@ -964,7 +964,7 @@ mod tests {
             serde_json::json!({
                 "inputs": [{"input": "mic", "gain_db": -6.0}, {"input": "alsa.input"}],
                 "tones": [{"frequency_hz": 440.0, "level_dbfs": -18.0}, {"frequency_hz": 1000.0}],
-                "master_gain_db": -1.0,
+                "program_gain_db": -1.0,
                 "duration_ms": 600_000,
             })
         );
@@ -981,7 +981,7 @@ mod tests {
             inputs: inputs.iter().map(|&input| input.to_owned()).collect(),
             tones: tones.iter().map(|&tone| tone.to_owned()).collect(),
             no_tone,
-            master_gain_db: None,
+            program_gain_db: None,
         }
     }
 
@@ -1015,11 +1015,11 @@ mod tests {
             source_args(&[], &[], true).mixer_setup(),
             Ok(MixerSetup {
                 channels: Some(Vec::new()),
-                master_gain_db: None,
+                program_gain_db: None,
             })
         );
         let mut args = source_args(&["mic=-6"], &["440@-18", "1000"], false);
-        args.master_gain_db = Some(-1.0);
+        args.program_gain_db = Some(-1.0);
         let setup = args.mixer_setup().expect("setup");
         let channels: Vec<Value> = setup
             .channels
@@ -1039,7 +1039,7 @@ mod tests {
                                    "input": {"kind": "tone", "frequency_hz": 1000.0}}),
             ]
         );
-        assert_eq!(setup.master_gain_db, Some(serde_json::json!(-1.0)));
+        assert_eq!(setup.program_gain_db, Some(serde_json::json!(-1.0)));
         for channel in channels {
             assert!(
                 Command::decode("add_channel", Some(&channel)).is_ok(),

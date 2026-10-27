@@ -8,6 +8,7 @@ license.workspace = true
 schemars.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+media-core = { path = "../media-core" }
 
 [dev-dependencies]
 serde_json.workspace = true

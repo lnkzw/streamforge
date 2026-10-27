@@ -147,6 +147,7 @@ pub struct InputStats {
     /// `live`, `tone` or `silent`.
     pub kind: &'static str,
     pub gain_db: f32,
+    #[serde(rename = "mute")]
     pub muted: bool,
     /// Post-gain level of this input.
     pub meter: MeterReading,
@@ -162,7 +163,7 @@ pub struct InputStats {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MixStats {
-    pub rate: u32,
+    pub sample_rate_hz: u32,
     pub channels: u32,
     pub block_frames: usize,
     pub elapsed_ms: u64,
@@ -172,7 +173,8 @@ pub struct MixStats {
     /// Blocks not mixed because the thread fell too far behind.
     pub skipped_blocks: u64,
     pub mix_time: Option<LatencySummary>,
-    pub master: MeterReading,
+    /// The program bus, before the limit.
+    pub program: MeterReading,
     /// The program bus's samples limited, and non-finite input and output
     /// samples replaced by silence.
     pub clipped_samples: u64,
@@ -777,7 +779,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
 
     let elapsed = start.elapsed();
     MixStats {
-        rate: RATE,
+        sample_rate_hz: RATE,
         channels: CHANNELS,
         block_frames: BLOCK_FRAMES,
         elapsed_ms: duration_millis(elapsed),
@@ -785,7 +787,7 @@ fn run(config: MixerConfig, stop: &AtomicBool, control: &MixerControl) -> MixSta
         late_blocks: late,
         skipped_blocks: skipped,
         mix_time: mix_times.summary(),
-        master: graph.bus_meter(BusRef::Program).unwrap_or(MeterReading {
+        program: graph.bus_meter(BusRef::Program).unwrap_or(MeterReading {
             peak_dbfs: None,
             rms_dbfs: None,
         }),
@@ -1077,7 +1079,7 @@ mod tests {
             (0, 0),
             "{input:?}"
         );
-        assert_eq!(stats.master.peak_dbfs, None);
+        assert_eq!(stats.program.peak_dbfs, None);
     }
 
     #[test]

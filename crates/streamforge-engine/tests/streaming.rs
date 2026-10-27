@@ -53,7 +53,7 @@ fn streams_to_a_local_server() {
     let report = &stopped["result"];
     assert_eq!(report["streaming"]["state"], "connected", "{report}");
     assert_eq!(report["streaming"]["connects"], 1);
-    assert_eq!(report["pipeline_stopped"], true);
+    assert_eq!(report["pipeline"]["stopped"], true);
     assert!(engine.finish().success());
 
     let arrived = server.join();
@@ -76,7 +76,7 @@ fn streams_to_a_local_server() {
     // compositor ticks in the middle leave gaps instead. A render stall
     // right before the stop does end the video early, uncounted; the
     // 0.15 s below allows for a short one.)
-    let fps = sent["fps"].as_f64().expect("fps");
+    let fps = sent["fps"]["num"].as_f64().expect("fps") / sent["fps"]["den"].as_f64().expect("fps");
     let short_frames = sent["frames_dropped"].as_u64().unwrap_or(0)
         + report["streaming"]["frames_undelivered"]
             .as_u64()
@@ -137,7 +137,7 @@ fn recording_continues_when_the_stream_fails() {
     assert_eq!(status["recording_state"], "running", "{status}");
     let stream = request(&mut engine, 2, "stop_streaming", json!({}));
     assert_eq!(stream["result"]["streaming"]["state"], "failed", "{stream}");
-    assert_eq!(stream["result"]["pipeline_stopped"], false);
+    assert_eq!(stream["result"]["pipeline"]["stopped"], false);
 
     thread::sleep(Duration::from_millis(500));
     // The file ends between the stop request and its reply; stopping waits
@@ -147,9 +147,9 @@ fn recording_continues_when_the_stream_fails() {
     let until_reply = recording_started.elapsed().as_secs_f64();
     assert_eq!(stopped["ok"], true, "{stopped}");
     let report = &stopped["result"]["recording"];
-    assert_eq!(stopped["result"]["pipeline_stopped"], true);
-    assert_eq!(report["audio"]["blocks_dropped"], 0, "{report}");
-    assert_eq!(report["audio"]["gap_samples"], 0, "{report}");
+    assert_eq!(stopped["result"]["pipeline"]["stopped"], true);
+    assert_eq!(report["audio_tracks"][0]["blocks_dropped"], 0, "{report}");
+    assert_eq!(report["audio_tracks"][0]["gap_samples"], 0, "{report}");
     assert!(engine.finish().success());
     let _ = server.join();
 

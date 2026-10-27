@@ -25,9 +25,7 @@ pub use thread::{EngineHandle, EngineThread, PendingReply};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use capture_api::{
-    CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind, UnsupportedCapture,
-};
+use capture_api::{CaptureBackend, CaptureCapabilities, UnsupportedCapture};
 use command_api::{
     AudioGraphSpec, AudioInputList, AudioOutputList, CaptureTargetList, Command, CommandError,
     CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles,
@@ -155,32 +153,32 @@ impl CommandHandler for Engine {
                 .capture
                 .audio_inputs()
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
-                .map_err(command_error),
+                .map_err(CommandError::from),
             Command::ListAudioOutputs => self
                 .capture
                 .audio_outputs()
                 .map(|outputs| CommandOutput::AudioOutputs(AudioOutputList { outputs }))
-                .map_err(command_error),
+                .map_err(CommandError::from),
             Command::ListCaptureTargets => self
                 .capture
                 .screen_sources()
                 .map(|sources| {
                     CommandOutput::CaptureTargets(CaptureTargetList { targets: sources })
                 })
-                .map_err(command_error),
+                .map_err(CommandError::from),
             Command::ProbeScreenCapture(request) => {
                 self.ensure_idle("probe_screen_capture")?;
                 self.capture
                     .probe_screen(&request)
                     .map(CommandOutput::VideoCaptureReport)
-                    .map_err(command_error)
+                    .map_err(CommandError::from)
             }
             Command::ProbeAudioCapture(request) => {
                 self.ensure_idle("probe_audio_capture")?;
                 self.capture
                     .probe_audio(&request)
                     .map(CommandOutput::AudioCaptureReport)
-                    .map_err(command_error)
+                    .map_err(CommandError::from)
             }
             Command::ProbeComposite(request) => {
                 self.ensure_idle("probe_composite")?;
@@ -270,21 +268,15 @@ impl CommandHandler for Engine {
     }
 }
 
-pub(crate) fn command_error(error: CaptureError) -> CommandError {
-    let code = match error.kind {
-        CaptureErrorKind::Unsupported => ErrorCode::Unsupported,
-        CaptureErrorKind::Unavailable => ErrorCode::Unavailable,
-        CaptureErrorKind::Cancelled => ErrorCode::Cancelled,
-        CaptureErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
-        CaptureErrorKind::NotFound => ErrorCode::NotFound,
-        CaptureErrorKind::Timeout => ErrorCode::Timeout,
-        CaptureErrorKind::InvalidRequest => ErrorCode::InvalidParams,
-        CaptureErrorKind::Backend => ErrorCode::BackendError,
-    };
-    CommandError {
-        code,
-        message: error.message,
-        details: error.details,
+/// The code for a file the engine could not create in its output
+/// directory: an existing file is the caller's choice (`invalid_params`),
+/// a missing or unwritable directory is the system's.
+pub(crate) fn file_error_code(error: &std::io::Error) -> ErrorCode {
+    match error.kind() {
+        std::io::ErrorKind::AlreadyExists => ErrorCode::InvalidParams,
+        std::io::ErrorKind::NotFound => ErrorCode::NotFound,
+        std::io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+        _ => ErrorCode::BackendError,
     }
 }
 
@@ -301,13 +293,13 @@ mod tests {
 
     use capture_api::{
         AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-        AudioStatsAccumulator, AudioStream, AudioStreamRequest, ScreenCaptureCapability,
-        ScreenCaptureRequest, ScreenSelection, VideoCaptureReport, VideoSourceInfo,
-        VideoStatsAccumulator, VideoStream,
+        AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
+        ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, VideoCaptureReport,
+        VideoSourceInfo, VideoStatsAccumulator, VideoStream,
     };
     use command_api::{RecordingState, registry};
     use encoder_ffmpeg::StreamState;
-    use media_core::{AudioRing, FrameBuffer, FrameMailbox, PixelFormat, VideoFrame};
+    use media_core::{AudioRing, FrameBuffer, FrameMailbox, PixelFormat, Rational, VideoFrame};
     use serde_json::json;
 
     use super::*;
@@ -763,7 +755,7 @@ mod tests {
         assert!(started.path.ends_with("take.mkv"));
         assert_eq!(
             (started.width, started.height, started.fps),
-            (1920, 1080, 60)
+            (1920, 1080, Rational::integer(60))
         );
         assert_eq!(
             status(&mut engine).recording_state,
@@ -788,17 +780,20 @@ mod tests {
         };
         let recording = &report.recording;
         assert!(recording.video.frames_encoded > 10, "{recording:?}");
-        assert!(recording.audio.samples_encoded > 10_000, "{recording:?}");
+        assert!(
+            recording.audio_tracks[0].samples_encoded > 10_000,
+            "{recording:?}"
+        );
         assert!(recording.file_bytes.is_some_and(|bytes| bytes > 1_000));
         // The last output stopped the pipeline and reports it.
-        assert!(report.pipeline.pipeline_stopped);
+        assert!(report.pipeline.stopped);
         assert_eq!(report.pipeline.audio_captures.len(), 1);
         assert!(report.pipeline.render.is_some() && report.pipeline.mix.is_some());
         // Both tracks end at the stop time, within a frame or a block. On a
         // slow machine, counted trailing drops and skipped compositor ticks
         // end the video earlier; it never outlasts the audio.
         let video_end = recording.video.end_ms.expect("video");
-        let audio_end = recording.audio.end_ms.expect("audio");
+        let audio_end = recording.audio_tracks[0].end_ms.expect("audio");
         let skipped = report
             .pipeline
             .render
@@ -869,7 +864,7 @@ mod tests {
         };
         assert_eq!(report.streaming.state, StreamState::Connected, "{report:?}");
         assert_eq!(report.streaming.connects, 1);
-        assert!(report.pipeline.pipeline_stopped);
+        assert!(report.pipeline.stopped);
         assert!(
             !serde_json::to_string(&report)
                 .expect("json")
@@ -891,7 +886,8 @@ mod tests {
         // instead.)
         // Half a second of video must arrive, whatever was dropped.
         let short = report.streaming.video.frames_dropped + report.streaming.frames_undelivered;
-        let fps = f64::from(report.streaming.video.fps);
+        let fps =
+            f64::from(report.streaming.video.fps.num) / f64::from(report.streaming.video.fps.den);
         assert!(
             video.end_s - video.first_s + short as f64 / fps > 1.0
                 && video.packets as f64 >= fps / 2.0,
@@ -976,7 +972,7 @@ mod tests {
         assert_eq!(stream.streaming.state, StreamState::Failed);
         assert_eq!(stream.streaming.disconnects, 1);
         // The recording still uses the pipeline.
-        assert!(!stream.pipeline.pipeline_stopped);
+        assert!(!stream.pipeline.stopped);
         assert!(
             stream.warnings.iter().any(|w| w.contains("failed")),
             "{:?}",
@@ -995,15 +991,15 @@ mod tests {
             CommandOutput::RecordingReport(report) => *report,
             other => panic!("unexpected output: {other:?}"),
         };
-        assert!(report.pipeline.pipeline_stopped);
+        assert!(report.pipeline.stopped);
         let recording = &report.recording;
-        assert_eq!(recording.audio.blocks_dropped, 0, "{recording:?}");
-        assert_eq!(recording.audio.gap_samples, 0, "{recording:?}");
+        assert_eq!(recording.audio_tracks[0].blocks_dropped, 0, "{recording:?}");
+        assert_eq!(recording.audio_tracks[0].gap_samples, 0, "{recording:?}");
         // No silent loss: every tick from the first frame to the cut is
         // encoded, dropped or skipped (skips cover the whole pipeline run,
         // so they can exceed the output's share), and no frame is invented.
         let first = recording.video.first_pts_ms.expect("video start");
-        let end = recording.audio.end_ms.expect("audio");
+        let end = recording.audio_tracks[0].end_ms.expect("audio");
         let ticks = ((end - first) * 60.0 / 1000.0).round() as u64;
         let skipped = report
             .pipeline
@@ -1067,7 +1063,7 @@ mod tests {
         else {
             panic!("unexpected output");
         };
-        assert!(preview.enabled && preview.fps == 30);
+        assert!(preview.enabled && preview.fps == Rational::integer(30));
         assert!(status(&mut engine).preview_active);
         // The default scene starts with color bars: white at the top left.
         wait_for_preview_pixel(&engine, 10, 10, [255, 255, 255, 255]);
@@ -1728,7 +1724,7 @@ mod tests {
             .pipeline
             .scene_captures
             .iter()
-            .filter(|outcome| outcome.source == "desk")
+            .filter(|outcome| outcome.name == "desk")
             .count();
         assert_eq!(desks, 2, "{:?}", report.pipeline.scene_captures);
         // The compositor took the new capture's frame.
@@ -2433,26 +2429,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_error_kinds_map_to_distinct_codes() {
-        let kinds = [
-            (CaptureErrorKind::Unsupported, ErrorCode::Unsupported),
-            (CaptureErrorKind::Unavailable, ErrorCode::Unavailable),
-            (CaptureErrorKind::Cancelled, ErrorCode::Cancelled),
-            (
-                CaptureErrorKind::PermissionDenied,
-                ErrorCode::PermissionDenied,
-            ),
-            (CaptureErrorKind::NotFound, ErrorCode::NotFound),
-            (CaptureErrorKind::Timeout, ErrorCode::Timeout),
-            (CaptureErrorKind::InvalidRequest, ErrorCode::InvalidParams),
-            (CaptureErrorKind::Backend, ErrorCode::BackendError),
-        ];
-        for (kind, code) in kinds {
-            assert_eq!(command_error(CaptureError::new(kind, "x")).code, code);
-        }
-    }
-
-    #[test]
     fn probes_return_reports() {
         let mut engine = engine();
         let output = engine
@@ -2490,7 +2466,7 @@ mod tests {
                 report.render.height,
                 report.render.target_fps
             ),
-            (1920, 1080, 60)
+            (1920, 1080, Rational::integer(60))
         );
         assert!(report.screen_capture.is_none());
         let names: Vec<_> = report
@@ -2571,7 +2547,7 @@ mod tests {
         assert_eq!(stats.inputs[1].kind, "tone");
         let tone_peak = stats.inputs[1].meter.peak_dbfs.expect("tone peak");
         assert!((tone_peak + 12.0).abs() < 0.01, "{tone_peak}");
-        assert!(stats.master.rms_dbfs.is_some());
+        assert!(stats.program.rms_dbfs.is_some());
         assert_eq!(report.captures.len(), 1);
         assert!(report.captures[0].report.is_some());
     }
@@ -2629,7 +2605,10 @@ mod tests {
         assert_eq!(captures.len(), 1, "{captures:?}");
         assert_eq!(captures[0].input.as_deref(), Some("missing"));
         assert!(captures[0].error.is_some() && captures[0].report.is_none());
-        assert!(report.recording.audio.samples_encoded > 0, "{report:?}");
+        assert!(
+            report.recording.audio_tracks[0].samples_encoded > 0,
+            "{report:?}"
+        );
         let silent: Vec<_> = report
             .warnings
             .iter()

@@ -244,7 +244,7 @@ fn composite_probe_runs_headless() {
     let render = &response["result"]["render"];
     assert_eq!(render["width"], 1920);
     assert_eq!(render["height"], 1080);
-    assert_eq!(render["target_fps"], 60);
+    assert_eq!(render["target_fps"], json!({"num": 60, "den": 1}));
     assert!(
         render["frames_rendered"].as_u64().is_some_and(|n| n > 0),
         "{render}"
@@ -318,7 +318,7 @@ fn audio_mix_probe_runs_headless_with_test_tones() {
     );
     assert_eq!(response["ok"], true, "{response}");
     let mix = &response["result"]["mix"];
-    assert_eq!(mix["rate"], 48_000);
+    assert_eq!(mix["sample_rate_hz"], 48_000);
     assert_eq!(mix["channels"], 2);
     assert!(mix["blocks_mixed"].as_u64().is_some_and(|n| n > 0), "{mix}");
     assert_eq!(mix["inputs"].as_array().map(Vec::len), Some(2));

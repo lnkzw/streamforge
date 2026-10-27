@@ -109,9 +109,12 @@ fn recording_has_expected_streams_duration_and_sync() {
     let stats = record(&file);
     assert_eq!(stats.video.frames_encoded, u64::from(SECONDS * FPS));
     assert_eq!(stats.video.frames_dropped, 0);
-    assert_eq!(stats.audio.samples_encoded, u64::from(SECONDS * RATE));
-    assert_eq!(stats.audio.blocks_dropped, 0);
-    assert_eq!(stats.audio.gap_samples, 0);
+    assert_eq!(
+        stats.audio_tracks[0].samples_encoded,
+        u64::from(SECONDS * RATE)
+    );
+    assert_eq!(stats.audio_tracks[0].blocks_dropped, 0);
+    assert_eq!(stats.audio_tracks[0].gap_samples, 0);
     assert!(
         (stats.duration_ms - 2000.0).abs() < 1.0,
         "{}",
@@ -294,9 +297,9 @@ fn items_after_the_end_are_counted_not_recorded() {
     // Frames at 0..=233 ms (8) and blocks at 0..=240 ms (25) are recorded.
     assert_eq!(stats.video.frames_encoded, 8, "{stats:?}");
     assert_eq!(stats.video.frames_after_end, 7);
-    assert_eq!(stats.audio.blocks_after_end, 25);
-    assert_eq!(stats.audio.samples_encoded, 25 * 480);
-    assert_eq!(stats.audio.end_ms, Some(250.0));
+    assert_eq!(stats.audio_tracks[0].blocks_after_end, 25);
+    assert_eq!(stats.audio_tracks[0].samples_encoded, 25 * 480);
+    assert_eq!(stats.audio_tracks[0].end_ms, Some(250.0));
     assert!(
         stats
             .video
@@ -421,7 +424,7 @@ fn live_counters_track_the_recording() {
     assert_eq!((live.frames_dropped, live.blocks_dropped), (0, 0));
     let stats = recorder.stop().expect("stop");
     assert_eq!(stats.video.frames_encoded, live.frames_encoded);
-    assert!(stats.audio.samples_encoded >= live.samples_encoded);
+    assert!(stats.audio_tracks[0].samples_encoded >= live.samples_encoded);
 }
 
 /// Each track's RMS level (dBFS) over its whole length and its name.
@@ -501,17 +504,28 @@ fn a_recording_carries_every_audio_track_by_name() {
     // A block with the wrong number of tracks is refused and counted.
     assert!(!input.send_audio(&blocks[0], MediaTimestamp::new(0, 1, RATE).expect("pts")));
     let stats = recorder.stop().expect("stop");
-    assert_eq!(stats.audio.name.as_deref(), Some("Program"));
-    let extra: Vec<_> = stats
-        .extra_audio
+    let tracks: Vec<_> = stats
+        .audio_tracks
         .iter()
         .map(|track| (track.name.as_deref(), track.samples_encoded))
         .collect();
     let samples = u64::from(SECONDS * RATE);
-    assert_eq!(extra, [(Some("Voice"), samples), (Some("Music"), samples)]);
-    assert_eq!(stats.audio.samples_encoded, samples);
+    assert_eq!(
+        tracks,
+        [
+            (Some("Program"), samples),
+            (Some("Voice"), samples),
+            (Some("Music"), samples)
+        ]
+    );
     // One drop, for the refused block, on every track.
-    assert_eq!(stats.audio.blocks_dropped, 1);
+    assert!(
+        stats
+            .audio_tracks
+            .iter()
+            .all(|track| track.blocks_dropped == 1),
+        "{stats:?}"
+    );
     let found = track_levels(&file.0);
     assert_eq!(found.len(), 3, "{found:?}");
     for ((name, rms), (wanted, peak)) in

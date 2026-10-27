@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use audio_engine::MixStats;
-use capture_api::VideoCaptureReport;
+use capture_api::{Rational, VideoCaptureReport};
 use encoder_api::{
     EncoderPreference, ReconnectPolicy, RecordingStats, StreamStats, StreamTarget, VideoEncoderInfo,
 };
@@ -252,8 +252,8 @@ pub struct RecordingStarted {
     pub path: String,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
-    pub sample_rate: u32,
+    pub fps: Rational,
+    pub sample_rate_hz: u32,
     pub channels: u32,
     pub video_encoder: VideoEncoderInfo,
     /// E.g. a channel that is silent because its device did not open.
@@ -266,21 +266,21 @@ pub struct StreamingStarted {
     pub target: String,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    pub fps: Rational,
     pub video_bitrate_kbps: u32,
-    pub sample_rate: u32,
+    pub sample_rate_hz: u32,
     pub channels: u32,
     pub video_encoder: VideoEncoderInfo,
     /// E.g. a channel that is silent because its device did not open.
     pub warnings: Vec<String>,
 }
 
-/// The pipeline part of an output's report. Its stats are present only if
-/// the pipeline stopped together with this output (`pipeline_stopped`);
-/// otherwise another output keeps it running.
+/// The pipeline part of an output's report, its `pipeline`. Its stats are
+/// present only if the pipeline stopped together with this output
+/// (`stopped`); otherwise another output keeps it running.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct PipelineReport {
-    pub pipeline_stopped: bool,
+    pub stopped: bool,
     pub render: Option<RenderStats>,
     pub mix: Option<MixStats>,
     pub audio_captures: Vec<CaptureOutcome>,
@@ -297,7 +297,7 @@ pub struct PipelineReport {
 pub struct SceneCaptureOutcome {
     /// The scene source's id (as in `list_scenes`) and name.
     pub id: String,
-    pub source: String,
+    pub name: String,
     pub report: Option<VideoCaptureReport>,
     pub error: Option<ErrorSummary>,
 }
@@ -305,7 +305,6 @@ pub struct SceneCaptureOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecordingReport {
     pub recording: RecordingStats,
-    #[serde(flatten)]
     pub pipeline: PipelineReport,
     pub warnings: Vec<String>,
 }
@@ -313,7 +312,18 @@ pub struct RecordingReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StreamingReport {
     pub streaming: StreamStats,
-    #[serde(flatten)]
+    pub pipeline: PipelineReport,
+    pub warnings: Vec<String>,
+}
+
+/// The `details` of a failed `stop_recording` or `stop_streaming`: what
+/// was counted up to the failure. A recording's file is kept.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StopFailure {
+    /// The recording's statistics, when the recorder kept them; never
+    /// present for a stream, whose statistics are lost with its thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingStats>,
     pub pipeline: PipelineReport,
     pub warnings: Vec<String>,
 }

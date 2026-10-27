@@ -206,7 +206,10 @@ fn the_monitor_plays_its_bus_live_beside_a_recording() {
         Some(RecordingState::Running)
     );
     let report = stop_recording(&mut engine);
-    assert!(report.recording.audio.samples_encoded > 0, "{report:?}");
+    assert!(
+        report.recording.audio_tracks[0].samples_encoded > 0,
+        "{report:?}"
+    );
     let monitor = report.pipeline.monitor.expect("monitor in the report");
     assert!(monitor.feed.expect("feed").ring.read_frames > 0);
 }
@@ -319,7 +322,7 @@ fn a_monitor_that_ends_leaves_the_recording_running() {
     assert_eq!(monitor_health(&mut engine).state, CaptureState::Running);
     std::thread::sleep(Duration::from_millis(500));
     let report = stop_recording(&mut engine);
-    assert!(report.recording.audio.samples_encoded > 0);
+    assert!(report.recording.audio_tracks[0].samples_encoded > 0);
     assert!(
         report
             .warnings

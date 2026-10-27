@@ -92,7 +92,7 @@ fn audio_probe_reports_format_and_positions() {
         .expect("probe");
     let format = report.format.expect("negotiated format");
     assert_eq!(format.sample_format, "f32le");
-    assert!(format.rate > 0 && format.channels > 0);
+    assert!(format.sample_rate_hz > 0 && format.channels > 0);
     assert!(report.stats.frames > 0, "{:?}", report.stats);
     let first = report.stats.first_position.expect("first position");
     let last = report.stats.last_position.expect("last position");

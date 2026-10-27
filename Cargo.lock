@@ -967,6 +967,7 @@ dependencies = [
  "audio-engine",
  "capture-api",
  "encoder-api",
+ "media-core",
  "schemars",
  "serde",
  "serde_json",
@@ -1374,6 +1375,7 @@ dependencies = [
 name = "encoder-api"
 version = "0.1.0"
 dependencies = [
+ "media-core",
  "schemars",
  "serde",
  "serde_json",

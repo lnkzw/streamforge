@@ -11,6 +11,7 @@ pub use stream::{
     ReconnectPolicy, StreamConfig, StreamKey, StreamState, StreamStats, StreamTarget,
 };
 
+use media_core::Rational;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -160,7 +161,8 @@ pub struct VideoTrackStats {
     pub encoder: VideoEncoderInfo,
     pub width: u32,
     pub height: u32,
-    pub fps: u32,
+    /// Nominal frame rate.
+    pub fps: Rational,
     pub frames_encoded: u64,
     /// Frames not recorded: no free copy buffer, the input queue was full,
     /// the recorder had failed, or the timestamp was invalid or did not
@@ -179,9 +181,9 @@ pub struct AudioTrackStats {
     /// The track's name in the file, if it has one.
     pub name: Option<String>,
     pub encoder: String,
-    pub rate: u32,
+    pub sample_rate_hz: u32,
     pub channels: u32,
-    pub bitrate: u64,
+    pub bitrate_bps: u64,
     pub samples_encoded: u64,
     /// Blocks not recorded: the input queue was full, the recorder had
     /// failed, or the block was invalid (too large, bad timestamp).
@@ -211,10 +213,9 @@ pub struct RecordingStats {
     pub duration_ms: f64,
     pub file_bytes: Option<u64>,
     pub video: VideoTrackStats,
-    /// Audio track 1.
-    pub audio: AudioTrackStats,
-    /// Audio tracks 2 and on, in order.
-    pub extra_audio: Vec<AudioTrackStats>,
+    /// The audio tracks in file order: the mix first (track 1), then the
+    /// further tracks. Never empty.
+    pub audio_tracks: Vec<AudioTrackStats>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

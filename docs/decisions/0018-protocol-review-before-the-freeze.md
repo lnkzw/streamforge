@@ -36,8 +36,8 @@ All changes below are made before 0.1.0, in three steps (2a, 2b, 2c), each liste
 
 12. **One shape per thing in reports:** a recording's audio is `audio_tracks: [...]`, the mix first, instead of `audio` plus `extra_audio` (a stream has one entry). The pipeline's fields are nested as `pipeline: {...}` in every stop report and in partial-error details, as the preview's report already does, and its `pipeline_stopped` becomes `stopped`. Errors embedded in reports (capture, snapshot) use the command error's shape `{code, message, details}` instead of backend kinds or plain strings.
 13. **Units and words:** `sample_rate_hz` and audio `bitrate_bps` (as `_kbps`, `_ms`, `_db` elsewhere), `mute` instead of `muted`, `program` instead of `master` (also `program_gain_db` in `probe_audio_mix`), and a scene capture's source is `name`.
-14. **Nominal frame rates are fractions** `{num, den}`, as in capture reports, so 59.94 needs no type change later. Measured rates stay numbers.
-8. **Freeze guard:** reports serialize types from `audio-engine`, `encoder-api` and `video-compositor`, so renaming an internal field would change v1 without anyone noticing; the contract tests pin only the envelope and `get_status`. Wire-shape tests pin the field names of every result and report, last, so they hold the final shapes.
+14. **Nominal frame rates are fractions** `{num, den}`, as in capture reports, so 59.94 needs no type change later; the fields keep their names (`fps`, `target_fps`). Measured rates stay numbers.
+8. **Freeze guard:** reports serialize types from `audio-engine`, `encoder-api` and `video-compositor`, so renaming an internal field would change v1 without anyone noticing; the contract tests pin only the envelope and `get_status`. Wire-shape tests pin the field names of every result and report, last, so they hold the final shapes. They pin each JSON path with its type in `crates/command-api/tests/wire_shapes.txt`, from a sample of every command's result and of a failed stop's `details`.
 
 ### Kept
 

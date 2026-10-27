@@ -171,10 +171,11 @@ fn a_recording_carries_its_tracks_named_after_their_buses() {
     let stopped = ok(engine.request(r#"{"id":9,"command":"stop_recording"}"#));
     assert!(engine.finish().success());
     let recording = &stopped["recording"];
-    assert_eq!(recording["audio"]["name"], "Program", "{recording}");
-    assert_eq!(recording["extra_audio"][0]["name"], "Quiet", "{recording}");
+    let tracks = &recording["audio_tracks"];
+    assert_eq!(tracks[0]["name"], "Program", "{recording}");
+    assert_eq!(tracks[1]["name"], "Quiet", "{recording}");
     assert_eq!(
-        recording["extra_audio"][0]["samples_encoded"], recording["audio"]["samples_encoded"],
+        tracks[1]["samples_encoded"], tracks[0]["samples_encoded"],
         "{recording}"
     );
 

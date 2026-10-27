@@ -4027,6 +4027,7 @@ dependencies = [
  "encoder-api",
  "engine",
  "ffmpeg-next",
+ "quit-signal",
  "rmcp",
  "rtmp-test-server",
  "serde_json",

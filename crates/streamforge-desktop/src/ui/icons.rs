@@ -12,8 +12,10 @@ pub enum Icon {
     Live,
     /// A filled square.
     Stop,
-    /// An eye: the preview.
+    /// An eye: the preview, a visible layer.
     Preview,
+    /// An eye, struck through: a hidden layer.
+    Hidden,
     /// Stacked frames: scenes.
     Scene,
     /// Stacked sheets: sources (layers).
@@ -100,12 +102,15 @@ impl Icon {
             Self::Stop => {
                 painter.rect_filled(rect_at(4.0, 4.0, 12.0, 12.0), 1.0 * scale, color);
             }
-            Self::Preview => {
+            Self::Preview | Self::Hidden => {
                 // Two lids, arcs of radius 7 centred 5 below and above the
                 // middle line; they meet at (8 ± 4.9, 8).
                 arc(8.0, 13.0, 7.0, 225.6, 314.4);
                 arc(8.0, 3.0, 7.0, 45.6, 134.4);
                 painter.circle_stroke(at(8.0, 8.0), 2.2 * scale, stroke);
+                if self == Self::Hidden {
+                    line(&[(3.0, 13.0), (13.0, 3.0)]);
+                }
             }
             Self::Scene => {
                 closed(&[(2.0, 5.0), (12.0, 5.0), (12.0, 13.0), (2.0, 13.0)]);
@@ -229,11 +234,12 @@ impl Icon {
     }
 
     /// Every icon, for the specimen render.
-    pub const ALL: [Icon; 25] = [
+    pub const ALL: [Icon; 26] = [
         Self::Record,
         Self::Live,
         Self::Stop,
         Self::Preview,
+        Self::Hidden,
         Self::Scene,
         Self::Layers,
         Self::Screen,

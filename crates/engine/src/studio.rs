@@ -6,10 +6,10 @@ use std::sync::Arc;
 use audio_engine::BusRef as GraphBus;
 use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
-    ErrorCode, MixerState, OutputKind, OutputMix, OutputProfileSet, OutputProfiles, PROGRAM_BUS_ID,
-    PreviewState, SceneList, SceneRef, SetChannelInputRequest, SetOutputProfileRequest,
-    SetSendRequest, SourceKind, SourceRef, UpdateBusRequest, UpdateChannelRequest,
-    UpdateSourceRequest,
+    ErrorCode, MixerState, MoveSourceRequest, OutputKind, OutputMix, OutputProfileSet,
+    OutputProfiles, PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
+    SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRef, UpdateBusRequest,
+    UpdateChannelRequest, UpdateSourceRequest,
 };
 use media_core::{FrameMailbox, Rational};
 use serde_json::Value;
@@ -86,6 +86,13 @@ impl Engine {
         request: &UpdateSourceRequest,
     ) -> Result<SceneList, CommandError> {
         self.edit_scenes(|scenes| scenes.update_source(request))
+    }
+
+    pub(crate) fn move_source(
+        &mut self,
+        request: &MoveSourceRequest,
+    ) -> Result<SceneList, CommandError> {
+        self.edit_scenes(|scenes| scenes.move_source(request))
     }
 
     pub(crate) fn remove_source(&mut self, source: &SourceRef) -> Result<SceneList, CommandError> {

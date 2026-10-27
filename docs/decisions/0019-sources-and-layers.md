@@ -23,7 +23,7 @@ Protocol v1 is stable since 0.1.0 (`docs/protocol.md`), so everything below is a
 ### Layers
 
 - **Order:** a new command `move_source {source, index}` moves a source to `index` in its scene's drawing order (0 is the bottom, the last index the top; the others shift). An index past the end is `invalid_params`. It applies live like `update_source` and returns the scene list. Access `control`, destructive like `update_source`. A drag in the desktop is one move.
-- **Visibility:** every source gains `visible` (default `true`), set through `update_source` and returned in `list_scenes`. A hidden source is not drawn. Its capture keeps running, so showing it again is immediate. Access `control`.
+- **Visibility:** every source gains `visible` (default `true`), set through `update_source` and returned in `list_scenes`. A hidden source is not drawn. Its capture keeps running, so showing it again is immediate. Access `control`. `add_source` takes it too (added in step 2), so a project file's source stays an `add_source` object.
 
 ### Image source
 

@@ -1263,6 +1263,95 @@ fn ctrl_and_a_digit_put_a_scene_on_program_and_arrows_move_in_the_lists() {
     });
 }
 
+/// Whether source row `upper` is drawn above row `lower`: the list shows
+/// the top layer first, so this is the drawing order.
+fn above(harness: &Harness<'static, DesktopApp>, upper: &str, lower: &str) -> bool {
+    let top = |label| row(harness, label).map(|node| node.rect().top());
+    matches!((top(upper), top(lower)), (Some(a), Some(b)) if a < b)
+}
+
+#[test]
+fn the_eye_hides_and_shows_a_source() {
+    let dir = TempDir::new("eye");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Hide lower third").click();
+    step_until(&mut harness, "the hidden source", |h| {
+        h.query_by_label("Show lower third").is_some()
+    });
+    // The click went to the eye, not the row.
+    assert!(harness.query_by_label("Remove source…").is_none());
+    harness.get_by_label("Show lower third").click();
+    step_until(&mut harness, "the shown source", |h| {
+        h.query_by_label("Hide lower third").is_some()
+    });
+}
+
+#[test]
+fn keys_move_the_selected_source_between_layers() {
+    let dir = TempDir::new("layer-keys");
+    let mut harness = harness(model(&dir));
+    // Top first: lower third (added last), overlay, colour bars.
+    assert!(above(&harness, "lower third", "overlay"));
+    // Nothing selected: nothing moves.
+    command(&mut harness, egui::Key::ArrowDown);
+    settle(&mut harness, 3);
+    assert!(above(&harness, "lower third", "overlay"));
+
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    command(&mut harness, egui::Key::ArrowDown);
+    step_until(&mut harness, "one layer down", |h| {
+        above(h, "overlay", "lower third") && above(h, "lower third", "color_bars")
+    });
+    command(&mut harness, egui::Key::ArrowDown);
+    step_until(&mut harness, "the bottom", |h| {
+        above(h, "color_bars", "lower third")
+    });
+    // At the bottom it stays.
+    command(&mut harness, egui::Key::ArrowDown);
+    settle(&mut harness, 5);
+    assert!(above(&harness, "color_bars", "lower third"));
+    command(&mut harness, egui::Key::ArrowUp);
+    step_until(&mut harness, "one layer up", |h| {
+        above(h, "lower third", "color_bars") && above(h, "overlay", "lower third")
+    });
+}
+
+#[test]
+fn dragging_a_source_row_reorders_the_layers() {
+    let dir = TempDir::new("layer-drag");
+    let mut harness = harness(model(&dir));
+    let from = row(&harness, "lower third")
+        .expect("the row")
+        .rect()
+        .center();
+    let to = row(&harness, "color_bars")
+        .expect("the row")
+        .rect()
+        .bottom()
+        - 2.0;
+    harness.hover_at(from);
+    harness.step();
+    harness.drag_at(from);
+    harness.step();
+    for step in 1..=5 {
+        harness.hover_at(egui::pos2(
+            from.x,
+            from.y + (to - from.y) * step as f32 / 5.0,
+        ));
+        harness.step();
+    }
+    harness.drop_at(egui::pos2(from.x, to));
+    step_until(&mut harness, "the bottom", |h| {
+        above(h, "color_bars", "lower third")
+    });
+    assert!(above(&harness, "overlay", "color_bars"));
+    // A drag is not a click: nothing was selected.
+    assert!(harness.query_by_label("Remove source…").is_none());
+}
+
 #[test]
 fn delete_asks_before_it_removes_the_selected_source() {
     let dir = TempDir::new("delete");

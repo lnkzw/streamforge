@@ -139,6 +139,8 @@ pub struct SourceSpec {
     #[serde(flatten)]
     pub rect: SourceRect,
     pub opacity: f32,
+    /// A hidden source is not drawn; its capture keeps running.
+    pub visible: bool,
 }
 
 /// A scene; sources are drawn in order (later ones on top).
@@ -169,6 +171,7 @@ pub struct AddSourceRequest {
     /// `None`: the whole canvas.
     pub rect: Option<SourceRect>,
     pub opacity: f32,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -179,6 +182,15 @@ pub struct UpdateSourceRequest {
     pub width: Option<f32>,
     pub height: Option<f32>,
     pub opacity: Option<f32>,
+    pub visible: Option<bool>,
+}
+
+/// Move a source to `index` in its scene's drawing order (0 is the
+/// bottom); the sources between shift by one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MoveSourceRequest {
+    pub source: SourceRef,
+    pub index: usize,
 }
 
 /// Result of `set_preview`.

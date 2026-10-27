@@ -300,7 +300,7 @@ After 0.1.0, additive: effects in the processing slots (EQ, compressor, gate, du
 Cameras, images and layer control (ADR 0019). Everything is additive to protocol v1; the project file moves to schema 4.
 
 - [x] Step 1: ADR 0019 with the project owner's decisions (2026-10-27).
-- [ ] Step 2: layers. `move_source` changes the drawing order, `visible` hides a source without stopping its capture, project file schema 4 migrates version 3; the desktop reorders by drag and keys and has an eye toggle.
+- [x] Step 2: layers. `move_source` changes the drawing order, `visible` hides a source without stopping its capture, project file schema 4 migrates version 3; the desktop reorders by drag and keys and has an eye toggle.
 - [ ] Step 3: image source. PNG and JPEG by plain file name in the project folder (`list_images`), decoded by the new crate `frame-decode`, with size limits; a missing image does not block loading a project.
 - [ ] Step 4: Linux camera.
   - [ ] 4a: `CaptureBackend` split into `ScreenCapture`, `AudioDevices` and `CameraCapture`, without behaviour change.

@@ -20,10 +20,10 @@ use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
     ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
     MAX_COORDINATE, MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest,
-    OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest,
-    SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind,
-    SourceRect, SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
-    UpdateSourceRequest, VIDEO_BITRATE_KBPS,
+    MoveSourceRequest, OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX,
+    SaveProjectRequest, SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest,
+    SetSendRequest, SourceKind, SourceRect, SourceRef, StreamingRequest, ToneSpec,
+    UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest, VIDEO_BITRATE_KBPS,
 };
 
 /// Permission class of a command.
@@ -278,7 +278,7 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     summary: "Add a source on top of a scene. Params: scene_id or scene_name, name, kind (color_bars, solid, \
               screen), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), x, \
               y, width, height (canvas pixels; all or none, default the whole canvas), opacity \
-              (0-1). Screen sources start capturing when the scene is rendered: the capture_target_id from \
+              (0-1), visible (default true). Screen sources start capturing when the scene is rendered: the capture_target_id from \
               list_capture_targets, or else the one the user picks in the system dialog. Returns \
               the scene list.",
     access: CommandAccess::Sensitive,
@@ -288,8 +288,19 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "update_source",
-    summary: "Move, resize or fade a source. Params: source_id, or scene_name (or scene_id) and \
-              source_name; any of x, y, width, height, opacity. Returns the scene list.",
+    summary: "Move, resize, fade, hide or show a source. Params: source_id, or scene_name (or \
+              scene_id) and source_name; any of x, y, width, height, opacity, visible (a hidden \
+              source is not drawn; a screen source keeps capturing). Returns the scene list.",
+    access: CommandAccess::Control,
+    destructive: true,
+    open_world: false,
+};
+
+const MOVE_SOURCE: CommandDescriptor = CommandDescriptor {
+    name: "move_source",
+    summary: "Change a source's place in its scene's drawing order. Params: source_id, or \
+              scene_name (or scene_id) and source_name; index (0 is the bottom, the last \
+              index the top; the sources between shift by one). Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -527,6 +538,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     SET_ACTIVE_SCENE,
     ADD_SOURCE,
     UPDATE_SOURCE,
+    MOVE_SOURCE,
     REMOVE_SOURCE,
     RESTART_SOURCE,
     SET_CAPTURE_TARGET,
@@ -610,6 +622,7 @@ impl Command {
             "set_active_scene" => decode_set_active_scene(name, params).map(Self::SetActiveScene),
             "add_source" => decode_add_source(name, params).map(Self::AddSource),
             "update_source" => decode_update_source(name, params).map(Self::UpdateSource),
+            "move_source" => decode_move_source(name, params).map(Self::MoveSource),
             "remove_source" => decode_remove_source(name, params).map(Self::RemoveSource),
             "restart_source" => decode_restart_source(name, params),
             "set_capture_target" => decode_set_capture_target(name, params),
@@ -695,6 +708,7 @@ impl Command {
             Self::SetActiveScene { .. } => &SET_ACTIVE_SCENE,
             Self::AddSource(_) => &ADD_SOURCE,
             Self::UpdateSource(_) => &UPDATE_SOURCE,
+            Self::MoveSource(_) => &MOVE_SOURCE,
             Self::RemoveSource { .. } => &REMOVE_SOURCE,
             Self::RestartSource { .. } => &RESTART_SOURCE,
             Self::SetCaptureTarget { .. } => &SET_CAPTURE_TARGET,
@@ -1235,6 +1249,8 @@ struct AddSourceParams {
     height: Option<f32>,
     /// Opacity from 0 to 1.
     opacity: Option<f32>,
+    /// Whether the source is drawn; default true.
+    visible: Option<bool>,
 }
 
 fn decode_add_source(
@@ -1319,6 +1335,7 @@ fn decode_add_source(
         kind,
         rect,
         opacity: opacity(command, params.opacity.unwrap_or(1.0))?,
+        visible: params.visible.unwrap_or(true),
     })
 }
 
@@ -1343,6 +1360,8 @@ struct UpdateSourceParams {
     height: Option<f32>,
     /// Opacity from 0 to 1.
     opacity: Option<f32>,
+    /// Whether the source is drawn; a hidden screen source keeps capturing.
+    visible: Option<bool>,
 }
 
 fn decode_update_source(
@@ -1359,10 +1378,11 @@ fn decode_update_source(
     ]
     .iter()
     .all(Option::is_none)
+        && params.visible.is_none()
     {
         return Err(invalid_params(
             command,
-            "give at least one of x, y, width, height or opacity",
+            "give at least one of x, y, width, height, opacity or visible",
         ));
     }
     let check = |field: &str, value: Option<f32>, size: bool| {
@@ -1383,6 +1403,39 @@ fn decode_update_source(
         width: check("width", params.width, true)?,
         height: check("height", params.height, true)?,
         opacity: params.opacity.map(|o| opacity(command, o)).transpose()?,
+        visible: params.visible,
+    })
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MoveSourceParams {
+    /// Source id from list_scenes (or give scene_name/scene_id and source_name).
+    source_id: Option<String>,
+    /// Scene id from list_scenes (or give scene_name).
+    scene_id: Option<String>,
+    /// Scene name.
+    scene_name: Option<String>,
+    /// Source name.
+    source_name: Option<String>,
+    /// New place in the drawing order: 0 is the bottom, the scene's last index the top.
+    index: u32,
+}
+
+fn decode_move_source(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<MoveSourceRequest, CommandError> {
+    let params: MoveSourceParams = decode_params(command, params)?;
+    Ok(MoveSourceRequest {
+        source: source_ref(
+            command,
+            params.source_id,
+            params.scene_id,
+            params.scene_name,
+            params.source_name,
+        )?,
+        index: params.index as usize,
     })
 }
 
@@ -2264,6 +2317,7 @@ pub fn params_schema(name: &str) -> Option<Value> {
         "delete_scene" => schema_of::<DeleteSceneParams>(),
         "add_source" => schema_of::<AddSourceParams>(),
         "update_source" => schema_of::<UpdateSourceParams>(),
+        "move_source" => schema_of::<MoveSourceParams>(),
         "remove_source" => schema_of::<RemoveSourceParams>(),
         "restart_source" => schema_of::<RestartSourceParams>(),
         "set_capture_target" => schema_of::<SetCaptureTargetParams>(),
@@ -2425,6 +2479,9 @@ mod tests {
             }
             "update_source" => {
                 Some(json!({"scene_name": "Scene", "source_name": "bars", "opacity": 0.5}))
+            }
+            "move_source" => {
+                Some(json!({"scene_name": "Scene", "source_name": "bars", "index": 0}))
             }
             "remove_source" | "restart_source" => {
                 Some(json!({"scene_name": "Scene", "source_name": "bars"}))
@@ -2708,10 +2765,58 @@ mod tests {
             panic!("decode");
         };
         assert!(matches!(screen.kind, SourceKind::Screen { .. }));
-        assert_eq!((screen.rect, screen.opacity), (None, 1.0));
+        assert_eq!(
+            (screen.rect, screen.opacity, screen.visible),
+            (None, 1.0, true)
+        );
+        let Ok(Command::AddSource(hidden)) = Command::decode(
+            "add_source",
+            Some(
+                &json!({"scene_name": "Main", "name": "bars", "kind": "color_bars",
+                         "visible": false}),
+            ),
+        ) else {
+            panic!("decode");
+        };
+        assert!(!hidden.visible);
         assert_eq!(
             serde_json::to_value(Rgba([1, 2, 3, 4])).expect("json"),
             json!("#01020304")
+        );
+    }
+
+    #[test]
+    fn sources_hide_and_move_by_reference() {
+        let Ok(Command::UpdateSource(update)) = Command::decode(
+            "update_source",
+            Some(&json!({"source_id": "src_a1", "visible": false})),
+        ) else {
+            panic!("decode");
+        };
+        // Visibility alone is a change.
+        assert_eq!(
+            (update.visible, update.x, update.opacity),
+            (Some(false), None, None)
+        );
+        assert_eq!(
+            Command::decode(
+                "move_source",
+                Some(&json!({"scene_name": "Main", "source_name": "logo", "index": 2})),
+            )
+            .expect("decode"),
+            Command::MoveSource(MoveSourceRequest {
+                source: SourceRef::named("Main", "logo"),
+                index: 2,
+            })
+        );
+        let descriptor = Command::MoveSource(MoveSourceRequest {
+            source: SourceRef::id("src_a1"),
+            index: 0,
+        })
+        .descriptor();
+        assert_eq!(
+            (descriptor.access, descriptor.destructive),
+            (CommandAccess::Control, true)
         );
     }
 
@@ -2760,6 +2865,20 @@ mod tests {
                 "update_source",
                 json!({"scene_name": "Main", "source_name": "a"}),
             ),
+            (
+                "update_source",
+                json!({"source_id": "src_a1", "visible": "no"}),
+            ),
+            // An index is a whole number from 0; past the top is the
+            // engine's to refuse, it knows the scene.
+            ("move_source", json!({"source_id": "src_a1"})),
+            ("move_source", json!({"source_id": "src_a1", "index": -1})),
+            ("move_source", json!({"source_id": "src_a1", "index": 1.5})),
+            (
+                "move_source",
+                json!({"source_id": "src_a1", "index": "top"}),
+            ),
+            ("move_source", json!({"scene_name": "Main", "index": 0})),
             // A source needs its id, or its scene and name.
             ("update_source", json!({"source_name": "a", "x": 1})),
             ("remove_source", json!({"scene_name": "Main"})),

@@ -212,6 +212,9 @@ impl CommandHandler for Engine {
             Command::UpdateSource(request) => {
                 self.update_source(&request).map(CommandOutput::SceneList)
             }
+            Command::MoveSource(request) => {
+                self.move_source(&request).map(CommandOutput::SceneList)
+            }
             Command::RemoveSource(source) => {
                 self.remove_source(&source).map(CommandOutput::SceneList)
             }
@@ -638,6 +641,9 @@ mod tests {
                     }
                     "update_source" => {
                         Some(json!({"scene_name": "Scene", "source_name": "bars", "opacity": 0.5}))
+                    }
+                    "move_source" => {
+                        Some(json!({"scene_name": "Scene", "source_name": "bars", "index": 0}))
                     }
                     "remove_source" | "restart_source" => {
                         Some(json!({"scene_name": "Scene", "source_name": "bars"}))
@@ -1097,6 +1103,56 @@ mod tests {
         run(&mut engine, "set_preview", json!({"enabled": false}));
         assert!(!status(&mut engine).preview_active);
         assert!(engine.preview_frames().take().is_none());
+    }
+
+    #[test]
+    fn layer_order_and_visibility_apply_live_to_the_preview() {
+        let _media = media_test_lock();
+        let mut engine = Engine::new();
+        run(&mut engine, "create_scene", json!({"name": "Show"}));
+        for (name, color) in [("red", "#ff0000"), ("blue", "#0000ff")] {
+            run(
+                &mut engine,
+                "add_source",
+                json!({"scene_name": "Show", "name": name, "kind": "solid", "color": color}),
+            );
+        }
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Show"}),
+        );
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        // Blue was added last, so it is on top.
+        wait_for_preview_pixel(&engine, 10, 10, [255, 0, 0, 255]);
+        let CommandOutput::SceneList(list) = run(
+            &mut engine,
+            "move_source",
+            json!({"scene_name": "Show", "source_name": "blue", "index": 0}),
+        ) else {
+            panic!("unexpected output");
+        };
+        let names: Vec<_> = list.scenes[1].sources.iter().map(|s| &s.name).collect();
+        assert_eq!(names, ["blue", "red"]);
+        wait_for_preview_pixel(&engine, 10, 10, [0, 0, 255, 255]);
+        // Hiding the top layer shows the one under it.
+        let CommandOutput::SceneList(list) = run(
+            &mut engine,
+            "update_source",
+            json!({"scene_name": "Show", "source_name": "red", "visible": false}),
+        ) else {
+            panic!("unexpected output");
+        };
+        assert!(!list.scenes[1].sources[1].visible);
+        wait_for_preview_pixel(&engine, 10, 10, [255, 0, 0, 255]);
+        let past = try_run(
+            &mut engine,
+            "move_source",
+            json!({"scene_name": "Show", "source_name": "red", "index": 2}),
+        )
+        .unwrap_err();
+        assert_eq!(past.code, ErrorCode::InvalidParams);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
     #[test]
@@ -1564,6 +1620,52 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_screen_source_keeps_its_capture() {
+        let _media = media_test_lock();
+        let (mut engine, starts) = engine_with_screen_counter();
+        run(&mut engine, "create_scene", json!({"name": "Main"}));
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene_name": "Main", "name": "desk", "kind": "screen"}),
+        );
+        run(
+            &mut engine,
+            "set_active_scene",
+            json!({"scene_name": "Main"}),
+        );
+        run(&mut engine, "set_preview", json!({"enabled": true}));
+        assert_eq!(starts.get(), 1);
+        for visible in [false, true, false] {
+            run(
+                &mut engine,
+                "update_source",
+                json!({"scene_name": "Main", "source_name": "desk", "visible": visible}),
+            );
+            assert_eq!(health(&mut engine).captures.len(), 1, "visible {visible}");
+        }
+        // Hidden, moved and shown again: still the first capture.
+        run(
+            &mut engine,
+            "add_source",
+            json!({"scene_name": "Main", "name": "bars", "kind": "color_bars"}),
+        );
+        run(
+            &mut engine,
+            "move_source",
+            json!({"scene_name": "Main", "source_name": "desk", "index": 1}),
+        );
+        run(
+            &mut engine,
+            "update_source",
+            json!({"scene_name": "Main", "source_name": "desk", "visible": true}),
+        );
+        assert_eq!(starts.get(), 1);
+        assert_eq!(health(&mut engine).captures.len(), 1);
+        run(&mut engine, "set_preview", json!({"enabled": false}));
+    }
+
+    #[test]
     fn an_ended_screen_source_shows_in_health() {
         let _media = media_test_lock();
         let dir = TempDir::new("capture-state");
@@ -1891,7 +1993,10 @@ mod tests {
             panic!("unexpected output");
         };
         assert!(validation.valid && validation.problems.is_empty());
-        assert_eq!(validation.schema_version, Some(3));
+        assert_eq!(
+            validation.schema_version,
+            Some(project_file::SCHEMA_VERSION)
+        );
         assert!(!validation.migrates);
     }
 
@@ -1928,11 +2033,11 @@ mod tests {
         ) else {
             panic!("unexpected output");
         };
-        assert!(
-            loaded.warnings[0].contains("migrated"),
-            "{:?}",
-            loaded.warnings
-        );
+        // Every step since version 1 is named.
+        let warning = &loaded.warnings[0];
+        for change in ["migrated", "became channels", "`target_kinds`", "`visible`"] {
+            assert!(warning.contains(change), "{change}: {warning}");
+        }
         let channels: Vec<_> = loaded
             .mixer
             .channels
@@ -1954,7 +2059,7 @@ mod tests {
             ]
         );
         assert_eq!(loaded.mixer.buses[0].gain_db, -1.0);
-        // Saving writes version 2, which loads without a migration.
+        // Saving writes the current version, which loads without a migration.
         run(
             &mut engine,
             "save_project",
@@ -1963,7 +2068,7 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.0.join("old.json")).expect("read"))
                 .expect("json");
-        assert_eq!(written["schema_version"], 3);
+        assert_eq!(written["schema_version"], project_file::SCHEMA_VERSION);
         assert_eq!(written["audio"]["channels"][1]["name"], "Tone 1");
         let CommandOutput::ProjectLoaded(again) = run(
             &mut engine,

@@ -33,6 +33,7 @@ const CHANGES_PROJECT: &[&str] = &[
     "set_active_scene",
     "add_source",
     "update_source",
+    "move_source",
     "remove_source",
     "add_channel",
     "remove_channel",
@@ -586,6 +587,20 @@ impl Model {
             params.insert("opacity".into(), opacity.into());
         }
         self.act("update_source", Value::Object(params));
+    }
+
+    /// Draw source `id` or not; a hidden screen source keeps capturing.
+    pub fn set_source_visible(&mut self, id: &str, visible: bool) {
+        self.act(
+            "update_source",
+            json!({ "source_id": id, "visible": visible }),
+        );
+    }
+
+    /// Move source `id` to `index` in its scene's drawing order (0 is the
+    /// bottom).
+    pub fn move_source(&mut self, id: &str, index: usize) {
+        self.act("move_source", json!({ "source_id": id, "index": index }));
     }
 
     pub fn remove_source(&mut self, id: &str) {

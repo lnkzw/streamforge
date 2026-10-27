@@ -8,7 +8,7 @@ use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, BadgeKind, Transport};
-use crate::workspace::{Shortcut, fit};
+use crate::workspace::{self, Shortcut, fit};
 
 use super::{right_to_left, scene, with_keys};
 
@@ -192,8 +192,8 @@ impl DesktopApp {
         }
     }
 
-    /// A click on the picture selects the topmost source under it in the
-    /// program scene.
+    /// A click on the picture selects the topmost visible source under it
+    /// in the program scene.
     fn select_at(&mut self, monitor: egui::Rect, pointer: egui::Pos2) {
         let Some(scenes) = &self.model.scenes else {
             return;
@@ -203,13 +203,7 @@ impl DesktopApp {
         let Some(program) = scene(scenes, &scenes.active_scene_id) else {
             return;
         };
-        let hit = program.sources.iter().rev().find(|source| {
-            let rect = &source.rect;
-            at.x >= rect.x
-                && at.y >= rect.y
-                && at.x < rect.x + rect.width
-                && at.y < rect.y + rect.height
-        });
+        let hit = workspace::source_at(&program.sources, at.x, at.y);
         let program_id = program.id.clone();
         let hit = hit.map(|source| source.id.clone());
         if hit.is_some() {

@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use command_api::{
-    AddSourceRequest, CommandError, ErrorCode, MAX_SCENE_SOURCES, MAX_SCENES, Rgba,
-    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind, SourceRect,
-    SourceRef, SourceSpec, UpdateSourceRequest,
+    AddSourceRequest, CommandError, ErrorCode, MAX_SCENE_SOURCES, MAX_SCENES, MoveSourceRequest,
+    Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind,
+    SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
 };
 use media_core::{FrameMailbox, VideoFrame};
 
@@ -56,6 +56,7 @@ impl SceneCollection {
             kind,
             rect,
             opacity: 1.0,
+            visible: true,
         };
         Self {
             scenes: vec![SceneSpec {
@@ -261,6 +262,7 @@ impl SceneCollection {
             kind: request.kind.clone(),
             rect: request.rect.unwrap_or_else(full_canvas),
             opacity: request.opacity,
+            visible: request.visible,
         });
         Ok(id)
     }
@@ -274,6 +276,28 @@ impl SceneCollection {
         rect.width = request.width.unwrap_or(rect.width);
         rect.height = request.height.unwrap_or(rect.height);
         source.opacity = request.opacity.unwrap_or(source.opacity);
+        source.visible = request.visible.unwrap_or(source.visible);
+        Ok(())
+    }
+
+    /// Move a source to `index` in its scene's drawing order (0 is the
+    /// bottom); the ones between shift. Its own place is no change.
+    pub fn move_source(&mut self, request: &MoveSourceRequest) -> Result<(), CommandError> {
+        let (scene, index) = self.source_index(&request.source)?;
+        let scene = &mut self.scenes[scene];
+        let top = scene.sources.len() - 1;
+        if request.index > top {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                format!(
+                    "`index` {} is past the top of scene `{}`: its sources are 0 to {top}",
+                    request.index, scene.name
+                ),
+            )
+            .with_details(serde_json::json!({"index": request.index, "max_index": top})));
+        }
+        let source = scene.sources.remove(index);
+        scene.sources.insert(request.index, source);
         Ok(())
     }
 
@@ -410,7 +434,10 @@ pub(crate) fn build(
                 )
             }
         };
-        canvas.layers.push(layer.with_opacity(spec.opacity));
+        canvas.layers.push(Layer {
+            visible: spec.visible,
+            ..layer.with_opacity(spec.opacity)
+        });
         sources.push(SourceConfig {
             id,
             name: spec.name.clone(),
@@ -473,6 +500,7 @@ mod tests {
             kind,
             rect: None,
             opacity: 1.0,
+            visible: true,
         }
     }
 
@@ -507,6 +535,7 @@ mod tests {
                 width: None,
                 height: None,
                 opacity: None,
+                visible: None,
             })
             .expect("move");
         // Moved by the user: it stays where it was put.
@@ -521,6 +550,7 @@ mod tests {
                 kind: SourceKind::ColorBars,
                 rect: Some(BUILTIN_OVERLAY_RECT),
                 opacity: 1.0,
+                visible: true,
             })
             .expect("add");
         let other = build(
@@ -670,6 +700,79 @@ mod tests {
             .expect("add again");
         assert_ne!(again, red);
         assert!(collection.source(&SourceRef::id(&red)).is_err());
+    }
+
+    #[test]
+    fn sources_move_in_the_drawing_order_and_hide() {
+        let mut collection = SceneCollection::new();
+        collection.create("Show").expect("create");
+        for name in ["a", "b", "c"] {
+            collection
+                .add_source(&source("Show", name, SourceKind::ColorBars))
+                .expect("add");
+        }
+        let order = |collection: &SceneCollection| -> Vec<String> {
+            let scene = collection.get(&SceneRef::name("Show")).expect("scene");
+            scene.sources.iter().map(|s| s.name.clone()).collect()
+        };
+        let to = |name: &str, index| MoveSourceRequest {
+            source: SourceRef::named("Show", name),
+            index,
+        };
+        // To the bottom, the others shift up.
+        collection.move_source(&to("c", 0)).expect("move");
+        assert_eq!(order(&collection), ["c", "a", "b"]);
+        // To the top, by id.
+        let c = collection
+            .source(&SourceRef::named("Show", "c"))
+            .expect("c");
+        collection
+            .move_source(&MoveSourceRequest {
+                source: SourceRef::id(c.id.clone()),
+                index: 2,
+            })
+            .expect("move");
+        assert_eq!(order(&collection), ["a", "b", "c"]);
+        // Its own place changes nothing.
+        collection.move_source(&to("b", 1)).expect("move");
+        assert_eq!(order(&collection), ["a", "b", "c"]);
+        let past = collection.move_source(&to("a", 3)).unwrap_err();
+        assert_eq!(past.code, ErrorCode::InvalidParams);
+        assert_eq!(past.details, Some(json!({"index": 3, "max_index": 2})));
+        assert_eq!(order(&collection), ["a", "b", "c"]);
+        assert_eq!(
+            collection.move_source(&to("gone", 0)).unwrap_err().code,
+            ErrorCode::NotFound
+        );
+
+        collection
+            .update_source(&UpdateSourceRequest {
+                source: SourceRef::named("Show", "b"),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                opacity: None,
+                visible: Some(false),
+            })
+            .expect("hide");
+        let scene = collection.get(&SceneRef::name("Show")).expect("scene");
+        let visible: Vec<_> = scene.sources.iter().map(|s| s.visible).collect();
+        assert_eq!(visible, [true, false, true]);
+        // The compositor gets every layer in order, the hidden one marked.
+        let update = build(
+            scene,
+            &LiveFrames { screens: &[] },
+            &mut FrameCache::default(),
+        )
+        .expect("build");
+        let layers: Vec<_> = update
+            .scene
+            .layers
+            .iter()
+            .map(|layer| (layer.name.as_str(), layer.visible))
+            .collect();
+        assert_eq!(layers, [("a", true), ("b", false), ("c", true)]);
     }
 
     #[test]

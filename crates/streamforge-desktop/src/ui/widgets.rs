@@ -1471,6 +1471,9 @@ pub struct ListRow<'a> {
     pub meta: Option<&'a str>,
     pub selected: bool,
     pub program: bool,
+    pub dimmed: bool,
+    pub trailing: f32,
+    pub draggable: bool,
     forced: Option<VisualState>,
 }
 
@@ -1482,8 +1485,30 @@ impl<'a> ListRow<'a> {
             meta: None,
             selected: false,
             program: false,
+            dimmed: false,
+            trailing: 0.0,
+            draggable: false,
             forced: None,
         }
+    }
+
+    /// Draw the icon and name dimmed, e.g. a hidden layer.
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
+    }
+
+    /// Keep `width` free at the right end for a control the caller puts
+    /// there.
+    pub fn trailing(mut self, width: f32) -> Self {
+        self.trailing = width;
+        self
+    }
+
+    /// Let the row be dragged (to reorder it); a click still selects it.
+    pub fn draggable(mut self, draggable: bool) -> Self {
+        self.draggable = draggable;
+        self
     }
 
     pub fn meta(mut self, meta: &'a str) -> Self {
@@ -1510,8 +1535,12 @@ impl<'a> ListRow<'a> {
 
 impl Widget for ListRow<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), size::ROW), Sense::click());
+        let sense = if self.draggable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), size::ROW), sense);
         response.widget_info(|| {
             WidgetInfo::selected(WidgetType::SelectableLabel, true, self.selected, self.label)
         });
@@ -1540,21 +1569,17 @@ impl Widget for ListRow<'_> {
         } else if hover > 0.0 {
             painter.rect_filled(rect, 0.0, color::BG_RAISED.gamma_multiply(hover));
         }
-        let text = if self.selected {
-            color::TEXT_PRIMARY
-        } else {
-            color::TEXT_SECONDARY
+        let (text, icon) = match (self.selected, self.dimmed) {
+            (_, true) => (color::TEXT_TERTIARY, color::TEXT_DISABLED),
+            (true, false) => (color::TEXT_PRIMARY, color::TEXT_PRIMARY),
+            (false, false) => (color::TEXT_SECONDARY, color::TEXT_TERTIARY),
         };
         self.icon.paint(
             painter,
             icon_rect(pos2(rect.left() + 16.0, rect.center().y), 14.0),
-            if self.selected {
-                color::TEXT_PRIMARY
-            } else {
-                color::TEXT_TERTIARY
-            },
+            icon,
         );
-        let mut right = rect.right() - size::SPACE_8;
+        let mut right = rect.right() - size::SPACE_8 - self.trailing;
         if self.program {
             let galley = painter.layout_no_wrap(
                 "PGM".into(),

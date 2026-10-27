@@ -46,8 +46,8 @@ pub use registry::{
 };
 pub use scenes::{
     AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
-    PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec,
-    SourceKind, SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
+    MoveSourceRequest, PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef,
+    SceneSpec, SourceKind, SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
@@ -120,6 +120,8 @@ pub enum Command {
     SetActiveScene(SceneRef),
     AddSource(AddSourceRequest),
     UpdateSource(UpdateSourceRequest),
+    /// Change a source's place in its scene's drawing order.
+    MoveSource(MoveSourceRequest),
     RemoveSource(SourceRef),
     /// Restart a screen source's capture while outputs keep running.
     RestartSource {

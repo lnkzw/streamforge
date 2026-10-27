@@ -27,12 +27,12 @@ impl Drop for TempDir {
 
 fn project() -> Value {
     json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "canvas": {"width": 1920, "height": 1080},
         "active_scene": "scene_main",
         "scenes": [{"id": "scene_main", "name": "Main", "sources": [
             {"id": "src_bars", "name": "bars", "kind": "color_bars",
-             "x": 0, "y": 0, "width": 1920, "height": 1080, "opacity": 1}
+             "x": 0, "y": 0, "width": 1920, "height": 1080, "opacity": 1, "visible": true}
         ]}],
         "audio": {"channels": [], "program": {"gain_db": 0, "mute": false}}
     })
@@ -58,13 +58,18 @@ fn project_validate_reports_problems_with_their_path() {
     let (ok, report) = validate(&good);
     assert!(ok, "{report}");
     assert_eq!(report["valid"], true);
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["migrates"], false);
 
     // A version 1 file is valid and would be migrated.
     let mut old = project();
     old["schema_version"] = json!(1);
     old["audio"] = json!({"inputs": [], "tones": [], "master_gain_db": 0});
+    // Version 4 added `visible`.
+    old["scenes"][0]["sources"][0]
+        .as_object_mut()
+        .expect("source")
+        .remove("visible");
     std::fs::write(&good, old.to_string()).expect("write");
     let (ok, report) = validate(&good);
     assert!(ok, "{report}");
@@ -81,7 +86,7 @@ fn project_validate_reports_problems_with_their_path() {
     assert_eq!(report["problems"][0]["path"], "scenes[0].sources[0]");
 
     let mut newer = project();
-    newer["schema_version"] = json!(4);
+    newer["schema_version"] = json!(5);
     std::fs::write(&bad, newer.to_string()).expect("write");
     let (ok, report) = validate(&bad);
     assert!(!ok);

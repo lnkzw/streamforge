@@ -83,7 +83,7 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 
 - **Top bar:** the project menu and its name (a dot means unsaved changes), the **REC** and **LIVE** buttons with their running time, and the health summary on the right. Click the summary for details and the activity log.
 - **Scenes** (left, top): your scenes. The one marked **PGM** is on program, which is what the recording and the stream show.
-- **Sources** (left, bottom): the layers of the selected scene, top layer first.
+- **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture keeps running, so showing it again is immediate.
 - **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming; the line below shows the frame rate and render time.
 - **Inspector** (right): position, size and opacity of the selected source.
 - **Mixer** (bottom): the **Console** with a strip per channel and bus, and the **Routing** matrix.
@@ -92,7 +92,7 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 ### A first recording
 
 1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine.
-2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, or a **screen capture**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top.
+2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, or a **screen capture**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
 3. **Audio.** Open **Routing** in the mixer. A new setup has one channel, **Tone**, a 1 kHz test tone on the program bus; mute or remove it before a real recording, or switch its input to your microphone.
    - Add a channel with **+** next to *Channels*, then choose its input in the *Input* column: a microphone or other device, the desktop audio of an output (listed separately, as `<output>.monitor`), the system's default input, or a test tone.
    - Each channel sends to the **Program** bus. Add aux buses with **+** at the right of the bus columns, for example a separate mix for headphones or a second recording track. Each send has a switch, a level, and a tap: PRE (before the channel fader) or POST (after it).
@@ -133,6 +133,7 @@ A project opens only while nothing records, streams or previews. Before you open
 | Ctrl+L | Go live, or end the stream (asks first) |
 | Ctrl+1 … Ctrl+9 | Put scene 1 … 9 on program |
 | Delete, Backspace | Remove the selected source (asks first) |
+| Ctrl+Up, Ctrl+Down | Move the selected source one layer up or down |
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S | Open, save, save as |
 | Tab, Shift+Tab | Move through the docks |
 | Up, Down | Move in the scene and source lists |
@@ -257,7 +258,7 @@ Version 0.1.0 is a first stable base, not a complete production suite.
 
 - **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On both, screen capture works by target id only (no picker yet), and desktop audio from outputs with more than two channels is not downmixed.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
-- **Sources:** solid colours, colour bars and screen or window capture. No cameras, images, text, media files or browser sources yet. The order of the layers cannot be changed after adding them.
+- **Sources:** solid colours, colour bars and screen or window capture. No cameras, images, text, media files or browser sources yet.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
 - **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.

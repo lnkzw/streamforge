@@ -99,6 +99,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `set_active_scene`         | see below | `sensitive`, destructive | Scene list |
 | `add_source`               | see below | `sensitive` | Scene list |
 | `update_source`            | see below | `control`, destructive | Scene list |
+| `move_source`              | see below | `control`, destructive | Scene list |
 | `remove_source`            | see below | `control`, destructive | Scene list |
 | `restart_source`           | see below | `sensitive`, destructive | Scene list |
 | `set_capture_target`        | see below | `sensitive`, destructive | Scene list |
@@ -392,22 +393,24 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - `create_scene {name}` creates an empty scene (black); the scene list holds its id.
   - `set_active_scene {scene_id | scene_name}` switches the rendered scene.
   - `delete_scene {scene_id | scene_name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
-- **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source` and `remove_source` (undone by adding the source again) are `control`.
+- **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source`, `move_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
-- **`add_source`:** params `scene_id` or `scene_name`, `name`, `kind`, optional rectangle and `opacity`. The scene list holds the new source's id.
+- **`add_source`:** params `scene_id` or `scene_name`, `name`, `kind`, optional rectangle, `opacity` and `visible`. The scene list holds the new source's id.
   - Kinds:
     - `color_bars`: stretched to the rectangle.
     - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
     - `screen` with optional `capture_target_id`, `target_kinds` and `cursor_mode` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept. The scene list shows `capture_target_id` when one is set.
   - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
   - `opacity` 0..=1.
-  - Sources are drawn in order, so later ones are on top.
+  - `visible` (default `true`): a hidden source is not drawn. A hidden screen source starts and keeps its capture like a visible one, so showing it again is immediate.
+  - Sources are drawn in order, so later ones are on top; `move_source` changes the order.
   - A screen source starts its capture when it becomes part of the rendered scene: the named source directly, otherwise through the system picker.
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
   - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`capture_target_id`) start without waiting and are allowed.
   - Capture reports are in the output reports' `pipeline.scene_captures` (`{"id", "name", "report", "error"}`, with the source's id and name): the most recent 64, with `scene_captures_omitted` counting older ones.
-- **`update_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and any of `x`, `y`, `width`, `height`, `opacity`.
+- **`update_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and any of `x`, `y`, `width`, `height`, `opacity`, `visible`.
+- **`move_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`) and `index`, its new place in the scene's drawing order (ADR 0019): 0 is the bottom, the scene's last index the top, and the sources between shift by one. Its own index changes nothing. An index past the top is `invalid_params` with `details` `{"index", "max_index"}`. It applies live, like `update_source`.
 - **`remove_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`).
 - **`restart_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), optional `capture_target_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
   - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
@@ -458,15 +461,16 @@ A project file holds the scenes with their ids, the active scene and the audio c
 - **Errors:** a missing file (or, for a save, a missing directory) is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
 - **Not stored:** stream keys, file paths, and what screen sources capture (`capture_target_id`: machine-specific, and window titles can be private).
 
-The file (`schema_version` 3):
+The file (`schema_version` 4):
 
 ```json
-{"schema_version": 3,
+{"schema_version": 4,
  "canvas": {"width": 1920, "height": 1080},
  "active_scene": "scene_k3j9x2m4q8w1",
  "scenes": [{"id": "scene_k3j9x2m4q8w1", "name": "Show", "sources": [
    {"id": "src_a1b2c3d4e5f6", "name": "red", "kind": "solid", "color": "#ff000080",
-    "x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0, "opacity": 0.5}]}],
+    "x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0, "opacity": 0.5,
+    "visible": true}]}],
  "audio": {"channels": [{"id": "ch_4k2m9x0q1w7e", "name": "Mic",
                          "input": {"kind": "device", "device": null},
                          "gain_db": 0.0, "mute": false, "balance": 0.0,
@@ -476,15 +480,16 @@ The file (`schema_version` 3):
            "program": {"gain_db": 0.0, "mute": false}}}
 ```
 
-- **Sources** are their `list_scenes` objects without `capture_target_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas) and `opacity` (1).
+- **Sources** are their `list_scenes` objects without `capture_target_id`, checked by the `add_source` rules; a hand-written source may leave out the rectangle (whole canvas), `opacity` (1) and `visible` (`true`).
 - **Channels** are their `get_mixer` objects without `peak_dbfs`, every field given (a device channel's `device` may be left out or `null` for the default input), checked by the `add_channel` rules. Their **`sends`** are checked by the `set_send` rules, each naming an existing bus once; a send that is left out is the default (on to program, off to an aux bus), in any order.
 - **`buses`** (aux buses, in mixer order; may be left out for none) are their `get_mixer` objects without `kind` and `peak_dbfs`, checked by the `add_bus` rules (`assign_db` may be left out for a separate mix). **`program`** is checked by the `update_bus` rules.
 - **`outputs`** holds the output profiles as `get_output_profiles` shows them, every field given (but the recording's `tracks` may be left out for none, and the monitor's `device` for the default); a profile that is left out (or `outputs` as a whole) is the default. Each is checked by the `set_output_profile` rules, the monitor's `device` by the `set_monitor_device` rules; its `mix` and each of its `tracks` (by id) must name a bus of the file, and a bus is a track once and not the mix as well. A loaded profile with the monitor on plays it from the next pipeline start.
 - **Checked across the file:** scene and source ids (form, and unique; source ids across all scenes), unique scene names, unique source names within a scene, at most 16 scenes of 16 sources, `active_scene` naming a scene, and the canvas matching the engine's. The audio is checked by the graph's own rules, the ones the engine keeps: channel and bus ids (form, unique, an aux bus not `bus_program`), unique channel names, unique bus names (`Program` is taken), at most 8 channels and 8 aux buses, and every send naming an existing bus once. An entry that is wrong on its own still counts for these, so every problem is reported at once.
 - **Version 1** (whose `audio` was the parameters of the former `set_audio_sources`: `inputs`, `tones`, `master_gain_db`) is migrated on load, with version 1's rules kept as they were. Inputs, then tones, become channels named `Input 1`, `Tone 1`, … at centre balance, with ids from their position (`ch_input_1`, `ch_tone_1`, …), so an unsaved version 1 file gives the same ids every time; the master gain becomes the program bus fader. `load_project` warns that it migrated, and saving writes version 3.
-- **Versions 1 and 2** also migrate screen sources' `source_types` to `target_kinds` and `cursor` to `cursor_mode` before source decoding. Version 3 refuses those old fields. Capture targets are never stored: an old file carrying `source_id` is refused at that path, and version 3 refuses `capture_target_id`. Sources must not carry `scene_id` or `scene_name`; their scene is the containing one. `load_project` warns on migration, `validate_project.migrates` reports it, and saving writes version 3.
-- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1, 2 and 3 is refused (a newer one with a hint to update).
-- **Left out or `null`:** an optional single value may be left out or `null` for its default: a source's rectangle and `opacity`, a device (the system default), `assign_db` (a separate mix), `outputs` and each of its profiles. A list that may be left out (`buses`, a channel's `sends`, the recording's `tracks`) is left out for none; `null` is a problem there.
+- **Versions 1 and 2** also migrate screen sources' `source_types` to `target_kinds` and `cursor` to `cursor_mode` before source decoding. Version 3 refuses those old fields. Capture targets are never stored: an old file carrying `source_id` is refused at that path, and versions 3 and 4 refuse `capture_target_id`. Sources must not carry `scene_id` or `scene_name`; their scene is the containing one.
+- **Versions 1 to 3** have no `visible` (ADR 0019): their sources are visible, and a `visible` in such a file is refused at its path. `load_project` warns on migration and names what changed, `validate_project.migrates` reports it, and saving writes version 4.
+- **Strict:** unknown fields and duplicate keys are problems, and a `schema_version` other than 1 to 4 is refused (a newer one with a hint to update).
+- **Left out or `null`:** an optional single value may be left out or `null` for its default: a source's rectangle, `opacity` and `visible`, a device (the system default), `assign_db` (a separate mix), `outputs` and each of its profiles. A list that may be left out (`buses`, a channel's `sends`, the recording's `tracks`) is left out for none; `null` is a problem there.
 - `streamforge project validate FILE` runs the same check from the CLI, prints the result as JSON and exits 1 if the file is not valid.
 
 ## Example session
@@ -492,7 +497,7 @@ The file (`schema_version` 3):
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","move_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.
@@ -513,7 +518,8 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
   - 2026-10-23, ADR 0017 step 2b: `add_bus`, `remove_bus` and `set_send` are new, `update_bus` gained `assign_db`; `get_mixer` channels gained `sends`, buses `assign_db`, and the result `warnings`; the project file may hold `buses` and channel `sends` (files without them read as before).
   - 2026-10-23, ADR 0017 step 2a: `set_mixer_strip`, `set_master_gain` and `set_audio_sources` are replaced by `add_channel`, `remove_channel`, `update_channel`, `set_channel_input` and `update_bus`; `get_mixer` returns `channels` and `buses` with ids instead of `strips` by index and the master fields; audio `captures` in `get_health` carry the channel's `id` and name; the project file is schema version 2 (version 1 is migrated); `validate_project` gained `migrates`.
   - 2026-10-23, ADR 0017 step 1: the master meter (`mix.master`, `master_peak_dbfs`) measures the program bus before the output limit, so it can exceed 0 dBFS when the mix overloads; `clipped_samples` still counts what the limit changed.
-- **From 0.1.0 on**, v1 is stable, and the rules below hold.
+- **From 0.1.0 on**, v1 is stable, and the rules below hold. Additions since then:
+  - M14 step 2, ADR 0019: `move_source`; sources' `visible` in `list_scenes` (and every result with the scene list), `add_source` and `update_source`. Project files are schema 4 (versions 1 to 3 migrate on load); a 0.1.0 build refuses a schema 4 file as newer than it reads.
 - Adding a command, adding optional fields to a result, or adding an error code is backward compatible within v1. Clients must ignore unknown result fields and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` and the pinned result shapes (`crates/command-api/tests/wire_shapes.txt`, see `docs/testing.md`) together with this document.

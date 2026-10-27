@@ -205,7 +205,7 @@ What the baseline shows:
   - **stream delivery:** both tracks arrive, starting with a key frame, audio and video end within 150 ms of each other.
     - At the local ingest: as many video packets as were delivered, as many audio packets as the delivered samples fill (1024 each, ±2), and video covering the run (less 1 s).
     - Read back from a server: the reader joins within 10 s, nothing is missing between packets (no step over 1.5 packet durations in video or audio), and from its join the packets reach the run's end (less 1 s). Packets are not counted against the sender's, since the reader missed the start.
-- **Limits:** memory, threads, descriptors and CPU are read from Linux's `/proc`; elsewhere those checks are skipped. Interrupting the harness (Ctrl+C) also ends the engine, and the recording is not finalized.
+- **Limits:** memory, threads, descriptors and CPU are read from Linux's `/proc`; elsewhere those checks are skipped. Interrupting the harness (Ctrl+C) ends it without a verdict; the engine, which gets the Ctrl+C too, finalizes the recording before it exits.
 
 **Result** (2026-10-27, **PASS**, 0 events): one hour on the development machine (Arch Linux, kernel 7.2.11, Hyprland 0.56.2 with xdg-desktop-portal-hyprland 1.4.1, PipeWire 1.6.10, Intel Core i5-13600KF, AMD Radeon RX 6800 with Mesa 26.2.5 VAAPI, FFmpeg 9.0.2, release build), in light desktop use (load average 4 to 6.4).
 - **Setup:** a screen source on a monitor chosen in the picker, desktop audio from the default sink's `.monitor` (S/PDIF) next to the default tone, the preview on; recording and stream both `h264_vaapi`; the stream to MediaMTX on another machine on the wired local network, read back from there.

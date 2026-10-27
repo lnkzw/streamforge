@@ -115,23 +115,41 @@ impl EngineProcess {
     /// Close stdin, wait for exit, and assert no unanswered output remains.
     pub fn finish(mut self) -> ExitStatus {
         drop(self.stdin.take());
-        let deadline = Instant::now() + TIMEOUT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("poll engine") {
-                break status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "engine did not exit within {TIMEOUT:?} after stdin closed"
-            );
-            thread::sleep(Duration::from_millis(10));
-        };
+        let status = self.wait_for_exit("stdin closed");
         match self.lines.recv_timeout(TIMEOUT) {
             Err(RecvTimeoutError::Disconnected) => {}
             Ok(line) => panic!("unexpected extra output: {line}"),
             Err(RecvTimeoutError::Timeout) => panic!("stdout not closed after exit"),
         }
         status
+    }
+}
+
+impl EngineProcess {
+    /// Send `signal` (e.g. `TERM`) with kill(1); stdin stays open.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: &str) {
+        let sent = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .expect("run kill");
+        assert!(sent.success(), "kill -{signal} failed");
+    }
+
+    /// Wait (bounded) for the engine to exit after `cause`.
+    pub fn wait_for_exit(&mut self, cause: &str) -> ExitStatus {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("poll engine") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "engine did not exit within {TIMEOUT:?} after {cause}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 

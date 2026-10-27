@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use command_api::{EncoderPreference, SourceSpec};
@@ -45,7 +47,11 @@ pub struct DesktopApp {
     /// The name typed for a new scene while its field is open.
     pub(crate) new_scene: Option<String>,
     pub(crate) dialog: Option<Dialog>,
+    /// The file name typed in the recording settings; empty (the default):
+    /// each take is named by its start time.
     pub(crate) record_file: String,
+    /// Names the takes without a typed name.
+    recording_names: workspace::RecordingNames,
     pub(crate) stream_url: String,
     /// Typed into a password field; handed to the engine on start only.
     pub(crate) stream_key: String,
@@ -65,8 +71,11 @@ pub struct DesktopApp {
     pub(crate) mixer_view: MixerView,
     /// Where project files are, as the project dialogs show it.
     pub(crate) project_folder: Option<String>,
-    /// The operator chose to quit despite unsaved changes.
+    /// The operator chose to quit despite unsaved changes or running
+    /// outputs.
     quit_confirmed: bool,
+    /// Set by a signal handler: quit without asking.
+    quit_signal: Option<Arc<AtomicBool>>,
     /// Quit once the save that was asked for succeeds.
     pub(crate) quit_after_save: bool,
     /// The window title last set.
@@ -187,7 +196,7 @@ pub(crate) enum Confirm {
     OpenProject {
         file_name: String,
     },
-    /// Close the window over unsaved changes.
+    /// Close the window over unsaved changes or running outputs.
     Quit,
     StopRecording,
     StopStreaming,
@@ -205,7 +214,8 @@ impl DesktopApp {
             selected_source: None,
             new_scene: None,
             dialog: None,
-            record_file: "recording.mkv".to_owned(),
+            record_file: String::new(),
+            recording_names: workspace::RecordingNames::default(),
             stream_url: String::new(),
             stream_key: String::new(),
             restart_targets: HashMap::new(),
@@ -222,6 +232,7 @@ impl DesktopApp {
             mixer_view: MixerView::Console,
             project_folder: None,
             quit_confirmed: false,
+            quit_signal: None,
             quit_after_save: false,
             title: String::new(),
             preview: None,
@@ -236,6 +247,14 @@ impl DesktopApp {
     /// Name the project folder in the project dialogs.
     pub fn with_project_folder(mut self, folder: impl Into<String>) -> Self {
         self.project_folder = Some(folder.into());
+        self
+    }
+
+    /// Once `signal` is set (by a SIGTERM handler, say), the window closes
+    /// without asking: running outputs stop and their files are finalized
+    /// as at any close, unsaved project changes are lost.
+    pub fn with_quit_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+        self.quit_signal = Some(signal);
         self
     }
 
@@ -374,11 +393,19 @@ impl DesktopApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// The window can close unless the project has unsaved changes; then
-    /// the operator chooses (save, discard or stay).
+    /// The window can close unless the project has unsaved changes or an
+    /// output runs; then the operator chooses (save, discard, stop or stay).
     fn guard_close(&mut self, ctx: &egui::Context) {
+        if !self.quit_confirmed
+            && self
+                .quit_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::Relaxed))
+        {
+            self.quit(ctx);
+        }
         if ctx.input(|input| input.viewport().close_requested())
-            && self.model.has_changes()
+            && (self.model.has_changes() || self.outputs_on_air() != (false, false))
             && !self.quit_confirmed
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -487,12 +514,35 @@ impl DesktopApp {
             return;
         }
         match self.record_transport() {
-            TransportState::Idle => self.model.start_recording(&self.record_file),
+            TransportState::Idle => {
+                let file_name = self.next_record_file();
+                self.model.start_recording(&file_name);
+            }
             TransportState::Failed => self.model.stop_recording(),
             TransportState::Starting | TransportState::Running(_) => {
                 self.dialog = Some(Dialog::Confirm(Confirm::StopRecording));
             }
         }
+    }
+
+    /// Whether closing the window would stop the recording and the stream:
+    /// each is starting or running (a failed one only needs finalizing).
+    pub(crate) fn outputs_on_air(&self) -> (bool, bool) {
+        let on_air = |state| matches!(state, TransportState::Starting | TransportState::Running(_));
+        (
+            on_air(self.record_transport()),
+            on_air(self.live_transport()),
+        )
+    }
+
+    /// The typed file name, or one from the local start time.
+    fn next_record_file(&mut self) -> String {
+        let typed = self.record_file.trim();
+        if !typed.is_empty() {
+            return typed.to_owned();
+        }
+        self.recording_names
+            .next(chrono::Local::now().naive_local())
     }
 
     /// LIVE, as [`Self::record_action`]; without a target it asks for one

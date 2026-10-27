@@ -22,6 +22,9 @@ serde_json.workspace = true
 # (owner's choice for M7); the default features bring winit with Wayland and
 # X11, the glow (OpenGL) renderer and AccessKit.
 eframe = "0.36.2"
+quit-signal = { path = "../quit-signal" }
+# Local time for recording file names (already in the tree through rmcp).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 # A capture backend for the tests that lists audio inputs (tests/support).

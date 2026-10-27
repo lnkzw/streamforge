@@ -58,6 +58,7 @@ cargo build --release -p streamforge-mcp   # then point an MCP client at target/
 - `crates/project-file`: project file format, its checks, migrations and atomic writes
 - `crates/engine`: engine controller implementing the command handlers
 - `crates/control-protocol`: JSON-lines control protocol v1 (transport-agnostic)
+- `crates/quit-signal`: Ctrl+C and SIGTERM handling, so the programs finalize their outputs
 - `crates/streamforge-engine`: headless engine process serving the protocol on stdio
 - `crates/streamforge-cli`: CLI (calls the same command handlers)
 - `crates/streamforge-desktop`: desktop UI (egui/eframe) over the command API

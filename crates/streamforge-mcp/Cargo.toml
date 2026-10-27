@@ -14,6 +14,7 @@ capture-platform = { path = "../capture-platform" }
 command-api = { path = "../command-api" }
 encoder-api = { path = "../encoder-api" }
 engine = { path = "../engine" }
+quit-signal = { path = "../quit-signal" }
 clap.workspace = true
 serde_json.workspace = true
 # The official Rust MCP SDK (protocol negotiation, JSON-RPC framing, stdio
@@ -21,7 +22,7 @@ serde_json.workspace = true
 rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
 # rmcp is async; the engine stays on its own thread and calls reach it
 # through `spawn_blocking`.
-tokio = { version = "1", features = ["rt", "macros", "signal"] }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 [dev-dependencies]
 rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process"] }

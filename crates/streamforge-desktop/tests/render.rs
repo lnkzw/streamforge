@@ -97,6 +97,10 @@ enum Situation {
     SceneMenu,
     /// Live, with the health details and the activity log open.
     Health,
+    /// Idle, with the recording settings open.
+    RecordSettings,
+    /// Live, with the question that closing the window asks.
+    Quit,
 }
 
 /// What the render does before it is taken, in order.
@@ -105,6 +109,8 @@ enum Step {
     /// A secondary click: a context menu.
     RightClick(&'static str),
     Type(&'static str),
+    /// The window's close button.
+    Close,
 }
 
 /// A project directory with a valid project and a broken one.
@@ -227,6 +233,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             | Situation::Routing
             | Situation::SceneMenu
             | Situation::Health
+            | Situation::Quit
     );
     project_files(&dir);
     let worker = EngineWorker::spawn(
@@ -354,6 +361,8 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
         Situation::MonitorEnded => vec![],
         Situation::SceneMenu => vec![Step::RightClick("Test pattern")],
         Situation::Health => vec![Step::Click("All healthy")],
+        Situation::RecordSettings => vec![Step::Click("Recording settings")],
+        Situation::Quit => vec![Step::Click("lower third"), Step::Close],
     };
     for step in steps {
         match step {
@@ -369,6 +378,13 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
                     .expect("a text field")
                     .type_text(text);
             }
+            Step::Close => harness
+                .input_mut()
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .events
+                .push(egui::ViewportEvent::Close),
         }
         for _ in 0..30 {
             harness.step();
@@ -444,6 +460,13 @@ fn render_the_workspace() {
         [1280.0, 720.0],
     );
     render(&out, "health-1400x900", Situation::Health, [1400.0, 900.0]);
+    render(
+        &out,
+        "record-settings-1400x900",
+        Situation::RecordSettings,
+        [1400.0, 900.0],
+    );
+    render(&out, "quit-1400x900", Situation::Quit, [1400.0, 900.0]);
     for (size, label) in [
         ([1280.0, 720.0], "1280x720"),
         ([1920.0, 1080.0], "1920x1080"),

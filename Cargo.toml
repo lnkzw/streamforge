@@ -17,6 +17,7 @@ members = [
     "crates/project-file",
     "crates/engine",
     "crates/control-protocol",
+    "crates/quit-signal",
     "crates/streamforge-engine",
     "crates/streamforge-cli",
     "crates/streamforge-desktop",

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -680,6 +681,7 @@ fn stream(
     stream_params: Map<String, Value>,
     duration: Duration,
 ) -> Result<ExitCode> {
+    let interrupt = Interrupt::install();
     let recording = record_params.is_some();
     if let Some(params) = record_params {
         match start(engine, "start_recording", params) {
@@ -710,7 +712,7 @@ fn stream(
             return Ok(code);
         }
     }
-    run_for(engine, duration);
+    run_for(engine, duration, &interrupt);
     let mut output = Map::new();
     let mut failed = false;
     match engine.handle(Command::StopStreaming) {
@@ -759,6 +761,7 @@ fn print_start_warnings(warnings: &[String]) {
 /// Start a recording, wait, stop it and print the report. Progress goes to
 /// stderr so stdout carries only the JSON report.
 fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -> Result<ExitCode> {
+    let interrupt = Interrupt::install();
     let started = Command::decode("start_recording", Some(&Value::Object(params)))
         .and_then(|command| engine.handle(command));
     match started {
@@ -773,7 +776,7 @@ fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -
         Ok(other) => bail!("engine returned unexpected output for start_recording: {other:?}"),
         Err(err) => return Ok(report_error(&err)),
     }
-    run_for(engine, duration);
+    run_for(engine, duration, &interrupt);
     match engine.handle(Command::StopRecording) {
         Ok(output) => {
             println!("{}", serde_json::to_string_pretty(&output)?);
@@ -785,15 +788,22 @@ fn record(engine: &mut Engine, params: Map<String, Value>, duration: Duration) -
 
 /// Wait `duration`, printing one progress line per second (from
 /// `get_health`) to stderr. Ends early once every open output stopped
-/// running (the stop reports say why); a recording outlives a failed stream.
-fn run_for(engine: &mut Engine, duration: Duration) {
+/// running (the stop reports say why), a recording outliving a failed
+/// stream, or at an interrupt.
+fn run_for(engine: &mut Engine, duration: Duration, interrupt: &Interrupt) {
     let started = std::time::Instant::now();
     loop {
         let left = duration.saturating_sub(started.elapsed());
         if left.is_zero() {
             return;
         }
-        std::thread::sleep(left.min(Duration::from_secs(1)));
+        if interrupt.wait(left.min(Duration::from_secs(1))) {
+            eprintln!(
+                "interrupted after {:.1} s; stopping (interrupt again to quit at once)",
+                started.elapsed().as_secs_f64()
+            );
+            return;
+        }
         if let Ok(CommandOutput::Health(health)) = engine.handle(Command::GetHealth) {
             eprintln!("{}", progress_line(&health, started.elapsed()));
             let outputs = [
@@ -804,6 +814,41 @@ fn run_for(engine: &mut Engine, duration: Duration) {
             if outputs.peek().is_some() && outputs.all(|running| !running) {
                 eprintln!("every output stopped; ending early");
                 return;
+            }
+        }
+    }
+}
+
+/// Ctrl+C or SIGTERM while outputs run: the first ends the wait, so the
+/// outputs stop and their files are finalized as at the end of
+/// `--duration-ms` (the report follows); a second exits at once (status
+/// 130), leaving them unfinished.
+struct Interrupt(Option<mpsc::Receiver<()>>);
+
+impl Interrupt {
+    /// Without a handler, a signal ends the program unfinalized, as before.
+    fn install() -> Self {
+        let (interrupted, receiver) = mpsc::sync_channel(1);
+        let installed = quit_signal::on_quit("streamforge", move || {
+            let _ = interrupted.try_send(());
+        });
+        match installed {
+            Ok(()) => Self(Some(receiver)),
+            Err(err) => {
+                eprintln!("warning: cannot handle Ctrl+C ({err}); it would lose the file");
+                Self(None)
+            }
+        }
+    }
+
+    /// Sleep up to `timeout`; whether an interrupt came. One during the
+    /// start is kept, so the first wait returns at once.
+    fn wait(&self, timeout: Duration) -> bool {
+        match &self.0 {
+            Some(receiver) => receiver.recv_timeout(timeout).is_ok(),
+            None => {
+                std::thread::sleep(timeout);
+                false
             }
         }
     }

@@ -1,8 +1,11 @@
 //! `streamforge-desktop`: the desktop UI. It embeds the engine with the
 //! platform capture backend, like the CLI and the headless engine do.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
@@ -76,7 +79,8 @@ fn main() -> ExitCode {
             )?;
             Ok(Box::new(
                 DesktopApp::new(&cc.egui_ctx, Model::new(worker))
-                    .with_project_folder(project_folder),
+                    .with_project_folder(project_folder)
+                    .with_quit_signal(quit_on_signal(cc.egui_ctx.clone())),
             ))
         }),
     );
@@ -87,4 +91,24 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Ctrl+C or SIGTERM close the window without asking, so running outputs
+/// are finalized as at any close; a second one exits at once. Without a
+/// handler, a signal ends the program unfinalized, as before.
+fn quit_on_signal(ctx: eframe::egui::Context) -> Arc<AtomicBool> {
+    let signal = Arc::new(AtomicBool::new(false));
+    let set = Arc::clone(&signal);
+    let installed = quit_signal::on_quit("streamforge-desktop", move || {
+        set.store(true, Ordering::Relaxed);
+        ctx.request_repaint();
+        let _ = writeln!(
+            io::stderr(),
+            "streamforge-desktop: quitting; signal again to quit at once"
+        );
+    });
+    if let Err(err) = installed {
+        eprintln!("streamforge-desktop: cannot handle quit signals: {err}");
+    }
+    signal
 }

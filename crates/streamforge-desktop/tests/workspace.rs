@@ -6,6 +6,8 @@
 mod support;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -311,12 +313,114 @@ fn stopping_a_recording_asks_first() {
     step_until(&mut harness, "the recording to stop", |h| {
         clickable(h, "Start recording")
     });
-    let files: Vec<_> = std::fs::read_dir(&dir.0)
+    assert_eq!(recordings(&dir).len(), 1, "the recording was written");
+}
+
+/// The automatically named recordings in the output folder.
+fn recordings(dir: &TempDir) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(&dir.0)
         .expect("output dir")
         .flatten()
-        .filter(|entry| entry.file_name() == "recording.mkv")
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("recording-") && name.ends_with(".mkv"))
         .collect();
-    assert_eq!(files.len(), 1, "the recording was written");
+    names.sort();
+    names
+}
+
+/// Stop the running recording through its confirmation.
+fn stop_recording(harness: &mut Harness<'static, DesktopApp>) {
+    harness.get_by_label("Stop recording").click();
+    step_until(harness, "the confirmation", |h| {
+        h.query_by_label("Stop recording?").is_some()
+    });
+    harness
+        .get_all_by_label("Stop recording")
+        .last()
+        .expect("the dialog's action")
+        .click();
+    step_until(harness, "the recording to stop", |h| {
+        clickable(h, "Start recording")
+    });
+}
+
+#[test]
+fn every_recording_gets_a_new_file_named_by_its_start() {
+    let dir = TempDir::new("takes");
+    let mut harness = harness(model(&dir));
+    // Two takes, most likely within the same second.
+    for _ in 0..2 {
+        harness.get_by_label("Start recording").click();
+        step_until(&mut harness, "the recording", |h| {
+            clickable(h, "Stop recording")
+        });
+        stop_recording(&mut harness);
+    }
+    let names = recordings(&dir);
+    assert_eq!(names.len(), 2, "{names:?}");
+    // E.g. recording-2026-10-27_15-30-05.mkv, then _2 within that second.
+    let stamp = names[0]
+        .strip_prefix("recording-")
+        .and_then(|name| name.strip_suffix(".mkv"))
+        .expect("the pattern");
+    assert_eq!(stamp.len(), "2026-10-27_15-30-05".len(), "{names:?}");
+}
+
+#[test]
+fn closing_while_recording_asks_and_stopping_closes() {
+    let dir = TempDir::new("quit-rec");
+    let mut harness = harness_without_changes(&dir);
+    harness.get_by_label("Start recording").click();
+    step_until(&mut harness, "the recording", |h| {
+        clickable(h, "Stop recording")
+    });
+    request_close(&mut harness);
+    harness.step();
+    assert!(commands(&harness).contains(&egui::ViewportCommand::CancelClose));
+    step_until(&mut harness, "the question", |h| {
+        h.query_by_label("Quit while recording?").is_some()
+    });
+    assert!(
+        harness
+            .query_by_label("The recording stops and its file is finalized.")
+            .is_some()
+    );
+    harness.get_by_label("Cancel").click();
+    step_until(&mut harness, "the question to close", |h| {
+        h.query_by_label("Quit while recording?").is_none()
+    });
+    assert!(clickable(&harness, "Stop recording"), "still recording");
+
+    request_close(&mut harness);
+    step_until(&mut harness, "the question", |h| {
+        h.query_by_label("Quit while recording?").is_some()
+    });
+    harness.get_by_label("Stop and quit").click();
+    harness.step();
+    assert!(commands(&harness).contains(&egui::ViewportCommand::Close));
+}
+
+#[test]
+fn a_quit_signal_closes_without_asking() {
+    let dir = TempDir::new("signal");
+    let signal = Arc::new(AtomicBool::new(false));
+    let set = Arc::clone(&signal);
+    let model = model(&dir);
+    let mut harness = Harness::builder()
+        .with_size([1400.0, 900.0])
+        .build_eframe(move |cc| DesktopApp::new(&cc.egui_ctx, model).with_quit_signal(set));
+    settle(&mut harness, 5);
+    harness.get_by_label("Start recording").click();
+    step_until(&mut harness, "the recording", |h| {
+        clickable(h, "Stop recording")
+    });
+    // Unsaved changes and a running recording, yet no question.
+    signal.store(true, Ordering::Relaxed);
+    harness.step();
+    assert!(commands(&harness).contains(&egui::ViewportCommand::Close));
+    request_close(&mut harness);
+    harness.step();
+    assert!(!commands(&harness).contains(&egui::ViewportCommand::CancelClose));
 }
 
 #[test]
@@ -1063,7 +1167,7 @@ fn ctrl_r_records_and_stopping_by_key_asks_first() {
     step_until(&mut harness, "the recording to stop", |h| {
         clickable(h, "Start recording")
     });
-    assert!(dir.0.join("recording.mkv").is_file());
+    assert_eq!(recordings(&dir).len(), 1);
 }
 
 #[test]

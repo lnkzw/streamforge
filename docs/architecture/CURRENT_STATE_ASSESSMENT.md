@@ -221,7 +221,7 @@ Each risk names its evidence and a classification: **D** = immediate defect, **L
 ### 6.5 Platform abstraction
 
 1. **(Satisfied)** Capture and encoders sit behind traits and `cfg` gates with one selection point each (`capture-platform/src/lib.rs:10`, `encoder-ffmpeg/src/ffmpeg/encoders.rs:35`).
-2. **(L) `CaptureBackend` combines screen and audio in one trait.** Each half returns `unsupported` from backends that only do the other, and `SplitCapture` stitches them together. This works, but adding a source type (camera, application audio) grows every backend.
+2. **(L) `CaptureBackend` combines screen and audio in one trait.** Each half returns `unsupported` from backends that only do the other, and `SplitCapture` stitches them together. This works, but adding a source type (camera, application audio) grows every backend. *Planned 2026-10-27:* split into three traits when cameras arrive (ADR 0019, M14 step 4a).
 3. **(L) No hardware-dependent CI evidence.** NVENC, Quick Sync, AMF and VideoToolbox are untested on real hardware, as are window capture on Windows/macOS beyond the error paths and live microphones on Windows/macOS (`docs/platforms.md` verification table).
 4. **(L) macOS builds depend on fragile tooling.** Xcode 26 and an rpath in `.cargo/config.toml` are required, and a custom `RUSTFLAGS` overrides the rpath (ADR 0010).
 

@@ -30,6 +30,7 @@ fn session(output_dir: &Path, steps: &[(&str, Option<Duration>)]) -> Vec<Value> 
 
 #[test]
 fn recorded_file_has_synchronized_streams_and_expected_content() {
+    let _media = common::media_lock();
     let dir = TempDir::new("acceptance");
     let responses = session(
         &dir.0,
@@ -200,6 +201,32 @@ fn recorded_file_has_synchronized_streams_and_expected_content() {
 }
 
 /// The reference scene starts with eight color bars; sample their centers.
+/// SIGTERM, as a service manager or `kill` sends it, with stdin still
+/// open: the engine exits cleanly and the recording is finalized (killed
+/// unfinalized, a short Matroska file is empty or has no duration).
+#[cfg(unix)]
+#[test]
+fn a_termination_signal_finalizes_the_recording() {
+    let _media = common::media_lock();
+    let dir = TempDir::new("sigterm");
+    let mut engine =
+        EngineProcess::spawn_with(&[std::ffi::OsStr::new("--output-dir"), dir.0.as_os_str()]);
+    let started = engine
+        .request(r#"{"id":1,"command":"start_recording","params":{"file_name":"signal.mkv"}}"#);
+    assert_eq!(started["ok"], true, "{started}");
+    std::thread::sleep(RECORD_FOR);
+    engine.signal("TERM");
+    assert!(engine.wait_for_exit("SIGTERM").success());
+
+    ff::init().expect("init");
+    let input = ff::format::input(&dir.0.join("signal.mkv")).expect("open recording");
+    let seconds = input.duration() as f64 / f64::from(ff::ffi::AV_TIME_BASE);
+    assert!(
+        seconds > RECORD_FOR.as_secs_f64() - 0.3,
+        "duration {seconds} s"
+    );
+}
+
 fn check_color_bars(picture: &ff::frame::Video) {
     let mut rgb = ff::frame::Video::empty();
     ff::software::scaling::Context::get(

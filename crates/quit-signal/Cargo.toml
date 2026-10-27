@@ -1,0 +1,19 @@
+[package]
+name = "quit-signal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Quit signals for the programs that own an engine (CLI, headless engine,
+# desktop), so a running recording is finalized instead of lost.
+[target.'cfg(unix)'.dependencies]
+# SIGINT and SIGTERM without SIGHUP (ctrlc's `termination` feature adds
+# SIGHUP and would override `nohup`), through a safe iterator.
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# Ctrl+C and Ctrl+Break through SetConsoleCtrlHandler.
+ctrlc = "3.5"
+
+[target.'cfg(unix)'.dev-dependencies]
+signal-hook = "0.3"

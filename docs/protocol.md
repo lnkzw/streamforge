@@ -9,7 +9,7 @@ Local control channel for the headless engine (`streamforge-engine`). Implemente
 - Responses on stdout are always single-line JSON. The engine writes nothing else to stdout; diagnostics go to stderr.
 - Lines containing only whitespace are ignored and get no response.
 - A request line may be at most **65 536 bytes** (`MAX_REQUEST_BYTES`), not counting the `\n`. A longer line is discarded without being buffered and answered with `request_too_large`.
-- The engine exits with status 0 when stdin closes. An I/O error on the pipes makes it exit with status 1 and print a message to stderr.
+- The engine exits with status 0 when stdin closes, and also at SIGINT (Ctrl+C) or SIGTERM (Ctrl+C or Ctrl+Break on Windows): it finishes the request in progress, may answer requests already sent, and leaves the rest unanswered. Either way, open recordings and streams are stopped and finalized first. A second signal exits at once with status 130, leaving them unfinished. SIGHUP keeps its default. An I/O error on the pipes makes it exit with status 1 and print a message to stderr.
 
 ## Request
 
@@ -297,7 +297,7 @@ Outputs share one **media pipeline**: the active scene (see below; by default th
 
 #### Recording
 
-`start_recording` records to H.264 + AAC in Matroska. It returns as soon as the file header is written; recording continues on its own threads until `stop_recording`. Closing the engine's stdin also stops and finalizes it. It is `sensitive` because it captures and stores private content.
+`start_recording` records to H.264 + AAC in Matroska. It returns as soon as the file header is written; recording continues on its own threads until `stop_recording`. Closing the engine's stdin, or a quit signal (see above), also stops and finalizes it. It is `sensitive` because it captures and stores private content.
 
 | Param            | Type | Default | Meaning |
 |------------------|------|---------|---------|

@@ -47,6 +47,7 @@ impl DesktopApp {
         let target = match (&self.model.recording, output) {
             (Some(_), Some(output)) => output.target.clone(),
             (Some(started), None) => started.path.clone(),
+            (None, _) if self.record_file.trim().is_empty() => "Named by start time".to_owned(),
             (None, _) => self.record_file.clone(),
         };
         let file_name = std::path::Path::new(&target)

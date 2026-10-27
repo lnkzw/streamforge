@@ -219,6 +219,19 @@ pub fn project_file(typed: &str) -> String {
     }
 }
 
+/// An automatic recording file name from the local start time, e.g.
+/// `recording-2026-10-27_15-30-05.mkv`: takes sort by time, and the name is
+/// valid on every system (no `:`). A second take started within the same
+/// second (`take` 2) gets `_2` (sorting after the first), since a file is
+/// never overwritten.
+pub fn recording_file(start: chrono::NaiveDateTime, take: u32) -> String {
+    let stamp = start.format("%Y-%m-%d_%H-%M-%S");
+    match take {
+        0 | 1 => format!("recording-{stamp}.mkv"),
+        take => format!("recording-{stamp}_{take}.mkv"),
+    }
+}
+
 /// Whether two file names name the same file in the project folder: Windows
 /// and macOS (by default) do not tell case apart.
 pub fn same_file_name(a: &str, b: &str) -> bool {
@@ -748,6 +761,21 @@ mod tests {
         assert_eq!(
             same_file_name("Show.json", "show.json"),
             cfg!(any(target_os = "windows", target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn recordings_are_named_by_their_start_time() {
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 7)
+            .and_then(|day| day.and_hms_opt(9, 5, 3))
+            .expect("a valid time");
+        assert_eq!(
+            recording_file(start, 1),
+            "recording-2026-01-07_09-05-03.mkv"
+        );
+        assert_eq!(
+            recording_file(start, 2),
+            "recording-2026-01-07_09-05-03_2.mkv"
         );
     }
 

@@ -178,12 +178,46 @@ impl DesktopApp {
         }
     }
 
-    /// Unsaved changes when the window closes: save them (to the current
-    /// file, or one chosen now), discard them, or stay.
+    /// Unsaved changes or running outputs when the window closes: save the
+    /// changes (to the current file, or one chosen now), discard them, stop
+    /// the outputs, or stay. Closing stops the outputs either way.
     fn confirm_quit(&mut self, ui: &mut egui::Ui, lost: &str) -> Outcome {
-        ui.label(TextRole::Title.text("Quit with unsaved changes?"));
-        ui.label(TextRole::Body.text(lost).color(color::TEXT_SECONDARY));
+        let unsaved = self.model.has_changes();
+        let (recording, live) = self.outputs_on_air();
+        let title = match (unsaved, recording, live) {
+            (true, ..) => "Quit with unsaved changes?",
+            (false, true, true) => "Quit while recording and live?",
+            (false, true, false) => "Quit while recording?",
+            (false, false, true) => "Quit while live?",
+            // Both stopped while the question was open.
+            (false, false, false) => "Quit StreamForge?",
+        };
+        let stops = match (recording, live) {
+            (true, true) => Some("The recording stops and its file is finalized; the stream ends."),
+            (true, false) => Some("The recording stops and its file is finalized."),
+            (false, true) => Some("The stream ends; viewers lose it."),
+            (false, false) => None,
+        };
+        ui.label(TextRole::Title.text(title));
+        for text in stops.into_iter().chain(unsaved.then_some(lost)) {
+            ui.label(TextRole::Body.text(text).color(color::TEXT_SECONDARY));
+        }
         ui.add_space(size::SPACE_8);
+        if !unsaved {
+            let quit = if stops.is_some() {
+                "Stop and quit"
+            } else {
+                "Quit"
+            };
+            return match buttons(ui, ButtonKind::Danger, quit, true) {
+                Some(true) => {
+                    self.quit(ui.ctx());
+                    Outcome::Done
+                }
+                Some(false) => Outcome::Cancel,
+                None => Outcome::Open,
+            };
+        }
         let save = if self.model.project.is_some() {
             "Save and quit"
         } else {
@@ -439,10 +473,13 @@ impl DesktopApp {
         ui.label(TextRole::Label.text("File name"));
         ui.add(
             egui::TextEdit::singleline(file_name)
-                .hint_text("recording.mkv")
+                .hint_text("Automatic")
                 .desired_width(f32::INFINITY),
         );
-        ui.label(TextRole::Meta.text("Saved in the recordings directory."));
+        ui.label(TextRole::Meta.text(
+            "Saved in the recordings directory, never over another file. Left empty, \
+             each recording is named by its start time, e.g. recording-2026-10-27_15-30-00.mkv.",
+        ));
         match encoder {
             Some(encoder) => encoder_picker(ui, encoder),
             None => {
@@ -454,7 +491,7 @@ impl DesktopApp {
         }
         ui.add_space(size::SPACE_8);
         let name = file_name.trim();
-        match buttons(ui, ButtonKind::Primary, "Done", !name.is_empty()) {
+        match buttons(ui, ButtonKind::Primary, "Done", true) {
             Some(true) => {
                 self.record_file = name.to_owned();
                 if let (Some(chosen), Some(current)) = (*encoder, current)

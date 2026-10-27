@@ -98,9 +98,9 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
    - Each channel sends to the **Program** bus. Add aux buses with **+** at the right of the bus columns, for example a separate mix for headphones or a second recording track. Each send has a switch, a level, and a tap: PRE (before the channel fader) or POST (after it).
    - The rows below the channels choose which bus each output takes: the recording (its first track, and further tracks), the stream, and the monitor.
    - Set levels and mutes in the **Console**. A warning above the mixer marks a channel that reaches the program bus twice, for example directly and through an aux bus.
-4. **Record.** Open the gear on the **Record** row to set the file name (a plain `.mkv` name) and the video encoder: *auto* uses the graphics card's encoder where one works and the software encoder otherwise. Press **REC** (Ctrl+R). Press it again to stop; it asks first. The file is finished when the recording stops.
+4. **Record.** Open the gear on the **Record** row to set the video encoder and, if you want, a file name (a plain `.mkv` name): *auto* uses the graphics card's encoder where one works and the software encoder otherwise. Without a file name, each recording is named by its start time, for example `recording-2026-10-27_15-30-00.mkv`. Press **REC** (Ctrl+R). Press it again to stop; it asks first. The file is finished when the recording stops.
 
-Each recording needs a new file name: StreamForge never overwrites a file, so starting again with the name of an existing file fails with a message. Change the name in the recording settings before the next take.
+StreamForge never overwrites a file. With the automatic name, every take gets a new file. With a name of your own, starting again with the name of an existing file fails with a message: change the name before the next take, or clear it to go back to automatic names.
 
 ### Screen capture on Linux
 
@@ -122,7 +122,7 @@ The **Monitor** row plays a bus on a headphone or speaker output, by default the
 
 The project menu (top left) opens, saves and saves under a new name: Ctrl+O, Ctrl+S, Ctrl+Shift+S. A project is a `.json` file in the project folder that holds the scenes and sources, the audio channels, buses and sends, and the output settings. It does not hold the stream URL or key, and not which screen or window a screen capture shows; on Linux, the screen-sharing dialog asks again after loading.
 
-A project opens only while nothing records, streams or previews. Before you open another project or close the window, the app asks about unsaved changes.
+A project opens only while nothing records, streams or previews. Before you open another project or close the window, the app asks about unsaved changes. Closing the window while recording or live asks too: quitting stops the stream and finishes the recording's file.
 
 ### Keyboard
 
@@ -164,7 +164,7 @@ streamforge stream --url rtmp://live.example.com/app --duration-ms 60000 --recor
 streamforge project validate ~/Documents/shows/show.json   # check a project file without loading it
 ```
 
-`--output-dir DIR` (before or after the subcommand) puts files elsewhere than the current folder. `record --video-encoder hardware` uses only the graphics card's encoder and fails with the reason if it does not work.
+`--output-dir DIR` (before or after the subcommand) puts files elsewhere than the current folder. Ctrl+C ends `record` and `stream` early: the outputs stop as at the end of `--duration-ms`, and the report follows. `record --video-encoder hardware` uses only the graphics card's encoder and fails with the reason if it does not work.
 
 ## Scripting the engine
 
@@ -237,7 +237,7 @@ The MCP server runs its own engine. It does not control a desktop app that is op
 
 ## Files and folders
 
-- **Recordings** are Matroska files (`.mkv`) with H.264 video and AAC audio. A recording with further audio tracks has them in the same file. A file is never overwritten. It is complete once the recording stops: with **REC**, `stop_recording`, at the end of `--duration-ms`, when you close the desktop window, or when a script closes the engine's stdin. A recording that does not stop that way (the program is killed, Ctrl+C on `streamforge record`, a crash) is not finished, and a short one is often empty.
+- **Recordings** are Matroska files (`.mkv`) with H.264 video and AAC audio. A recording with further audio tracks has them in the same file. A file is never overwritten. It is complete once the recording stops: with **REC**, `stop_recording`, at the end of `--duration-ms`, when you close the desktop window, when a script closes the engine's stdin, or at Ctrl+C or SIGTERM (`kill`, a service manager) to any of the programs. A second Ctrl+C quits at once and leaves the file unfinished. A recording that does not stop that way (the program is killed with SIGKILL or crashes, or its terminal closes, which sends SIGHUP) is not finished, and a short one is often empty.
 - **Projects** are JSON files. `streamforge project validate show.json` checks one and lists every problem with its place in the file. Files from older versions are converted on load and saved in the current format.
 - **File names** are plain names without folders, for recordings ending in `.mkv` and for projects in `.json`. Names that are not valid on Windows or macOS are refused everywhere (for example with `:` or `\`, or device names such as `CON`), so a project folder works on every system.
 
@@ -259,8 +259,7 @@ Version 0.1.0 is a first stable base, not a complete production suite.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
 - **Sources:** solid colours, colour bars and screen or window capture. No cameras, images, text, media files or browser sources yet. The order of the layers cannot be changed after adding them.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
-- **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log), and recordings are not numbered: give each take a new file name. Closing the window stops a running recording and stream without asking. Screen capture targets and the stream URL and key are not saved in projects. English only.
-- **Command line:** Ctrl+C on `streamforge record` or `stream` loses the recording; let `--duration-ms` end it.
+- **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.
 - **Not planned for 0.1.0:** plugins, scripting inside the app, per-output scenes, automation. Later versions add them on the same commands.
 

@@ -1133,6 +1133,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "ctrlc"
+version = "3.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
+dependencies = [
+ "dispatch2",
+ "nix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,6 +1168,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -3345,6 +3358,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "quit-signal"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "signal-hook",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3765,6 +3786,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3950,6 +3981,7 @@ dependencies = [
  "clap",
  "command-api",
  "engine",
+ "quit-signal",
  "serde_json",
 ]
 
@@ -3959,12 +3991,14 @@ version = "0.1.0"
 dependencies = [
  "capture-api",
  "capture-platform",
+ "chrono",
  "command-api",
  "eframe",
  "egui_kittest",
  "engine",
  "image",
  "media-core",
+ "quit-signal",
  "serde_json",
 ]
 
@@ -3978,6 +4012,7 @@ dependencies = [
  "control-protocol",
  "engine",
  "ffmpeg-next",
+ "quit-signal",
  "rtmp-test-server",
  "serde_json",
 ]

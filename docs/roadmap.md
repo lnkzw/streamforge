@@ -125,7 +125,7 @@ Known limitations, deferred:
 - Live-input drift resampling is still linear (ADR 0004).
 - A failure during recording is visible through polling (`get_status.recording_failed`); there are no push events yet. This failure path has no automated test, because an encoder failure cannot be triggered deterministically.
 - Live sources are stamped when mixed or composited, not when captured. Live audio is late by its jitter-buffer target (about 30 ms), and screen frames by up to one capture interval. Per-source latency compensation is deferred.
-- `streamforge record` does not handle Ctrl-C; Matroska stays playable up to the last cluster but loses its index.
+- `streamforge record` does not handle Ctrl-C; Matroska stays playable up to the last cluster but loses its index. Lifted in M13 step 5a: every program finalizes its outputs at Ctrl+C or SIGTERM.
 
 ## M6 — Live output
 
@@ -276,7 +276,7 @@ Acceptance:
 
 Linux first; Windows and macOS follow with tests on real machines.
 
-- [ ] Protocol review before the freeze: the breaking changes still wanted (e.g. `media_engine_ready`, the legacy `screen: true` output layer, the name `source_id` for capture targets). From 0.1.0 on, the versioning policy in `docs/protocol.md` applies.
+- [x] Protocol review before the freeze: the breaking changes still wanted (e.g. `media_engine_ready`, the legacy `screen: true` output layer, the name `source_id` for capture targets). From 0.1.0 on, the versioning policy in `docs/protocol.md` applies.
   - [x] Step 1: review of the whole surface, decisions in ADR 0018 (2026-10-26).
   - [x] Step 2a: legacy, state and strictness: `media_engine_ready` and the output screen layer removed, one state per output in `get_status` and `get_health`, destructive flags, one file name rule on every system, repeated keys refused, `details.unexpected` for every command.
   - [x] Step 2b: names (capture targets, `<entity>_id`/`<entity>_name` references, explicit recording tracks, CLI flags).
@@ -285,6 +285,7 @@ Linux first; Windows and macOS follow with tests on real machines.
 - [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.
 - [x] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries. The README is the project's front page; `docs/user-guide.md` is the guide (shipped in the packages with the rest of `docs/`), `docs/development.md` the developer part. The packages gained `install.sh` (into `~/.local` by default, `--uninstall`), an application-menu launcher and an app icon; the desktop window reports the launcher's app id.
 - [ ] Version 0.1.0: changelog, tag, published release.
+  - [x] Step 5a: three gaps found while writing the user guide, closed before the tag. The desktop names each recording by its start time unless a name is typed, so a second take no longer fails on the existing file; closing the window while recording or live asks first; Ctrl+C or SIGTERM to the CLI, the engine process or the desktop stops and finalizes the outputs (new crate `quit-signal`; a second signal quits at once; SIGHUP keeps its default, so `nohup` works).
 
 Acceptance:
 - The soak test passes, and CI on `main` stays green over several runs.

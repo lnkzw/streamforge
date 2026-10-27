@@ -4,6 +4,14 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- Layers (ADR 0019): `move_source` changes a source's place in its scene's drawing order, and `visible` (in `add_source`, `update_source` and `list_scenes`) hides a source without stopping its capture. In the desktop app, drag a source row or press Ctrl+Up and Ctrl+Down to reorder, and use the eye to hide a layer.
+
+### Changed
+
+- Project files are schema version 4 (sources have `visible`). Versions 1 to 3 migrate on load; 0.1.0 cannot open a file saved by this version.
+
 ## [0.1.0] - 2026-10-27
 
 The first release: a streaming and recording application with its own real-time media engine, for Linux. Packages for Ubuntu 24.04 and Arch Linux on x86_64; see `INSTALL.md` in each.

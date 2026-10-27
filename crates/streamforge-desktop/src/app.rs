@@ -638,6 +638,8 @@ impl DesktopApp {
                     }));
                 }
             }
+            Shortcut::RaiseSource => self.step_source(true),
+            Shortcut::LowerSource => self.step_source(false),
             Shortcut::OpenProject => self.open_projects(),
             Shortcut::SaveProject => self.save_project(false),
             Shortcut::SaveProjectAs => self.save_project_as(false),

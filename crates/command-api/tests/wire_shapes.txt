@@ -257,7 +257,7 @@ files[].file_name: string
 files[].modified_unix_ms: number
 omitted: number
 
-== list_scenes, create_scene, delete_scene, set_active_scene, add_source, update_source, remove_source, restart_source, set_capture_target
+== list_scenes, create_scene, delete_scene, set_active_scene, add_source, update_source, move_source, remove_source, restart_source, set_capture_target
 active_scene_id: string
 active_scene_name: string
 canvas_height: number
@@ -278,6 +278,7 @@ scenes[].sources[].name: string
 scenes[].sources[].opacity: number
 scenes[].sources[].target_kinds: absent|array
 scenes[].sources[].target_kinds[]: absent|string
+scenes[].sources[].visible: bool
 scenes[].sources[].width: number
 scenes[].sources[].x: number
 scenes[].sources[].y: number
@@ -343,6 +344,7 @@ scenes[].sources[].name: string
 scenes[].sources[].opacity: number
 scenes[].sources[].target_kinds: absent|array
 scenes[].sources[].target_kinds[]: absent|string
+scenes[].sources[].visible: bool
 scenes[].sources[].width: number
 scenes[].sources[].x: number
 scenes[].sources[].y: number

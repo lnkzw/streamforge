@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::Timelike;
 use command_api::{
     AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
-    OutputHealth, RecordingState, SceneList, StreamState,
+    OutputHealth, RecordingState, SceneList, SourceSpec, StreamState,
 };
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, Rect, vec2};
 
@@ -478,6 +478,10 @@ pub enum Shortcut {
     Program(usize),
     /// Delete: remove the selected source; asks first.
     RemoveSource,
+    /// Ctrl+Up: move the selected source one layer up.
+    RaiseSource,
+    /// Ctrl+Down: move the selected source one layer down.
+    LowerSource,
     /// Ctrl+O
     OpenProject,
     /// Ctrl+S
@@ -501,11 +505,13 @@ const PROGRAM_KEYS: [Key; 9] = [
 
 impl Shortcut {
     /// Every shortcut, for matching a key press against.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Preview,
         Self::Record,
         Self::Live,
         Self::RemoveSource,
+        Self::RaiseSource,
+        Self::LowerSource,
         Self::OpenProject,
         Self::SaveProject,
         Self::SaveProjectAs,
@@ -544,6 +550,8 @@ impl Shortcut {
             Self::Live => command(Key::L),
             Self::Program(index) => PROGRAM_KEYS.get(index).copied().and_then(command),
             Self::RemoveSource => Some(KeyboardShortcut::new(Modifiers::NONE, Key::Delete)),
+            Self::RaiseSource => command(Key::ArrowUp),
+            Self::LowerSource => command(Key::ArrowDown),
             Self::OpenProject => command(Key::O),
             Self::SaveProject => command(Key::S),
             Self::SaveProjectAs => Some(KeyboardShortcut::new(
@@ -552,6 +560,41 @@ impl Shortcut {
             )),
         }
     }
+}
+
+/// Where a source at `index` in a drawing order of `len` layers (0 is
+/// the bottom) moves one layer up (`raise`) or down; `None` at that end.
+pub fn layer_step(index: usize, len: usize, raise: bool) -> Option<usize> {
+    if raise {
+        (index + 1 < len).then_some(index + 1)
+    } else {
+        index.checked_sub(1)
+    }
+}
+
+/// The drawing-order index (0 is the bottom) of row `row` in a list of
+/// `len` layers that shows the top layer first; also the other way round.
+pub fn layer_of_row(row: usize, len: usize) -> usize {
+    len.saturating_sub(row + 1)
+}
+
+/// The topmost visible source of `sources` (in drawing order) at canvas
+/// point (`x`, `y`): what a click on the picture selects.
+pub fn source_at(sources: &[SourceSpec], x: f32, y: f32) -> Option<&SourceSpec> {
+    sources.iter().rev().find(|source| {
+        let rect = &source.rect;
+        source.visible
+            && x >= rect.x
+            && y >= rect.y
+            && x < rect.x + rect.width
+            && y < rect.y + rect.height
+    })
+}
+
+/// Where a row dragged from row `from` lands when dropped in gap `gap`
+/// (0 is above the first row, the row count below the last).
+pub fn drop_row(from: usize, gap: usize) -> usize {
+    if gap > from { gap - 1 } else { gap }
 }
 
 /// Where Up and Down (`steps`: down minus up presses) move in a list of
@@ -1042,6 +1085,57 @@ mod tests {
         assert_eq!(hint(Shortcut::SaveProjectAs), "Ctrl+Shift+S");
         assert_eq!(hint(Shortcut::Program(2)), "Ctrl+3");
         assert_eq!(hint(Shortcut::RemoveSource), "Delete");
+        assert_eq!(hint(Shortcut::RaiseSource), "Ctrl+Up");
+    }
+
+    #[test]
+    fn layers_step_within_the_drawing_order_and_rows_map_to_layers() {
+        let command = Modifiers::COMMAND;
+        assert_eq!(
+            Shortcut::of(Key::ArrowUp, command),
+            Some(Shortcut::RaiseSource)
+        );
+        assert_eq!(
+            Shortcut::of(Key::ArrowDown, command),
+            Some(Shortcut::LowerSource)
+        );
+        // Plain arrows move the selection in a list instead.
+        assert_eq!(Shortcut::of(Key::ArrowUp, Modifiers::NONE), None);
+        assert_eq!(layer_step(0, 3, true), Some(1));
+        assert_eq!(layer_step(2, 3, true), None);
+        assert_eq!(layer_step(2, 3, false), Some(1));
+        assert_eq!(layer_step(0, 3, false), None);
+        assert_eq!(layer_step(0, 1, true), None);
+        // The top row is the last layer.
+        assert_eq!(layer_of_row(0, 3), 2);
+        assert_eq!(layer_of_row(2, 3), 0);
+        assert_eq!(layer_of_row(layer_of_row(1, 4), 4), 1);
+        // A click on the picture finds the top visible layer there.
+        let layer = |id: &str, x: f32, visible: bool| SourceSpec {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            kind: command_api::SourceKind::ColorBars,
+            rect: command_api::SourceRect {
+                x,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            opacity: 1.0,
+            visible,
+        };
+        let sources = [layer("a", 0.0, true), layer("b", 50.0, true)];
+        let hit = |sources: &[SourceSpec], x| source_at(sources, x, 10.0).map(|s| s.id.clone());
+        assert_eq!(hit(&sources, 60.0).as_deref(), Some("b"));
+        assert_eq!(hit(&sources, 10.0).as_deref(), Some("a"));
+        assert_eq!(hit(&sources, 150.0), None);
+        let hidden = [layer("a", 0.0, true), layer("b", 50.0, false)];
+        assert_eq!(hit(&hidden, 60.0).as_deref(), Some("a"));
+        // Dropped above itself or just below: no move.
+        assert_eq!(drop_row(1, 1), 1);
+        assert_eq!(drop_row(1, 2), 1);
+        assert_eq!(drop_row(1, 0), 0);
+        assert_eq!(drop_row(0, 3), 2);
     }
 
     #[test]

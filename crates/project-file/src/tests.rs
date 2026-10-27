@@ -32,6 +32,7 @@ fn project() -> Project {
                         kind: SourceKind::ColorBars,
                         rect: rect(0.0, 0.0, 1920.0, 1080.0),
                         opacity: 1.0,
+                        visible: true,
                     },
                     SourceSpec {
                         id: "src_overlay".to_owned(),
@@ -41,6 +42,7 @@ fn project() -> Project {
                         },
                         rect: rect(64.0, 120.0, 160.0, 160.0),
                         opacity: 0.6,
+                        visible: true,
                     },
                 ],
             },
@@ -57,6 +59,7 @@ fn project() -> Project {
                     },
                     rect: rect(-10.5, 20.25, 960.0, 540.0),
                     opacity: 0.9,
+                    visible: true,
                 }],
             },
         ],
@@ -134,11 +137,17 @@ fn loaded() -> Loaded {
     }
 }
 
-fn old_screen_fields(value: &mut Value) {
+/// A current file as an older `version` wrote it: without `visible`
+/// (versions 1 to 3), with the old screen fields (versions 1 and 2).
+fn as_version(value: &mut Value, version: u64) {
+    value["schema_version"] = json!(version);
     for scene in value["scenes"].as_array_mut().unwrap() {
         for source in scene["sources"].as_array_mut().unwrap() {
-            if source["kind"] == "screen" {
-                let object = source.as_object_mut().unwrap();
+            let object = source.as_object_mut().unwrap();
+            if version <= 3 {
+                object.remove("visible");
+            }
+            if version <= 2 && object["kind"] == "screen" {
                 let kinds = object.remove("target_kinds").unwrap();
                 let cursor = object.remove("cursor_mode").unwrap();
                 object.insert("source_types".into(), kinds);
@@ -152,8 +161,7 @@ fn old_screen_fields(value: &mut Value) {
 /// parameters, as version 1 stored it.
 fn v1_file() -> Value {
     let mut value = file();
-    value["schema_version"] = json!(1);
-    old_screen_fields(&mut value);
+    as_version(&mut value, 1);
     // Version 1 had no output profiles.
     value.as_object_mut().expect("file").remove("outputs");
     value["audio"] = json!({
@@ -220,14 +228,15 @@ fn screen_capture_targets_are_not_saved() {
 #[test]
 fn the_file_reads_like_the_command_results() {
     let value = file();
-    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["schema_version"], 4);
     assert_eq!(value["canvas"], json!({"width": 1920, "height": 1080}));
     assert_eq!(value["active_scene"], "scene_k3j9x2m4q8w1");
     // A source is its `list_scenes` object.
     assert_eq!(
         value["scenes"][0]["sources"][1],
         json!({"id": "src_overlay", "name": "overlay", "kind": "solid", "color": "#99999999",
-               "x": 64.0, "y": 120.0, "width": 160.0, "height": 160.0, "opacity": 0.6})
+               "x": 64.0, "y": 120.0, "width": 160.0, "height": 160.0, "opacity": 0.6,
+               "visible": true})
     );
     // A channel is its `get_mixer` object without the level.
     assert_eq!(
@@ -270,6 +279,7 @@ fn a_hand_written_source_may_leave_out_its_rectangle_and_opacity() {
     let bars = &loaded.project.scenes[0].sources[0];
     assert_eq!(bars.rect, rect(0.0, 0.0, 1920.0, 1080.0));
     assert_eq!(bars.opacity, 1.0);
+    assert!(bars.visible);
 }
 
 #[test]
@@ -283,13 +293,13 @@ fn unreadable_files_and_other_versions_are_refused() {
         "schema_version"
     );
     let mut value = file();
-    value["schema_version"] = json!(4);
+    value["schema_version"] = json!(5);
     assert_eq!(
         only(&value, "newer than this build reads"),
         "schema_version"
     );
     let invalid = parse(&serde_json::to_vec(&value).expect("bytes"), CANVAS).unwrap_err();
-    assert_eq!(invalid.schema_version, Some(4));
+    assert_eq!(invalid.schema_version, Some(5));
     value["schema_version"] = json!(0);
     assert_eq!(only(&value, "not supported"), "schema_version");
 }
@@ -711,7 +721,7 @@ fn a_version_1_file_is_migrated() {
     assert_eq!(loaded.project.audio, expected);
     assert_eq!(loaded.project.scenes, project().scenes);
     assert_eq!(loaded.project.outputs, OutputProfiles::default());
-    // The same ids every time, until the file is saved as version 3.
+    // The same ids every time, until the file is saved as version 4.
     assert_eq!(parse(&bytes, CANVAS), Ok(loaded));
 }
 
@@ -800,16 +810,15 @@ fn every_problem_is_reported_at_once() {
 }
 
 #[test]
-fn version_2_screen_fields_migrate_and_save_as_version_3() {
+fn version_2_screen_fields_migrate_and_save_as_version_4() {
     let mut old = file();
-    old["schema_version"] = json!(2);
-    old_screen_fields(&mut old);
+    as_version(&mut old, 2);
     let loaded = parse(&serde_json::to_vec(&old).unwrap(), CANVAS).expect("v2 migrates");
     assert_eq!(loaded.migrated_from, Some(2));
     assert_eq!(loaded.project, project());
     let saved = to_json(&loaded.project, CANVAS);
     let value: Value = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["schema_version"], 4);
     let screen = &value["scenes"][1]["sources"][0];
     assert_eq!(screen["target_kinds"], json!(["window"]));
     assert_eq!(screen["cursor_mode"], "hidden");
@@ -836,8 +845,7 @@ fn old_screen_fields_in_version_3_and_stored_targets_have_paths() {
         );
     }
     let mut old = file();
-    old["schema_version"] = json!(2);
-    old_screen_fields(&mut old);
+    as_version(&mut old, 2);
     old["scenes"][1]["sources"][0]["source_id"] = json!("monitor:1");
     assert_eq!(only(&old, "not stored"), "scenes[1].sources[0].source_id");
     // The rest of that source is still checked.
@@ -859,16 +867,66 @@ fn old_screen_fields_in_version_3_and_stored_targets_have_paths() {
 #[test]
 fn migration_refuses_conflicting_spellings_and_preserves_invalid_value_paths() {
     let mut old = file();
-    old["schema_version"] = json!(2);
-    old_screen_fields(&mut old);
+    as_version(&mut old, 2);
     old["scenes"][1]["sources"][0]["cursor_mode"] = json!("embedded");
     assert_eq!(
         only(&old, "unknown field `cursor_mode`"),
         "scenes[1].sources[0].cursor_mode"
     );
     let mut old = file();
-    old["schema_version"] = json!(2);
-    old_screen_fields(&mut old);
+    as_version(&mut old, 2);
     old["scenes"][1]["sources"][0]["source_types"] = json!([]);
     assert_eq!(only(&old, "must not be empty"), "scenes[1].sources[0]");
+}
+
+#[test]
+fn a_hidden_source_round_trips_and_version_3_sources_are_visible() {
+    let mut hidden = project();
+    hidden.scenes[1].sources[0].visible = false;
+    let bytes = to_json(&hidden, CANVAS);
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["scenes"][1]["sources"][0]["visible"], false);
+    assert_eq!(parse(&bytes, CANVAS).unwrap().project, hidden);
+
+    // Version 3 had no `visible`: every source is visible.
+    let mut old = file();
+    as_version(&mut old, 3);
+    let loaded = parse(&serde_json::to_vec(&old).unwrap(), CANVAS).expect("v3 migrates");
+    assert_eq!(loaded.migrated_from, Some(3));
+    assert_eq!(loaded.project, project());
+    let saved: Value = serde_json::from_slice(&to_json(&loaded.project, CANVAS)).unwrap();
+    assert_eq!(saved["schema_version"], 4);
+    assert_eq!(saved["scenes"][0]["sources"][0]["visible"], true);
+}
+
+#[test]
+fn visible_follows_its_version_rules() {
+    // Unknown before version 4, and the rest of the source is still checked.
+    let mut old = file();
+    as_version(&mut old, 3);
+    old["scenes"][0]["sources"][1]["visible"] = json!(false);
+    assert_eq!(
+        only(&old, "unknown field `visible` in schema version 1 to 3"),
+        "scenes[0].sources[1].visible"
+    );
+    old["scenes"][0]["sources"][1]["opacity"] = json!(2);
+    let paths: Vec<String> = problems(&old).into_iter().map(|(path, _)| path).collect();
+    assert_eq!(
+        paths,
+        ["scenes[0].sources[1].visible", "scenes[0].sources[1]"]
+    );
+    // A boolean in version 4, which may be left out (or `null`) for visible.
+    let mut value = file();
+    value["scenes"][0]["sources"][1]["visible"] = json!("no");
+    assert_eq!(only(&value, "invalid type"), "scenes[0].sources[1]");
+    for absent in [None, Some(Value::Null)] {
+        let mut value = file();
+        let source = value["scenes"][0]["sources"][1].as_object_mut().unwrap();
+        source.remove("visible");
+        if let Some(null) = absent {
+            source.insert("visible".into(), null);
+        }
+        let loaded = parse(&serde_json::to_vec(&value).unwrap(), CANVAS).expect("valid");
+        assert!(loaded.project.scenes[0].sources[1].visible);
+    }
 }

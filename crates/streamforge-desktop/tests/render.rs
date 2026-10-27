@@ -301,6 +301,18 @@ fn model(dir: &Path, situation: Situation) -> Model {
                     .any(|scene| scene.name == "Interview" && scene.sources.len() == 3)
             })
         });
+        // One hidden layer, to show its row.
+        let bars = |m: &Model| {
+            m.scenes
+                .as_ref()
+                .and_then(|list| list.scenes.iter().find(|scene| scene.name == "Interview"))
+                .and_then(|scene| scene.sources.iter().find(|source| source.name == "bars"))
+                .cloned()
+                .expect("bars")
+        };
+        let id = bars(&model).id;
+        model.set_source_visible(&id, false);
+        wait(&mut model, "the hidden bars", |m| !bars(m).visible);
         model.activate_scene(&interview, "Interview");
         wait(&mut model, "the scene on program", |m| {
             m.scenes

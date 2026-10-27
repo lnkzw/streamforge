@@ -358,6 +358,7 @@ fn samples() -> Vec<(&'static [&'static str], Value)> {
                 "set_active_scene",
                 "add_source",
                 "update_source",
+                "move_source",
                 "remove_source",
                 "restart_source",
                 "set_capture_target",
@@ -1009,6 +1010,7 @@ fn scene_list() -> SceneList {
         kind,
         rect,
         opacity: 1.0,
+        visible: true,
     };
     SceneList {
         canvas_width: 1920,

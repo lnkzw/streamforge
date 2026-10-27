@@ -125,15 +125,25 @@ impl Engine {
         self.profiles = project.outputs;
         let mut warnings = Vec::new();
         if let Some(version) = loaded.migrated_from {
-            let audio = if version == 1 {
-                " its audio inputs and tones became channels (`ch_input_1`, `ch_tone_1`, …), and"
-            } else {
-                ""
-            };
+            let mut changes = Vec::new();
+            if version == 1 {
+                changes.push(
+                    "its audio inputs and tones became channels (`ch_input_1`, `ch_tone_1`, …)",
+                );
+            }
+            if version <= 2 {
+                changes.push(
+                    "its screen sources' `source_types` and `cursor` became `target_kinds` and \
+                     `cursor_mode`",
+                );
+            }
+            if version <= 3 {
+                changes.push("every source is visible (`visible`)");
+            }
             warnings.push(format!(
-                "the file has schema version {version} and was migrated:{audio} its screen \
-                 sources' `source_types` and `cursor` became `target_kinds` and `cursor_mode`; \
-                 save it to write version {}",
+                "the file has schema version {version} and was migrated: {}; save it to write \
+                 version {}",
+                changes.join("; "),
                 project_file::SCHEMA_VERSION
             ));
         }

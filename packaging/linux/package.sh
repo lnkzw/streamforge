@@ -105,10 +105,22 @@ if command -v desktop-file-validate > /dev/null; then
   desktop-file-validate "$prefix/with space/share/applications/$app_id.desktop"
 fi
 "$out/install.sh" --uninstall --prefix "$prefix/with space"
-leftovers=$(find "$prefix/with space" -type f)
+# Without --prefix: the binaries in ~/.local/bin, the shared files where
+# XDG_DATA_HOME says.
+HOME="$prefix/home" XDG_DATA_HOME="$prefix/data" "$out/install.sh"
+test -x "$prefix/home/.local/bin/streamforge-desktop"
+grep -qxF "Exec=\"$prefix/home/.local/bin/streamforge-desktop\"" \
+  "$prefix/data/applications/$app_id.desktop"
+HOME="$prefix/home" XDG_DATA_HOME="$prefix/data" "$out/install.sh" --uninstall
+leftovers=$(find "$prefix" -type f)
 if [ -n "$leftovers" ]; then
   echo "install.sh --uninstall left files behind:" >&2
   echo "$leftovers" >&2
+  exit 1
+fi
+# A path the launcher's Exec line cannot hold is refused.
+if "$out/install.sh" --prefix "$prefix/a=b" 2> /dev/null; then
+  echo "install.sh accepted a prefix with =" >&2
   exit 1
 fi
 rm -rf "$prefix"

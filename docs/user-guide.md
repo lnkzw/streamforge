@@ -1,6 +1,6 @@
 # StreamForge user guide
 
-StreamForge composes scenes, mixes audio, and records and streams the result. You run it from the desktop app, the command line, scripts (JSON lines over stdin and stdout), or an AI agent over MCP. All four go through the same commands and the same engine.
+StreamForge composes scenes, mixes audio, and records and streams the result. You run it from the desktop app, the command line, scripts (JSON lines over stdin and stdout), or an AI agent over MCP. All four use the same commands and the same engine code. Each program runs its own engine, though: they do not share scenes or outputs, and one does not see what another records.
 
 This guide is for version 0.1.0 on Linux. [Known limitations](#known-limitations) lists what it does not do yet.
 
@@ -40,7 +40,7 @@ Packages are built for **Ubuntu 24.04** and **Arch Linux** (x86_64). They use th
    ./install.sh
    ```
 
-   `install.sh` copies the programs to `~/.local/bin`, adds StreamForge to the application menu, and puts this guide and the licences in `~/.local/share/doc/streamforge`. `./install.sh --prefix DIR` installs elsewhere; `./install.sh --uninstall` (with the same `--prefix`) removes it again and leaves your projects and recordings alone.
+   `install.sh` copies the programs to `~/.local/bin`, adds StreamForge to the application menu, and puts this guide and the licences in `~/.local/share/doc/streamforge`. `./install.sh --prefix DIR` installs elsewhere; the menu entry then appears if your desktop looks in `DIR/share`, as it does for `/usr/local` (the installer says if it does not). `./install.sh --uninstall` (with the same `--prefix`) removes it again and leaves your projects and recordings alone.
 
 3. Check that it runs: `streamforge status`. If the shell does not find it, add `~/.local/bin` to your `PATH` or call `~/.local/bin/streamforge status`.
 
@@ -70,10 +70,11 @@ The programs are in `target/release/`. Windows and macOS build the same way and 
 Start it from the application menu (**StreamForge**) or from a terminal:
 
 ```sh
+mkdir -p ~/Videos ~/Documents/shows
 streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 ```
 
-- `--output-dir` is where recordings go, `--project-dir` where projects are saved. Both default to the working directory. From the application menu that is your home folder.
+- `--output-dir` is where recordings go, `--project-dir` where projects are saved. Both folders must exist. Both default to the working directory, which from the application menu is usually your home folder.
 - To use other folders from the menu as well, add the two flags to the `Exec=` line of `~/.local/share/applications/io.github.lnkzw.StreamForge.desktop`. Running `install.sh` again overwrites that file.
 
 ![The desktop app while recording](images/desktop.png)
@@ -91,8 +92,8 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 ### A first recording
 
 1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine.
-2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, or a **screen capture**. Choose the colour, whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top. On Linux, a screen capture asks in your desktop's screen-sharing dialog which screen or window to share, when the scene is first rendered.
-3. **Audio.** Open **Routing** in the mixer.
+2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, or a **screen capture**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top.
+3. **Audio.** Open **Routing** in the mixer. A new setup has one channel, **Tone**, a 1 kHz test tone on the program bus; mute or remove it before a real recording, or switch its input to your microphone.
    - Add a channel with **+** next to *Channels*, then choose its input in the *Input* column: a microphone or other device, the desktop audio of an output (listed separately, as `<output>.monitor`), the system's default input, or a test tone.
    - Each channel sends to the **Program** bus. Add aux buses with **+** at the right of the bus columns, for example a separate mix for headphones or a second recording track. Each send has a switch, a level, and a tap: PRE (before the channel fader) or POST (after it).
    - The rows below the channels choose which bus each output takes: the recording (its first track, and further tracks), the stream, and the monitor.
@@ -101,15 +102,21 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 
 Each recording needs a new file name: StreamForge never overwrites a file, so starting again with the name of an existing file fails with a message. Change the name in the recording settings before the next take.
 
+### Screen capture on Linux
+
+On Linux, your desktop's screen-sharing dialog chooses the screen or window a screen capture shows. It opens when a scene with a new screen capture goes on program while the preview or an output runs. Once chosen, the capture keeps running as long as the source exists, also while its scene is off program, so switching scenes does not ask again.
+
+While a recording or stream runs, StreamForge does not open the dialog, since outputs must not wait for a person. Adding a screen capture to the scene on program, or putting a scene with a new screen capture on program, is refused then, and so is **Restart capture** in the inspector. So prepare first: switch the preview on, put each scene with a screen capture on program once and choose in the dialog, then start recording or streaming. After loading a project, the dialog asks again for each screen capture.
+
 ### Streaming
 
-Open the gear on the **Stream** row and enter the server URL (`rtmp://` or `rtmps://`, for example `rtmp://live.example.com/app`) and the stream key from your streaming service, plus the video bitrate and encoder. **Go live** starts the stream; afterwards **LIVE** (Ctrl+L) starts and stops it. The key goes to the engine when the stream starts; it is never saved or shown. The URL is kept until you close the app, but not saved in projects.
+Open the gear on the **Stream** row and enter the server URL (`rtmp://` or `rtmps://`, for example `rtmp://live.example.com/app`) and the stream key from your streaming service, plus the video bitrate and encoder. Then **LIVE** (Ctrl+L) starts and stops the stream. Pressing **LIVE** without a URL opens these settings with a **Go live** button. The key goes to the engine when the stream starts; it is never saved or shown. The URL is kept until you close the app, but not saved in projects.
 
 Recording and streaming run at the same time and independently. If the connection drops, the stream reconnects on its own and the recording continues. If reconnecting fails, the stream shows *failed*, and **LIVE** ends it.
 
 ### Monitoring
 
-The **Monitor** row plays a bus on a headphone or speaker output, by default the program bus. Choose the device with the gear while nothing records, streams or previews, and switch the monitor on in the routing matrix (the switch in the *Monitor* row). If a channel captures the desktop audio of the device the monitor plays on, the sound feeds back; StreamForge warns when you switch the monitor on.
+The **Monitor** row plays a bus on a headphone or speaker output, by default the program bus. Choose the device with the gear while nothing records, streams or previews, and switch the monitor on in the routing matrix (the switch in the *Monitor* row). If a channel captures the desktop audio of the device the monitor plays on, the sound feeds back. StreamForge warns about that when you switch the monitor on, but only for a device you chose: with the system default output it cannot tell.
 
 ### Projects
 
@@ -130,14 +137,14 @@ A project opens only while nothing records, streams or previews. Before you open
 | Tab, Shift+Tab | Move through the docks |
 | Up, Down | Move in the scene and source lists |
 
-The keys work while no dialog or menu is open and no text field has the focus. Menus and tooltips show them too.
+The keys work while no dialog or menu is open and no text field has the focus. Space toggles the preview only when no control has the focus; otherwise it presses the focused control. Menus and tooltips show the keys too.
 
 ## Command line
 
-`streamforge` checks the system and makes quick test recordings and streams. It records and streams a built-in reference scene (colour bars and a moving overlay at 1920×1080, 60 fps); for your own scenes, use the desktop app, the engine or an agent. Every command prints JSON and has `--help`.
+`streamforge` checks the system and makes quick test recordings and streams. It records and streams a built-in reference scene (colour bars and a moving overlay at 1920×1080, 60 fps); for your own scenes, use the desktop app, the engine or an agent. The commands print their results as JSON (`status` only with `--json`), progress and errors as text on stderr, and each has `--help`.
 
 ```sh
-streamforge status              # version, capture availability, outputs
+streamforge status              # version and capture availability
 streamforge capture caps        # what this system can capture, and how
 streamforge capture inputs      # audio inputs by name
 streamforge capture audio --input <name> --duration-ms 3000  # levels of one input, nothing stored
@@ -230,7 +237,7 @@ The MCP server runs its own engine. It does not control a desktop app that is op
 
 ## Files and folders
 
-- **Recordings** are Matroska files (`.mkv`) with H.264 video and AAC audio. A recording with further audio tracks has them in the same file. A file is never overwritten, and it is complete when the recording stops.
+- **Recordings** are Matroska files (`.mkv`) with H.264 video and AAC audio. A recording with further audio tracks has them in the same file. A file is never overwritten. It is complete once the recording stops: with **REC**, `stop_recording`, at the end of `--duration-ms`, when you close the desktop window, or when a script closes the engine's stdin. A recording that does not stop that way (the program is killed, Ctrl+C on `streamforge record`, a crash) is not finished, and a short one is often empty.
 - **Projects** are JSON files. `streamforge project validate show.json` checks one and lists every problem with its place in the file. Files from older versions are converted on load and saved in the current format.
 - **File names** are plain names without folders, for recordings ending in `.mkv` and for projects in `.json`. Names that are not valid on Windows or macOS are refused everywhere (for example with `:` or `\`, or device names such as `CON`), so a project folder works on every system.
 
@@ -252,7 +259,8 @@ Version 0.1.0 is a first stable base, not a complete production suite.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
 - **Sources:** solid colours, colour bars and screen or window capture. No cameras, images, text, media files or browser sources yet. The order of the layers cannot be changed after adding them.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
-- **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The app does not show the recordings folder, and it does not number recordings: give each take a new file name. Screen capture targets and stream settings are not saved in projects. English only.
+- **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log), and recordings are not numbered: give each take a new file name. Closing the window stops a running recording and stream without asking. Screen capture targets and the stream URL and key are not saved in projects. English only.
+- **Command line:** Ctrl+C on `streamforge record` or `stream` loses the recording; let `--duration-ms` end it.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.
 - **Not planned for 0.1.0:** plugins, scripting inside the app, per-output scenes, automation. Later versions add them on the same commands.
 

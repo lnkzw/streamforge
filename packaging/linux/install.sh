@@ -89,7 +89,7 @@ mv "$launcher.tmp" "$launcher"
 
 rm -rf "$doc"
 install -d "$doc"
-cp -R "$here/README.md" "$here/INSTALL.md" "$here/BUILD-INFO.txt" "$here"/LICENSE-* "$here/docs" "$doc/"
+cp -R "$here/README.md" "$here/CHANGELOG.md" "$here/INSTALL.md" "$here/BUILD-INFO.txt" "$here"/LICENSE-* "$here/docs" "$doc/"
 
 echo "StreamForge installed into $prefix:"
 echo "  binaries   $prefix/bin"

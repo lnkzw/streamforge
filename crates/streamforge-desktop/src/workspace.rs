@@ -1,12 +1,13 @@
 //! What the production workspace shows, computed from the model's state
 //! without widgets: the scene selection, the transport states, the monitor
 //! rectangle, meter ballistics, the health summary, the project's name
-//! and files, what a channel plays, where and whether the monitor plays,
+//! and files, recording names, what a channel plays, where and whether the monitor plays,
 //! and what the keys do. The views draw these; keeping them here keeps
 //! them unit-tested.
 
 use std::time::Duration;
 
+use chrono::Timelike;
 use command_api::{
     AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
     OutputHealth, RecordingState, SceneList, StreamState,
@@ -219,16 +220,33 @@ pub fn project_file(typed: &str) -> String {
     }
 }
 
-/// An automatic recording file name from the local start time, e.g.
+/// Automatic recording file names from the local start time, e.g.
 /// `recording-2026-10-27_15-30-05.mkv`: takes sort by time, and the name is
-/// valid on every system (no `:`). A second take started within the same
-/// second (`take` 2) gets `_2` (sorting after the first), since a file is
-/// never overwritten.
-pub fn recording_file(start: chrono::NaiveDateTime, take: u32) -> String {
-    let stamp = start.format("%Y-%m-%d_%H-%M-%S");
-    match take {
-        0 | 1 => format!("recording-{stamp}.mkv"),
-        take => format!("recording-{stamp}_{take}.mkv"),
+/// valid on every system (no `:`). Since a file is never overwritten, a
+/// further take within the same second gets `_2`, `_3` (sorting after the
+/// first). After the clock went back (a correction, the end of daylight
+/// saving time), takes count on from the latest name given rather than
+/// reuse one.
+#[derive(Debug, Default)]
+pub struct RecordingNames {
+    /// The latest name's start second and take.
+    latest: Option<(chrono::NaiveDateTime, u32)>,
+}
+
+impl RecordingNames {
+    /// The name for a recording starting `now`.
+    pub fn next(&mut self, now: chrono::NaiveDateTime) -> String {
+        let start = now.with_nanosecond(0).unwrap_or(now);
+        let (stamp, take) = match self.latest {
+            Some((latest, take)) if start <= latest => (latest, take.saturating_add(1)),
+            _ => (start, 1),
+        };
+        self.latest = Some((stamp, take));
+        let stamp = stamp.format("%Y-%m-%d_%H-%M-%S");
+        match take {
+            1 => format!("recording-{stamp}.mkv"),
+            take => format!("recording-{stamp}_{take}.mkv"),
+        }
     }
 }
 
@@ -766,17 +784,21 @@ mod tests {
 
     #[test]
     fn recordings_are_named_by_their_start_time() {
-        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 7)
-            .and_then(|day| day.and_hms_opt(9, 5, 3))
-            .expect("a valid time");
-        assert_eq!(
-            recording_file(start, 1),
-            "recording-2026-01-07_09-05-03.mkv"
-        );
-        assert_eq!(
-            recording_file(start, 2),
-            "recording-2026-01-07_09-05-03_2.mkv"
-        );
+        let at = |seconds, milli| {
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 7)
+                .and_then(|day| day.and_hms_milli_opt(9, 5, seconds, milli))
+                .expect("a valid time")
+        };
+        let mut names = RecordingNames::default();
+        let mut next = |seconds, milli| names.next(at(seconds, milli));
+        assert_eq!(next(3, 100), "recording-2026-01-07_09-05-03.mkv");
+        assert_eq!(next(3, 900), "recording-2026-01-07_09-05-03_2.mkv");
+        assert_eq!(next(3, 950), "recording-2026-01-07_09-05-03_3.mkv");
+        assert_eq!(next(4, 0), "recording-2026-01-07_09-05-04.mkv");
+        // The clock went back: no name comes twice.
+        assert_eq!(next(3, 0), "recording-2026-01-07_09-05-04_2.mkv");
+        assert_eq!(next(4, 500), "recording-2026-01-07_09-05-04_3.mkv");
+        assert_eq!(next(9, 0), "recording-2026-01-07_09-05-09.mkv");
     }
 
     #[test]

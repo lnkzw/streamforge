@@ -100,7 +100,7 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
    - Set levels and mutes in the **Console**. A warning above the mixer marks a channel that reaches the program bus twice, for example directly and through an aux bus.
 4. **Record.** Open the gear on the **Record** row to set the video encoder and, if you want, a file name (a plain `.mkv` name): *auto* uses the graphics card's encoder where one works and the software encoder otherwise. Without a file name, each recording is named by its start time, for example `recording-2026-10-27_15-30-00.mkv`. Press **REC** (Ctrl+R). Press it again to stop; it asks first. The file is finished when the recording stops.
 
-StreamForge never overwrites a file. With the automatic name, every take gets a new file. With a name of your own, starting again with the name of an existing file fails with a message: change the name before the next take, or clear it to go back to automatic names.
+StreamForge never overwrites a file. With the automatic name, every take gets a new file (only a file of that name from elsewhere, such as a second StreamForge recording into the same folder in the same second, makes REC fail with a message). With a name of your own, starting again with the name of an existing file fails with a message: change the name before the next take, or clear it to go back to automatic names.
 
 ### Screen capture on Linux
 

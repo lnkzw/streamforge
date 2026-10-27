@@ -99,15 +99,24 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Clients usually stop stdio servers with a signal; finish cleanly
+    // then too, so open recordings and streams are finalized. A second
+    // signal exits at once.
+    let (quit, quitting) = tokio::sync::oneshot::channel();
+    let installed = quit_signal::on_quit("streamforge-mcp", move || {
+        let _ = quit.send(());
+    });
+    if let Err(err) = installed {
+        eprintln!("streamforge-mcp: cannot handle quit signals: {err}");
+    }
     let served = runtime.block_on(async {
         let service = server.serve(rmcp::transport::stdio()).await?;
-        // Clients usually stop stdio servers with a signal; finish cleanly
-        // then too, so open recordings and streams are finalized.
         tokio::select! {
             quit = service.waiting() => {
                 quit?;
             }
-            () = shutdown_signal() => {}
+            // Only a signal: without a handler the sender is gone at once.
+            Ok(()) = quitting => {}
         }
         Ok::<_, Box<dyn std::error::Error>>(())
     });
@@ -123,29 +132,6 @@ fn main() -> ExitCode {
             eprintln!("streamforge-mcp: {err}");
             ExitCode::FAILURE
         }
-    }
-}
-
-/// SIGINT or SIGTERM (Ctrl-C elsewhere).
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut terminate) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

@@ -5,7 +5,7 @@
 //! stderr. Exits with status 0 when stdin closes or at Ctrl+C or SIGTERM,
 //! finalizing open recordings and streams.
 
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -62,7 +62,13 @@ fn main() -> ExitCode {
         engine = engine.with_project_dir(dir);
     }
     let mut handler = Gated::new(engine, AccessPolicy::allowing(allow));
-    let input = BufReader::new(Input::spawn());
+    let input = match Input::spawn() {
+        Ok(input) => BufReader::new(input),
+        Err(err) => {
+            eprintln!("streamforge-engine: cannot read stdin: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     match control_protocol::serve(input, io::stdout().lock(), &mut handler) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -97,39 +103,35 @@ enum Chunk {
 }
 
 impl Input {
-    fn spawn() -> Self {
+    fn spawn() -> io::Result<Self> {
         let (sender, chunks) = mpsc::sync_channel(CHUNKS);
         let signalled = Arc::new(AtomicBool::new(false));
         let wake = sender.clone();
         let flag = Arc::clone(&signalled);
         let installed = quit_signal::on_quit("streamforge-engine", move || {
             flag.store(true, Ordering::Relaxed);
-            eprintln!("streamforge-engine: stopping; signal again to quit at once");
             // Wakes a blocked read; a full queue needs no wake, the next read
             // sees the flag.
             let _ = wake.try_send(Chunk::End);
+            let _ = writeln!(
+                io::stderr(),
+                "streamforge-engine: stopping; signal again to quit at once"
+            );
         });
         if let Err(err) = installed {
             eprintln!("streamforge-engine: cannot handle quit signals: {err}");
         }
         // Blocks in its read until EOF; the process may exit around it.
-        let reader = thread::Builder::new()
+        thread::Builder::new()
             .name("stdin".to_owned())
-            .spawn(move || read_stdin(&sender));
-        let ended = match reader {
-            Ok(_) => false,
-            Err(err) => {
-                eprintln!("streamforge-engine: cannot read stdin: {err}");
-                true
-            }
-        };
-        Self {
+            .spawn(move || read_stdin(&sender))?;
+        Ok(Self {
             chunks,
             signalled,
             chunk: Vec::new(),
             at: 0,
-            ended,
-        }
+            ended: false,
+        })
     }
 }
 

@@ -1,6 +1,7 @@
 //! `streamforge-desktop`: the desktop UI. It embeds the engine with the
 //! platform capture backend, like the CLI and the headless engine do.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -100,8 +101,11 @@ fn quit_on_signal(ctx: eframe::egui::Context) -> Arc<AtomicBool> {
     let set = Arc::clone(&signal);
     let installed = quit_signal::on_quit("streamforge-desktop", move || {
         set.store(true, Ordering::Relaxed);
-        eprintln!("streamforge-desktop: quitting; signal again to quit at once");
         ctx.request_repaint();
+        let _ = writeln!(
+            io::stderr(),
+            "streamforge-desktop: quitting; signal again to quit at once"
+        );
     });
     if let Err(err) = installed {
         eprintln!("streamforge-desktop: cannot handle quit signals: {err}");

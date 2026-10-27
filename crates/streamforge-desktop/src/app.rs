@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use chrono::Timelike;
 use command_api::{EncoderPreference, SourceSpec};
 use eframe::egui;
 
@@ -51,8 +50,8 @@ pub struct DesktopApp {
     /// The file name typed in the recording settings; empty (the default):
     /// each take is named by its start time.
     pub(crate) record_file: String,
-    /// The last automatic name's start second and its takes so far.
-    auto_take: Option<(chrono::NaiveDateTime, u32)>,
+    /// Names the takes without a typed name.
+    recording_names: workspace::RecordingNames,
     pub(crate) stream_url: String,
     /// Typed into a password field; handed to the engine on start only.
     pub(crate) stream_key: String,
@@ -216,7 +215,7 @@ impl DesktopApp {
             new_scene: None,
             dialog: None,
             record_file: String::new(),
-            auto_take: None,
+            recording_names: workspace::RecordingNames::default(),
             stream_url: String::new(),
             stream_key: String::new(),
             restart_targets: HashMap::new(),
@@ -542,19 +541,8 @@ impl DesktopApp {
         if !typed.is_empty() {
             return typed.to_owned();
         }
-        let now = chrono::Local::now().naive_local();
-        let start = now.with_nanosecond(0).unwrap_or(now);
-        let take = match &mut self.auto_take {
-            Some((second, take)) if *second == start => {
-                *take += 1;
-                *take
-            }
-            last => {
-                *last = Some((start, 1));
-                1
-            }
-        };
-        workspace::recording_file(start, take)
+        self.recording_names
+            .next(chrono::Local::now().naive_local())
     }
 
     /// LIVE, as [`Self::record_action`]; without a target it asks for one

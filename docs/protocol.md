@@ -9,7 +9,7 @@ Local control channel for the headless engine (`streamforge-engine`). Implemente
 - Responses on stdout are always single-line JSON. The engine writes nothing else to stdout; diagnostics go to stderr.
 - Lines containing only whitespace are ignored and get no response.
 - A request line may be at most **65 536 bytes** (`MAX_REQUEST_BYTES`), not counting the `\n`. A longer line is discarded without being buffered and answered with `request_too_large`.
-- The engine exits with status 0 when stdin closes, and also at SIGINT (Ctrl+C) or SIGTERM (Ctrl+C or Ctrl+Break on Windows): it finishes the request in progress, may answer requests already sent, and leaves the rest unanswered. Either way, open recordings and streams are stopped and finalized first. A second signal exits at once with status 130, leaving them unfinished. SIGHUP keeps its default. An I/O error on the pipes makes it exit with status 1 and print a message to stderr.
+- The engine exits with status 0 when stdin closes, and also at SIGINT (Ctrl+C) or SIGTERM (Ctrl+C or Ctrl+Break on Windows): it finishes the request in progress, may answer requests already sent, and leaves the rest unanswered. Either way, open recordings and streams are stopped and finalized first. It stops at its next read of a request: while a client leaves the responses unread and the pipe is full, the engine waits to write an answer and finalizes only once that is written. A second signal exits at once with status 130, leaving them unfinished. SIGHUP keeps its default. An I/O error on the pipes makes it exit with status 1 and print a message to stderr.
 
 ## Request
 

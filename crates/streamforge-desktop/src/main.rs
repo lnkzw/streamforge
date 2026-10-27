@@ -13,7 +13,7 @@ use streamforge_desktop::identity;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
 
-const USAGE: &str = "usage: streamforge-desktop [--output-dir DIR] [--project-dir DIR]";
+const USAGE: &str = "usage: streamforge-desktop [--output-dir DIR] [--project-dir DIR]\n       streamforge-desktop --version | --help";
 
 fn main() -> ExitCode {
     // Where recordings and project files go, as `--output-dir` and
@@ -27,6 +27,12 @@ fn main() -> ExitCode {
             &mut output_dir
         } else if flag == "--project-dir" {
             &mut project_dir
+        } else if flag == "--version" || flag == "-V" {
+            println!("streamforge-desktop {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        } else if flag == "--help" || flag == "-h" {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
         } else {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;

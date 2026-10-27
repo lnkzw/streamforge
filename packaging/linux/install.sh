@@ -96,7 +96,7 @@ echo "  binaries   $prefix/bin"
 echo "  launcher   $launcher"
 echo "  documents  $doc"
 case ":$PATH:" in
-  *":$prefix/bin:"*) ;;
+  *":$prefix/bin:"* | *":$prefix/bin/:"*) ;;
   *) echo "Note: $prefix/bin is not on your PATH; add it to use the commands by name." ;;
 esac
 # Where application menus look for launchers (the XDG base directories).

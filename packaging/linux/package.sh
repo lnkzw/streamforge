@@ -82,8 +82,10 @@ fi
 } > "$out/BUILD-INFO.txt"
 cat "$out/BUILD-INFO.txt"
 
-# Smoke test on this system: each command-line binary starts and answers.
-# (The desktop needs a display; the library check above covers it.)
+# Smoke test on this system: each binary starts and answers. (The
+# desktop's window needs a display, `--version` does not; the library
+# check above covers the rest.)
+"$out/bin/streamforge-desktop" --version
 "$out/bin/streamforge" --version
 "$out/bin/streamforge" status --json
 response=$(printf '%s\n' '{"id":1,"command":"get_status"}' | "$out/bin/streamforge-engine")

@@ -283,7 +283,7 @@ Linux first; Windows and macOS follow with tests on real machines.
   - [x] Step 2c: report shapes (`audio_tracks`, nested `pipeline`, embedded errors, units, fractional frame rates), then wire-shape tests on every result.
 - [x] Soak test on the development machine, after the UI changes: an hour of recording and streaming with health polling; no unexplained drops, no growing memory, a file that decodes from start to end. Harness `streamforge-soak`; passed on 2026-10-27 with real sources and a stream to MediaMTX on the local network (`docs/testing.md`, Soak test).
 - [x] Release workflow (`.github/workflows/release.yml`): Linux tarballs per distribution family, since FFmpeg and PipeWire are linked dynamically and their library versions differ (Ubuntu 24.04, Arch Linux). Each is smoke-tested on its own system; a tag creates a draft release.
-- [ ] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries.
+- [x] User documentation: installation and runtime dependencies, a desktop and CLI quick start, MCP setup, known limitations, and the FFmpeg license note for binaries. The README is the project's front page; `docs/user-guide.md` is the guide (shipped in the packages with the rest of `docs/`), `docs/development.md` the developer part. The packages gained `install.sh` (into `~/.local` by default, `--uninstall`), an application-menu launcher and an app icon; the desktop window reports the launcher's app id.
 - [ ] Version 0.1.0: changelog, tag, published release.
 
 Acceptance:

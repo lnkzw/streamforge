@@ -16,6 +16,7 @@ test -n "$version"
 name="streamforge-$version-x86_64-linux-$distro"
 out="dist/$name"
 bins=(streamforge streamforge-engine streamforge-desktop streamforge-mcp)
+app_id=io.github.lnkzw.StreamForge
 
 cargo build --release --locked \
   -p streamforge-cli -p streamforge-engine -p streamforge-desktop -p streamforge-mcp
@@ -25,9 +26,40 @@ mkdir -p "$out/bin"
 for bin in "${bins[@]}"; do
   install -m 0755 "target/release/$bin" "$out/bin/"
 done
-cp LICENSE-MIT LICENSE-APACHE README.md packaging/linux/INSTALL.md "$out/"
+cp LICENSE-MIT LICENSE-APACHE README.md packaging/linux/INSTALL.md packaging/linux/install.sh "$out/"
+# The documentation the README and the user guide link to, at the same
+# relative paths as in the repository.
+cp -R docs "$out/"
 # The desktop binary embeds IBM Plex, whose licence must travel with it.
 cp crates/streamforge-desktop/assets/fonts/OFL.txt "$out/LICENSE-OFL-IBM-Plex.txt"
+# The launcher and its icon, named after the app id the desktop window
+# reports (crates/streamforge-desktop/src/identity.rs).
+install -D -m 0644 "packaging/linux/$app_id.desktop" "$out/share/applications/$app_id.desktop"
+install -D -m 0644 "crates/streamforge-desktop/assets/icon/$app_id.svg" \
+  "$out/share/icons/hicolor/scalable/apps/$app_id.svg"
+if command -v desktop-file-validate > /dev/null; then
+  desktop-file-validate "$out/share/applications/$app_id.desktop"
+else
+  echo "desktop-file-validate not installed; launcher not validated"
+fi
+
+# Every relative link in the user's entry points must resolve inside the
+# package (they are read there, not on GitHub). The developer documents
+# may point into the source tree.
+broken=0
+for doc in "$out/README.md" "$out/INSTALL.md" "$out/docs/user-guide.md"; do
+  dir=$(dirname "$doc")
+  while IFS= read -r target; do
+    target=${target%%#*}
+    if [ -n "$target" ] && [ ! -e "$dir/$target" ]; then
+      echo "broken link in ${doc#"$out"/}: $target" >&2
+      broken=1
+    fi
+  done < <(grep -oE '\]\([^)[:space:]]+\)' "$doc" | sed -E 's/^\]\(//; s/\)$//' | grep -vE '^[a-z]+:' || true)
+done
+if [ "$broken" -ne 0 ]; then
+  exit 1
+fi
 
 # Every library the binaries link must be found here.
 missing=$(ldd "$out"/bin/* | grep 'not found' || true)
@@ -59,6 +91,27 @@ echo "$response"
 grep -q '"ok":true' <<< "$response"
 "$out/bin/streamforge-engine" --version
 "$out/bin/streamforge-mcp" --version
+
+# The installer: into a fresh prefix, the launcher pointing at the
+# installed binary, and out again without leftovers.
+prefix=$(mktemp -d)
+"$out/install.sh" --prefix "$prefix/with space"
+"$prefix/with space/bin/streamforge" --version
+grep -qxF "Exec=\"$prefix/with space/bin/streamforge-desktop\"" \
+  "$prefix/with space/share/applications/$app_id.desktop"
+test -f "$prefix/with space/share/icons/hicolor/scalable/apps/$app_id.svg"
+test -f "$prefix/with space/share/doc/streamforge/docs/user-guide.md"
+if command -v desktop-file-validate > /dev/null; then
+  desktop-file-validate "$prefix/with space/share/applications/$app_id.desktop"
+fi
+"$out/install.sh" --uninstall --prefix "$prefix/with space"
+leftovers=$(find "$prefix/with space" -type f)
+if [ -n "$leftovers" ]; then
+  echo "install.sh --uninstall left files behind:" >&2
+  echo "$leftovers" >&2
+  exit 1
+fi
+rm -rf "$prefix"
 
 tar -C dist -czf "dist/$name.tar.gz" "$name"
 (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")

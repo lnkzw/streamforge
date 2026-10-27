@@ -1,6 +1,6 @@
 # Installing StreamForge on Linux
 
-This package was built for one distribution family; its name says which (`ubuntu24.04` or `archlinux`), and `BUILD-INFO.txt` lists the library versions it links. StreamForge uses the system's FFmpeg and PipeWire libraries, so the package runs where those have the same versions: the distribution it was built for. On another one, build from source (README).
+This package was built for one distribution family; its name says which (`ubuntu24.04` or `archlinux`), and `BUILD-INFO.txt` lists the library versions it links. StreamForge uses the system's FFmpeg and PipeWire libraries, so the package runs where those have the same versions: the distribution it was built for. On another one, build from source (`docs/development.md`).
 
 ## Runtime dependencies
 
@@ -26,15 +26,25 @@ sudo pacman -S --needed ffmpeg pipewire xdg-desktop-portal
 sha256sum -c streamforge-*.tar.gz.sha256
 tar -xzf streamforge-*.tar.gz
 cd streamforge-*/
-./bin/streamforge status
+./install.sh
+streamforge status
 ```
 
-The binaries run from anywhere; copy `bin/*` into a directory on your `PATH` (e.g. `~/.local/bin`) to use them by name.
+`install.sh` installs for your user, into `~/.local`:
 
-- `streamforge`: command line (recording, streaming, capture checks, `project validate`)
-- `streamforge-desktop`: desktop app
-- `streamforge-engine`: headless engine for scripts (JSON lines on stdin and stdout)
-- `streamforge-mcp`: MCP server for AI agents
+- `bin/`: the programs
+  - `streamforge`: command line (system checks, test recordings and streams, `project validate`)
+  - `streamforge-desktop`: desktop app
+  - `streamforge-engine`: headless engine for scripts (JSON lines on stdin and stdout)
+  - `streamforge-mcp`: MCP server for AI agents
+- `share/applications/io.github.lnkzw.StreamForge.desktop` and its icon: *StreamForge* in the application menu
+- `share/doc/streamforge/`: this file, the README, the documentation (`docs/`) and the licences
+
+If `streamforge` is not found afterwards, add `~/.local/bin` to your `PATH`. `./install.sh --prefix DIR` installs into another directory (for example `/usr/local`, as root), and `./install.sh --uninstall` with the same `--prefix` removes everything it installed. Projects and recordings stay where you saved them.
+
+The programs also run straight from this folder, without installing: `./bin/streamforge status`.
+
+Start with the user guide, `docs/user-guide.md`.
 
 ## License
 

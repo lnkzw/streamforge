@@ -207,6 +207,13 @@ What the baseline shows:
     - Read back from a server: the reader joins within 10 s, nothing is missing between packets (no step over 1.5 packet durations in video or audio), and from its join the packets reach the run's end (less 1 s). Packets are not counted against the sender's, since the reader missed the start.
 - **Limits:** memory, threads, descriptors and CPU are read from Linux's `/proc`; elsewhere those checks are skipped. Interrupting the harness (Ctrl+C) also ends the engine, and the recording is not finalized.
 
+**Result** (2026-10-27, **PASS**, 0 events): one hour on the development machine (Arch Linux, kernel 7.2.11, Hyprland 0.56.2 with xdg-desktop-portal-hyprland 1.4.1, PipeWire 1.6.10, Intel Core i5-13600KF, AMD Radeon RX 6800 with Mesa 26.2.5 VAAPI, FFmpeg 9.0.2, release build), in light desktop use (load average 4 to 6.4).
+- **Setup:** a screen source on a monitor chosen in the picker, desktop audio from the default sink's `.monitor` (S/PDIF) next to the default tone, the preview on; recording and stream both `h264_vaapi`; the stream to MediaMTX on another machine on the wired local network, read back from there.
+- **Outputs:** the recording ran 3600 s (216 011 frames), the stream connected once and never reconnected (216 000 frames); no frame, audio block or sample lost anywhere, no skipped compositor tick or mixer block, no late frame or block, no input underrun or overrun; the desktop audio drifted −51 ppm against the mixer.
+- **File:** decoded from start to end with strict decoders: 216 011 frames over 3600.2 s, no gaps, audio and video ending 4 ms apart.
+- **Stream:** read back from 4.7 s on: 215 759 video and 168 654 audio packets over 3596.0 s, no gaps, ending 13 ms apart.
+- **Resources:** engine RSS 287 MiB at the start, 303 MiB from the first minute, 311 MiB from minute 24 to the end. That step is exactly one 1920×1080 BGRA frame (7.9 MiB): an output's frame copy pool, bounded at 8 buffers (`VIDEO_COPY_BUFFERS`), allocated one more buffer when its queue reached a new depth (the deepest queue was 7 items). It is not a leak; the reported slope (+11.8 MiB/h) is that single step. Threads 23 and file descriptors 62 throughout. Engine CPU 149 % of one core (two VAAPI encoders, the screen capture and its scaling); render time mean 4.04 ms, p99 5.80 ms, max 12.82 ms.
+
 ## Reliability requirements
 
 - Tests must have timeouts for process and device operations.

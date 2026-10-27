@@ -31,7 +31,7 @@ What runs:
   - build and tests with `--locked`
   - the M0 acceptance command (`streamforge-cli status --json`)
   - a stdio smoke test of `streamforge-engine`
-- On pushes to `main` and manual runs (not on pull requests), a `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures; there are no thresholds, because shared runners vary. A failing measurement leaves a warning annotation and does not fail the job; a failing setup or build does. Both jobs share their setup through the local composite action `.github/actions/build-setup`.
+- On pushes to `main` and manual runs (not on pull requests), a `bench` job per platform, in parallel to the tests: a release build of `streamforge-bench`, run with 2 runs × 5 s per scenario. It prints the runner's figures; there are no thresholds, because shared runners vary. A failing measurement leaves a warning annotation and does not fail the job; a failing setup or build does. The same job runs `streamforge-soak` for one minute, so the soak harness keeps working against the engine; its result is a warning too. Both jobs share their setup through the local composite action `.github/actions/build-setup`.
 - `release.yml` builds the Linux release packages (Ubuntu 24.04 on the runner, Arch Linux in a container) with `packaging/linux/package.sh`. The script checks that every linked library resolves and smoke-tests the command-line binaries (`--version`, `status`, a `get_status` request to the engine) before packing. Pull requests that change the packaging and manual runs build the packages as artifacts; a `v*` tag matching the workspace version creates a draft release.
 
 The workflow uses the current Rust stable from `rustup` and logs the exact toolchain version. Its only third-party code is `actions/checkout`, pinned to a commit SHA. Jobs have timeouts and read-only repository permissions.
@@ -182,6 +182,27 @@ What the baseline shows:
 - `cargo run --release -p streamforge-cli -- --output-dir /tmp record --file-name take.mkv --duration-ms 60000 [--screen] [--input <name>]`: a real recording; check `frames_dropped`, `blocks_dropped`, `gap_samples` and the compositor's late frames, then `ffprobe` the file.
 - `STREAMFORGE_STREAM_KEY=… cargo run --release -p streamforge-cli -- --output-dir /tmp stream --url rtmp://127.0.0.1:1935/live --duration-ms 60000 [--record both.mkv]` against a local ingest (e.g. `ffmpeg -listen 1 -i rtmp://127.0.0.1:1935/live/x -c copy -f flv out.flv`): check the dropped frames of both outputs and the compositor's late frames.
 - Record CPU model, OS, build profile and thread count with every result (see ADR 0003).
+
+### Soak test (`streamforge-soak`, M13)
+
+`cargo build --release -p streamforge-engine -p streamforge-soak`, then `target/release/streamforge-soak [--seconds 3600] [--screen] [--input <name>]… [--url rtmp://host/app/name] [--video-encoder auto|software|hardware] [--output-dir .] [--keep] [--json]`
+
+- **What runs:** the release `streamforge-engine` (next to the harness, or `--engine`) as a child process, driven over the JSON-lines protocol like any client, so the shipped binary and protocol are tested and the engine's own resources are measured.
+  - Setup: one channel per `--input` (e.g. a sink's `.monitor` for desktop audio, next to the default tone), the preview on, and with `--screen` a screen source on the active scene: the system picker asks once, so someone must be there at the start.
+  - Then a recording and a stream for `--seconds`. The stream goes to an in-process RTMP ingest, or with `--url` to a server (e.g. MediaMTX) that the harness reads the stream back from as a player would; the URL's last segment is sent as the stream key.
+  - While they run, it polls as the desktop does: `get_status` and `get_mixer` every 100 ms, `get_health` every 250 ms, `list_scenes` every 2 s.
+- **Files** in `--output-dir` (not a tmpfs: an hour of 1080p60 is several GB): `soak-<unix time>.mkv`, deleted after a passing run unless `--keep`; `.engine.log`, the engine's stderr; `.jsonl`, the timeline: the setup, a sample every 10 s (engine RSS, CPU, threads, file descriptors, the host's load average, the health counters), every event as it happens, and the result.
+- **Events:** each growth of a loss counter (compositor ticks skipped, mixer blocks skipped, input underruns and overruns, frames and blocks an output dropped) and each change of an output's or capture's state, with its time; also printed on stderr. Drops of a stream before its first video frame are marked as by design.
+- **Checks** (any `FAIL` fails the run, exit status 1):
+  - **outputs:** the recording stays `running` and the stream `connected` to the end, the stream connects once and never reconnects, both stops succeed, and the engine exits cleanly when stdin closes.
+  - **recording loss / stream loss:** no dropped frames or audio blocks, no gap samples, no discontinuities, nothing undelivered, from the stop reports. A stream's drops before its first video frame (by design, so both start together) do not count unless it disconnected.
+  - **render / mix:** no skipped compositor ticks, no skipped mixer blocks, and no input underruns or overruns while the outputs ran. Late frames and blocks, render times, each input's drift, buffer fill and drift correction (trimmed frames) are reported, not judged.
+  - **captures:** no capture ended.
+  - **memory:** after a 5-minute warm-up, the median engine RSS of the last 10 minutes is at most 16 MiB above the median of the first 10 minutes after the warm-up (two 1080p BGRA frames; a leak of about 100 bytes per frame exceeds it in an hour). The least-squares slope is reported in MiB/h. Runs shorter than 25 minutes are not judged.
+  - **threads and fds:** the highest count in the last 10 minutes does not exceed the highest in the first 10 minutes after the warm-up.
+  - **file:** the recording decodes from start to end without decoder errors, frames out of order or gaps over 1.5 frame durations; as many frames as the report encoded; each audio track within 2048 samples of its encoded count and within 50 ms of the video at both ends.
+  - **stream delivery:** both tracks arrive, starting with a key frame, audio and video end within 150 ms of each other. At the local ingest, as many video packets as were delivered; read back from a server, which the reader joins late, no gaps over 1.5 frame durations and at least the run's length less 10 s.
+- **Limits:** memory, threads, descriptors and CPU are read from Linux's `/proc`; elsewhere those checks are skipped. Interrupting the harness (Ctrl+C) also ends the engine, and the recording is not finalized.
 
 ## Reliability requirements
 

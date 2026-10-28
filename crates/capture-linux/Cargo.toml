@@ -15,4 +15,6 @@ futures-lite = "2"
 pipewire = { version = "0.10", features = ["v0_3_49"] }
 serde_json.workspace = true
 capture-api = { path = "../capture-api" }
+# Camera frames: YUV layouts and MJPEG into BGRX (ADR 0019).
+frame-decode = { path = "../frame-decode" }
 media-core = { path = "../media-core" }

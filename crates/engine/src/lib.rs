@@ -28,8 +28,9 @@ use std::sync::Arc;
 
 use capture_api::{Capture, CaptureCapabilities};
 use command_api::{
-    AudioGraphSpec, AudioInputList, AudioOutputList, CaptureTargetList, Command, CommandError,
-    CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles,
+    AudioGraphSpec, AudioInputList, AudioOutputList, CameraList, CaptureTargetList, Command,
+    CommandError, CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode,
+    OutputProfiles,
 };
 use media_core::FrameMailbox;
 
@@ -164,6 +165,12 @@ impl CommandHandler for Engine {
                 .audio
                 .audio_outputs()
                 .map(|outputs| CommandOutput::AudioOutputs(AudioOutputList { outputs }))
+                .map_err(CommandError::from),
+            Command::ListCameras => self
+                .capture
+                .camera
+                .cameras()
+                .map(|cameras| CommandOutput::Cameras(CameraList { cameras }))
                 .map_err(CommandError::from),
             Command::ListCaptureTargets => self
                 .capture

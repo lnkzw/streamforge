@@ -114,7 +114,7 @@ const LIST_COMMANDS: CommandDescriptor = CommandDescriptor {
 
 const GET_CAPTURE_CAPABILITIES: CommandDescriptor = CommandDescriptor {
     name: "get_capture_capabilities",
-    summary: "Query screen and audio capture capabilities of the running system.",
+    summary: "Query screen, audio and camera capture capabilities of the running system.",
     access: CommandAccess::ReadOnly,
     destructive: false,
     open_world: false,
@@ -131,6 +131,14 @@ const LIST_AUDIO_INPUTS: CommandDescriptor = CommandDescriptor {
 const LIST_AUDIO_OUTPUTS: CommandDescriptor = CommandDescriptor {
     name: "list_audio_outputs",
     summary: "List audio output devices, for the monitor (set_monitor_device).",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
+const LIST_CAMERAS: CommandDescriptor = CommandDescriptor {
+    name: "list_cameras",
+    summary: "List cameras (camera_id, name) and the modes each offers (width, height, fps).",
     access: CommandAccess::ReadOnly,
     destructive: false,
     open_world: false,
@@ -541,6 +549,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     LIST_AUDIO_INPUTS,
     LIST_AUDIO_OUTPUTS,
     LIST_CAPTURE_TARGETS,
+    LIST_CAMERAS,
     PROBE_SCREEN_CAPTURE,
     PROBE_AUDIO_CAPTURE,
     PROBE_COMPOSITE,
@@ -646,6 +655,7 @@ impl Command {
             "set_capture_target" => decode_set_capture_target(name, params),
             "list_projects" => expect_no_params(name, params).map(|()| Self::ListProjects),
             "list_images" => expect_no_params(name, params).map(|()| Self::ListImages),
+            "list_cameras" => expect_no_params(name, params).map(|()| Self::ListCameras),
             "save_project" => decode_save_project(name, params).map(Self::SaveProject),
             "load_project" => {
                 decode_project_file(name, params).map(|file_name| Self::LoadProject { file_name })
@@ -747,6 +757,7 @@ impl Command {
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::ListProjects => &LIST_PROJECTS,
             Self::ListImages => &LIST_IMAGES,
+            Self::ListCameras => &LIST_CAMERAS,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
             Self::ValidateProject { .. } => &VALIDATE_PROJECT,
@@ -2432,7 +2443,8 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "get_mixer"
         | "get_output_profiles"
         | "list_projects"
-        | "list_images" => {
+        | "list_images"
+        | "list_cameras" => {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
         _ => return None,
@@ -2733,6 +2745,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(decode("list_images", json!({})), Ok(Command::ListImages));
+        assert_eq!(decode("list_cameras", json!({})), Ok(Command::ListCameras));
+        assert!(decode("list_cameras", json!({"all": true})).is_err());
         assert!(decode("list_images", json!({"dir": "/tmp"})).is_err());
         assert_eq!(
             Command::ListImages.required_access(),
@@ -3924,6 +3938,8 @@ mod tests {
             Some(CommandAccess::ReadOnly)
         );
         assert_eq!(access("list_audio_inputs"), Some(CommandAccess::ReadOnly));
+        // Camera names are device names, like audio inputs.
+        assert_eq!(access("list_cameras"), Some(CommandAccess::ReadOnly));
         assert_eq!(access("get_health"), Some(CommandAccess::ReadOnly));
         // Restarting starts a capture again, like adding a screen source.
         assert_eq!(access("restart_source"), Some(CommandAccess::Sensitive));

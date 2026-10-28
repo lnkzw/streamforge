@@ -765,6 +765,7 @@ dependencies = [
  "ashpd",
  "async-io",
  "capture-api",
+ "frame-decode",
  "futures-lite",
  "media-core",
  "pipewire",

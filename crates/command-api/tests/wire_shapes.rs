@@ -20,21 +20,22 @@ use audio_engine::{
 };
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioFormatInfo, AudioInput, AudioOutput,
-    AudioStats, CaptureCapabilities, CaptureError, CaptureErrorKind, CaptureState, CursorMode,
-    IntervalStats, Rational, ScreenCaptureCapability, ScreenSource, VideoCaptureReport,
-    VideoFormatInfo, VideoSourceInfo, VideoSourceKind, VideoStats,
+    AudioStats, Camera, CameraCaptureCapability, CameraMode, CaptureCapabilities, CaptureError,
+    CaptureErrorKind, CaptureState, CursorMode, IntervalStats, Rational, ScreenCaptureCapability,
+    ScreenSource, VideoCaptureReport, VideoFormatInfo, VideoSourceInfo, VideoSourceKind,
+    VideoStats,
 };
 use command_api::{
-    AudioInputList, AudioOutputList, BusState, CaptureHealth, CaptureKind, CaptureOutcome,
-    CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandAccess, CommandList,
-    CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary, HealthReport,
-    ImageFileInfo, ImageFileList, MixReport, MixerState, MonitorHealth, MonitorProfile,
-    OutputHealth, OutputKind, OutputMix, OutputProfileSet, OutputProfiles, PipelineReport,
-    PreviewState, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem, ProjectSaved,
-    ProjectValidation, RecordingProfile, RecordingReport, RecordingStarted, RecordingState, Rgba,
-    SceneCaptureOutcome, SceneList, SceneSpec, SendSpec, SendTap, SnapshotResult, SourceKind,
-    SourceRect, SourceSpec, StopFailure, StreamProfile, StreamingReport, StreamingStarted,
-    registry,
+    AudioInputList, AudioOutputList, BusState, CameraList, CaptureHealth, CaptureKind,
+    CaptureOutcome, CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandAccess,
+    CommandList, CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary,
+    HealthReport, ImageFileInfo, ImageFileList, MixReport, MixerState, MonitorHealth,
+    MonitorProfile, OutputHealth, OutputKind, OutputMix, OutputProfileSet, OutputProfiles,
+    PipelineReport, PreviewState, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem,
+    ProjectSaved, ProjectValidation, RecordingProfile, RecordingReport, RecordingStarted,
+    RecordingState, Rgba, SceneCaptureOutcome, SceneList, SceneSpec, SendSpec, SendTap,
+    SnapshotResult, SourceKind, SourceRect, SourceSpec, StopFailure, StreamProfile,
+    StreamingReport, StreamingStarted, registry,
 };
 use encoder_api::{
     AudioTrackStats, EncoderPreference, LiveConnectionStats, LiveOutputStats, RecordingStats,
@@ -415,6 +416,20 @@ fn samples() -> Vec<(&'static [&'static str], Value)> {
                     modified_unix_ms: Some(1_761_500_000_000),
                 }],
                 omitted: 0,
+            })),
+        ),
+        (
+            &["list_cameras"],
+            output(CommandOutput::Cameras(CameraList {
+                cameras: vec![Camera {
+                    camera_id: "v4l2_input.pci-0000_00_14.0-usb-0_1_1.0".to_owned(),
+                    name: "USB Camera".to_owned(),
+                    modes: vec![CameraMode {
+                        width: 1280,
+                        height: 720,
+                        fps: Rational { num: 30, den: 1 },
+                    }],
+                }],
             })),
         ),
         (
@@ -1013,6 +1028,11 @@ fn capabilities() -> CaptureCapabilities {
             available: true,
             unavailable_reason: Some("no audio server".to_owned()),
             server_version: Some("1.4.0".to_owned()),
+        },
+        camera: CameraCaptureCapability {
+            backend: Some("pipewire".to_owned()),
+            available: true,
+            unavailable_reason: Some("no camera service".to_owned()),
         },
     }
 }

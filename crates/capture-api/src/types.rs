@@ -67,6 +67,8 @@ pub struct CaptureCapabilities {
     pub session_type: Option<String>,
     pub screen: ScreenCaptureCapability,
     pub audio: AudioCaptureCapability,
+    /// Added in M14 step 4b (ADR 0019).
+    pub camera: CameraCaptureCapability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

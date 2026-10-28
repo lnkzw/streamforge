@@ -8,7 +8,7 @@ use capture_api::Capture;
 
 /// Capture parts for the platform this binary was built for.
 pub fn capture() -> Capture {
-    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let camera = Box::new(capture_api::UnsupportedCapture::new(format!(
         "camera capture is not implemented on {} yet",
         std::env::consts::OS
@@ -18,7 +18,7 @@ pub fn capture() -> Capture {
         Capture {
             screen: Box::new(capture_linux::PortalScreen::new()),
             audio: Box::new(capture_linux::PipeWireAudio::new()),
-            camera,
+            camera: Box::new(capture_linux::PipeWireCamera::new()),
         }
     }
     #[cfg(target_os = "windows")]

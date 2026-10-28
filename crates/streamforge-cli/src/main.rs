@@ -143,6 +143,8 @@ enum CaptureCommand {
     Inputs,
     /// List monitors and windows that can be captured by id (where the platform allows it).
     Targets,
+    /// List cameras and the modes each offers.
+    Cameras,
     /// Capture a screen or window and report diagnostics: the --capture-target-id target, or the one
     /// chosen in the system dialog.
     Screen {
@@ -451,6 +453,7 @@ fn capture_request(command: CaptureCommand) -> (&'static str, Map<String, Value>
         CaptureCommand::Caps => "get_capture_capabilities",
         CaptureCommand::Inputs => "list_audio_inputs",
         CaptureCommand::Targets => "list_capture_targets",
+        CaptureCommand::Cameras => "list_cameras",
         CaptureCommand::Screen {
             duration_ms,
             capture_target_id,

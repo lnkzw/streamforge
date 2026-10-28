@@ -294,7 +294,7 @@ fn report(input: Option<String>, run: AudioRun) -> AudioCaptureReport {
     }
 }
 
-/// `target` is the resolved `request.input` (see `LinuxCapture::check_input`).
+/// `target` is the resolved `request.input` (see `PipeWireAudio::check_input`).
 pub(crate) fn probe(
     request: &AudioCaptureRequest,
     target: Option<Target>,

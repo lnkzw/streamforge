@@ -18,10 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioCaptureRequest, AudioStreamRequest, CaptureBackend, CaptureErrorKind, CaptureState,
-    PlaybackRequest,
+    AudioCaptureRequest, AudioDevices, AudioStreamRequest, CaptureErrorKind, CaptureState,
+    PlaybackRequest, ScreenCapture,
 };
-use capture_linux::LinuxCapture;
+use capture_linux::{PipeWireAudio, PortalScreen};
 use media_core::sample_ring;
 use pipewire as pw;
 
@@ -42,16 +42,12 @@ fn capabilities_report_running_services() {
     if !session_available() {
         return;
     }
-    let caps = LinuxCapture::new().capabilities();
-    assert_eq!(caps.platform, "linux");
-    assert!(caps.audio.available, "{:?}", caps.audio.unavailable_reason);
-    assert!(caps.audio.server_version.is_some());
-    assert!(
-        caps.screen.available,
-        "{:?}",
-        caps.screen.unavailable_reason
-    );
-    assert!(!caps.screen.target_kinds.is_empty());
+    let caps = PipeWireAudio::new().capability();
+    assert!(caps.available, "{:?}", caps.unavailable_reason);
+    assert!(caps.server_version.is_some());
+    let screen = PortalScreen::new().capability();
+    assert!(screen.available, "{:?}", screen.unavailable_reason);
+    assert!(!screen.target_kinds.is_empty());
 }
 
 #[test]
@@ -60,7 +56,7 @@ fn audio_inputs_are_listed_with_names() {
     if !session_available() {
         return;
     }
-    let inputs = LinuxCapture::new().audio_inputs().expect("list inputs");
+    let inputs = PipeWireAudio::new().audio_inputs().expect("list inputs");
     for input in &inputs {
         assert!(!input.name.is_empty());
         assert!(input.media_class.starts_with("Audio/"), "{input:?}");
@@ -74,7 +70,7 @@ fn audio_probe_reports_format_and_positions() {
     if !session_available() {
         return;
     }
-    let mut backend = LinuxCapture::new();
+    let mut backend = PipeWireAudio::new();
     let Some(input) = backend
         .audio_inputs()
         .expect("list inputs")
@@ -106,7 +102,7 @@ fn unknown_audio_input_is_not_found() {
     if !session_available() {
         return;
     }
-    let err = LinuxCapture::new()
+    let err = PipeWireAudio::new()
         .probe_audio(&AudioCaptureRequest {
             input: Some("streamforge.test.does-not-exist".into()),
             duration: Duration::from_millis(100),
@@ -122,7 +118,7 @@ fn audio_outputs_are_listed_with_their_monitors() {
     if !session_available() {
         return;
     }
-    let mut backend = LinuxCapture::new();
+    let mut backend = PipeWireAudio::new();
     let outputs = backend.audio_outputs().expect("list outputs");
     let inputs = backend.audio_inputs().expect("list inputs");
     for output in &outputs {
@@ -152,7 +148,7 @@ fn unknown_audio_output_is_not_found() {
         rate: 48_000,
         channels: 2,
     };
-    let Err(err) = LinuxCapture::new().start_playback(&request, reader) else {
+    let Err(err) = PipeWireAudio::new().start_playback(&request, reader) else {
         panic!("played on an unknown output");
     };
     assert_eq!(err.kind, CaptureErrorKind::NotFound);
@@ -245,7 +241,7 @@ fn playback_plays_on_a_sink_and_ends_with_it() {
         return;
     }
     let mut sink = TestSink::create();
-    let mut backend = LinuxCapture::new();
+    let mut backend = PipeWireAudio::new();
     assert!(
         wait_until(Duration::from_secs(3), || {
             let outputs = backend.audio_outputs().expect("list outputs");
@@ -334,7 +330,7 @@ fn an_output_gone_since_the_listing_does_not_fall_back_to_the_default() {
         return;
     }
     let mut sink = TestSink::create();
-    let mut backend = LinuxCapture::new();
+    let mut backend = PipeWireAudio::new();
     assert!(
         wait_until(Duration::from_secs(3), || {
             let outputs = backend.audio_outputs().expect("list outputs");

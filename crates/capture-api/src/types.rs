@@ -99,6 +99,49 @@ impl ScreenCaptureCapability {
     }
 }
 
+/// Whether cameras can be listed and captured, and through what.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraCaptureCapability {
+    pub backend: Option<String>,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+impl CameraCaptureCapability {
+    pub fn unavailable(backend: Option<&str>, reason: impl Into<String>) -> Self {
+        Self {
+            backend: backend.map(str::to_owned),
+            available: false,
+            unavailable_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// A camera that can be captured by its id (ADR 0019).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Camera {
+    pub camera_id: String,
+    pub name: String,
+    pub modes: Vec<CameraMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraMode {
+    pub width: u32,
+    pub height: u32,
+    pub fps: Rational,
+}
+
+/// What to capture from a camera; without a size or rate the backend chooses
+/// (ADR 0019 "Mode choice").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraRequest {
+    pub camera_id: String,
+    /// Width and height.
+    pub size: Option<(u32, u32)>,
+    pub fps: Option<Rational>,
+}
+
 /// A screen source that can be captured by its [`ScreenSource::id`]
 /// without a picker. Names (e.g. window titles) can reveal private
 /// content, so listing them needs the same access as capturing.

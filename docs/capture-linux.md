@@ -1,19 +1,19 @@
 # Linux capture backend (M2 spike)
 
-`crates/capture-linux` implements the platform-neutral `capture_api::CaptureBackend` on Linux:
+`crates/capture-linux` implements `ScreenCapture` as `PortalScreen` and `AudioDevices` as `PipeWireAudio` on Linux (traits from `capture-api`):
 
 - **Screen:** the XDG desktop portal (`org.freedesktop.portal.ScreenCast`) shows the compositor's source picker. The selected monitor or window arrives as a PipeWire node, consumed through a portal-provided PipeWire file descriptor.
 - **Audio:** PipeWire source nodes are found through the registry and captured as interleaved F32 at the device's native rate and channel count. The monitor of each sink (what it plays, e.g. desktop audio) is an input too, named `<sink>.monitor` as pipewire-pulse names it, with `loopback_of` set to the sink. It is captured with `stream.capture.sink`.
 - **Playback:** the monitor output (ADR 0017) plays on a sink (`Audio/Sink`) or duplex device; `list_audio_outputs` lists them.
 
-Probes measure and report what arrives. Since M3, a continuous screen stream (`CaptureBackend::start_screen_stream`) also delivers frames to the compositor:
+Probes measure and report what arrives. Since M3, a continuous screen stream (`ScreenCapture::start_screen_stream`) also delivers frames to the compositor:
 - a dedicated `screen-capture` thread runs the PipeWire loop
 - each frame is converted to Bgrx8 (or premultiplied Bgra8) in one of 4 pooled buffers
 - frames are published to a latest-frame `FrameMailbox`
 
-Since M4, a continuous audio stream (`CaptureBackend::start_audio_stream`) feeds the mixer. A dedicated `audio-capture` thread requests 48 kHz stereo F32 from PipeWire, which converts if needed, and pushes into a 1 s `AudioRing`.
+Since M4, a continuous audio stream (`AudioDevices::start_audio_stream`) feeds the mixer. A dedicated `audio-capture` thread requests 48 kHz stereo F32 from PipeWire, which converts if needed, and pushes into a 1 s `AudioRing`.
 
-Since M11 (step 5b), playback (`CaptureBackend::start_playback`) plays the monitor's feed:
+Since M11 (step 5b), playback (`AudioDevices::start_playback`) plays the monitor's feed:
 - An `audio-playback` thread runs the PipeWire loop of an output stream in 48 kHz stereo F32. PipeWire converts to the sink's format.
 - The stream asks for a 512-frame period (`node.latency`, about 11 ms). That sets the quantum of the whole PipeWire graph while the monitor's device is open, so it is not lower than needed: the engine's feed holds at least two 10 ms mixer blocks anyway, and a smaller period would barely lower the delay. PipeWire may run a larger quantum. The feed sizes its buffering by the pulls it sees.
 - The process callback runs on PipeWire's real-time thread (`RT_PROCESS`). It reads exactly the frames PipeWire asks for (`pw_buffer.requested`) from the lock-free `SampleReader`, through a buffer allocated before the stream starts. It does not lock, wait or allocate. The reader plays silence when the feed runs short and counts it.

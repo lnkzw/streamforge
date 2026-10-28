@@ -12,11 +12,9 @@ use std::thread;
 use std::time::Instant;
 
 use capture_api::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
-    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
-    CaptureState, CursorMode, FrameSink, MappedFrame, ScreenCaptureCapability,
-    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
-    VideoSourceKind, VideoStream,
+    CaptureError, CaptureErrorKind, CaptureState, CursorMode, FrameSink, MappedFrame,
+    ScreenCapture, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
+    VideoCaptureReport, VideoSourceInfo, VideoSourceKind, VideoStream,
 };
 use media_core::FrameMailbox;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
@@ -82,23 +80,9 @@ fn screen_capability() -> ScreenCaptureCapability {
     }
 }
 
-fn audio_elsewhere() -> CaptureError {
-    CaptureError::unsupported("audio capture is provided by the cpal backend, not by this one")
-}
-
-impl CaptureBackend for WgcCapture {
-    fn capabilities(&mut self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            platform: std::env::consts::OS.to_owned(),
-            desktop: None,
-            session_type: None,
-            screen: screen_capability(),
-            audio: AudioCaptureCapability::unavailable(None, audio_elsewhere().message),
-        }
-    }
-
-    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        Err(audio_elsewhere())
+impl ScreenCapture for WgcCapture {
+    fn capability(&mut self) -> ScreenCaptureCapability {
+        screen_capability()
     }
 
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
@@ -149,25 +133,11 @@ impl CaptureBackend for WgcCapture {
         Box::new(stream).stop()
     }
 
-    fn probe_audio(
-        &mut self,
-        _request: &AudioCaptureRequest,
-    ) -> Result<AudioCaptureReport, CaptureError> {
-        Err(audio_elsewhere())
-    }
-
     fn start_screen_stream(
         &mut self,
         selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError> {
         Ok(Box::new(start(selection, true)?))
-    }
-
-    fn start_audio_stream(
-        &mut self,
-        _request: &AudioStreamRequest,
-    ) -> Result<Box<dyn capture_api::AudioStream>, CaptureError> {
-        Err(audio_elsewhere())
     }
 }
 

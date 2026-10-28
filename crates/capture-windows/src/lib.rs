@@ -1,7 +1,7 @@
 //! Native screen capture on Windows (Windows.Graphics.Capture).
 //!
 //! Monitors and top-level windows are listed by
-//! [`capture_api::CaptureBackend::screen_sources`] and captured by id;
+//! [`capture_api::ScreenCapture::screen_sources`] and captured by id;
 //! there is no system picker yet. Audio comes from `capture-cpal`
 //! (`capture-platform` combines the two). Only the id format builds on
 //! other platforms, so it is tested everywhere.

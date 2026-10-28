@@ -57,7 +57,7 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let mut engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+    let mut engine = Engine::with_capture(capture_platform::capture()).with_output_dir(output_dir);
     if let Some(dir) = project_dir {
         engine = engine.with_project_dir(dir);
     }

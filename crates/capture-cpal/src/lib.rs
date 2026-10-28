@@ -1,7 +1,7 @@
 //! Audio capture and playback through cpal: WASAPI on Windows, CoreAudio
 //! on macOS.
 //!
-//! [`CpalCapture`] implements the audio half of [`capture_api::CaptureBackend`]
+//! [`CpalCapture`] implements [`capture_api::AudioDevices`]
 //! (inputs, probes, continuous streams into a bounded `AudioRing`; outputs
 //! and playback of the monitor's feed). Screen capture comes from
 //! `capture-windows` and `capture-macos`; `capture-platform` combines them

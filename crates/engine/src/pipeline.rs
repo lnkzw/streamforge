@@ -21,8 +21,8 @@ use audio_engine::{
     MixerThread, PlaybackFeed, RATE,
 };
 use capture_api::{
-    AudioStream, CaptureBackend, CaptureErrorKind, CaptureState, PlaybackRequest, PlaybackStream,
-    ScreenSelection, VideoStream,
+    AudioDevices, AudioStream, Capture, CaptureErrorKind, CaptureState, PlaybackRequest,
+    PlaybackStream, ScreenCapture, ScreenSelection, VideoStream,
 };
 use command_api::{
     AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
@@ -92,7 +92,7 @@ impl DeviceCapture {
     /// stream from starting. Every other error (no permission, no audio
     /// server) fails the start, since the user has to act.
     fn start(
-        capture: &mut dyn CaptureBackend,
+        capture: &mut dyn AudioDevices,
         device: &Option<String>,
     ) -> Result<Self, CommandError> {
         match mix::start_device(capture, device) {
@@ -151,7 +151,7 @@ fn label(device: &Option<String>, default: &str) -> String {
 /// back into the mix. The default output is not compared, as its name is
 /// not known here. Lists the inputs only when a channel captures a device.
 fn feedback_warnings(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn AudioDevices,
     audio: &AudioGraphSpec,
     device: &Option<String>,
 ) -> Vec<String> {
@@ -237,16 +237,16 @@ impl MonitorPlayback {
 
 impl Pipeline {
     pub fn start(
-        capture: &mut dyn CaptureBackend,
+        capture: &mut Capture,
         scene: &SceneSpec,
         images: &ImageStore,
         audio: AudioGraphSpec,
     ) -> Result<Self, CommandError> {
-        let scene_screens = start_screens(capture, scene, &[])?;
+        let scene_screens = start_screens(capture.screen.as_mut(), scene, &[])?;
         // On an error, the captures already started are dropped, which
         // stops them.
         let audio_streams = audio::devices(&audio)
-            .map(|(_, device)| DeviceCapture::start(capture, device))
+            .map(|(_, device)| DeviceCapture::start(capture.audio.as_mut(), device))
             .collect::<Result<Vec<_>, _>>()?;
         let fanout = Arc::new(Fanout::default());
         let mut cache = FrameCache::default();
@@ -303,7 +303,7 @@ impl Pipeline {
     /// affected), or channels that capture the device's own playback.
     pub fn monitor_on(
         &mut self,
-        capture: &mut dyn CaptureBackend,
+        capture: &mut dyn AudioDevices,
         device: &Option<String>,
         mix: usize,
     ) -> Vec<String> {
@@ -453,7 +453,7 @@ impl Pipeline {
     /// nothing changes.
     pub fn apply_scene(
         &mut self,
-        capture: &mut dyn CaptureBackend,
+        capture: &mut dyn ScreenCapture,
         scene: &SceneSpec,
         images: &ImageStore,
         keep: &[String],
@@ -522,7 +522,7 @@ impl Pipeline {
     /// keeps running (a new one that started first is stopped and reported).
     pub fn restart_screen(
         &mut self,
-        capture: &mut dyn CaptureBackend,
+        capture: &mut dyn ScreenCapture,
         rendered: &SceneSpec,
         images: &ImageStore,
         source: &SourceSpec,
@@ -938,7 +938,7 @@ impl Pipeline {
 /// Start captures for the screen sources of `scene` not in `running`. On
 /// error, the captures started by this call are stopped again.
 fn start_screens(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn ScreenCapture,
     scene: &SceneSpec,
     running: &[SceneCapture],
 ) -> Result<Vec<SceneCapture>, CommandError> {

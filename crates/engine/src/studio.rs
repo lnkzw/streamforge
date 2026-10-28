@@ -79,7 +79,7 @@ impl Engine {
                 || changed_image.is_some_and(|file| scenes::shows_image(active, file))
             {
                 if let Err(error) = pipeline.apply_scene(
-                    self.capture.as_mut(),
+                    self.capture.screen.as_mut(),
                     active,
                     &self.images,
                     &keep,
@@ -215,7 +215,7 @@ impl Engine {
         let (allow_new_captures, keep) = self.capture_policy();
         let restarted = match &mut self.pipeline {
             Some(pipeline) => pipeline.restart_screen(
-                self.capture.as_mut(),
+                self.capture.screen.as_mut(),
                 self.scenes.active(),
                 &self.images,
                 &source,
@@ -424,7 +424,7 @@ impl Engine {
                 match request.enabled {
                     Some(true) => {
                         warnings = pipeline.monitor_on(
-                            self.capture.as_mut(),
+                            self.capture.audio.as_mut(),
                             &next.monitor.device,
                             column,
                         );

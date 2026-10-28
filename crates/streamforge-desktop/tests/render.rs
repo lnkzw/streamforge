@@ -202,7 +202,11 @@ fn routed_engine(dir: PathBuf) -> Engine {
 /// An engine that lists audio devices (`support`) but captures and plays
 /// nothing.
 fn engine(dir: PathBuf) -> Engine {
-    Engine::with_capture(Box::new(ListedDevices::new())).with_output_dir(dir)
+    Engine::with_capture(capture_api::Capture {
+        audio: Box::new(ListedDevices::new()),
+        ..capture_api::Capture::unsupported("the tests capture nothing")
+    })
+    .with_output_dir(dir)
 }
 
 /// An idle engine whose monitor is on, on a device that is not listed.

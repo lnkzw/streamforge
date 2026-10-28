@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioCaptureRequest, AudioStreamRequest, CaptureBackend, CaptureErrorKind, CaptureState,
+    AudioCaptureRequest, AudioDevices, AudioStreamRequest, CaptureErrorKind, CaptureState,
     PlaybackRequest,
 };
 use capture_cpal::CpalCapture;
@@ -36,22 +36,13 @@ fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
 }
 
 #[test]
-fn capabilities_report_the_platform_and_what_is_missing() {
-    let capabilities = CpalCapture::new().capabilities();
-    assert_eq!(capabilities.platform, std::env::consts::OS);
-    assert!(!capabilities.screen.available);
-    assert!(
-        capabilities
-            .screen
-            .unavailable_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("not part of the cpal backend"))
-    );
-    let backend = capabilities.audio.backend.as_deref().unwrap_or_default();
+fn capability_reports_audio_backend_and_what_is_missing() {
+    let capabilities = CpalCapture::new().capability();
+    let backend = capabilities.backend.as_deref().unwrap_or_default();
     assert!(backend.starts_with("cpal ("), "{backend}");
     assert_eq!(
-        capabilities.audio.available,
-        capabilities.audio.unavailable_reason.is_none()
+        capabilities.available,
+        capabilities.unavailable_reason.is_none()
     );
     println!("{capabilities:#?}");
 }

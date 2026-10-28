@@ -4,9 +4,9 @@
 //! pipeline starts, so its channel runs silent.
 
 use capture_api::{
-    AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput, AudioStream,
-    AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError, CaptureErrorKind,
-    ScreenCaptureRequest, ScreenSelection, UnsupportedCapture, VideoCaptureReport, VideoStream,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,
+    AudioOutput, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
+    UnsupportedCapture,
 };
 
 pub struct ListedDevices(UnsupportedCapture);
@@ -17,9 +17,9 @@ impl ListedDevices {
     }
 }
 
-impl CaptureBackend for ListedDevices {
-    fn capabilities(&mut self) -> CaptureCapabilities {
-        self.0.capabilities()
+impl AudioDevices for ListedDevices {
+    fn capability(&mut self) -> AudioCaptureCapability {
+        self.0.capability()
     }
 
     fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
@@ -48,25 +48,11 @@ impl CaptureBackend for ListedDevices {
         ])
     }
 
-    fn probe_screen(
-        &mut self,
-        request: &ScreenCaptureRequest,
-    ) -> Result<VideoCaptureReport, CaptureError> {
-        self.0.probe_screen(request)
-    }
-
     fn probe_audio(
         &mut self,
         request: &AudioCaptureRequest,
     ) -> Result<AudioCaptureReport, CaptureError> {
         self.0.probe_audio(request)
-    }
-
-    fn start_screen_stream(
-        &mut self,
-        selection: &ScreenSelection,
-    ) -> Result<Box<dyn VideoStream>, CaptureError> {
-        self.0.start_screen_stream(selection)
     }
 
     fn start_audio_stream(
@@ -80,5 +66,13 @@ impl CaptureBackend for ListedDevices {
                 request.input.as_deref().unwrap_or("the default input")
             ),
         ))
+    }
+
+    fn start_playback(
+        &mut self,
+        request: &capture_api::PlaybackRequest,
+        feed: media_core::SampleReader,
+    ) -> Result<Box<dyn capture_api::PlaybackStream>, CaptureError> {
+        self.0.start_playback(request, feed)
     }
 }

@@ -1,33 +1,44 @@
-//! Selects the capture backend for the target platform.
+//! Selects the capture parts for the target platform.
 //!
-//! The single place that maps `cfg(target_os)` to a [`CaptureBackend`], so
+//! The single place that maps `cfg(target_os)` to a [`Capture`], so
 //! every composition root (CLI, headless engine, UI, MCP server) uses the
-//! same one. See `docs/platforms.md` for what each backend offers.
+//! same parts. See `docs/platforms.md` for what each backend offers.
 
-use capture_api::CaptureBackend;
+use capture_api::Capture;
 
-/// Capture backend for the platform this binary was built for.
-pub fn backend() -> Box<dyn CaptureBackend> {
+/// Capture parts for the platform this binary was built for.
+pub fn capture() -> Capture {
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    let camera = Box::new(capture_api::UnsupportedCapture::new(format!(
+        "camera capture is not implemented on {} yet",
+        std::env::consts::OS
+    )));
     #[cfg(target_os = "linux")]
     {
-        Box::new(capture_linux::LinuxCapture::new())
+        Capture {
+            screen: Box::new(capture_linux::PortalScreen::new()),
+            audio: Box::new(capture_linux::PipeWireAudio::new()),
+            camera,
+        }
     }
     #[cfg(target_os = "windows")]
     {
-        Box::new(capture_api::SplitCapture {
-            video: capture_windows::WgcCapture::new(),
-            audio: capture_cpal::CpalCapture::new(),
-        })
+        Capture {
+            screen: Box::new(capture_windows::WgcCapture::new()),
+            audio: Box::new(capture_cpal::CpalCapture::new()),
+            camera,
+        }
     }
     #[cfg(target_os = "macos")]
     {
-        Box::new(capture_api::SplitCapture {
-            video: capture_macos::SckCapture::new(),
-            audio: capture_cpal::CpalCapture::new(),
-        })
+        Capture {
+            screen: Box::new(capture_macos::SckCapture::new()),
+            audio: Box::new(capture_cpal::CpalCapture::new()),
+            camera,
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
-        Box::new(capture_api::UnsupportedCapture::for_current_platform())
+        Capture::for_unsupported_platform()
     }
 }

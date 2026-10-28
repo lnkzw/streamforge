@@ -66,6 +66,8 @@ Protocol v1 is stable since 0.1.0 (`docs/protocol.md`), so everything below is a
 
 The engine takes a set of the three (`Capture { screen, audio, camera }`). `capture-platform` builds it per system, and every part that a system lacks is an unsupported implementation with a reason. `SplitCapture` and the half-implemented methods that return `unsupported` go away. The split itself changes no behaviour and is its own step.
 
+Implemented in step 4a: each trait answers one capability (`capability`), and the camera's joins `get_capture_capabilities` in step 4b. The traits are `Send`, so `Capture::capabilities` queries screen and audio in parallel (the screen on the calling thread), as the Linux backend did before. `desktop` and `session_type` come from the environment on every system. The Linux parts are `PortalScreen` and `PipeWireAudio`.
+
 ### Cameras per system
 
 - **Linux:** PipeWire directly, as the audio inputs already are. Cameras are the `Video/Source` nodes that WirePlumber creates for V4L2 and libcamera devices, told apart from screen-cast nodes by their device API and role. This covers libcamera (MIPI) cameras that V4L2 alone does not, and other applications can use the camera at the same time.

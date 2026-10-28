@@ -60,9 +60,12 @@ fn model(dir: &TempDir) -> Model {
     let out = dir.0.clone();
     let worker = EngineWorker::spawn(
         move || {
-            Engine::with_capture(Box::new(ListedDevices::new()))
-                .with_output_dir(&out)
-                .with_project_dir(out)
+            Engine::with_capture(capture_api::Capture {
+                audio: Box::new(ListedDevices::new()),
+                ..capture_api::Capture::unsupported("the tests capture nothing")
+            })
+            .with_output_dir(&out)
+            .with_project_dir(out)
         },
         || {},
     )

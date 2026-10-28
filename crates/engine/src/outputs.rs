@@ -156,7 +156,7 @@ impl Engine {
             None => {
                 // Every run mixes the configured channels (ADR 0017).
                 let mut pipeline = Pipeline::start(
-                    self.capture.as_mut(),
+                    &mut self.capture,
                     self.scenes.active(),
                     &self.images,
                     self.audio.clone(),
@@ -167,7 +167,7 @@ impl Engine {
                     // start.
                     let column = mix_column(&pipeline, &self.profiles, OutputKind::Monitor);
                     pipeline.monitor_on(
-                        self.capture.as_mut(),
+                        self.capture.audio.as_mut(),
                         &self.profiles.monitor.device,
                         column,
                     );

@@ -945,11 +945,17 @@ mod tests {
         wait_until("a first snapshot", || compositor.live().frames_rendered > 0);
         let held = compositor.live.lock().expect("lock");
         let before = times.lock().expect("lock").len();
-        thread::sleep(Duration::from_millis(300));
-        let during = times.lock().expect("lock").len() - before;
+        // Ten frames while the snapshot stays locked; a renderer that waited
+        // for the lock would render none. Bounded, not timed: a loaded
+        // runner may render slower than 100 FPS.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let rendered = || times.lock().expect("lock").len() - before;
+        while rendered() < 10 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let during = rendered();
         drop(held);
         compositor.stop().expect("stop");
-        // About 30 frames at 100 FPS; rendering went on with the snapshot locked.
         assert!(
             during >= 10,
             "only {during} frames while the snapshot was held"

@@ -5,7 +5,7 @@
 //! sources (static frames are cached so unchanged sources keep their state
 //! across live updates).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use command_api::{
@@ -16,6 +16,7 @@ use command_api::{
 use media_core::{FrameMailbox, VideoFrame};
 
 use crate::ids::new_id;
+use crate::images::ImageStore;
 use crate::refs::{self, Kind, mismatch, not_found, not_found_id};
 use video_compositor::{
     Animation, Layer, Rect, Scene, SceneUpdate, SourceConfig, SourceId, SourceInput, Transform,
@@ -101,6 +102,19 @@ impl SceneCollection {
         self.sources()
             .filter(|source| matches!(source.kind, SourceKind::Screen { .. }))
             .map(|source| source.id.clone())
+            .collect()
+    }
+
+    /// The files image sources in any scene show.
+    pub fn image_files(&self) -> HashSet<&str> {
+        self.sources().filter_map(image_file).collect()
+    }
+
+    /// Names of the image sources showing `file`, in any scene.
+    pub fn sources_showing(&self, file: &str) -> Vec<&str> {
+        self.sources()
+            .filter(|source| image_file(source) == Some(file))
+            .map(|source| source.name.as_str())
             .collect()
     }
 
@@ -270,6 +284,18 @@ impl SceneCollection {
     pub fn update_source(&mut self, request: &UpdateSourceRequest) -> Result<(), CommandError> {
         let (scene, index) = self.source_index(&request.source)?;
         let source = &mut self.scenes[scene].sources[index];
+        if let Some(file) = &request.file {
+            let SourceKind::Image { file: shown } = &mut source.kind else {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "`{}` is not an image source; only image sources have a `file`",
+                        source.name
+                    ),
+                ));
+            };
+            shown.clone_from(file);
+        }
         let rect = &mut source.rect;
         rect.x = request.x.unwrap_or(rect.x);
         rect.y = request.y.unwrap_or(rect.y);
@@ -345,6 +371,22 @@ impl SceneCollection {
     }
 }
 
+/// The file `source` shows, if it is an image source.
+fn image_file(source: &SourceSpec) -> Option<&str> {
+    match &source.kind {
+        SourceKind::Image { file } => Some(file),
+        _ => None,
+    }
+}
+
+/// Whether `scene` has an image source showing `file`.
+pub(crate) fn shows_image(scene: &SceneSpec, file: &str) -> bool {
+    scene
+        .sources
+        .iter()
+        .any(|source| image_file(source) == Some(file))
+}
+
 fn full_canvas() -> SourceRect {
     SourceRect {
         x: 0.0,
@@ -391,13 +433,16 @@ impl FrameCache {
     }
 }
 
-/// Live inputs the build can use: screen captures by source id.
+/// Inputs the build can use besides its own static frames: screen captures
+/// by source id, and the image sources' frames.
 pub(crate) struct LiveFrames<'a> {
     pub screens: &'a [(String, Arc<FrameMailbox>)],
+    pub images: &'a ImageStore,
 }
 
 /// Turn `scene` into compositor input. Screen sources without a running
-/// capture are left out.
+/// capture and image sources without a frame (their file was missing when
+/// a project loaded) are left out.
 pub(crate) fn build(
     scene: &SceneSpec,
     live: &LiveFrames<'_>,
@@ -407,7 +452,12 @@ pub(crate) fn build(
     let mut sources = Vec::with_capacity(scene.sources.len());
     for spec in &scene.sources {
         let id = SourceId::from(spec.id.as_str());
-        let rect = spec.rect;
+        let area = Rect {
+            x: spec.rect.x,
+            y: spec.rect.y,
+            width: spec.rect.width,
+            height: spec.rect.height,
+        };
         let (layer, input) = match &spec.kind {
             SourceKind::ColorBars => (
                 stretched(spec, id.clone(), CANVAS_WIDTH, CANVAS_HEIGHT),
@@ -422,15 +472,18 @@ pub(crate) fn build(
                 else {
                     continue;
                 };
-                let area = Rect {
-                    x: rect.x,
-                    y: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                };
                 (
                     Layer::fitted(spec.name.clone(), id.clone(), area),
                     SourceInput::Live(Arc::clone(mailbox)),
+                )
+            }
+            SourceKind::Image { file } => {
+                let Some(frame) = live.images.frame(file) else {
+                    continue;
+                };
+                (
+                    Layer::fitted(spec.name.clone(), id.clone(), area),
+                    SourceInput::Static(Arc::clone(frame)),
                 )
             }
         };
@@ -513,7 +566,10 @@ mod tests {
         assert_eq!(names, ["color_bars", "overlay"]);
         let update = build(
             collection.active(),
-            &LiveFrames { screens: &[] },
+            &LiveFrames {
+                screens: &[],
+                images: &ImageStore::default(),
+            },
             &mut FrameCache::default(),
         )
         .expect("build");
@@ -525,7 +581,10 @@ mod tests {
     #[test]
     fn only_the_builtin_overlay_in_place_is_animated() {
         let mut collection = SceneCollection::new();
-        let none = LiveFrames { screens: &[] };
+        let none = LiveFrames {
+            screens: &[],
+            images: &ImageStore::default(),
+        };
         let mut cache = FrameCache::default();
         collection
             .update_source(&UpdateSourceRequest {
@@ -536,6 +595,7 @@ mod tests {
                 height: None,
                 opacity: None,
                 visible: None,
+                file: None,
             })
             .expect("move");
         // Moved by the user: it stays where it was put.
@@ -754,6 +814,7 @@ mod tests {
                 height: None,
                 opacity: None,
                 visible: Some(false),
+                file: None,
             })
             .expect("hide");
         let scene = collection.get(&SceneRef::name("Show")).expect("scene");
@@ -762,7 +823,10 @@ mod tests {
         // The compositor gets every layer in order, the hidden one marked.
         let update = build(
             scene,
-            &LiveFrames { screens: &[] },
+            &LiveFrames {
+                screens: &[],
+                images: &ImageStore::default(),
+            },
             &mut FrameCache::default(),
         )
         .expect("build");
@@ -799,7 +863,10 @@ mod tests {
             .expect("scene")
             .clone();
         let mut cache = FrameCache::default();
-        let none = LiveFrames { screens: &[] };
+        let none = LiveFrames {
+            screens: &[],
+            images: &ImageStore::default(),
+        };
         let first = build(&scene, &none, &mut cache).expect("build");
         // Without a running capture the screen source is left out.
         assert_eq!(first.sources.len(), 1);
@@ -816,6 +883,7 @@ mod tests {
             &scene,
             &LiveFrames {
                 screens: &[(screen_id, Arc::clone(&mailbox))],
+                images: &ImageStore::default(),
             },
             &mut cache,
         )

@@ -24,6 +24,8 @@ pub enum Icon {
     Screen,
     /// A filled swatch: a solid colour.
     Solid,
+    /// A framed landscape with a sun: an image file.
+    Image,
     /// Vertical bars: the test pattern.
     Bars,
     /// A sine wave: a test tone.
@@ -131,6 +133,17 @@ impl Icon {
                 closed(&[(3.0, 3.0), (13.0, 3.0), (13.0, 13.0), (3.0, 13.0)]);
                 filled(&[(13.0, 3.0), (13.0, 13.0), (3.0, 13.0)]);
             }
+            Self::Image => {
+                closed(&[(2.0, 3.0), (14.0, 3.0), (14.0, 13.0), (2.0, 13.0)]);
+                line(&[
+                    (2.0, 11.5),
+                    (6.0, 7.5),
+                    (9.0, 10.5),
+                    (11.0, 8.5),
+                    (14.0, 11.5),
+                ]);
+                painter.circle_filled(at(10.5, 6.0), 1.3 * scale, color);
+            }
             Self::Bars => {
                 for x in [3.5, 6.5, 9.5, 12.5] {
                     line(&[(x, 3.0), (x, 13.0)]);
@@ -234,7 +247,7 @@ impl Icon {
     }
 
     /// Every icon, for the specimen render.
-    pub const ALL: [Icon; 26] = [
+    pub const ALL: [Icon; 27] = [
         Self::Record,
         Self::Live,
         Self::Stop,
@@ -244,6 +257,7 @@ impl Icon {
         Self::Layers,
         Self::Screen,
         Self::Solid,
+        Self::Image,
         Self::Bars,
         Self::Tone,
         Self::Mic,

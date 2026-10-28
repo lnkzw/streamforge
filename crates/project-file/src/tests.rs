@@ -930,3 +930,40 @@ fn visible_follows_its_version_rules() {
         assert!(loaded.project.scenes[0].sources[1].visible);
     }
 }
+
+#[test]
+fn an_image_source_round_trips_in_version_4_only() {
+    let mut with_image = project();
+    with_image.scenes[1].sources.push(SourceSpec {
+        id: "src_logo00000001".to_owned(),
+        name: "logo".to_owned(),
+        kind: SourceKind::Image {
+            file: "logo.png".to_owned(),
+        },
+        rect: rect(0.0, 0.0, 320.0, 200.0),
+        opacity: 1.0,
+        visible: true,
+    });
+    let bytes = to_json(&with_image, CANVAS);
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let logo = &value["scenes"][1]["sources"][1];
+    assert_eq!(logo["kind"], "image");
+    assert_eq!(logo["file"], "logo.png");
+    assert_eq!(parse(&bytes, CANVAS).unwrap().project, with_image);
+
+    // The file name follows the image source's rule.
+    let mut bad = value.clone();
+    bad["scenes"][1]["sources"][1]["file"] = json!("../logo.png");
+    assert_eq!(
+        only(&bad, "`file` must be a plain file name"),
+        "scenes[1].sources[1]"
+    );
+
+    // Version 3 had no image sources.
+    let mut old = value;
+    as_version(&mut old, 3);
+    assert_eq!(
+        only(&old, "unknown kind `image` in schema version 1 to 3"),
+        "scenes[1].sources[1].kind"
+    );
+}

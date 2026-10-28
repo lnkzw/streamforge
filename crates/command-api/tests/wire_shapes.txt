@@ -13,7 +13,7 @@ ErrorCode: unknown_command|invalid_params|invalid_state|unsupported|unavailable|
 OutputKind: recording|stream|monitor
 RecordingState: running|failed
 SendTap: pre_fader|post_fader
-SourceKind: color_bars|solid|screen
+SourceKind: color_bars|solid|screen|image
 StreamState: connecting|connected|reconnecting|failed|stopped
 VideoSourceKind: monitor|window|virtual
 
@@ -249,6 +249,16 @@ commands[].name: string
 commands[].open_world: bool
 commands[].summary: string
 
+== list_images
+files: array
+files[]: object
+files[].bytes: number
+files[].file_name: string
+files[].height: number
+files[].modified_unix_ms: number
+files[].width: number
+omitted: number
+
 == list_projects
 files: array
 files[]: object
@@ -271,6 +281,7 @@ scenes[].sources[]: object
 scenes[].sources[].capture_target_id: absent|string
 scenes[].sources[].color: absent|string
 scenes[].sources[].cursor_mode: absent|string
+scenes[].sources[].file: absent|string
 scenes[].sources[].height: number
 scenes[].sources[].id: string
 scenes[].sources[].kind: string
@@ -337,6 +348,7 @@ scenes[].sources[]: object
 scenes[].sources[].capture_target_id: absent|string
 scenes[].sources[].color: absent|string
 scenes[].sources[].cursor_mode: absent|string
+scenes[].sources[].file: absent|string
 scenes[].sources[].height: number
 scenes[].sources[].id: string
 scenes[].sources[].kind: string

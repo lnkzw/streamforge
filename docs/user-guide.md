@@ -74,7 +74,7 @@ mkdir -p ~/Videos ~/Documents/shows
 streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 ```
 
-- `--output-dir` is where recordings go, `--project-dir` where projects are saved. Both folders must exist. Both default to the working directory, which from the application menu is usually your home folder.
+- `--output-dir` is where recordings go, `--project-dir` where projects are saved and where image sources find their files. Both folders must exist. Both default to the working directory, which from the application menu is usually your home folder.
 - To use other folders from the menu as well, add the two flags to the `Exec=` line of `~/.local/share/applications/io.github.lnkzw.StreamForge.desktop`. Running `install.sh` again overwrites that file.
 
 ![The desktop app while recording](images/desktop.png)
@@ -85,14 +85,14 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 - **Scenes** (left, top): your scenes. The one marked **PGM** is on program, which is what the recording and the stream show.
 - **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture keeps running, so showing it again is immediate.
 - **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming; the line below shows the frame rate and render time.
-- **Inspector** (right): position, size and opacity of the selected source.
+- **Inspector** (right): position, size and opacity of the selected source, and an image source's file.
 - **Mixer** (bottom): the **Console** with a strip per channel and bus, and the **Routing** matrix.
 - **Outputs** (bottom right): **Record**, **Stream** and **Monitor**, each with its state and a settings button (the gear).
 
 ### A first recording
 
 1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine.
-2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, or a **screen capture**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
+2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, a **screen capture**, or an **image**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
 3. **Audio.** Open **Routing** in the mixer. A new setup has one channel, **Tone**, a 1 kHz test tone on the program bus; mute or remove it before a real recording, or switch its input to your microphone.
    - Add a channel with **+** next to *Channels*, then choose its input in the *Input* column: a microphone or other device, the desktop audio of an output (listed separately, as `<output>.monitor`), the system's default input, or a test tone.
    - Each channel sends to the **Program** bus. Add aux buses with **+** at the right of the bus columns, for example a separate mix for headphones or a second recording track. Each send has a switch, a level, and a tap: PRE (before the channel fader) or POST (after it).
@@ -101,6 +101,14 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 4. **Record.** Open the gear on the **Record** row to set the video encoder and, if you want, a file name (a plain `.mkv` name): *auto* uses the graphics card's encoder where one works and the software encoder otherwise. Without a file name, each recording is named by its start time, for example `recording-2026-10-27_15-30-00.mkv`. Press **REC** (Ctrl+R). Press it again to stop; it asks first. The file is finished when the recording stops.
 
 StreamForge never overwrites a file. With the automatic name, every take gets a new file (only a file of that name from elsewhere, such as a second StreamForge recording into the same folder in the same second, makes REC fail with a message). With a name of your own, starting again with the name of an existing file fails with a message: change the name before the next take, or clear it to go back to automatic names.
+
+### Images
+
+An image source shows a PNG or JPEG file from the project folder, such as a logo or an overlay with transparency. There is no file browser: put the file into the project folder (the **Open folder** button in the add dialog opens it in your file manager), press **Refresh**, and choose it. Without a rectangle, the image keeps its own size at the top left (scaled down if it is larger than the canvas); with one, it is fitted inside, keeping its shape.
+
+StreamForge reads the file when you add the source or open the project, not afterwards. After you change the file, press **Read again** in the inspector; every source showing that file updates. The inspector also switches a source to another file. A project whose image is missing still opens: that source shows nothing, and the activity log says which file is missing.
+
+Images can be up to 8192 pixels on a side and 16 megapixels; all images shown together may take up to 512 MiB of memory (4 bytes per pixel).
 
 ### Screen capture on Linux
 
@@ -120,7 +128,7 @@ The **Monitor** row plays a bus on a headphone or speaker output, by default the
 
 ### Projects
 
-The project menu (top left) opens, saves and saves under a new name: Ctrl+O, Ctrl+S, Ctrl+Shift+S. A project is a `.json` file in the project folder that holds the scenes and sources, the audio channels, buses and sends, and the output settings. It does not hold the stream URL or key, and not which screen or window a screen capture shows; on Linux, the screen-sharing dialog asks again after loading.
+The project menu (top left) opens, saves and saves under a new name: Ctrl+O, Ctrl+S, Ctrl+Shift+S. A project is a `.json` file in the project folder that holds the scenes and sources, the audio channels, buses and sends, and the output settings. Image sources store the image's file name; keep the images in the same folder when you move a project. It does not hold the stream URL or key, and not which screen or window a screen capture shows; on Linux, the screen-sharing dialog asks again after loading.
 
 A project opens only while nothing records, streams or previews. Before you open another project or close the window, the app asks about unsaved changes. Closing the window while recording or live asks too: quitting stops the stream and finishes the recording's file.
 
@@ -183,7 +191,7 @@ A script keeps the engine running and sends commands as it goes: create scenes, 
 
 Options:
 - `--output-dir DIR`: where recordings and snapshots go (default: the current folder). Clients choose only file names inside it.
-- `--project-dir DIR`: the project folder; without it, the project commands are unavailable.
+- `--project-dir DIR`: the project folder, also for the images of image sources; without it, the project commands and image sources are unavailable.
 - `--allow read-only|control|sensitive`: the highest class of commands the client may run (default `sensitive`, the client being whoever writes to stdin). See [Access levels](#access-levels).
 
 ## AI agents (MCP)
@@ -231,7 +239,7 @@ Most clients take a JSON entry like this:
 
 ### Projects and streaming
 
-- `--project-dir DIR` offers the project tools. Listing and checking are read-only; loading and saving need `--allow sensitive`.
+- `--project-dir DIR` offers the project tools and image sources. Listing and checking projects and listing images (`list_images`) are read-only; adding an image source needs `--allow control`; loading and saving need `--allow sensitive`.
 - Streaming needs `--allow sensitive` and `--stream-url rtmp://…`, the only target the agent may stream to. If the server needs a key, `--stream-key-env NAME` names the environment variable that holds it, in the environment the client starts the MCP server with (the server stops at start if it is not set). Claude Code passes its own environment on, so export the variable before you start it. Codex passes on only the variables listed in the server's section, as `env_vars = ["NAME"]`. An `env` entry in a client's configuration (`claude mcp add -e`, a JSON `"env"`) works too, but stores the key in that file in plain text.
 
 The MCP server runs its own engine. It does not control a desktop app that is open at the same time, and the two do not share scenes.
@@ -240,7 +248,8 @@ The MCP server runs its own engine. It does not control a desktop app that is op
 
 - **Recordings** are Matroska files (`.mkv`) with H.264 video and AAC audio. A recording with further audio tracks has them in the same file. A file is never overwritten. It is complete once the recording stops: with **REC**, `stop_recording`, at the end of `--duration-ms`, when you close the desktop window, when a script closes the engine's stdin, or at Ctrl+C or SIGTERM (`kill`, a service manager) to any of the programs. A second Ctrl+C quits at once and leaves the file unfinished. A recording that does not stop that way (the program is killed with SIGKILL or crashes, or its terminal closes, which sends SIGHUP) is not finished, and a short one is often empty.
 - **Projects** are JSON files. `streamforge project validate show.json` checks one and lists every problem with its place in the file. Files from older versions are converted on load and saved in the current format.
-- **File names** are plain names without folders, for recordings ending in `.mkv` and for projects in `.json`. Names that are not valid on Windows or macOS are refused everywhere (for example with `:` or `\`, or device names such as `CON`), so a project folder works on every system.
+- **Images** for image sources are PNG or JPEG files in the project folder, named `.png`, `.jpg` or `.jpeg`.
+- **File names** are plain names without folders, for recordings ending in `.mkv`, for projects in `.json`, and for images in `.png`, `.jpg` or `.jpeg`. Names that are not valid on Windows or macOS are refused everywhere (for example with `:` or `\`, or device names such as `CON`), so a project folder works on every system.
 
 ## Troubleshooting
 
@@ -258,7 +267,7 @@ Version 0.1.0 is a first stable base, not a complete production suite.
 
 - **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On both, screen capture works by target id only (no picker yet), and desktop audio from outputs with more than two channels is not downmixed.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
-- **Sources:** solid colours, colour bars and screen or window capture. No cameras, images, text, media files or browser sources yet.
+- **Sources:** solid colours, colour bars, screen or window capture, and PNG and JPEG images. No cameras, text, media files or browser sources yet; images are not animated (GIF, APNG) and colour profiles in them are ignored.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
 - **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.

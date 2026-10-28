@@ -160,6 +160,7 @@ fn kind_label(kind: &SourceKind) -> (Icon, &'static str) {
         SourceKind::ColorBars => (Icon::Bars, "colour bars"),
         SourceKind::Solid { .. } => (Icon::Solid, "solid colour"),
         SourceKind::Screen { .. } => (Icon::Screen, "screen capture"),
+        SourceKind::Image { .. } => (Icon::Image, "image"),
     }
 }
 

@@ -1,6 +1,6 @@
-//! The inspector: the selected source's position, size and opacity, and a
-//! screen source's capture with its restart. A dock in wide windows, a
-//! drawer over the workspace in narrow ones.
+//! The inspector: the selected source's position, size and opacity, a
+//! screen source's capture with its restart, and an image source's file. A
+//! dock in wide windows, a drawer over the workspace in narrow ones.
 
 use command_api::{SourceKind, SourceSpec};
 use eframe::egui;
@@ -143,6 +143,11 @@ impl DesktopApp {
             widgets::section_header(ui, "Capture", None);
             self.capture(ui, &source, capture_target_id.is_none());
         }
+        if let SourceKind::Image { file } = &source.kind {
+            ui.add_space(size::SPACE_8);
+            widgets::section_header(ui, "Image", None);
+            self.image_file(ui, &source.id, file);
+        }
 
         ui.add_space(size::SPACE_16);
         if ui
@@ -228,6 +233,73 @@ impl DesktopApp {
                 }));
             }
         }
+    }
+
+    /// An image source's file: another one from the project folder, or the
+    /// same one read again after it changed on disk.
+    fn image_file(&mut self, ui: &mut egui::Ui, id: &str, file: &str) {
+        if self.model.images.is_none() {
+            self.model.list_images();
+        }
+        let mut chosen = file.to_owned();
+        match &self.model.images {
+            Some(Ok(list)) => {
+                let listed = list.files.iter().any(|info| info.file_name == file);
+                let width = ui.available_width();
+                widgets::dropdown(ui, file, "Image file", width, |ui| {
+                    for info in &list.files {
+                        widgets::choice(ui, &mut chosen, info.file_name.clone(), &info.file_name);
+                    }
+                })
+                .on_hover_text("Image file");
+                if !listed {
+                    widgets::status_line(
+                        ui,
+                        StatusLevel::Warn,
+                        "Not in the project folder: the source draws nothing until the file is \
+                         there and read again.",
+                    );
+                }
+            }
+            Some(Err(reason)) => {
+                ui.label(TextRole::Body.text(file));
+                widgets::status_line(ui, StatusLevel::Error, reason);
+            }
+            None => {
+                ui.label(TextRole::Body.text(file));
+            }
+        }
+        if chosen != file {
+            self.model.set_source_file(id, &chosen);
+        }
+        let busy = self.model.busy();
+        ui.horizontal(|ui| {
+            if ui
+                .add(
+                    Button::new(ButtonKind::Secondary, "Read again")
+                        .icon(Icon::Restart)
+                        .enabled(!busy),
+                )
+                .on_hover_text(
+                    "Read the file again after it changed; every source showing it updates",
+                )
+                .on_disabled_hover_text("Waiting for the engine")
+                .clicked()
+            {
+                self.model.restart_source(id, None);
+                self.model.list_images();
+            }
+            if ui
+                .add(
+                    Button::new(ButtonKind::Ghost, "Refresh list")
+                        .enabled(!self.model.listing_images()),
+                )
+                .on_hover_text("List the project folder's images again")
+                .clicked()
+            {
+                self.model.list_images();
+            }
+        });
     }
 
     /// For an ended named source: restart on the same id, or on another

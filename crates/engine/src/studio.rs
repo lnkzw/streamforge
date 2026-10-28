@@ -15,9 +15,10 @@ use media_core::{FrameMailbox, Rational};
 use serde_json::Value;
 
 use crate::composite::FPS;
+use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
 use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH, Pipeline};
-use crate::scenes::SceneCollection;
+use crate::scenes::{self, SceneCollection};
 use crate::{Engine, audio};
 
 impl Engine {
@@ -33,9 +34,39 @@ impl Engine {
     }
 
     /// Apply `change`; if it alters what the running pipeline renders, swap
-    /// the scene live, and undo the change if that fails.
+    /// the scene live, and undo the change if that fails. Image frames no
+    /// source shows any more are dropped.
     fn edit_scenes(
         &mut self,
+        change: impl FnOnce(&mut SceneCollection) -> Result<(), CommandError>,
+    ) -> Result<SceneList, CommandError> {
+        let edited = self.apply_edit(None, change);
+        self.images.retain(&self.scenes.image_files());
+        edited
+    }
+
+    /// [`edit_scenes`](Self::edit_scenes) after reading image `file`: if
+    /// its frame changed (`replaced`), a rendered scene showing it is
+    /// swapped too, and the read is undone if the edit fails.
+    fn edit_scenes_reading(
+        &mut self,
+        file: &str,
+        replaced: Option<Replaced>,
+        change: impl FnOnce(&mut SceneCollection) -> Result<(), CommandError>,
+    ) -> Result<SceneList, CommandError> {
+        let edited = self.apply_edit(replaced.is_some().then_some(file), change);
+        if edited.is_err()
+            && let Some(replaced) = replaced
+        {
+            self.images.put_back(replaced);
+        }
+        self.images.retain(&self.scenes.image_files());
+        edited
+    }
+
+    fn apply_edit(
+        &mut self,
+        changed_image: Option<&str>,
         change: impl FnOnce(&mut SceneCollection) -> Result<(), CommandError>,
     ) -> Result<SceneList, CommandError> {
         let before = self.scenes.snapshot();
@@ -43,10 +74,14 @@ impl Engine {
         change(&mut self.scenes)?;
         let (allow_new_captures, keep) = self.capture_policy();
         if let Some(pipeline) = &mut self.pipeline {
-            if *self.scenes.active() != rendered {
+            let active = self.scenes.active();
+            if *active != rendered
+                || changed_image.is_some_and(|file| scenes::shows_image(active, file))
+            {
                 if let Err(error) = pipeline.apply_scene(
                     self.capture.as_mut(),
-                    self.scenes.active(),
+                    active,
+                    &self.images,
                     &keep,
                     allow_new_captures,
                 ) {
@@ -74,18 +109,39 @@ impl Engine {
         self.edit_scenes(|scenes| scenes.set_active(scene))
     }
 
+    /// Add a source. An image is read first; without a rectangle it keeps
+    /// its own size.
     pub(crate) fn add_source(
         &mut self,
         request: &AddSourceRequest,
     ) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.add_source(request).map(drop))
+        let SourceKind::Image { file } = &request.kind else {
+            return self.edit_scenes(|scenes| scenes.add_source(request).map(drop));
+        };
+        let replaced = self.read_image(file, false)?;
+        let mut request = request.clone();
+        if request.rect.is_none() {
+            request.rect = self.images.natural_rect(file);
+        }
+        self.edit_scenes_reading(file, replaced, |scenes| {
+            scenes.add_source(&request).map(drop)
+        })
     }
 
+    /// Change a source; an image source's new `file` is read first.
     pub(crate) fn update_source(
         &mut self,
         request: &UpdateSourceRequest,
     ) -> Result<SceneList, CommandError> {
-        self.edit_scenes(|scenes| scenes.update_source(request))
+        let image = matches!(
+            self.scenes.source(&request.source)?.kind,
+            SourceKind::Image { .. }
+        );
+        let Some(file) = request.file.as_deref().filter(|_| image) else {
+            return self.edit_scenes(|scenes| scenes.update_source(request));
+        };
+        let replaced = self.read_image(file, false)?;
+        self.edit_scenes_reading(file, replaced, |scenes| scenes.update_source(request))
     }
 
     pub(crate) fn move_source(
@@ -101,7 +157,8 @@ impl Engine {
 
     /// Restart a screen source's capture (e.g. after it ended), optionally
     /// on another source (`capture_target_id`, kept by the scene), while the
-    /// pipeline and its outputs keep running. On error nothing changes.
+    /// pipeline and its outputs keep running; or read an image source's file
+    /// again, also while idle. On error nothing changes.
     pub(crate) fn restart_source(
         &mut self,
         source: &SourceRef,
@@ -111,11 +168,31 @@ impl Engine {
         let name = &spec.name.clone();
         // Found once; from here on by its id.
         let source = &SourceRef::id(spec.id.clone());
-        if !matches!(spec.kind, SourceKind::Screen { .. }) {
-            return Err(CommandError::new(
-                ErrorCode::InvalidParams,
-                format!("`{name}` does not capture; only screen sources can be restarted"),
-            ));
+        match &spec.kind {
+            SourceKind::Screen { .. } => {}
+            SourceKind::Image { .. } if capture_target_id.is_some() => {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "`{name}` is an image source; `capture_target_id` applies to screen \
+                         sources only"
+                    ),
+                ));
+            }
+            SourceKind::Image { file } => {
+                let file = file.clone();
+                let replaced = self.read_image(&file, true)?;
+                return self.edit_scenes_reading(&file, replaced, |_| Ok(()));
+            }
+            SourceKind::ColorBars | SourceKind::Solid { .. } => {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "`{name}` does not capture or read a file; only screen and image \
+                         sources can be restarted"
+                    ),
+                ));
+            }
         }
         match &self.pipeline {
             None => return Err(no_pipeline(name)),
@@ -139,6 +216,7 @@ impl Engine {
             Some(pipeline) => pipeline.restart_screen(
                 self.capture.as_mut(),
                 self.scenes.active(),
+                &self.images,
                 &source,
                 &keep,
                 allow_new_captures,

@@ -12,8 +12,9 @@
 //!
 //! Version 1 audio is migrated on load ([`v1`]); version 1 and 2 screen
 //! fields are migrated by [`v2`], and versions 1 to 3 have no `visible`
-//! ([`v3`]). Saving writes version 4.
+//! and no image sources ([`v3`]). Saving writes version 4.
 //!
+//! An image source stores its plain file name in the project directory.
 //! Not stored: stream keys, file paths, and what screen sources capture
 //! (machine-specific, and window titles can be private, ADR 0010).
 

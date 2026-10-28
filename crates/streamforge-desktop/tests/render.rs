@@ -101,6 +101,11 @@ enum Situation {
     RecordSettings,
     /// Live, with the question that closing the window asks.
     Quit,
+    /// Idle, with the dialog for adding a source on an image and its list
+    /// of files open.
+    ImageDialog,
+    /// Live, with the image source selected.
+    ImageInspector,
 }
 
 /// What the render does before it is taken, in order.
@@ -113,8 +118,23 @@ enum Step {
     Close,
 }
 
-/// A project directory with a valid project and a broken one.
+/// A project directory with a valid project, a broken one and two images.
 fn project_files(dir: &Path) {
+    // A badge: a horizontal gradient that fades out to the right.
+    image::RgbaImage::from_fn(320, 120, |x, _| {
+        let t = x as f32 / 319.0;
+        image::Rgba([
+            (40.0 + 200.0 * t) as u8,
+            (160.0 - 60.0 * t) as u8,
+            220,
+            (255.0 * (1.0 - 0.6 * t)) as u8,
+        ])
+    })
+    .save(dir.join("logo.png"))
+    .expect("logo");
+    image::RgbImage::from_pixel(1920, 1080, image::Rgb([30, 30, 30]))
+        .save(dir.join("backdrop.png"))
+        .expect("backdrop");
     let mut engine = Engine::new().with_project_dir(dir);
     let save = Command::decode("save_project", Some(&json!({"file_name": "show.json"})))
         .expect("save_project");
@@ -234,6 +254,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             | Situation::SceneMenu
             | Situation::Health
             | Situation::Quit
+            | Situation::ImageInspector
     );
     project_files(&dir);
     let worker = EngineWorker::spawn(
@@ -281,6 +302,12 @@ fn model(dir: &Path, situation: Situation) -> Model {
                 [220, 60, 40, 230],
                 Some([80.0, 860.0, 900.0, 120.0]),
             ),
+            (
+                "logo",
+                SourceType::Image,
+                [0, 0, 0, 255],
+                Some([1560.0, 40.0, 320.0, 120.0]),
+            ),
         ] {
             model.add_source(
                 &interview,
@@ -291,6 +318,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
                     rect,
                     opacity: 1.0,
                     screen_source: None,
+                    image_file: (kind == SourceType::Image).then(|| "logo.png".to_owned()),
                 },
             );
         }
@@ -298,7 +326,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             m.scenes.as_ref().is_some_and(|list| {
                 list.scenes
                     .iter()
-                    .any(|scene| scene.name == "Interview" && scene.sources.len() == 3)
+                    .any(|scene| scene.name == "Interview" && scene.sources.len() == 4)
             })
         });
         // One hidden layer, to show its row.
@@ -375,6 +403,12 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
         Situation::Health => vec![Step::Click("All healthy")],
         Situation::RecordSettings => vec![Step::Click("Recording settings")],
         Situation::Quit => vec![Step::Click("lower third"), Step::Close],
+        Situation::ImageDialog => vec![
+            Step::Click("Add a source to this scene"),
+            Step::Click("Image"),
+            Step::Click("Image file"),
+        ],
+        Situation::ImageInspector => vec![Step::Click("logo")],
     };
     for step in steps {
         match step {
@@ -479,6 +513,18 @@ fn render_the_workspace() {
         [1400.0, 900.0],
     );
     render(&out, "quit-1400x900", Situation::Quit, [1400.0, 900.0]);
+    render(
+        &out,
+        "image-dialog-1400x900",
+        Situation::ImageDialog,
+        [1400.0, 900.0],
+    );
+    render(
+        &out,
+        "image-inspector-1400x900",
+        Situation::ImageInspector,
+        [1400.0, 900.0],
+    );
     for (size, label) in [
         ([1280.0, 720.0], "1280x720"),
         ([1920.0, 1080.0], "1920x1080"),

@@ -276,10 +276,13 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "add_source",
     summary: "Add a source on top of a scene. Params: scene_id or scene_name, name, kind (color_bars, solid, \
-              screen), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), x, \
-              y, width, height (canvas pixels; all or none, default the whole canvas), opacity \
+              screen, image), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), \
+              file (image: a PNG or JPEG file name from list_images), x, \
+              y, width, height (canvas pixels; all or none, default the whole canvas; an image \
+              keeps its own size at the top left), opacity \
               (0-1), visible (default true). Screen sources start capturing when the scene is rendered: the capture_target_id from \
-              list_capture_targets, or else the one the user picks in the system dialog. Returns \
+              list_capture_targets, or else the one the user picks in the system dialog. Adding a \
+              screen source needs sensitive access, the other kinds control. Returns \
               the scene list.",
     access: CommandAccess::Sensitive,
     destructive: false,
@@ -288,9 +291,10 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "update_source",
-    summary: "Move, resize, fade, hide or show a source. Params: source_id, or scene_name (or \
-              scene_id) and source_name; any of x, y, width, height, opacity, visible (a hidden \
-              source is not drawn; a screen source keeps capturing). Returns the scene list.",
+    summary: "Move, resize, fade, hide or show a source, or show another image file. Params: \
+              source_id, or scene_name (or scene_id) and source_name; any of x, y, width, height, \
+              opacity, visible (a hidden source is not drawn; a screen source keeps capturing), \
+              file (image sources: a file name from list_images). Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -323,7 +327,8 @@ const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
               (from list_capture_targets) to capture another target from now on: a closed \
               window's id does not come back, a display's does when it reconnects. A picker \
               source asks the user again, so it is refused while recording or streaming. \
-              Returns the scene list.",
+              An image source reads its file again (also while idle), and every source showing \
+              that file shows the new content. Returns the scene list.",
     access: CommandAccess::Sensitive,
     // It ends the running capture; a picker choice is lost.
     destructive: true,
@@ -484,6 +489,17 @@ const LIST_PROJECTS: CommandDescriptor = CommandDescriptor {
     open_world: false,
 };
 
+const LIST_IMAGES: CommandDescriptor = CommandDescriptor {
+    name: "list_images",
+    summary: "List the image files (.png, .jpg, .jpeg) in the engine's project directory \
+              (--project-dir) that an image source can show, by name, with their size in bytes, \
+              when they were written, and their width and height from the file header (null if \
+              it cannot be read); at most 256, the rest are counted in omitted.",
+    access: CommandAccess::ReadOnly,
+    destructive: false,
+    open_world: false,
+};
+
 const SAVE_PROJECT: CommandDescriptor = CommandDescriptor {
     name: "save_project",
     summary: "Write the scenes (with their ids), the active scene and the audio setup to a \
@@ -556,6 +572,7 @@ const COMMANDS: &[CommandDescriptor] = &[
     SET_MONITOR_DEVICE,
     SET_PREVIEW,
     LIST_PROJECTS,
+    LIST_IMAGES,
     SAVE_PROJECT,
     LOAD_PROJECT,
     VALIDATE_PROJECT,
@@ -627,6 +644,7 @@ impl Command {
             "restart_source" => decode_restart_source(name, params),
             "set_capture_target" => decode_set_capture_target(name, params),
             "list_projects" => expect_no_params(name, params).map(|()| Self::ListProjects),
+            "list_images" => expect_no_params(name, params).map(|()| Self::ListImages),
             "save_project" => decode_save_project(name, params).map(Self::SaveProject),
             "load_project" => {
                 decode_project_file(name, params).map(|file_name| Self::LoadProject { file_name })
@@ -667,8 +685,9 @@ impl Command {
     }
 
     /// Access this particular command needs: its descriptor's class, except
-    /// `add_source` of a non-capturing source (color bars, solid), which is
-    /// `control` (only screen sources capture private content).
+    /// `add_source` of a non-capturing source (color bars, solid, an image
+    /// from the project directory), which is `control` (only screen sources
+    /// capture private content).
     pub fn required_access(&self) -> CommandAccess {
         match self {
             // Listed explicitly: a new source kind needs the descriptor's
@@ -676,7 +695,7 @@ impl Command {
             Self::AddSource(request)
                 if matches!(
                     request.kind,
-                    SourceKind::ColorBars | SourceKind::Solid { .. }
+                    SourceKind::ColorBars | SourceKind::Solid { .. } | SourceKind::Image { .. }
                 ) =>
             {
                 CommandAccess::Control
@@ -726,6 +745,7 @@ impl Command {
             Self::SetMonitorDevice { .. } => &SET_MONITOR_DEVICE,
             Self::SetPreview { .. } => &SET_PREVIEW,
             Self::ListProjects => &LIST_PROJECTS,
+            Self::ListImages => &LIST_IMAGES,
             Self::SaveProject(_) => &SAVE_PROJECT,
             Self::LoadProject { .. } => &LOAD_PROJECT,
             Self::ValidateProject { .. } => &VALIDATE_PROJECT,
@@ -1228,11 +1248,13 @@ struct AddSourceParams {
     scene_name: Option<String>,
     /// Source name, unique within the scene.
     name: String,
-    /// Source kind: color_bars, solid or screen.
-    #[schemars(extend("enum" = ["color_bars", "solid", "screen"]))]
+    /// Source kind: color_bars, solid, screen or image.
+    #[schemars(extend("enum" = ["color_bars", "solid", "screen", "image"]))]
     kind: String,
     /// Solid sources: #rrggbb or #rrggbbaa.
     color: Option<String>,
+    /// Image sources: a PNG or JPEG file name from list_images.
+    file: Option<String>,
     /// Capture target id from list_capture_targets: capture it without a picker.
     capture_target_id: Option<String>,
     /// Capture target kinds to offer in the picker (monitor, window, virtual); default monitor and window.
@@ -1265,17 +1287,23 @@ fn decode_add_source(
         )
     };
     let kind = match params.kind.as_str() {
-        "color_bars" | "solid"
+        "color_bars" | "solid" | "image"
             if params.capture_target_id.is_some()
                 || params.target_kinds.is_some()
                 || params.cursor_mode.is_some() =>
         {
             return Err(screen_only());
         }
-        "color_bars" if params.color.is_some() => {
+        "color_bars" | "image" if params.color.is_some() => {
             return Err(invalid_params(
                 command,
                 "`color` applies to solid sources only",
+            ));
+        }
+        "color_bars" | "solid" | "screen" if params.file.is_some() => {
+            return Err(invalid_params(
+                command,
+                "`file` applies to image sources only",
             ));
         }
         "color_bars" => SourceKind::ColorBars,
@@ -1307,10 +1335,18 @@ fn decode_add_source(
                 capture_target_id: selection.capture_target_id,
             }
         }
+        "image" => SourceKind::Image {
+            file: image_file(
+                command,
+                params
+                    .file
+                    .ok_or_else(|| invalid_params(command, "image sources need a `file`"))?,
+            )?,
+        },
         _ => {
             return Err(invalid_params(
                 command,
-                "`kind` must be color_bars, solid or screen",
+                "`kind` must be color_bars, solid, screen or image",
             ));
         }
     };
@@ -1362,6 +1398,8 @@ struct UpdateSourceParams {
     opacity: Option<f32>,
     /// Whether the source is drawn; a hidden screen source keeps capturing.
     visible: Option<bool>,
+    /// Image sources: show this PNG or JPEG file from list_images instead.
+    file: Option<String>,
 }
 
 fn decode_update_source(
@@ -1379,10 +1417,11 @@ fn decode_update_source(
     .iter()
     .all(Option::is_none)
         && params.visible.is_none()
+        && params.file.is_none()
     {
         return Err(invalid_params(
             command,
-            "give at least one of x, y, width, height, opacity or visible",
+            "give at least one of x, y, width, height, opacity, visible or file",
         ));
     }
     let check = |field: &str, value: Option<f32>, size: bool| {
@@ -1404,6 +1443,10 @@ fn decode_update_source(
         height: check("height", params.height, true)?,
         opacity: params.opacity.map(|o| opacity(command, o)).transpose()?,
         visible: params.visible,
+        file: params
+            .file
+            .map(|file| image_file(command, file))
+            .transpose()?,
     })
 }
 
@@ -1555,6 +1598,24 @@ fn decode_project_file(command: &str, params: Option<&Value>) -> Result<PathBuf,
 /// lists only names it would accept.
 pub fn project_file_name(command: &str, file_name: &str) -> Result<PathBuf, CommandError> {
     project_file(command, file_name.to_owned())
+}
+
+/// Check an image file name by the image source's rule (a plain `.png`,
+/// `.jpg` or `.jpeg` name, not a Windows device) for `command`, which the
+/// error names. The engine lists only names it would accept.
+pub fn image_file_name(command: &str, file_name: &str) -> Result<String, CommandError> {
+    image_file(command, file_name.to_owned())
+}
+
+fn image_file(command: &str, file_name: String) -> Result<String, CommandError> {
+    plain_file_of(
+        command,
+        "file",
+        file_name.clone(),
+        &["png", "jpg", "jpeg"],
+        "it lives in the engine's project directory (list_images)",
+    )?;
+    Ok(file_name)
 }
 
 fn project_file(command: &str, file_name: String) -> Result<PathBuf, CommandError> {
@@ -2154,6 +2215,23 @@ fn plain_file(
     extension: &str,
     place: &str,
 ) -> Result<PathBuf, CommandError> {
+    plain_file_of(command, field, name, &[extension], place)
+}
+
+/// [`plain_file`] with any of `extensions` (compared without case).
+fn plain_file_of(
+    command: &str,
+    field: &str,
+    name: String,
+    extensions: &[&str],
+    place: &str,
+) -> Result<PathBuf, CommandError> {
+    // `.json`, or `.png, .jpg or .jpeg`.
+    let dotted: Vec<_> = extensions.iter().map(|e| format!(".{e}")).collect();
+    let extension = match dotted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => dotted.concat(),
+    };
     // Separators and drive or stream syntax of any system, and what Windows
     // does not allow in a name.
     let forbidden = |c: char| matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*');
@@ -2161,7 +2239,7 @@ fn plain_file(
         return Err(invalid_params(
             command,
             format!(
-                "`{field}` must be a plain file name ending in .{extension}, without \
+                "`{field}` must be a plain file name ending in {extension}, without \
                  directories, control characters or any of \\ / : < > \" | ? *; {place}"
             ),
         ));
@@ -2178,13 +2256,17 @@ fn plain_file(
     }
     let stem = name
         .rsplit_once('.')
-        .filter(|(_, found)| found.eq_ignore_ascii_case(extension))
+        .filter(|(_, found)| {
+            extensions
+                .iter()
+                .any(|extension| found.eq_ignore_ascii_case(extension))
+        })
         .map(|(stem, _)| stem);
     if stem.is_none_or(str::is_empty) {
         return Err(invalid_params(
             command,
             format!(
-                "`{field}` must be a plain file name ending in .{extension} \
+                "`{field}` must be a plain file name ending in {extension} \
                  (no directories); {place}"
             ),
         ));
@@ -2348,7 +2430,8 @@ pub fn params_schema(name: &str) -> Option<Value> {
         | "list_scenes"
         | "get_mixer"
         | "get_output_profiles"
-        | "list_projects" => {
+        | "list_projects"
+        | "list_images" => {
             json!({"type": "object", "properties": {}, "additionalProperties": false})
         }
         _ => return None,
@@ -2577,6 +2660,83 @@ mod tests {
             panic!("restart_source");
         };
         assert_eq!(source, SourceRef::id("src_a1"));
+    }
+
+    #[test]
+    fn image_source_params() {
+        let decode = |command: &str, params: Value| Command::decode(command, Some(&params));
+        let image = |file: &str| {
+            decode(
+                "add_source",
+                json!({"scene_name": "Main", "name": "logo", "kind": "image", "file": file}),
+            )
+        };
+        for file in ["logo.png", "Logo.PNG", "photo 2.jpg", "x.JPEG", "a.b.jpeg"] {
+            let Ok(Command::AddSource(add)) = image(file) else {
+                panic!("{file}");
+            };
+            assert_eq!(
+                add.kind,
+                SourceKind::Image {
+                    file: file.to_owned()
+                }
+            );
+            assert_eq!(add.rect, None);
+        }
+        // Plain PNG and JPEG names in the project directory only.
+        for bad in [
+            "logo.gif",
+            "logo",
+            ".png",
+            "../logo.png",
+            "img/logo.png",
+            "C:logo.png",
+            "NUL.png",
+            "logo.png\n",
+        ] {
+            let error = image(bad).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{bad}");
+            assert!(error.message.contains("`file`"), "{bad}: {}", error.message);
+        }
+        assert!(
+            image("logo.gif")
+                .unwrap_err()
+                .message
+                .contains(".png, .jpg or .jpeg")
+        );
+        assert_eq!(image_file_name("x", "a.jpg"), Ok("a.jpg".to_owned()));
+        assert!(image_file_name("x", "a.json").is_err());
+        // `file` belongs to images, and images take nothing of the others.
+        for params in [
+            json!({"scene_name": "Main", "name": "s", "kind": "image"}),
+            json!({"scene_name": "Main", "name": "s", "kind": "color_bars", "file": "a.png"}),
+            json!({"scene_name": "Main", "name": "s", "kind": "screen", "file": "a.png"}),
+            json!({"scene_name": "Main", "name": "s", "kind": "image", "file": "a.png", "color": "#ffffff"}),
+            json!({"scene_name": "Main", "name": "s", "kind": "image", "file": "a.png", "capture_target_id": "monitor:1"}),
+        ] {
+            let error = decode("add_source", params.clone()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
+        }
+        let Ok(Command::UpdateSource(update)) = decode(
+            "update_source",
+            json!({"source_id": "src_a1", "file": "other.jpg"}),
+        ) else {
+            panic!("update_source");
+        };
+        assert_eq!(update.file.as_deref(), Some("other.jpg"));
+        assert!(
+            decode(
+                "update_source",
+                json!({"source_id": "src_a1", "file": "a/b.png"})
+            )
+            .is_err()
+        );
+        assert_eq!(decode("list_images", json!({})), Ok(Command::ListImages));
+        assert!(decode("list_images", json!({"dir": "/tmp"})).is_err());
+        assert_eq!(
+            Command::ListImages.required_access(),
+            CommandAccess::ReadOnly
+        );
     }
 
     #[test]
@@ -3650,7 +3810,7 @@ mod tests {
         let add = params_schema("add_source").expect("schema");
         assert_eq!(
             add["properties"]["kind"]["enum"],
-            json!(["color_bars", "solid", "screen"])
+            json!(["color_bars", "solid", "screen", "image"])
         );
         assert_eq!(add["required"], json!(["name", "kind"]));
         // The advertised kinds are exactly the ones the decoder accepts.
@@ -3658,6 +3818,9 @@ mod tests {
             let mut params = json!({"scene_name": "Main", "name": "s", "kind": kind});
             if kind == "solid" {
                 params["color"] = json!("#000000");
+            }
+            if kind == "image" {
+                params["file"] = json!("logo.png");
             }
             assert!(
                 Command::decode("add_source", Some(&params)).is_ok(),
@@ -3736,12 +3899,16 @@ mod tests {
         let solid =
             add(json!({"scene_name": "Main", "name": "s", "kind": "solid", "color": "#ffffff"}));
         let screen = add(json!({"scene_name": "Main", "name": "s", "kind": "screen"}));
+        // An image shows only what the user put in the project directory.
+        let image =
+            add(json!({"scene_name": "Main", "name": "s", "kind": "image", "file": "a.png"}));
         assert_eq!(
-            (bars, solid, screen),
+            (bars, solid, screen, image),
             (
                 CommandAccess::Control,
                 CommandAccess::Control,
-                CommandAccess::Sensitive
+                CommandAccess::Sensitive,
+                CommandAccess::Control
             )
         );
         assert!(CommandAccess::ReadOnly < CommandAccess::Control);

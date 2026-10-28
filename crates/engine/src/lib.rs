@@ -8,6 +8,7 @@
 mod audio;
 mod composite;
 mod ids;
+mod images;
 mod mix;
 mod outputs;
 mod pipeline;
@@ -41,6 +42,8 @@ pub struct Engine {
     streaming: Option<StreamingOutput>,
     /// Scenes; the pipeline renders the active one.
     scenes: SceneCollection,
+    /// The image sources' frames, by file name.
+    images: images::ImageStore,
     /// The configured audio graph; every run mixes it (ADR 0017).
     audio: AudioGraphSpec,
     /// How each output starts: its mix bus and encoder settings.
@@ -84,6 +87,7 @@ impl Engine {
             project_dir: None,
             capture_capabilities: None,
             scenes: SceneCollection::new(),
+            images: images::ImageStore::default(),
             audio: audio::default_graph(),
             profiles: OutputProfiles::default(),
             preview_enabled: false,
@@ -100,9 +104,9 @@ impl Engine {
         self
     }
 
-    /// Directory for project files; clients only name files in it. Without
-    /// one, `save_project`, `load_project` and `validate_project` are
-    /// `invalid_state`.
+    /// Directory for project files and the images image sources show;
+    /// clients only name files in it. Without one, the project commands,
+    /// `list_images` and image sources are `invalid_state`.
     pub fn with_project_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.project_dir = Some(dir.into());
         self
@@ -258,6 +262,7 @@ impl CommandHandler for Engine {
                 .set_capture_target(&source, &capture_target_id)
                 .map(CommandOutput::SceneList),
             Command::ListProjects => self.list_projects().map(CommandOutput::ProjectFiles),
+            Command::ListImages => self.list_images().map(CommandOutput::ImageFiles),
             Command::SaveProject(request) => {
                 self.save_project(&request).map(CommandOutput::ProjectSaved)
             }
@@ -285,6 +290,7 @@ pub(crate) fn file_error_code(error: &std::io::Error) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
+    mod images;
     mod monitor;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;

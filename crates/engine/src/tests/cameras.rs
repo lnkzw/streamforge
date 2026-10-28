@@ -26,6 +26,8 @@ struct CameraLog {
     ends: Arc<Mutex<Vec<Arc<CaptureEnd>>>>,
     /// Cameras that are not plugged in.
     unplugged: Arc<Mutex<HashSet<String>>>,
+    /// Cameras another application holds.
+    busy: Arc<Mutex<HashSet<String>>>,
 }
 
 impl CameraLog {
@@ -38,18 +40,61 @@ impl CameraLog {
     }
 
     fn plug(&self, camera_id: &str, plugged: bool) {
-        let mut unplugged = self.unplugged.lock().expect("unplugged");
-        if plugged {
-            unplugged.remove(camera_id);
-        } else {
-            unplugged.insert(camera_id.to_owned());
-        }
+        set(&self.unplugged, camera_id, !plugged);
+    }
+
+    fn hold(&self, camera_id: &str, held: bool) {
+        set(&self.busy, camera_id, held);
     }
 }
 
-/// `cam:1` and `cam:2` run in 1280x720 or 640x480 at 30 fps; `cam:busy`
-/// does not start in time, as one another application holds; every other
-/// camera (and an unplugged one) is not found.
+fn set(ids: &Mutex<HashSet<String>>, id: &str, member: bool) {
+    let mut ids = ids.lock().expect("ids");
+    if member {
+        ids.insert(id.to_owned());
+    } else {
+        ids.remove(id);
+    }
+}
+
+/// The colour of the frame the stream of start `index` (0 for the first)
+/// shows, as the preview has it (BGRA).
+fn color(index: usize) -> [u8; 4] {
+    [255, 20 * (index as u8 + 1), 0, 255]
+}
+
+/// Where a camera added by [`add_camera`] shows in the 480x270 preview.
+const CAMERA_PIXEL: (u32, u32) = (40, 40);
+
+/// Wait for the preview to show the stream of start `index`.
+fn shows(engine: &Engine, index: usize) {
+    wait_for_preview_pixel(engine, CAMERA_PIXEL.0, CAMERA_PIXEL.1, color(index));
+}
+
+/// The preview a while from now does not show any camera stream.
+fn shows_no_camera(engine: &Engine) {
+    let frames = engine.preview_frames();
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = frames.take();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let frame = loop {
+        if let Some(frame) = frames.take() {
+            break frame;
+        }
+        assert!(Instant::now() < deadline, "no preview frame");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let pixel = frame.pixel(CAMERA_PIXEL.0, CAMERA_PIXEL.1);
+    assert!(
+        !(pixel[0] == 255 && pixel[2] == 0 && pixel[1] % 20 == 0 && pixel[1] > 0),
+        "a camera still shows: {pixel:?}"
+    );
+}
+
+/// `cam:1` and `cam:2` run in 1280x720 or 640x480 at 30 fps, each stream
+/// in its own colour ([`color`]); `cam:busy` (and a held one) does not
+/// start in time, as one another application holds; every other camera
+/// (and an unplugged one) is not found.
 struct FakeCamera(CameraLog);
 
 impl CameraCapture for FakeCamera {
@@ -84,15 +129,17 @@ impl CameraCapture for FakeCamera {
         request: &CameraRequest,
     ) -> Result<CameraStream, CaptureError> {
         let log = &self.0;
-        log.starts
-            .lock()
-            .expect("starts")
-            .push((request.clone(), log.open()));
+        let index = {
+            let mut starts = log.starts.lock().expect("starts");
+            starts.push((request.clone(), log.open()));
+            starts.len() - 1
+        };
         let id = request.camera_id.as_str();
-        if id == "cam:busy" {
-            return Err(CaptureError::timeout(
-                "camera `cam:busy` did not start within 5000 ms; another application may hold it",
-            ));
+        if id == "cam:busy" || log.busy.lock().expect("busy").contains(id) {
+            return Err(CaptureError::timeout(format!(
+                "camera `{id}` did not start within 5000 ms; another application may hold it"
+            ))
+            .with_detail("capture_error", "device busy"));
         }
         if !["cam:1", "cam:2"].contains(&id)
             || log.unplugged.lock().expect("unplugged").contains(id)
@@ -114,7 +161,8 @@ impl CameraCapture for FakeCamera {
             None => MODES[0],
         };
         let mailbox = Arc::new(FrameMailbox::new());
-        // One small blue frame.
+        // One small frame in this stream's colour.
+        let [b, g, r, _] = color(index);
         mailbox.publish(
             VideoFrame::new(
                 16,
@@ -122,7 +170,7 @@ impl CameraCapture for FakeCamera {
                 16 * 4,
                 PixelFormat::Bgrx8,
                 None,
-                FrameBuffer::unpooled([255u8, 0, 0, 0].repeat(16 * 9)),
+                FrameBuffer::unpooled([b, g, r, 0].repeat(16 * 9)),
             )
             .expect("frame"),
         );
@@ -261,6 +309,7 @@ fn a_camera_starts_with_its_scene_also_on_air_and_runs_until_the_pipeline_stops(
     let mut engine = engine.with_output_dir(&dir.0);
     run(&mut engine, "create_scene", json!({"name": "Cam"}));
     add_camera(&mut engine, "Cam", "cam", "cam:1").expect("add");
+    run(&mut engine, "set_preview", json!({"enabled": true}));
     start(&mut engine, json!({"file_name": "cam.mkv"})).expect("start");
     // Not rendered yet: the camera stays off.
     assert!(log.starts().is_empty());
@@ -285,6 +334,7 @@ fn a_camera_starts_with_its_scene_also_on_air_and_runs_until_the_pipeline_stops(
         (format.pixel_format.as_str(), format.width, format.height),
         ("YUY2", 1280, 720)
     );
+    shows(&engine, 0);
 
     // Switching away and back does not reopen it; it keeps running.
     run(
@@ -311,19 +361,30 @@ fn a_camera_starts_with_its_scene_also_on_air_and_runs_until_the_pipeline_stops(
         json!({"scene_name": "Cam", "source_name": "cam"}),
     );
     assert_eq!((log.starts().len(), log.open()), (2, 1));
+    // Back on program, the scene shows the new stream.
+    run(
+        &mut engine,
+        "set_active_scene",
+        json!({"scene_name": "Cam"}),
+    );
+    shows(&engine, 1);
 
-    let report = match engine.handle(Command::StopRecording).expect("stop") {
-        CommandOutput::RecordingReport(report) => *report,
-        other => panic!("unexpected output: {other:?}"),
+    engine.handle(Command::StopRecording).expect("stop");
+    // The preview still runs: so does the camera.
+    assert_eq!(log.open(), 1);
+    let CommandOutput::PreviewState(preview) =
+        run(&mut engine, "set_preview", json!({"enabled": false}))
+    else {
+        panic!("unexpected output");
     };
     assert_eq!(log.open(), 0);
+    let report = preview.pipeline.expect("pipeline report");
     let cams: Vec<_> = report
-        .pipeline
         .scene_captures
         .iter()
         .filter(|outcome| outcome.name == "cam")
         .collect();
-    assert_eq!(cams.len(), 2, "{:?}", report.pipeline.scene_captures);
+    assert_eq!(cams.len(), 2, "{:?}", report.scene_captures);
     assert!(
         cams.iter()
             .all(|outcome| outcome.kind == CaptureKind::Camera)
@@ -337,6 +398,7 @@ fn removing_a_camera_stops_it_and_restart_reopens_an_ended_one() {
     run(&mut engine, "set_preview", json!({"enabled": true}));
     add_camera(&mut engine, "Test pattern", "cam", "cam:1").expect("add");
     assert_eq!(log.open(), 1);
+    shows(&engine, 0);
 
     // Unplugged: it ends like a screen capture, with the reason.
     log.ends.lock().expect("ends")[0].end(|| "camera `cam:1` went away".to_owned());
@@ -361,6 +423,27 @@ fn removing_a_camera_stops_it_and_restart_reopens_an_ended_one() {
         camera_health(&health(&mut engine), "cam").state,
         CaptureState::Running
     );
+    shows(&engine, 1);
+
+    // Held by another application: the restart fails, and the source shows
+    // nothing (not the closed camera's last frame) until it is restarted.
+    log.hold("cam:1", true);
+    let busy = json!({"scene_name": "Test pattern", "source_name": "cam"});
+    let error = try_run(&mut engine, "restart_source", busy.clone()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Timeout);
+    // The backend's details stay, next to the source.
+    assert_eq!(
+        error.details,
+        Some(json!({"capture_error": "device busy", "source": "cam"}))
+    );
+    assert!(matches!(
+        camera_health(&health(&mut engine), "cam").state,
+        CaptureState::Ended { reason } if reason.starts_with("could not start: camera `cam:1` did not start")
+    ));
+    shows_no_camera(&engine);
+    log.hold("cam:1", false);
+    run(&mut engine, "restart_source", busy);
+    shows(&engine, 3);
     // A camera has no capture target.
     let error = try_run(
         &mut engine,
@@ -383,7 +466,19 @@ fn removing_a_camera_stops_it_and_restart_reopens_an_ended_one() {
             .iter()
             .any(|capture| capture.name == "cam")
     );
-    run(&mut engine, "set_preview", json!({"enabled": false}));
+    let CommandOutput::PreviewState(preview) =
+        run(&mut engine, "set_preview", json!({"enabled": false}))
+    else {
+        panic!("unexpected output");
+    };
+    // Every stream that ran, but not the restart that failed: that error
+    // was returned already.
+    let outcomes = preview.pipeline.expect("pipeline report").scene_captures;
+    assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+    assert!(
+        outcomes.iter().all(|outcome| outcome.report.is_some()),
+        "{outcomes:?}"
+    );
 }
 
 #[test]
@@ -427,7 +522,7 @@ fn a_camera_that_is_not_found_shows_nothing_and_warns() {
         added.warnings
     );
     // Only the colour bars and the overlay are drawn.
-    std::thread::sleep(Duration::from_millis(300));
+    shows_no_camera(&engine);
     let render = health(&mut engine).render.expect("render");
     assert!(
         !render
@@ -449,6 +544,7 @@ fn a_camera_that_is_not_found_shows_nothing_and_warns() {
         camera_health(&health(&mut engine), "cam").state,
         CaptureState::Running
     );
+    shows(&engine, 2);
     let CommandOutput::PreviewState(preview) =
         run(&mut engine, "set_preview", json!({"enabled": false}))
     else {
@@ -533,6 +629,7 @@ fn update_source_switches_the_camera_or_mode_and_undoes_a_failed_switch() {
     );
     run(&mut engine, "set_preview", json!({"enabled": true}));
     assert_eq!(log.starts()[0].0.size, Some((640, 480)));
+    shows(&engine, 0);
 
     // Another mode: the camera closes, then opens in it.
     let changed = update(
@@ -562,6 +659,7 @@ fn update_source_switches_the_camera_or_mode_and_undoes_a_failed_switch() {
             .map(|f| (f.width, f.height)),
         Some((1280, 720))
     );
+    shows(&engine, 1);
     // The same camera and mode again, with a move: nothing reopens.
     update(
         &mut engine,
@@ -569,18 +667,39 @@ fn update_source_switches_the_camera_or_mode_and_undoes_a_failed_switch() {
     )
     .expect("same");
     assert_eq!(log.starts().len(), 2);
+    // A rate is the same however it is written.
+    update(
+        &mut engine,
+        with(json!({"mode": {"width": 800, "height": 600, "fps": {"num": 30, "den": 1}}})),
+    )
+    .expect("rate");
+    assert_eq!(log.starts().len(), 3);
+    update(
+        &mut engine,
+        with(json!({"mode": {"width": 800, "height": 600, "fps": {"num": 60, "den": 2}}})),
+    )
+    .expect("same rate");
+    assert_eq!(log.starts().len(), 3);
 
     // A busy camera: the switch fails, the source keeps its camera and
     // mode, and that camera opens again.
     let error = update(&mut engine, with(json!({"camera_id": "cam:busy", "x": 20}))).unwrap_err();
     assert_eq!(error.code, ErrorCode::Timeout);
+    // It runs in its closest mode again, as before.
+    assert!(
+        error.message.contains(
+            "the camera it had opened again, but: camera source `cam`: the camera has no 800x600"
+        ),
+        "{error}"
+    );
     let starts = log.starts();
-    assert_eq!(starts.len(), 4);
-    assert_eq!(starts[2].0.camera_id, "cam:busy");
+    assert_eq!(starts.len(), 5);
+    assert_eq!(starts[3].0.camera_id, "cam:busy");
     assert_eq!(
-        (starts[3].0.camera_id.as_str(), starts[3].0.size),
+        (starts[4].0.camera_id.as_str(), starts[4].0.size),
         ("cam:1", Some((800, 600)))
     );
+    shows(&engine, 4);
     let list = scene_list(&mut engine);
     let source = list.scenes[0]
         .sources
@@ -599,6 +718,7 @@ fn update_source_switches_the_camera_or_mode_and_undoes_a_failed_switch() {
     update(&mut engine, with(json!({"camera_id": "cam:2", "mode": {}}))).expect("switch");
     let (last, _) = log.starts().pop().expect("start");
     assert_eq!((last.camera_id.as_str(), last.size), ("cam:2", None));
+    shows(&engine, 5);
     assert_eq!(
         source_kind(&mut engine, "Test pattern", "cam"),
         SourceKind::Camera {
@@ -608,15 +728,36 @@ fn update_source_switches_the_camera_or_mode_and_undoes_a_failed_switch() {
     );
     assert_eq!(log.open(), 1);
 
-    // Only camera sources have a camera.
+    // A failed switch whose old camera is gone by now says so.
+    log.plug("cam:2", false);
+    let error = update(&mut engine, with(json!({"camera_id": "cam:busy"}))).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert!(
+        error
+            .message
+            .contains("the camera it had opened again, but")
+            && error.message.contains("shows nothing"),
+        "{error}"
+    );
+    assert!(matches!(
+        camera_health(&health(&mut engine), "cam").state,
+        CaptureState::Ended { .. }
+    ));
+    shows_no_camera(&engine);
+    assert_eq!(log.open(), 0);
+
+    // Only camera sources have a camera, and a refused update changes
+    // nothing.
     let error = update(
         &mut engine,
-        json!({"scene_name": "Test pattern", "source_name": "color_bars", "camera_id": "cam:1"}),
+        json!({"scene_name": "Test pattern", "source_name": "color_bars", "camera_id": "cam:1",
+               "x": 99}),
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidParams);
+    let list = scene_list(&mut engine);
+    assert_eq!(list.scenes[0].sources[0].rect.x, 0.0);
     run(&mut engine, "set_preview", json!({"enabled": false}));
-    assert_eq!(log.open(), 0);
 }
 
 #[test]

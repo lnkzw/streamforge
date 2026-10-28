@@ -524,13 +524,7 @@ impl Pipeline {
         let started = start_captures(capture, scene, &self.scene_captures)?;
         let mut live = mailboxes(&self.scene_captures);
         live.extend(mailboxes(&started));
-        let live = LiveFrames {
-            captures: &live,
-            images,
-        };
-        let applied = scenes::build(scene, &live, &mut self.cache)
-            .and_then(|update| self.compositor.update(update).map_err(internal));
-        match applied {
+        match self.render(scene, &live, images) {
             Ok(()) => {
                 let warnings = started
                     .iter()
@@ -557,6 +551,21 @@ impl Pipeline {
         }
     }
 
+    /// Hand the compositor `scene` with the frames of `live` captures.
+    fn render(
+        &mut self,
+        scene: &SceneSpec,
+        live: &[(String, Arc<FrameMailbox>)],
+        images: &ImageStore,
+    ) -> Result<(), CommandError> {
+        let live = LiveFrames {
+            captures: live,
+            images,
+        };
+        scenes::build(scene, &live, &mut self.cache)
+            .and_then(|update| self.compositor.update(update).map_err(internal))
+    }
+
     /// Start the capture of screen or camera source `source` again (as
     /// `source` says now). A source of the rendered scene goes through the
     /// path of a scene change, so the compositor gets the new capture's
@@ -568,6 +577,9 @@ impl Pipeline {
     /// new stream its running mode (and Windows and macOS open a camera
     /// once); on error the source shows nothing until it is restarted.
     /// Returns a camera's warnings (e.g. it was not found).
+    ///
+    /// A camera that had not started is replaced without a report entry:
+    /// its failure was returned or warned about when it happened.
     pub fn restart_capture(
         &mut self,
         capture: &mut Capture,
@@ -612,12 +624,15 @@ impl Pipeline {
         let old = self.scene_captures.remove(index);
         let camera = matches!(source.kind, SourceKind::Camera { .. });
         let old = if camera {
-            self.retire(stop_scene_capture(old));
+            if old.stream.is_ok() {
+                self.retire(stop_scene_capture(old));
+            }
             None
         } else {
             Some(old)
         };
-        let started = if rendered.sources.iter().any(|other| other.id == source.id) {
+        let shown = rendered.sources.iter().any(|other| other.id == source.id);
+        let started = if shown {
             self.apply_scene(capture, rendered, images, keep, allow_new_captures)
         } else {
             let alone = SceneSpec {
@@ -646,11 +661,16 @@ impl Pipeline {
                 Err(error)
             }
             (Err(error), None) => {
-                // The compositor keeps the stopped camera's last frame.
                 self.scene_captures.insert(
                     index,
                     SceneCapture::failed(source, ErrorSummary::from(error.clone())),
                 );
+                // Not the closed camera's last frame: it shows nothing. A
+                // compositor that refuses has stopped, which health shows.
+                if shown {
+                    let live = mailboxes(&self.scene_captures);
+                    let _ = self.render(rendered, &live, images);
+                }
                 Err(error)
             }
         }
@@ -1113,9 +1133,21 @@ fn start_camera(
     }
 }
 
-/// `error` with the source it happened to in `details.source`.
-fn in_source(error: CommandError, source: &SourceSpec) -> CommandError {
-    error.with_details(serde_json::json!({ "source": source.name }))
+/// `error` with the source it happened to in `details.source`, next to
+/// the details the capture gave.
+fn in_source(mut error: CommandError, source: &SourceSpec) -> CommandError {
+    let name = serde_json::Value::from(source.name.clone());
+    match &mut error.details {
+        Some(serde_json::Value::Object(details)) => {
+            details.insert("source".to_owned(), name);
+            error
+        }
+        Some(other) => {
+            let capture = other.take();
+            error.with_details(serde_json::json!({ "source": name, "capture": capture }))
+        }
+        None => error.with_details(serde_json::json!({ "source": name })),
+    }
 }
 
 /// The frames of the captures that run (or ran).

@@ -290,35 +290,37 @@ impl SceneCollection {
     pub fn update_source(&mut self, request: &UpdateSourceRequest) -> Result<(), CommandError> {
         let (scene, index) = self.source_index(&request.source)?;
         let source = &mut self.scenes[scene].sources[index];
-        if let Some(file) = &request.file {
-            let SourceKind::Image { file: shown } = &mut source.kind else {
-                return Err(CommandError::new(
-                    ErrorCode::InvalidParams,
-                    format!(
-                        "`{}` is not an image source; only image sources have a `file`",
-                        source.name
-                    ),
-                ));
-            };
-            shown.clone_from(file);
+        // Checked before anything changes.
+        let image = matches!(source.kind, SourceKind::Image { .. });
+        let camera = matches!(source.kind, SourceKind::Camera { .. });
+        let refused = if request.file.is_some() && !image {
+            Some("not an image source; only image sources have a `file`")
+        } else if (request.camera_id.is_some() || request.mode.is_some()) && !camera {
+            Some("not a camera source; only camera sources have a `camera_id` and a `mode`")
+        } else {
+            None
+        };
+        if let Some(reason) = refused {
+            return Err(CommandError::new(
+                ErrorCode::InvalidParams,
+                format!("`{}` is {reason}", source.name),
+            ));
         }
-        if request.camera_id.is_some() || request.mode.is_some() {
-            let SourceKind::Camera { camera_id, mode } = &mut source.kind else {
-                return Err(CommandError::new(
-                    ErrorCode::InvalidParams,
-                    format!(
-                        "`{}` is not a camera source; only camera sources have a `camera_id` \
-                         and a `mode`",
-                        source.name
-                    ),
-                ));
-            };
-            if let Some(id) = &request.camera_id {
-                camera_id.clone_from(id);
+        match &mut source.kind {
+            SourceKind::Image { file } => {
+                if let Some(wanted) = &request.file {
+                    file.clone_from(wanted);
+                }
             }
-            if let Some(wanted) = request.mode {
-                *mode = (!wanted.is_auto()).then_some(wanted);
+            SourceKind::Camera { camera_id, mode } => {
+                if let Some(id) = &request.camera_id {
+                    camera_id.clone_from(id);
+                }
+                if let Some(wanted) = request.mode {
+                    *mode = (!wanted.is_auto()).then_some(wanted);
+                }
             }
+            _ => {}
         }
         let rect = &mut source.rect;
         rect.x = request.x.unwrap_or(rect.x);

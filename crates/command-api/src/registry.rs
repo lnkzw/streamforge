@@ -2415,7 +2415,8 @@ fn valid_camera_id(command: &str, id: String) -> Result<String, CommandError> {
 
 /// A camera source's mode; all `None` lets the engine choose. A rate of
 /// `0/1` is how `list_cameras` lists a camera that states none, so it asks
-/// for no rate.
+/// for no rate. Rates are kept in lowest terms, so the same rate compares
+/// equal however it was written.
 fn camera_mode(command: &str, mode: CameraModeParams) -> Result<CameraModeSpec, CommandError> {
     let side = |value: u32| (1..=MAX_CAMERA_SIDE).contains(&value);
     match (mode.width, mode.height) {
@@ -2448,13 +2449,26 @@ fn camera_mode(command: &str, mode: CameraModeParams) -> Result<CameraModeSpec, 
                 format!("`mode.fps` must be at most {MAX_CAMERA_FPS} frames per second"),
             ));
         }
-        Some(FpsParams { num, den }) => Some(Rational { num, den }),
+        Some(FpsParams { num, den }) => {
+            let divisor = gcd(num, den);
+            Some(Rational {
+                num: num / divisor,
+                den: den / divisor,
+            })
+        }
     };
     Ok(CameraModeSpec {
         width: mode.width,
         height: mode.height,
         fps,
     })
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn screen_selection(
@@ -4079,6 +4093,11 @@ mod tests {
                         den: 1001,
                     }),
                 )),
+            ),
+            // In lowest terms, so the same rate is the same mode.
+            (
+                json!({"fps": {"num": 60, "den": 2}}),
+                Some(mode(None, None, Some(Rational::integer(30)))),
             ),
             // How list_cameras lists a camera without rates: no rate asked.
             (

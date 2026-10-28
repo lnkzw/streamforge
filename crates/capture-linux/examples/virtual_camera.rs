@@ -87,7 +87,7 @@ mod camera {
             pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut [Pod::from_bytes(&format).expect("format pod")],
         )?;
-        // A driver stream runs when it is triggered: every 33 ms.
+        // A driver stream runs when it is triggered: 30 times a second.
         let timer = main_loop.loop_().add_timer({
             let stream = stream.clone();
             move |_| {
@@ -97,7 +97,7 @@ mod camera {
         timer
             .update_timer(
                 Some(Duration::from_millis(1)),
-                Some(Duration::from_millis(33)),
+                Some(Duration::from_nanos(1_000_000_000 / 30)),
             )
             .into_sync_result()?;
         eprintln!("virtual camera `{name}` runs; stop it with Ctrl-C");

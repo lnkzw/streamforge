@@ -79,7 +79,10 @@ impl Engine {
     ) -> Result<SceneList, CommandError> {
         let before = self.scenes.snapshot();
         let rendered = self.scenes.active().clone();
-        change(&mut self.scenes)?;
+        if let Err(error) = change(&mut self.scenes) {
+            self.scenes.restore(before);
+            return Err(error);
+        }
         let (allow_new_captures, keep) = self.capture_policy();
         let mut warnings = Vec::new();
         if let Some(pipeline) = &mut self.pipeline {
@@ -173,8 +176,12 @@ impl Engine {
         if !running {
             return self.edit_scenes(|scenes| scenes.update_source(request));
         }
+        self.live_pipeline(&old.name)?;
         let before = self.scenes.snapshot();
-        self.scenes.update_source(request)?;
+        if let Err(error) = self.scenes.update_source(request) {
+            self.scenes.restore(before);
+            return Err(error);
+        }
         let new = self.scenes.source(&SourceRef::id(old.id.clone()))?.clone();
         if new.kind == old.kind {
             // It captures that camera in that mode already.
@@ -185,15 +192,42 @@ impl Engine {
             Ok(warnings) => Ok(self.scene_list(warnings)),
             Err(mut error) => {
                 self.scenes.restore(before);
-                if let Err(again) = self.restart_capture(&old) {
-                    error.message = format!(
-                        "{}; the camera it had did not open again either ({}), so it shows \
-                         nothing until restart_source",
-                        error.message, again.message
-                    );
+                match self.restart_capture(&old) {
+                    Ok(warnings) if warnings.is_empty() => {}
+                    // E.g. the old camera is not found any more.
+                    Ok(warnings) => {
+                        error.message = format!(
+                            "{}; the camera it had opened again, but: {}",
+                            error.message,
+                            warnings.join("; ")
+                        );
+                    }
+                    Err(again) => {
+                        error.message = format!(
+                            "{}; the camera it had did not open again either ({}), so it shows \
+                             nothing until restart_source",
+                            error.message, again.message
+                        );
+                    }
                 }
                 Err(error)
             }
+        }
+    }
+
+    /// Refuse a new capture for `name` into a pipeline that stopped
+    /// unexpectedly (it would never be rendered); `Ok` without a pipeline.
+    fn live_pipeline(&self, name: &str) -> Result<(), CommandError> {
+        match &self.pipeline {
+            Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "the media pipeline stopped unexpectedly, so a new capture of `{name}` would \
+                     not be rendered; turn the preview off and stop the open outputs to collect \
+                     their reports"
+                ),
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -272,18 +306,10 @@ impl Engine {
                 ));
             }
         }
-        match &self.pipeline {
-            None => return Err(no_pipeline(name)),
-            Some(pipeline) if !pipeline.is_running() => {
-                return Err(CommandError::new(
-                    ErrorCode::InvalidState,
-                    "the media pipeline stopped unexpectedly, so a new capture would not be \
-                     rendered; turn the preview off and stop the open outputs to collect their \
-                     reports",
-                ));
-            }
-            Some(_) => {}
+        if self.pipeline.is_none() {
+            return Err(no_pipeline(name));
         }
+        self.live_pipeline(name)?;
         let before = self.scenes.snapshot();
         if let Some(id) = capture_target_id {
             self.scenes.set_capture_target_id(source, id)?;

@@ -292,6 +292,28 @@ fn image_sources_take_only_their_own_fields() {
         not_image.message.contains("not an image source"),
         "{not_image}"
     );
+    // A camera's fields on an image are refused before the file changes.
+    write_png(&dir.0, "other.png", 4, 4, [0, 0, 255]);
+    let camera = try_run(
+        &mut engine,
+        "update_source",
+        json!({"scene_name": "Show", "source_name": "logo", "file": "other.png", "mode": {}}),
+    )
+    .unwrap_err();
+    assert_eq!(camera.code, ErrorCode::InvalidParams, "{camera}");
+    assert!(camera.message.contains("not a camera source"), "{camera}");
+    let list = scene_list(&mut engine);
+    let logo = list.scenes[1]
+        .sources
+        .iter()
+        .find(|source| source.name == "logo")
+        .expect("logo");
+    assert_eq!(
+        logo.kind,
+        SourceKind::Image {
+            file: "logo.png".to_owned()
+        }
+    );
     let target = try_run(
         &mut engine,
         "restart_source",

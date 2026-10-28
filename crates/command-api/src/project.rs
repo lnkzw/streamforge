@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::{MixerState, SceneList};
 
@@ -58,9 +58,9 @@ pub struct ProjectSaved {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProjectLoaded {
     pub file_name: String,
-    /// Its `warnings` stay empty, so they never clash with this result's:
-    /// a project loads only while idle, so loading starts no capture.
-    #[serde(flatten)]
+    /// Without its `warnings`: this result has its own, and a project loads
+    /// only while idle, so loading starts no capture to warn about.
+    #[serde(flatten, serialize_with = "scenes_without_warnings")]
     pub scenes: SceneList,
     pub mixer: MixerState,
     /// E.g. screen sources whose capture target has to be chosen again.
@@ -87,4 +87,51 @@ pub struct ProjectValidation {
     /// writes the current version.
     pub migrates: bool,
     pub problems: Vec<ProjectProblem>,
+}
+
+/// The scene list's fields for [`ProjectLoaded`], whose `warnings` is the
+/// only one in the result.
+fn scenes_without_warnings<S: Serializer>(
+    scenes: &SceneList,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    SceneList {
+        warnings: Vec::new(),
+        ..scenes.clone()
+    }
+    .serialize(serializer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_loaded_project_has_one_warnings_field() {
+        let loaded = ProjectLoaded {
+            file_name: "show.json".to_owned(),
+            scenes: SceneList {
+                canvas_width: 1920,
+                canvas_height: 1080,
+                active_scene_name: "Show".to_owned(),
+                active_scene_id: "scene_show".to_owned(),
+                scenes: Vec::new(),
+                // A scene list's own warnings stay out of this result.
+                warnings: vec!["camera".to_owned()],
+            },
+            mixer: MixerState {
+                running: false,
+                channels: Vec::new(),
+                buses: Vec::new(),
+                outputs: Vec::new(),
+                warnings: Vec::new(),
+            },
+            warnings: vec!["migrated".to_owned()],
+        };
+        let text = serde_json::to_string(&loaded).expect("serialize");
+        // `serde_json::Value` would keep one of two duplicate keys, so count
+        // them in the text: the result's and the mixer's.
+        assert_eq!(text.matches("\"warnings\"").count(), 2, "{text}");
+        assert!(text.contains("\"warnings\":[\"migrated\"]"), "{text}");
+    }
 }

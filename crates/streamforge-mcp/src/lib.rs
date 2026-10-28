@@ -127,7 +127,7 @@ fn tool(descriptor: &CommandDescriptor) -> Tool {
             .to_owned()
     } else if descriptor.least_access() != descriptor.access {
         format!(
-            "{} Needs {} access for some parameters (screen sources) and {} otherwise.",
+            "{} Needs {} access for some parameters (screen and camera sources) and {} otherwise.",
             descriptor.summary,
             access_label(descriptor.access),
             access_label(descriptor.least_access())

@@ -48,6 +48,26 @@ impl Target {
             Self::Camera { .. } => "camera",
         }
     }
+
+    fn no_frames_warning(&self) -> &'static str {
+        match self {
+            Self::Portal { .. } => {
+                "no frames received; screen sources only send frames when content changes"
+            }
+            Self::Camera { .. } => "no frames received from the camera",
+        }
+    }
+}
+
+/// Why a frame was not delivered.
+enum Discard {
+    /// Every pooled buffer is in use: the consumer is behind.
+    PoolEmpty,
+    /// No format was negotiated, or it cannot be converted (warned when
+    /// it was negotiated).
+    NoLayout,
+    /// The buffer did not hold a frame of the negotiated format.
+    Unconvertible,
 }
 
 /// Where captured frames go in streaming mode.
@@ -75,6 +95,9 @@ struct State {
     buffer_memory: Option<&'static str>,
     /// Frames arrived with bottom-up rows (negative stride); not supported.
     saw_bottom_up: bool,
+    /// Frames whose buffers could not be converted (short, missing planes,
+    /// a corrupt MJPEG frame).
+    unconvertible: u64,
     warnings: Vec<String>,
 }
 
@@ -90,6 +113,7 @@ pub(crate) fn capture(
 ) -> Result<VideoRun, CaptureError> {
     let delivering = delivery.is_some();
     let what = target.what();
+    let no_frames_warning = target.no_frames_warning();
     let (connection, stream_name, properties, node_id, enum_formats) = match target {
         Target::Portal {
             remote,
@@ -195,7 +219,9 @@ pub(crate) fn capture(
         })
         .process({
             let state = Rc::clone(&state);
-            // Real-time path: no allocation, no blocking, O(1) per buffer.
+            // Runs on the stream's own capture thread, not PipeWire's
+            // real-time thread: no blocking, and no allocation except in
+            // the MJPEG decoder (see `deliver`); conversion is O(pixels).
             move |stream, _| {
                 let arrival_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 let mut state = state.borrow_mut();
@@ -263,10 +289,15 @@ pub(crate) fn capture(
                         &mut state.mjpeg,
                         pts_ns,
                     ),
-                    _ => false,
+                    _ => Err(Discard::NoLayout),
                 };
-                if !delivered {
-                    state.stats.frame_discarded();
+                match delivered {
+                    Ok(()) => {}
+                    Err(Discard::PoolEmpty | Discard::NoLayout) => state.stats.frame_discarded(),
+                    Err(Discard::Unconvertible) => {
+                        state.unconvertible += 1;
+                        state.stats.frame_discarded();
+                    }
                 }
             }
         })
@@ -300,11 +331,20 @@ pub(crate) fn capture(
     }
     let stats = state.stats.finish(elapsed);
     if stats.frames == 0 {
-        state.warnings.push(match what {
-            "screen" => "no frames received; screen sources only send frames when content changes"
-                .to_owned(),
-            _ => format!("no frames received from the {what}"),
-        });
+        state.warnings.push(no_frames_warning.to_owned());
+    }
+    if state.unconvertible > 0 {
+        let format = state
+            .format
+            .as_ref()
+            .map_or("the negotiated format", |format| {
+                format.pixel_format.as_str()
+            });
+        state.warnings.push(format!(
+            "{} frames in {format} could not be converted (short buffers, missing planes or \
+             corrupt data) and were discarded",
+            state.unconvertible
+        ));
     }
     if stats.frames > 0 && stats.frames_without_pts == stats.frames {
         state.warnings.push(
@@ -320,10 +360,9 @@ pub(crate) fn capture(
     })
 }
 
-/// Convert one frame into a pooled buffer and publish it. Returns `false`
-/// if it had to be discarded. Allocates only while the pool warms up or
-/// when the resolution grows, and inside the MJPEG decoder (see
-/// `frame-decode`).
+/// Convert one frame into a pooled buffer and publish it, or say why it
+/// was discarded. Allocates only while the pool warms up or when the
+/// resolution grows, and inside the MJPEG decoder (see `frame-decode`).
 fn deliver(
     delivery: &Delivery,
     datas: &mut [Data],
@@ -332,23 +371,20 @@ fn deliver(
     layout: FrameLayout,
     mjpeg: &mut Option<MjpegDecoder>,
     pts_ns: Option<i64>,
-) -> bool {
+) -> Result<(), Discard> {
     let (w, h) = (width as usize, height as usize);
     let row = w * media_core::PixelFormat::BYTES_PER_PIXEL;
     let Some(mut buffer) = delivery.pool.acquire(row * h) else {
-        return false;
+        return Err(Discard::PoolEmpty);
     };
     if !convert(datas, width, height, layout, mjpeg, &mut buffer) {
-        return false;
+        return Err(Discard::Unconvertible);
     }
     let pts = pts_ns.and_then(|ns| MediaTimestamp::new(ns, 1, 1_000_000_000).ok());
-    match VideoFrame::new(width, height, row, layout.target_format(), pts, buffer) {
-        Ok(frame) => {
-            delivery.mailbox.publish(frame);
-            true
-        }
-        Err(_) => false,
-    }
+    let frame = VideoFrame::new(width, height, row, layout.target_format(), pts, buffer)
+        .map_err(|_| Discard::Unconvertible)?;
+    delivery.mailbox.publish(frame);
+    Ok(())
 }
 
 /// The valid bytes of a data block's chunk, and its row stride (`None`

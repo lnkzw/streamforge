@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use capture_api::{
     Camera, CameraRequest, CaptureEnd, CaptureError, CaptureErrorKind, CaptureState,
@@ -62,8 +62,9 @@ fn is_camera(props: &DictRef) -> bool {
             || matches!(props.get(*pw::keys::DEVICE_API), Some("v4l2" | "libcamera")))
 }
 
-/// List the cameras, sorted by id.
+/// List the cameras, sorted by id. Both roundtrips share `timeout`.
 pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, CaptureError> {
+    let deadline = Instant::now() + timeout;
     let connection = Connection::connect()?;
     let registry = connection
         .core
@@ -122,7 +123,7 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
         bound.push((node, listener));
     }
     if !bound.is_empty() {
-        connection.roundtrip(timeout)?;
+        connection.roundtrip(deadline.saturating_duration_since(Instant::now()))?;
     }
     drop(bound);
     let params = params.take();
@@ -133,10 +134,7 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
         .map(|((_, name, description), params)| CameraNode {
             name,
             description,
-            offers: params
-                .iter()
-                .flat_map(|param| modes::parse_offers(param))
-                .collect(),
+            offers: modes::camera_offers(params.iter().map(Vec::as_slice)),
         })
         .collect();
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -287,7 +285,7 @@ fn other_mode(chosen: &ModeOffer, negotiated: Option<&VideoFormatInfo>) -> Optio
     let got = text(
         negotiated.width,
         negotiated.height,
-        negotiated.framerate,
+        modes::reduce(negotiated.framerate),
         &negotiated.pixel_format,
     );
     (wanted != got).then(|| {
@@ -421,6 +419,12 @@ mod tests {
             framerate: Rational::integer(30),
         };
         assert_eq!(other_mode(&chosen, Some(&format(1280, "MJPG"))), None);
+        // An equal rate written differently is the same mode.
+        let doubled = VideoFormatInfo {
+            framerate: Rational { num: 60, den: 2 },
+            ..format(1280, "MJPG")
+        };
+        assert_eq!(other_mode(&chosen, Some(&doubled)), None);
         assert_eq!(other_mode(&chosen, None), None);
         assert_eq!(
             other_mode(&chosen, Some(&format(1280, "YUY2"))).as_deref(),

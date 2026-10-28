@@ -19,8 +19,12 @@ use crate::formats;
 const CANVAS: (u32, u32) = (1920, 1080);
 /// Without a requested rate: the highest one up to this.
 const MAX_DEFAULT_FPS: u32 = 60;
-/// A size without a requested one runs at least this fast if it can.
-const MIN_DEFAULT_FPS: u32 = 30;
+/// A size without a requested one runs at least this fast if it can:
+/// 30 fps, counting NTSC's 30000/1001.
+const MIN_DEFAULT_FPS: Rational = Rational {
+    num: 30000,
+    den: 1001,
+};
 /// Sizes tried within a size range (cameras with discrete sizes list their own).
 const RANGE_SIZES: [(u32, u32); 8] = [
     (3840, 2160),
@@ -34,7 +38,7 @@ const RANGE_SIZES: [(u32, u32); 8] = [
 ];
 /// Rates tried within a rate range.
 const RANGE_RATES: [u32; 8] = [60, 50, 30, 25, 24, 15, 10, 5];
-/// Bound on the modes kept per camera, whatever its params say.
+/// Bound on the modes kept per param and per camera, whatever its params say.
 const MAX_OFFERS: usize = 1024;
 /// Bound on the formats offered when connecting: the chosen one and fallbacks.
 const MAX_CONNECT_FORMATS: usize = 64;
@@ -96,6 +100,23 @@ impl ModeOffer {
     fn area(&self) -> u64 {
         u64::from(self.width) * u64::from(self.height)
     }
+}
+
+/// Every mode of a camera's `EnumFormat` params, each once and at most
+/// [`MAX_OFFERS`].
+pub(crate) fn camera_offers<'a>(params: impl IntoIterator<Item = &'a [u8]>) -> Vec<ModeOffer> {
+    let mut offers = Vec::new();
+    for param in params {
+        for offer in parse_offers(param) {
+            if offers.len() == MAX_OFFERS {
+                return offers;
+            }
+            if !offers.contains(&offer) {
+                offers.push(offer);
+            }
+        }
+    }
+    offers
 }
 
 /// The modes in one `EnumFormat` param that StreamForge can convert.
@@ -300,7 +321,10 @@ fn dedup_in_order<T: PartialEq + Copy>(values: &mut Vec<T>) {
     *values = kept;
 }
 
-fn reduce(rate: Rational) -> Rational {
+pub(crate) fn reduce(rate: Rational) -> Rational {
+    if rate.num == 0 || rate.den == 0 {
+        return rate;
+    }
     let (mut a, mut b) = (rate.num, rate.den);
     while b != 0 {
         (a, b) = (b, a % b);
@@ -418,7 +442,7 @@ fn default_size(offers: &[ModeOffer]) -> Option<(u32, u32)> {
     offers
         .iter()
         .filter(fits)
-        .filter(|o| compare(o.fps, Rational::integer(MIN_DEFAULT_FPS)) != Ordering::Less)
+        .filter(|o| compare(o.fps, MIN_DEFAULT_FPS) != Ordering::Less)
         .max_by_key(largest)
         .or_else(|| offers.iter().filter(fits).max_by_key(largest))
         .or_else(|| offers.iter().min_by_key(|o| (o.area(), o.width)))
@@ -591,6 +615,48 @@ mod tests {
         let offers = [offer(3840, 2160, 30, YUY2), offer(2560, 1440, 30, YUY2)];
         let choice = choose(&offers, &request(None, None)).expect("choice");
         assert_eq!(choice.offer.size(), (2560, 1440));
+    }
+
+    #[test]
+    fn ntsc_rates_count_as_30_fps() {
+        let ntsc = Rational {
+            num: 30000,
+            den: 1001,
+        };
+        let offers = [
+            ModeOffer {
+                fps: ntsc,
+                ..offer(1920, 1080, 1, YUY2)
+            },
+            offer(1280, 720, 60, YUY2),
+        ];
+        let choice = choose(&offers, &request(None, None)).expect("choice");
+        assert_eq!(choice.offer.size(), (1920, 1080));
+        // 29 fps is not 30.
+        let offers = [offer(1920, 1080, 29, YUY2), offer(1280, 720, 60, YUY2)];
+        let choice = choose(&offers, &request(None, None)).expect("choice");
+        assert_eq!(choice.offer.size(), (1280, 720));
+    }
+
+    #[test]
+    fn a_cameras_params_give_each_mode_once() {
+        let yuy2 = format_pod(&offer(640, 480, 30, YUY2)).expect("pod");
+        let mjpeg = format_pod(&offer(640, 480, 30, CameraFormat::Mjpeg)).expect("pod");
+        let offers = camera_offers([&yuy2[..], &mjpeg[..], &yuy2[..]]);
+        assert_eq!(
+            offers,
+            [
+                offer(640, 480, 30, YUY2),
+                offer(640, 480, 30, CameraFormat::Mjpeg)
+            ]
+        );
+        let many: Vec<Vec<u8>> = (1..=1100)
+            .map(|width| format_pod(&offer(width, 480, 30, YUY2)).expect("pod"))
+            .collect();
+        assert_eq!(
+            camera_offers(many.iter().map(Vec::as_slice)).len(),
+            MAX_OFFERS
+        );
     }
 
     #[test]

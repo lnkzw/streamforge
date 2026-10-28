@@ -1151,8 +1151,13 @@ mod tests {
         // Holding the snapshot does not stall the mixer thread.
         let held = control.shared.live.lock().expect("lock");
         let before = blocks.lock().expect("lock").len();
-        thread::sleep(Duration::from_millis(200));
-        let during = blocks.lock().expect("lock").len() - before;
+        // Bounded, not timed: a loaded runner may mix late.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mixed = || blocks.lock().expect("lock").len() - before;
+        while mixed() < 10 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let during = mixed();
         drop(held);
         let stats = mixer.stop().expect("stop");
         assert!(

@@ -3,6 +3,7 @@
 use std::io::Cursor;
 
 use capture_api::{AudioFormatInfo, Rational, VideoFormatInfo};
+use frame_decode::{ColorMatrix, ColorRange, YuvColor, YuvLayout};
 use media_core::PixelFormat;
 use pipewire::spa;
 use spa::param::ParamType;
@@ -10,6 +11,7 @@ use spa::param::audio::{AudioFormat, AudioInfoRaw};
 use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use spa::param::format_utils;
 use spa::param::video::{VideoFormat, VideoInfoRaw};
+use spa::pod::deserialize::PodDeserializer;
 use spa::pod::serialize::PodSerializer;
 use spa::pod::{ChoiceValue, Object, Pod, Property, Value};
 use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
@@ -26,12 +28,26 @@ const VIDEO_FORMATS: [(VideoFormat, &str); 8] = [
     (VideoFormat::ABGR, "ABGR"),
 ];
 
-const MAX_DIMENSION: u32 = 8192;
+/// Names of the other raw formats a camera may deliver.
+const CAMERA_FORMAT_NAMES: [(VideoFormat, &str); 6] = [
+    (VideoFormat::RGB, "RGB"),
+    (VideoFormat::BGR, "BGR"),
+    (VideoFormat::YUY2, "YUY2"),
+    (VideoFormat::UYVY, "UYVY"),
+    (VideoFormat::NV12, "NV12"),
+    (VideoFormat::I420, "I420"),
+];
+
+/// How a negotiated MJPEG format is reported.
+pub(crate) const MJPEG_NAME: &str = "MJPG";
+
+pub(crate) const MAX_DIMENSION: u32 = 8192;
 const MAX_FRAMERATE: u32 = 360;
 
 pub(crate) fn video_format_name(format: VideoFormat) -> String {
     VIDEO_FORMATS
         .iter()
+        .chain(&CAMERA_FORMAT_NAMES)
         .find(|(known, _)| known.as_raw() == format.as_raw())
         .map_or_else(
             || format!("spa:{}", format.as_raw()),
@@ -198,6 +214,81 @@ pub(crate) fn pixel_layout(format: VideoFormat) -> Option<PixelLayout> {
     }
 }
 
+/// Byte positions of B, G and R inside one 3-byte pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Rgb24Layout {
+    b: usize,
+    g: usize,
+    r: usize,
+}
+
+/// Layout of the 24-bit packed formats a camera may deliver.
+pub(crate) fn rgb24_layout(format: VideoFormat) -> Option<Rgb24Layout> {
+    match format.as_raw() {
+        raw if raw == VideoFormat::RGB.as_raw() => Some(Rgb24Layout { b: 2, g: 1, r: 0 }),
+        raw if raw == VideoFormat::BGR.as_raw() => Some(Rgb24Layout { b: 0, g: 1, r: 2 }),
+        _ => None,
+    }
+}
+
+/// The YUV layouts `frame-decode` converts.
+pub(crate) fn yuv_layout(format: VideoFormat) -> Option<YuvLayout> {
+    match format.as_raw() {
+        raw if raw == VideoFormat::YUY2.as_raw() => Some(YuvLayout::Yuy2),
+        raw if raw == VideoFormat::UYVY.as_raw() => Some(YuvLayout::Uyvy),
+        raw if raw == VideoFormat::NV12.as_raw() => Some(YuvLayout::Nv12),
+        raw if raw == VideoFormat::I420.as_raw() => Some(YuvLayout::I420),
+        _ => None,
+    }
+}
+
+/// How a negotiated format's frames become Bgrx8 (or premultiplied Bgra8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameLayout {
+    Packed(PixelLayout),
+    Rgb24(Rgb24Layout),
+    Yuv(YuvLayout, YuvColor),
+    Mjpeg,
+}
+
+impl FrameLayout {
+    /// Format of the frames delivered for this layout.
+    pub fn target_format(self) -> PixelFormat {
+        match self {
+            Self::Packed(layout) => layout.target_format(),
+            Self::Rgb24(_) | Self::Yuv(..) | Self::Mjpeg => PixelFormat::Bgrx8,
+        }
+    }
+}
+
+/// Copy a `width` x `height` 24-bit RGB image whose rows are `src_stride`
+/// bytes apart into the tightly packed `dst` as Bgrx8. Returns `false` if
+/// a buffer is too small. Does not allocate.
+pub(crate) fn convert_rgb24(
+    src: &[u8],
+    src_stride: usize,
+    width: usize,
+    height: usize,
+    layout: Rgb24Layout,
+    dst: &mut [u8],
+) -> bool {
+    let row = width * PixelFormat::BYTES_PER_PIXEL;
+    let src_row = width * 3;
+    if height == 0 || src_stride < src_row || dst.len() < row * height {
+        return false;
+    }
+    if src.len() < src_stride * (height - 1) + src_row {
+        return false;
+    }
+    for (y, out) in dst.chunks_exact_mut(row).take(height).enumerate() {
+        let input = &src[y * src_stride..][..src_row];
+        for (o, i) in pixels_mut(out).iter_mut().zip(input.as_chunks::<3>().0) {
+            *o = [i[layout.b], i[layout.g], i[layout.r], 255];
+        }
+    }
+    true
+}
+
 /// Copy a `width` x `height` image whose rows are `src_stride` bytes apart
 /// into the tightly packed `dst` as Bgrx8, or as premultiplied Bgra8 when the
 /// source has alpha (SPA alpha is straight). Returns `false` if a buffer is
@@ -254,12 +345,29 @@ fn pixels_mut(bytes: &mut [u8]) -> &mut [[u8; 4]] {
     bytes.as_chunks_mut::<{ PixelFormat::BYTES_PER_PIXEL }>().0
 }
 
-/// Negotiated raw video format plus its SPA format id.
-pub(crate) fn parse_video_format(param: &Pod) -> Result<(VideoFormatInfo, VideoFormat), String> {
+/// Negotiated video format, and how its frames are converted (`None` for a
+/// format that cannot be).
+pub(crate) fn parse_frame_format(
+    param: &Pod,
+) -> Result<(VideoFormatInfo, Option<FrameLayout>), String> {
     let (media_type, media_subtype) = format_utils::parse_format(param)
         .map_err(|err| format!("cannot parse negotiated format: {err}"))?;
-    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
-        return Err("producer negotiated a non-raw video format".to_owned());
+    if media_type != MediaType::Video {
+        return Err("producer negotiated a non-video format".to_owned());
+    }
+    if media_subtype == MediaSubtype::Mjpg {
+        let (width, height, framerate) = fixed_size_and_rate(param)
+            .ok_or("cannot parse the negotiated MJPEG size and frame rate")?;
+        let format = VideoFormatInfo {
+            pixel_format: MJPEG_NAME.to_owned(),
+            width,
+            height,
+            framerate,
+        };
+        return Ok((format, Some(FrameLayout::Mjpeg)));
+    }
+    if media_subtype != MediaSubtype::Raw {
+        return Err("producer negotiated a video format other than raw or MJPEG".to_owned());
     }
     let mut info = VideoInfoRaw::new();
     info.parse(param)
@@ -273,7 +381,73 @@ pub(crate) fn parse_video_format(param: &Pod) -> Result<(VideoFormatInfo, VideoF
             den: info.framerate().denom,
         },
     };
-    Ok((format, info.format()))
+    let layout = pixel_layout(info.format())
+        .map(FrameLayout::Packed)
+        .or_else(|| rgb24_layout(info.format()).map(FrameLayout::Rgb24))
+        .or_else(|| {
+            yuv_layout(info.format()).map(|layout| FrameLayout::Yuv(layout, yuv_color(&info)))
+        });
+    Ok((format, layout))
+}
+
+/// The colour matrix and range a raw format states; BT.601 limited range
+/// when it does not say (ADR 0019). BT.2020 and other matrices also fall
+/// back to BT.601.
+fn yuv_color(info: &VideoInfoRaw) -> YuvColor {
+    YuvColor {
+        matrix: if info.color_matrix() == spa::sys::SPA_VIDEO_COLOR_MATRIX_BT709 {
+            ColorMatrix::Bt709
+        } else {
+            ColorMatrix::Bt601
+        },
+        range: if info.color_range() == spa::sys::SPA_VIDEO_COLOR_RANGE_0_255 {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        },
+    }
+}
+
+/// Size and rate of a negotiated (fixed) format pod.
+fn fixed_size_and_rate(param: &Pod) -> Option<(u32, u32, Rational)> {
+    let Ok((_, Value::Object(object))) = PodDeserializer::deserialize_any_from(param.as_bytes())
+    else {
+        return None;
+    };
+    let mut size = None;
+    let mut rate = None;
+    for property in object.properties {
+        match (property.key, property.value) {
+            (key, Value::Rectangle(r)) if key == FormatProperties::VideoSize.as_raw() => {
+                size = Some((r.width, r.height));
+            }
+            (key, Value::Choice(ChoiceValue::Rectangle(Choice(_, ChoiceEnum::None(r)))))
+                if key == FormatProperties::VideoSize.as_raw() =>
+            {
+                size = Some((r.width, r.height));
+            }
+            (key, Value::Fraction(f)) if key == FormatProperties::VideoFramerate.as_raw() => {
+                rate = Some(f);
+            }
+            (key, Value::Choice(ChoiceValue::Fraction(Choice(_, ChoiceEnum::None(f)))))
+                if key == FormatProperties::VideoFramerate.as_raw() =>
+            {
+                rate = Some(f);
+            }
+            _ => {}
+        }
+    }
+    let (width, height) = size?;
+    // A format without a rate is reported as variable (0/1).
+    let rate = rate.unwrap_or(Fraction { num: 0, denom: 1 });
+    Some((
+        width,
+        height,
+        Rational {
+            num: rate.num,
+            den: rate.denom,
+        },
+    ))
 }
 
 pub(crate) fn parse_audio_format(param: &Pod) -> Result<AudioFormatInfo, String> {
@@ -298,7 +472,7 @@ pub(crate) fn parse_audio_format(param: &Pod) -> Result<AudioFormatInfo, String>
     })
 }
 
-fn serialize(object: Object) -> Result<Vec<u8>, String> {
+pub(crate) fn serialize(object: Object) -> Result<Vec<u8>, String> {
     PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(object))
         .map(|(cursor, _)| cursor.into_inner())
         .map_err(|err| format!("cannot serialize SPA pod: {err:?}"))
@@ -312,9 +486,10 @@ mod tests {
     fn known_video_formats_have_names() {
         assert_eq!(video_format_name(VideoFormat::BGRx), "BGRx");
         assert_eq!(video_format_name(VideoFormat::ABGR), "ABGR");
+        assert_eq!(video_format_name(VideoFormat::NV12), "NV12");
         assert_eq!(
-            video_format_name(VideoFormat::NV12),
-            format!("spa:{}", VideoFormat::NV12.as_raw())
+            video_format_name(VideoFormat::YV12),
+            format!("spa:{}", VideoFormat::YV12.as_raw())
         );
     }
 
@@ -370,6 +545,35 @@ mod tests {
         // A=128, R=255, G=100, B=0
         assert!(convert_frame(&[128, 255, 100, 0], 4, 1, 1, argb, &mut dst));
         assert_eq!(dst, [0, 50, 128, 128]);
+    }
+
+    #[test]
+    fn rgb24_is_widened_to_bgrx() {
+        // 2x1 RGB image, source stride 8 (2 bytes padding).
+        let rgb = rgb24_layout(VideoFormat::RGB).expect("layout");
+        let mut dst = [0u8; 8];
+        assert!(convert_rgb24(
+            &[10, 20, 30, 40, 50, 60, 9, 9],
+            8,
+            2,
+            1,
+            rgb,
+            &mut dst
+        ));
+        assert_eq!(dst, [30, 20, 10, 255, 60, 50, 40, 255]);
+        let bgr = rgb24_layout(VideoFormat::BGR).expect("layout");
+        assert!(convert_rgb24(&[10, 20, 30], 3, 1, 1, bgr, &mut dst[..4]));
+        assert_eq!(dst[..4], [10, 20, 30, 255]);
+        assert!(!convert_rgb24(&[0; 5], 3, 1, 2, bgr, &mut dst));
+        assert!(!convert_rgb24(&[0; 6], 2, 1, 2, bgr, &mut dst));
+    }
+
+    #[test]
+    fn camera_formats_have_layouts() {
+        assert_eq!(yuv_layout(VideoFormat::YUY2), Some(YuvLayout::Yuy2));
+        assert_eq!(yuv_layout(VideoFormat::I420), Some(YuvLayout::I420));
+        assert_eq!(yuv_layout(VideoFormat::YV12), None);
+        assert_eq!(rgb24_layout(VideoFormat::RGBx), None);
     }
 
     #[test]

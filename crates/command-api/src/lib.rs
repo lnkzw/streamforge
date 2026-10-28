@@ -62,7 +62,7 @@ use capture_api::{
     VideoCaptureReport,
 };
 /// Capture types in results, for adapters that do not use `capture-api`.
-pub use capture_api::{AudioInput, AudioOutput, CaptureState, ScreenSource};
+pub use capture_api::{AudioInput, AudioOutput, Camera, CameraMode, CaptureState, ScreenSource};
 /// Output encoder types, for adapters that do not use `encoder-api`.
 /// `StreamTarget` lets a client check a stream URL and show its redacted
 /// form before `start_streaming`, with the engine's own rules.
@@ -85,7 +85,7 @@ pub enum Command {
     GetStatus,
     /// List all commands supported by this engine.
     ListCommands,
-    /// Query screen and audio capture capabilities of the running system.
+    /// Query screen, audio and camera capture capabilities of the running system.
     GetCaptureCapabilities,
     /// Live counters of the pipeline and the open outputs.
     GetHealth,
@@ -95,6 +95,8 @@ pub enum Command {
     ListAudioOutputs,
     /// List screen sources that can be captured by id (no picker).
     ListCaptureTargets,
+    /// List cameras and the modes each offers (ADR 0019).
+    ListCameras,
     /// Capture a screen source (named or user-picked) briefly and report diagnostics.
     ProbeScreenCapture(ScreenCaptureRequest),
     /// Capture an audio input briefly and report diagnostics; no audio is stored.
@@ -202,6 +204,7 @@ pub enum CommandOutput {
     AudioInputs(AudioInputList),
     AudioOutputs(AudioOutputList),
     CaptureTargets(CaptureTargetList),
+    Cameras(CameraList),
     VideoCaptureReport(VideoCaptureReport),
     AudioCaptureReport(AudioCaptureReport),
     CompositeReport(Box<CompositeReport>),
@@ -232,6 +235,12 @@ pub struct AudioInputList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioOutputList {
     pub outputs: Vec<AudioOutput>,
+}
+
+/// Result of `list_cameras`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraList {
+    pub cameras: Vec<Camera>,
 }
 
 /// Result of `list_capture_targets`.

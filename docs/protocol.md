@@ -81,10 +81,11 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `get_status`               | none   | `read_only` | `{"application", "version", "pipeline_running", "capture_available", "recording_state", "streaming_state", "preview_active"}` |
 | `get_health`               | none   | `read_only` | Live counters of the pipeline and outputs (see below) |
 | `list_commands`            | none   | `read_only` | `{"commands": [{"name", "summary", "access", "destructive", "open_world"}]}` |
-| `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}}` |
+| `get_capture_capabilities` | none   | `read_only` | `{"platform", "desktop", "session_type", "screen": {...}, "audio": {...}, "camera": {...}}` |
 | `list_audio_inputs`        | none   | `read_only` | `{"inputs": [{"name", "description", "media_class", "loopback_of"}]}` |
 | `list_audio_outputs`       | none   | `read_only` | `{"outputs": [{"name", "description", "media_class"}]}` |
 | `list_capture_targets`      | none   | `sensitive` | `{"targets": [{"id", "kind", "name", "width", "height"}]}` |
+| `list_cameras`             | none   | `read_only` | `{"cameras": [{"camera_id", "name", "modes": [{"width", "height", "fps"}]}]}` |
 | `probe_screen_capture`     | see below | `sensitive` | Video capture report |
 | `probe_audio_capture`      | see below | `sensitive` | Audio capture report |
 | `probe_composite`          | see below | `sensitive` | Composite report |
@@ -176,13 +177,24 @@ Commands that create or read a file (`start_recording`, `probe_composite`'s snap
 
 ### Capabilities
 
-`screen` and `audio` each carry `backend`, `available` and `unavailable_reason`. The reason is a string when the capability is unavailable, otherwise `null`. In addition:
+`screen`, `audio` and `camera` each carry `backend`, `available` and `unavailable_reason`. The reason is a string when the capability is unavailable, otherwise `null`. In addition:
 
 - `screen` has `portal_version`, `target_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`). An empty `cursor_modes` means the backend cannot select a cursor mode; the request is then ignored, with a warning.
 - `screen` also says how a source is chosen:
   - `picker`: without `capture_target_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
   - `target_list`: `list_capture_targets` lists monitors and windows, and screen commands capture one by its `capture_target_id` without a dialog (Windows).
 - `audio` has `server_version`.
+- `camera` (since M14 step 4b) has nothing more: `available` means cameras can be listed and captured, not that one is attached. Linux uses PipeWire (`backend` `pipewire`); Windows and macOS report it unavailable until their camera steps.
+
+### Cameras
+
+`list_cameras` (ADR 0019) lists the cameras with the modes StreamForge can capture them in:
+
+- `camera_id` is opaque and stable on one machine: the PipeWire `node.name` on Linux (for example `v4l2_input.pci-0000_00_14.0-usb-0_1_1.0`, which names the USB port). A camera source will name it.
+- `name` is the system's description of the camera.
+- `modes` lists every size and frame rate once (`fps` as `{"num", "den"}`), largest first, then fastest. A camera that offers a range of sizes or rates lists the common ones inside it (sizes from 320x240 to 3840x2160, rates from 5 to 60). A format StreamForge cannot convert (for example H.264) adds no modes, so a camera may list none.
+
+Camera names are device names, like audio inputs, so the listing is `read_only`. Capturing a camera will be `sensitive`.
 
 ### Capture probes
 
@@ -536,6 +548,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
 - **From 0.1.0 on**, v1 is stable, and the rules below hold. Additions since then:
   - M14 step 2, ADR 0019: `move_source`; sources' `visible` in `list_scenes` (and every result with the scene list), `add_source` and `update_source`. Project files are schema 4 (versions 1 to 3 migrate on load); a 0.1.0 build refuses a schema 4 file as newer than it reads.
   - M14 step 3, ADR 0019: `list_images`; the source kind `image` with `file` (`add_source`, `list_scenes`, project files of schema 4); `update_source`'s `file`; `restart_source` of an image source. A build of step 2 refuses a project file with an image source.
+  - M14 step 4b1, ADR 0019: `list_cameras`; `get_capture_capabilities` gained `camera`.
 - Adding a command, adding optional fields to a result, adding a value to an enumerated result field (e.g. a source `kind`), or adding an error code is backward compatible within v1. Clients must ignore unknown result fields, show or skip objects of an unknown kind, and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` and the pinned result shapes (`crates/command-api/tests/wire_shapes.txt`, see `docs/testing.md`) together with this document.

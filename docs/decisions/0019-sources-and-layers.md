@@ -79,6 +79,8 @@ Implemented in step 4a: each trait answers one capability (`capability`), and th
 
 `unsafe` stays in small modules with documented invariants, as for the screen backends.
 
+Implemented in step 4b1 (the Linux capture backend, without the source kind): the project owner split step 4b into 4b1 (backend), 4b2 (engine) and 4b3 (desktop), and decided on 2026-10-28 that "else the largest size" in the mode choice means the largest size up to the canvas at any rate, and without one the smallest above it; and that a camera stream offers the chosen mode first and then the camera's other modes, so a camera another application already runs in another mode still connects, with a warning. A camera node is a `Video/Source` with `device.api` `v4l2` or `libcamera`, or with `media.role` `Camera`. A size or rate range is listed as the common sizes and rates inside it. `list_cameras` lists a camera even when it offers no format StreamForge converts (with no modes). PipeWire 1.6.10 aborts when a `videotestsrc` node is destroyed, so the live tests use a virtual camera of their own (an output stream) instead. The measured cost is in `docs/testing.md`; the MJPEG decoder's allocations per frame are documented in `frame-decode` and accepted for the capture thread.
+
 ### New crate `frame-decode`
 
 `frame-decode` turns encoded or YUV pictures into the engine's frames:

@@ -23,6 +23,10 @@ audio.available: bool
 audio.backend: string
 audio.server_version: string
 audio.unavailable_reason: string
+camera: object
+camera.available: bool
+camera.backend: string
+camera.unavailable_reason: string
 desktop: string
 platform: string
 screen: object
@@ -230,6 +234,19 @@ outputs[]: object
 outputs[].description: string
 outputs[].media_class: string
 outputs[].name: string
+
+== list_cameras
+cameras: array
+cameras[]: object
+cameras[].camera_id: string
+cameras[].modes: array
+cameras[].modes[]: object
+cameras[].modes[].fps: object
+cameras[].modes[].fps.den: number
+cameras[].modes[].fps.num: number
+cameras[].modes[].height: number
+cameras[].modes[].width: number
+cameras[].name: string
 
 == list_capture_targets
 targets: array

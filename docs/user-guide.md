@@ -156,6 +156,7 @@ The keys work while no dialog or menu is open and no text field has the focus. S
 streamforge status              # version and capture availability
 streamforge capture caps        # what this system can capture, and how
 streamforge capture inputs      # audio inputs by name
+streamforge capture cameras     # cameras and their modes (Linux; camera sources come later)
 streamforge capture audio --input <name> --duration-ms 3000  # levels of one input, nothing stored
 streamforge capture screen      # opens the screen-sharing dialog and reports the frames
 

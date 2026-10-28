@@ -1,10 +1,11 @@
 # Linux capture backend (M2 spike)
 
-`crates/capture-linux` implements `ScreenCapture` as `PortalScreen` and `AudioDevices` as `PipeWireAudio` on Linux (traits from `capture-api`):
+`crates/capture-linux` implements `ScreenCapture` as `PortalScreen`, `CameraCapture` as `PipeWireCamera` and `AudioDevices` as `PipeWireAudio` on Linux (traits from `capture-api`):
 
 - **Screen:** the XDG desktop portal (`org.freedesktop.portal.ScreenCast`) shows the compositor's source picker. The selected monitor or window arrives as a PipeWire node, consumed through a portal-provided PipeWire file descriptor.
 - **Audio:** PipeWire source nodes are found through the registry and captured as interleaved F32 at the device's native rate and channel count. The monitor of each sink (what it plays, e.g. desktop audio) is an input too, named `<sink>.monitor` as pipewire-pulse names it, with `loopback_of` set to the sink. It is captured with `stream.capture.sink`.
 - **Playback:** the monitor output (ADR 0017) plays on a sink (`Audio/Sink`) or duplex device; `list_audio_outputs` lists them.
+- **Cameras** (ADR 0019): the `Video/Source` nodes that WirePlumber creates for V4L2 and libcamera devices, captured through the user's PipeWire daemon like audio inputs. See Cameras below.
 
 Probes measure and report what arrives. Since M3, a continuous screen stream (`ScreenCapture::start_screen_stream`) also delivers frames to the compositor:
 - a dedicated `screen-capture` thread runs the PipeWire loop
@@ -20,6 +21,23 @@ Since M11 (step 5b), playback (`AudioDevices::start_playback`) plays the monitor
 - A named output is checked against the registry first, and its stream has `node.dont-fallback`, so it cannot fall back to the default device, even when it went away after the listing (which is cached for 2 s). Named inputs get the same property.
 - The stream has `node.dont-reconnect`, so when its device goes away (headphones unplugged), the playback ends. WirePlumber never moves it to the speakers, where the microphones would pick it up. This holds for the default output too: the monitor stays on the device that was the default when it started. The end closes the feed and is reported as `not_found: audio output … is gone` (WirePlumber's error), or as `audio output … went away` when the stream is just disconnected.
 - `start_playback` returns once the stream plays, or fails with the cause (at most 3 s).
+
+## Cameras
+
+Since M14 step 4b1, `PipeWireCamera` lists and captures cameras:
+
+- **Which nodes:** a `Video/Source` node is a camera when its `device.api` is `v4l2` or `libcamera`, or its `media.role` is `Camera` (virtual cameras). Screen-cast nodes have neither. A v4l2loopback device with `exclusive_caps` gets a node only if a producer was attached when WirePlumber enumerated it.
+- **Modes:** `list_cameras` binds each camera node and reads its `EnumFormat` params. Formats StreamForge converts: packed RGB (32-bit and 24-bit), YUY2, UYVY, NV12, I420 and MJPEG. A size or rate range is listed as the common sizes and rates inside it. The listing is cached for 2 s for `start_camera_stream`, which rescans once when the id is missing.
+- **Mode choice** (ADR 0019, decided with the project owner on 2026-10-28):
+  - Size: the requested one, else the closest by area. Without one: the largest up to 1920x1080 that runs at 30 fps or more; else the largest up to 1920x1080 at any rate; else the smallest above it.
+  - Rate at that size: the requested one, else the closest. Without one: the highest up to 60 fps, else the lowest above.
+  - Format at that size and rate: packed RGB, then YUY2 or UYVY, then NV12, then I420, then MJPEG.
+  - A request the camera lacks gets the closest mode and a warning in the capture report.
+- **Connecting:** the stream offers the chosen mode first and then every other mode, closest first (at most 64). A camera that already runs for another application in another mode still connects; the report then warns that it runs in another mode. The stream targets the node by name, with `node.dont-reconnect` and `node.dont-fallback`, so WirePlumber never moves it to another camera.
+- **Start:** `start_camera_stream` returns once the stream reaches `Streaming`, or with the cause: `not_found` for a camera that is not listed or went away before it connected, `timeout` after 5 s (another application may hold the device), else the PipeWire error. Its source size is the negotiated one.
+- **Frames:** a `camera-capture` thread runs the PipeWire loop and converts every frame into one of 4 pooled buffers as Bgrx8. Packed RGB is copied or swizzled here; YUV and MJPEG go through `frame-decode`. YUV uses the matrix and range the format states, else BT.601 limited range, with nearest-sample chroma. Planar formats come as one data block (V4L2's single-planar buffers) or one block per plane. A frame that cannot be converted is discarded and counted (`frames_discarded`).
+- **End:** a camera that goes away ends the capture with `camera … is gone; see list_cameras` (WirePlumber's missing-target error) or `camera … went away`.
+- **Cost** (i5-13600KF, release build, one thread, one 1920x1080 frame, `cargo run --release -p frame-decode --example convert_bench`, 2026-10-28): YUY2 2.5 ms, UYVY 2.5 ms, NV12 2.5 ms, I420 2.2 ms, MJPEG (quality 85, 4:2:2) 3.6 ms; p99 within 0.3 ms of the mean. YUV conversion allocates nothing; the MJPEG decoder (zune-jpeg 0.5) makes 17 allocations, 213 kB, per 1080p frame (`cargo test -p frame-decode --test alloc -- --nocapture`), which ADR 0019 accepts for the capture thread.
 
 ## Requirements
 
@@ -126,6 +144,9 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 | `not_found: audio output … is gone` | The monitor's device went away during the run (unplugged, or a virtual sink removed). Connect it and switch the monitor on again, or choose another with `set_monitor_device` while idle. |
 | `not_found: no default audio input is available` | WirePlumber has no default source. Typical cause: the configured default, e.g. a removed virtual mic, no longer exists. Pass `--input`, or set a default with `wpctl set-default <id>`. |
 | `cannot connect to PipeWire (Creation failed)` | The PipeWire daemon is not running, or `$XDG_RUNTIME_DIR` is unset. |
+| `list_cameras` is empty with a webcam attached | WirePlumber made no node for it. Check `wpctl status` (Video section). A v4l2loopback device needs a producer before WirePlumber starts. |
+| `timeout: camera … did not start within 5000 ms` | Another program holds the V4L2 device outside PipeWire, or the camera stalls. Close the other program. |
+
 | Warning "digital silence" | The device is muted, unplugged or has no active port. |
 
 ## Limitations
@@ -140,3 +161,4 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 - The portal session is closed on every failure path: cancellation, a selection timeout, errors after `Start`, and capture errors. Because ashpd shares one D-Bus connection per process, an unclosed session would keep the compositor sharing until the process exits. One case remains: if *creating* the session itself times out, there is no handle to close.
 - Microphone access is not consent-gated on the desktop (outside Flatpak). Both probes are classified `sensitive`; enforcement arrives with M8.
 - ScreenCast portals older than interface version 2 cannot select a cursor mode. The request's `cursor_mode` is then ignored with a warning instead of failing.
+- Cameras: no camera portal (sandboxed packages), no camera controls, BT.2020 and other matrices fall back to BT.601, bottom-up frames are discarded. The camera live tests run against a virtual camera the test creates, not a real webcam (the development machine has none); real V4L2 and libcamera devices are still untested.

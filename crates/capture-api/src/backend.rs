@@ -168,20 +168,31 @@ impl Capture {
 
     /// The capabilities as `get_capture_capabilities` reports them.
     ///
-    /// Screen and audio are queried in parallel, so a slow system service
-    /// costs one query timeout, not two. Audio stays on the calling thread:
-    /// cpal's WASAPI host keeps its device enumerator in the COM apartment
-    /// of the first thread that uses it, which must outlive the query.
+    /// Screen, camera and audio are queried in parallel, so a slow system
+    /// service costs one query timeout, not three. Audio stays on the calling
+    /// thread: cpal's WASAPI host keeps its device enumerator in the COM
+    /// apartment of the first thread that uses it, which must outlive the
+    /// query. Screen and camera run on short-lived threads, so their queries
+    /// must not leave per-thread state behind that later calls rely on.
     /// `desktop` and `session_type` come from `XDG_CURRENT_DESKTOP` and
-    /// `XDG_SESSION_TYPE` on every OS. Camera is not part of this report yet.
+    /// `XDG_SESSION_TYPE` on every OS.
     pub fn capabilities(&mut self) -> CaptureCapabilities {
-        let (screen, audio) = std::thread::scope(|scope| {
-            let screen = scope.spawn(|| self.screen.capability());
-            let audio = self.audio.capability();
+        let Self {
+            screen,
+            audio,
+            camera,
+        } = self;
+        let (screen, audio, camera) = std::thread::scope(|scope| {
+            let screen = scope.spawn(|| screen.capability());
+            let camera = scope.spawn(|| camera.capability());
+            let audio = audio.capability();
             let screen = screen.join().unwrap_or_else(|_| {
                 ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
             });
-            (screen, audio)
+            let camera = camera.join().unwrap_or_else(|_| {
+                CameraCaptureCapability::unavailable(None, "the camera capability query panicked")
+            });
+            (screen, audio, camera)
         });
         CaptureCapabilities {
             platform: std::env::consts::OS.to_owned(),
@@ -189,6 +200,7 @@ impl Capture {
             session_type: std::env::var("XDG_SESSION_TYPE").ok(),
             screen,
             audio,
+            camera,
         }
     }
 }
@@ -399,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_takes_screen_and_audio_from_their_parts() {
+    fn capture_takes_each_capability_from_its_part() {
         let mut capture = Capture {
             screen: Box::new(UnsupportedCapture::new("no screen here")),
             audio: Box::new(UnsupportedCapture::new("no audio here")),
@@ -416,6 +428,10 @@ mod tests {
         assert_eq!(
             caps.audio.unavailable_reason.as_deref(),
             Some("no audio here")
+        );
+        assert_eq!(
+            caps.camera.unavailable_reason.as_deref(),
+            Some("no camera here")
         );
         assert_eq!(
             capture.audio.audio_inputs().unwrap_err().message,
@@ -469,6 +485,7 @@ mod tests {
     fn panicking_screen_query_preserves_audio_capability() {
         let mut capture = Capture {
             screen: Box::new(TestScreen(Box::new(|| panic!("test screen panic")))),
+            camera: Box::new(TestCamera(Box::new(|| panic!("test camera panic")))),
             ..Capture::unsupported("audio reason")
         };
         let caps = capture.capabilities();
@@ -477,9 +494,32 @@ mod tests {
             ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
         );
         assert_eq!(
+            caps.camera,
+            CameraCaptureCapability::unavailable(None, "the camera capability query panicked")
+        );
+        assert_eq!(
             caps.audio,
             AudioCaptureCapability::unavailable(None, "audio reason")
         );
+    }
+
+    struct TestCamera(Box<dyn FnMut() -> CameraCaptureCapability + Send>);
+
+    impl CameraCapture for TestCamera {
+        fn capability(&mut self) -> CameraCaptureCapability {
+            (self.0)()
+        }
+
+        fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+
+        fn start_camera_stream(
+            &mut self,
+            _request: &CameraRequest,
+        ) -> Result<Box<dyn VideoStream>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
     }
 
     struct TestScreen(Box<dyn FnMut() -> ScreenCaptureCapability + Send>);
@@ -510,30 +550,52 @@ mod tests {
 
     #[test]
     fn capabilities_query_in_parallel_with_audio_on_the_calling_thread() {
-        use std::sync::mpsc::sync_channel;
+        use std::sync::{Arc, Condvar, Mutex};
         use std::time::Duration;
 
+        /// Each part waits until all three run at once, or fails after 5 s.
+        fn meet(arrived: &(Mutex<u32>, Condvar)) {
+            let (count, all_here) = arrived;
+            let mut count = count.lock().expect("lock");
+            *count += 1;
+            all_here.notify_all();
+            let (count, timeout) = all_here
+                .wait_timeout_while(count, Duration::from_secs(5), |count| *count < 3)
+                .expect("lock");
+            assert!(
+                !timeout.timed_out(),
+                "only {} of 3 queries ran at once",
+                *count
+            );
+        }
+
         let caller = std::thread::current().id();
-        let (audio_started, wait_audio) = sync_channel(1);
-        let (screen_started, wait_screen) = sync_channel(1);
+        let arrived = Arc::new((Mutex::new(0), Condvar::new()));
         let mut capture = Capture {
-            screen: Box::new(TestScreen(Box::new(move || {
-                assert_ne!(std::thread::current().id(), caller);
-                screen_started.send(()).expect("screen started");
-                wait_audio
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("audio runs alongside screen");
-                ScreenCaptureCapability::unavailable(None, "test screen")
+            screen: Box::new(TestScreen(Box::new({
+                let arrived = Arc::clone(&arrived);
+                move || {
+                    assert_ne!(std::thread::current().id(), caller);
+                    meet(&arrived);
+                    ScreenCaptureCapability::unavailable(None, "test screen")
+                }
             }))),
-            audio: Box::new(TestAudio(Box::new(move || {
-                assert_eq!(std::thread::current().id(), caller);
-                audio_started.send(()).expect("audio started");
-                wait_screen
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("screen runs alongside audio");
-                AudioCaptureCapability::unavailable(None, "test audio")
+            audio: Box::new(TestAudio(Box::new({
+                let arrived = Arc::clone(&arrived);
+                move || {
+                    assert_eq!(std::thread::current().id(), caller);
+                    meet(&arrived);
+                    AudioCaptureCapability::unavailable(None, "test audio")
+                }
             }))),
-            ..Capture::unsupported("no camera")
+            camera: Box::new(TestCamera(Box::new({
+                let arrived = Arc::clone(&arrived);
+                move || {
+                    assert_ne!(std::thread::current().id(), caller);
+                    meet(&arrived);
+                    CameraCaptureCapability::unavailable(None, "test camera")
+                }
+            }))),
         };
         let caps = capture.capabilities();
         assert_eq!(
@@ -543,6 +605,10 @@ mod tests {
         assert_eq!(
             caps.audio,
             AudioCaptureCapability::unavailable(None, "test audio")
+        );
+        assert_eq!(
+            caps.camera,
+            CameraCaptureCapability::unavailable(None, "test camera")
         );
     }
 }

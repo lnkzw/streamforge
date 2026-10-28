@@ -15,7 +15,7 @@ use pipewire as pw;
 use crate::QUERY_TIMEOUT;
 use crate::portal::{self, Cast};
 use crate::pw::RunUntil;
-use crate::video::{self, Delivery, VideoRun};
+use crate::video::{self, Delivery, Target, VideoRun};
 
 /// Upper bound for the user to pick a source in the portal dialog.
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -134,10 +134,13 @@ pub(crate) fn probe(
     let open = open_cast(selection)?;
     let run = duplicate_remote(&open.cast).and_then(|remote| {
         video::capture(
-            remote,
-            open.cast.node_id,
-            open.cast.size,
+            Target::Portal {
+                remote,
+                node_id: open.cast.node_id,
+                preferred_size: open.cast.size,
+            },
             RunUntil::Elapsed(duration),
+            None,
             None,
         )
     });
@@ -171,11 +174,14 @@ pub(crate) fn start_stream(
             let ended = Arc::clone(&ended);
             move || {
                 let run = video::capture(
-                    remote,
-                    node_id,
-                    size,
+                    Target::Portal {
+                        remote,
+                        node_id,
+                        preferred_size: size,
+                    },
                     RunUntil::Stopped(stop_receiver),
                     Some(delivery),
+                    None,
                 );
                 // Before a stop, this is why the capture ended on its own.
                 ended.end(|| match &run {

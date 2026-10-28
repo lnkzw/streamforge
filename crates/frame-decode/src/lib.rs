@@ -1,12 +1,38 @@
-//! PNG and JPEG images as premultiplied BGRA frames.
+//! PNG/JPEG images as premultiplied BGRA frames, and camera YUV/MJPEG as BGRX.
+//!
+//! [`convert_yuv`] accepts YUY2, UYVY, NV12 and I420, with nearest-sample chroma
+//! (no interpolation), BT.601/BT.709 and limited/full range. It uses borrowed
+//! planes and a caller-owned destination, checks bounds before writing, and
+//! allocates nothing. Unspecified camera colour defaults to BT.601 limited.
+//!
+//! [`MjpegDecoder`] checks the stored size before decoding pixels directly into
+//! the caller's tightly packed BGRX buffer (X = 255), without EXIF rotation.
+//! Missing Huffman tables are supplied from JPEG Annex K.3 in reused compressed
+//! scratch storage, even without an AVI1 marker. Zune 0.5 has no decoder reset
+//! API: its internal buffers still allocate per frame. With zune-jpeg 0.5.15 on
+//! x86_64 Linux, the 1920×1080 quality-85 4:2:2 fixture requests **17 allocations,
+//! 212,688 bytes per frame** after warm-up, both with DHT and with DHT removed.
+//! These are total allocation/reallocation requests, not peak live memory; other
+//! images, versions and platforms may differ. Run `cargo test -p frame-decode
+//! --test alloc -- --nocapture` to measure. The missing-DHT scratch does not
+//! allocate again for equal-sized or smaller frames.
 //!
 //! APNG uses only its default (first) image. Colour metadata is ignored: pixels
-//! are assumed to be sRGB. Only JPEG applies EXIF orientation; PNG eXIf is ignored.
-//! Zune can accept truncated JPEG entropy streams, even with strict mode enabled.
+//! are assumed to be sRGB. Only JPEG image files apply EXIF orientation; PNG
+//! eXIf is ignored. Zune can accept damaged/truncated JPEG entropy streams even
+//! in strict mode; the camera path additionally requires complete framing through
+//! EOI, so frames missing their end marker are rejected.
 
 #![forbid(unsafe_code)]
 
+mod camera;
 mod exif;
+mod mjpeg;
+
+pub use camera::{
+    ColorMatrix, ColorRange, ConvertError, Plane, Planes, YuvColor, YuvLayout, convert_yuv,
+};
+pub use mjpeg::MjpegDecoder;
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 

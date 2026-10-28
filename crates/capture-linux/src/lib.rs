@@ -1,7 +1,10 @@
-//! Linux screen and audio capture: XDG desktop portal ScreenCast + PipeWire.
+//! Linux screen, camera and audio capture: XDG desktop portal ScreenCast + PipeWire.
 //!
 //! - `PortalScreen`: the portal shows the compositor's picker and hands out a PipeWire
 //!   node; frames arrive as shared-memory buffers with optional header metadata.
+//! - `PipeWireCamera`: the `Video/Source` nodes of V4L2 and libcamera devices
+//!   (ADR 0019), with their modes from the nodes' `EnumFormat` params;
+//!   YUV and MJPEG frames are converted to BGRX by `frame-decode`.
 //! - `PipeWireAudio`: PipeWire source nodes, and the monitor of each sink, are
 //!   enumerated through the registry and captured as interleaved F32 at their
 //!   native rate and channel count.
@@ -9,13 +12,16 @@
 //!   process callback runs on PipeWire's real-time thread.
 //!
 //! Probes run a PipeWire main loop on the calling thread for a bounded time;
-//! callers must not invoke them from a UI thread. Screen streams run their
-//! loop on a dedicated `screen-capture` thread. See
+//! callers must not invoke them from a UI thread. Screen and camera streams
+//! run their loop on a dedicated `screen-capture` or `camera-capture`
+//! thread. See
 //! `docs/capture-linux.md` for system requirements (Hyprland in particular).
 #![cfg(target_os = "linux")]
 
 mod audio;
+mod camera;
 mod formats;
+mod modes;
 mod playback;
 mod portal;
 mod pw;
@@ -26,17 +32,18 @@ use std::time::{Duration, Instant};
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,
-    AudioOutput, AudioStream, AudioStreamRequest, CaptureError, PlaybackRequest, PlaybackStream,
-    ScreenCapture, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
+    AudioOutput, AudioStream, AudioStreamRequest, Camera, CameraCapture, CameraCaptureCapability,
+    CameraRequest, CaptureError, PlaybackRequest, PlaybackStream, ScreenCapture,
+    ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
     VideoCaptureReport, VideoStream,
 };
 use media_core::SampleReader;
 
-/// Upper bound for each portal or PipeWire query. Screen and audio
+/// Upper bound for each portal or PipeWire query. Screen, camera and audio
 /// capabilities are queried in parallel by `Capture::capabilities` (in
 /// `capture-api`), so it and the first `get_status` wait at most this long.
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
-/// How long a listing of audio devices is reused for name checks, so
+/// How long a listing of audio devices or cameras is reused for name checks, so
 /// starting several streams does not rescan the PipeWire registry each time.
 const NODE_CACHE_TTL: Duration = Duration::from_secs(2);
 
@@ -61,6 +68,71 @@ pub struct PipeWireAudio {
 impl PipeWireAudio {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// Cameras through PipeWire.
+#[derive(Debug, Default)]
+pub struct PipeWireCamera {
+    /// The last listing of cameras, and when it was made.
+    nodes: Vec<camera::CameraNode>,
+    scanned_at: Option<Instant>,
+}
+
+impl PipeWireCamera {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn scan_nodes(&mut self) -> Result<&[camera::CameraNode], CaptureError> {
+        self.nodes = camera::camera_nodes(QUERY_TIMEOUT)?;
+        self.scanned_at = Some(Instant::now());
+        Ok(&self.nodes)
+    }
+}
+
+impl CameraCapture for PipeWireCamera {
+    fn capability(&mut self) -> CameraCaptureCapability {
+        match pw::server_version(QUERY_TIMEOUT) {
+            Ok(_) => CameraCaptureCapability {
+                backend: Some(pw::BACKEND.to_owned()),
+                available: true,
+                unavailable_reason: None,
+            },
+            Err(err) => CameraCaptureCapability::unavailable(Some(pw::BACKEND), err.message),
+        }
+    }
+
+    fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError> {
+        Ok(self
+            .scan_nodes()?
+            .iter()
+            .map(camera::CameraNode::listing)
+            .collect())
+    }
+
+    fn start_camera_stream(
+        &mut self,
+        request: &CameraRequest,
+    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        let recent = self
+            .scanned_at
+            .is_some_and(|at| at.elapsed() < NODE_CACHE_TTL);
+        let find = |nodes: &[camera::CameraNode]| {
+            nodes
+                .iter()
+                .find(|node| node.name == request.camera_id)
+                .cloned()
+        };
+        // A camera plugged in since the last listing is found by a rescan.
+        let node = match recent.then(|| find(&self.nodes)).flatten() {
+            Some(node) => node,
+            None => {
+                let nodes = self.scan_nodes()?;
+                find(nodes).ok_or_else(|| camera::not_found(&request.camera_id, nodes))?
+            }
+        };
+        camera::start_stream(request, &node)
     }
 }
 

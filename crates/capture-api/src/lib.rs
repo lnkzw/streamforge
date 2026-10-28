@@ -2,8 +2,10 @@
 //!
 //! Defines what a capture backend can report and do, independent of any OS
 //! API: capture, and audio playback for the monitor. Platform crates
-//! (`capture-linux`, `capture-cpal`, `capture-windows`) implement
-//! [`CaptureBackend`]; the engine only talks to the trait.
+//! (`capture-linux`, `capture-cpal`, `capture-windows`, `capture-macos`)
+//! implement [`ScreenCapture`] and [`AudioDevices`] (no system implements
+//! [`CameraCapture`] yet), and `capture-platform` groups one of each into a
+//! [`Capture`], the only thing the engine talks to.
 
 mod backend;
 mod error;
@@ -12,7 +14,8 @@ mod stats;
 mod types;
 
 pub use backend::{
-    AudioStream, CaptureBackend, PlaybackStream, SplitCapture, UnsupportedCapture, VideoStream,
+    AudioDevices, AudioStream, CameraCapture, Capture, PlaybackStream, ScreenCapture,
+    UnsupportedCapture, VideoStream,
 };
 pub use error::{CaptureError, CaptureErrorKind};
 pub use sink::{FrameSink, MappedFrame};
@@ -22,8 +25,9 @@ pub use stats::{
 };
 pub use types::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
-    AudioOutput, AudioStreamRequest, CaptureCapabilities, CaptureEnd, CaptureState, CursorMode,
-    DEFAULT_PROBE_DURATION, MAX_PROBE_DURATION, MIN_PROBE_DURATION, PlaybackRequest, Rational,
-    ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
-    VideoCaptureReport, VideoFormatInfo, VideoSourceInfo, VideoSourceKind,
+    AudioOutput, AudioStreamRequest, Camera, CameraCaptureCapability, CameraMode, CameraRequest,
+    CaptureCapabilities, CaptureEnd, CaptureState, CursorMode, DEFAULT_PROBE_DURATION,
+    MAX_PROBE_DURATION, MIN_PROBE_DURATION, PlaybackRequest, Rational, ScreenCaptureCapability,
+    ScreenCaptureRequest, ScreenSelection, ScreenSource, VideoCaptureReport, VideoFormatInfo,
+    VideoSourceInfo, VideoSourceKind,
 };

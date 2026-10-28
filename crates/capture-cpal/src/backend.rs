@@ -31,11 +31,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use capture_api::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioFormatInfo, AudioInput,
-    AudioOutput, AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureBackend,
-    CaptureCapabilities, CaptureError, CaptureErrorKind, CaptureState, PlaybackRequest,
-    PlaybackStream, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
-    VideoCaptureReport, VideoStream,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioFormatInfo,
+    AudioInput, AudioOutput, AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError,
+    CaptureErrorKind, CaptureState, PlaybackRequest, PlaybackStream,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
@@ -67,15 +65,8 @@ fn backend_name(host: &cpal::Host) -> String {
     format!("cpal ({})", host.id().name())
 }
 
-fn screen_unsupported() -> String {
-    format!(
-        "screen capture on {} is not part of the cpal backend (capture-platform adds the native one); audio capture works",
-        std::env::consts::OS
-    )
-}
-
-impl CaptureBackend for CpalCapture {
-    fn capabilities(&mut self) -> CaptureCapabilities {
+impl AudioDevices for CpalCapture {
+    fn capability(&mut self) -> AudioCaptureCapability {
         let host = host();
         let backend = backend_name(&host);
         let any_input = host
@@ -84,7 +75,7 @@ impl CaptureBackend for CpalCapture {
             || host
                 .output_devices()
                 .is_ok_and(|mut devices| devices.any(|device| is_loopback_output(&device)));
-        let audio = if any_input {
+        if any_input {
             AudioCaptureCapability {
                 backend: Some(backend.clone()),
                 available: true,
@@ -97,13 +88,6 @@ impl CaptureBackend for CpalCapture {
                 "no audio input found (no input device, and no output whose playback can be \
                  captured); connect a microphone or enable a device",
             )
-        };
-        CaptureCapabilities {
-            platform: std::env::consts::OS.to_owned(),
-            desktop: None,
-            session_type: None,
-            screen: ScreenCaptureCapability::unavailable(None, screen_unsupported()),
-            audio,
         }
     }
 
@@ -128,13 +112,6 @@ impl CaptureBackend for CpalCapture {
         ))
     }
 
-    fn probe_screen(
-        &mut self,
-        _request: &ScreenCaptureRequest,
-    ) -> Result<VideoCaptureReport, CaptureError> {
-        Err(CaptureError::unsupported(screen_unsupported()))
-    }
-
     fn probe_audio(
         &mut self,
         request: &AudioCaptureRequest,
@@ -146,13 +123,6 @@ impl CaptureBackend for CpalCapture {
         })?;
         thread::sleep(request.duration);
         stream.stop()
-    }
-
-    fn start_screen_stream(
-        &mut self,
-        _selection: &ScreenSelection,
-    ) -> Result<Box<dyn VideoStream>, CaptureError> {
-        Err(CaptureError::unsupported(screen_unsupported()))
     }
 
     fn start_audio_stream(

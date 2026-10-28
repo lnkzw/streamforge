@@ -8,7 +8,7 @@ use audio_engine::{
     BusConfig, CHANNELS, ChannelConfig, InputSource, MAX_CORRECTION, MixerConfig, MixerInput,
     MixerThread, RATE, Tone,
 };
-use capture_api::{AudioStream, AudioStreamRequest, CaptureBackend, CaptureError};
+use capture_api::{AudioDevices, AudioStream, AudioStreamRequest, CaptureError};
 use command_api::{
     AudioGraphSpec, CaptureOutcome, ChannelInput, CommandError, ErrorCode, ErrorSummary,
     LiveInputSpec, MixReport, MixRequest, ToneSpec,
@@ -22,7 +22,7 @@ use crate::audio;
 const WATCH_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn probe(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn AudioDevices,
     request: &MixRequest,
 ) -> Result<MixReport, CommandError> {
     let devices: Vec<Option<String>> = request
@@ -75,7 +75,7 @@ pub(crate) fn probe(
 /// Start a stream from a capture device (`None`: the default input) in the
 /// mixer's format.
 pub(crate) fn start_device(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn AudioDevices,
     device: &Option<String>,
 ) -> Result<Box<dyn AudioStream>, CaptureError> {
     capture.start_audio_stream(&AudioStreamRequest {
@@ -89,7 +89,7 @@ pub(crate) fn start_device(
 /// started are dropped, which stops them. A probe tests devices, so a
 /// device that does not open fails it.
 fn start_live_inputs<'a>(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn AudioDevices,
     devices: impl IntoIterator<Item = &'a Option<String>>,
 ) -> Result<Vec<Box<dyn AudioStream>>, CommandError> {
     devices

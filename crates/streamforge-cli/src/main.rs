@@ -175,7 +175,7 @@ fn main() -> Result<ExitCode> {
     // In-process engine; the CLI shares command handlers with the protocol
     // server instead of computing results itself.
     let mut engine =
-        Engine::with_capture(capture_platform::backend()).with_output_dir(cli.output_dir);
+        Engine::with_capture(capture_platform::capture()).with_output_dir(cli.output_dir);
 
     match cli.command {
         Commands::Status { json } => {

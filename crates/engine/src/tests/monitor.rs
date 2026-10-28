@@ -80,12 +80,12 @@ impl PlaybackStream for FakePlayback {
 
 fn engine_with_speakers(dir: &TempDir) -> (Engine, Arc<Mutex<Vec<f32>>>) {
     let played = Arc::default();
-    let engine = Engine::with_capture(Box::new(FakeCapture {
-        capability_queries: Rc::new(Cell::new(0)),
-        screen_starts: Rc::new(Cell::new(0)),
-        screen_ends: Rc::default(),
-        played: Arc::clone(&played),
-    }))
+    let engine = Engine::with_capture(Capture {
+        audio: Box::new(FakeAudio {
+            played: Arc::clone(&played),
+        }),
+        ..Capture::unsupported("the monitor tests capture no screen")
+    })
     .with_output_dir(&dir.0);
     (engine, played)
 }

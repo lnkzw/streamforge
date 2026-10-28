@@ -70,7 +70,7 @@ fn main() -> ExitCode {
     let projects = args.project_dir.is_some();
     let (output_dir, project_dir) = (args.output_dir, args.project_dir);
     let engine = match EngineThread::spawn(move || {
-        let engine = Engine::with_capture(capture_platform::backend()).with_output_dir(output_dir);
+        let engine = Engine::with_capture(capture_platform::capture()).with_output_dir(output_dir);
         match project_dir {
             Some(dir) => engine.with_project_dir(dir),
             None => engine,

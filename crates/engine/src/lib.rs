@@ -2,7 +2,7 @@
 //!
 //! Independent of UI and transport. The CLI, the JSON-lines server, the
 //! desktop UI and the MCP server all drive the engine through
-//! [`CommandHandler`]. Platform capture is injected as a [`CaptureBackend`]
+//! [`CommandHandler`]. Platform capture is injected as a [`Capture`]
 //! by the composition root.
 
 mod audio;
@@ -26,7 +26,7 @@ pub use thread::{EngineHandle, EngineThread, PendingReply};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use capture_api::{CaptureBackend, CaptureCapabilities, UnsupportedCapture};
+use capture_api::{Capture, CaptureCapabilities};
 use command_api::{
     AudioGraphSpec, AudioInputList, AudioOutputList, CaptureTargetList, Command, CommandError,
     CommandHandler, CommandList, CommandOutput, EngineStatus, ErrorCode, OutputProfiles,
@@ -53,7 +53,7 @@ pub struct Engine {
     /// Where preview frames go (see `Engine::preview_frames`).
     preview_frames: Arc<FrameMailbox>,
     status: EngineStatus,
-    capture: Box<dyn CaptureBackend>,
+    capture: Capture,
     /// Where commands may create files (snapshots); clients only name files.
     output_dir: PathBuf,
     /// Where project files live (`--project-dir`); without one, the project
@@ -66,12 +66,12 @@ pub struct Engine {
 impl Engine {
     /// Engine without a capture backend; capture commands fail as unsupported.
     pub fn new() -> Self {
-        Self::with_capture(Box::new(UnsupportedCapture::new(
+        Self::with_capture(Capture::unsupported(
             "no capture backend is configured for this engine instance",
-        )))
+        ))
     }
 
-    pub fn with_capture(capture: Box<dyn CaptureBackend>) -> Self {
+    pub fn with_capture(capture: Capture) -> Self {
         Self {
             status: EngineStatus {
                 application: "StreamForge".to_owned(),
@@ -155,16 +155,19 @@ impl CommandHandler for Engine {
             )),
             Command::ListAudioInputs => self
                 .capture
+                .audio
                 .audio_inputs()
                 .map(|inputs| CommandOutput::AudioInputs(AudioInputList { inputs }))
                 .map_err(CommandError::from),
             Command::ListAudioOutputs => self
                 .capture
+                .audio
                 .audio_outputs()
                 .map(|outputs| CommandOutput::AudioOutputs(AudioOutputList { outputs }))
                 .map_err(CommandError::from),
             Command::ListCaptureTargets => self
                 .capture
+                .screen
                 .screen_sources()
                 .map(|sources| {
                     CommandOutput::CaptureTargets(CaptureTargetList { targets: sources })
@@ -173,6 +176,7 @@ impl CommandHandler for Engine {
             Command::ProbeScreenCapture(request) => {
                 self.ensure_idle("probe_screen_capture")?;
                 self.capture
+                    .screen
                     .probe_screen(&request)
                     .map(CommandOutput::VideoCaptureReport)
                     .map_err(CommandError::from)
@@ -180,18 +184,19 @@ impl CommandHandler for Engine {
             Command::ProbeAudioCapture(request) => {
                 self.ensure_idle("probe_audio_capture")?;
                 self.capture
+                    .audio
                     .probe_audio(&request)
                     .map(CommandOutput::AudioCaptureReport)
                     .map_err(CommandError::from)
             }
             Command::ProbeComposite(request) => {
                 self.ensure_idle("probe_composite")?;
-                composite::probe(self.capture.as_mut(), &self.output_dir, &request)
+                composite::probe(self.capture.screen.as_mut(), &self.output_dir, &request)
                     .map(|report| CommandOutput::CompositeReport(Box::new(report)))
             }
             Command::ProbeAudioMix(request) => {
                 self.ensure_idle("probe_audio_mix")?;
-                mix::probe(self.capture.as_mut(), &request)
+                mix::probe(self.capture.audio.as_mut(), &request)
                     .map(|report| CommandOutput::MixReport(Box::new(report)))
             }
             Command::StartRecording(request) => self
@@ -292,19 +297,17 @@ pub(crate) fn file_error_code(error: &std::io::Error) -> ErrorCode {
 mod tests {
     mod images;
     mod monitor;
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
     use std::time::{Duration, Instant};
 
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use capture_api::{
-        AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput,
+        AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,
         AudioStatsAccumulator, AudioStream, AudioStreamRequest, CaptureError, CaptureErrorKind,
-        ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, VideoCaptureReport,
-        VideoSourceInfo, VideoStatsAccumulator, VideoStream,
+        ScreenCapture, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection,
+        VideoCaptureReport, VideoSourceInfo, VideoStatsAccumulator, VideoStream,
     };
     use command_api::{RecordingState, registry};
     use encoder_ffmpeg::StreamState;
@@ -313,36 +316,105 @@ mod tests {
 
     use super::*;
 
-    /// Backend with a working screen capability and a failing audio side.
-    struct FakeCapture {
-        capability_queries: Rc<Cell<usize>>,
-        screen_starts: Rc<Cell<usize>>,
+    /// Screen part with a working capability and observable stream lifecycle.
+    struct FakeScreen {
+        capability_queries: Arc<AtomicUsize>,
+        screen_starts: Arc<AtomicUsize>,
         /// One end switch per started screen stream, in start order.
-        screen_ends: Rc<RefCell<Vec<Arc<capture_api::CaptureEnd>>>>,
-        /// What the fake speakers played, interleaved stereo.
-        played: Arc<std::sync::Mutex<Vec<f32>>>,
+        screen_ends: Arc<Mutex<Vec<Arc<capture_api::CaptureEnd>>>>,
     }
 
-    impl CaptureBackend for FakeCapture {
-        fn capabilities(&mut self) -> CaptureCapabilities {
-            self.capability_queries
-                .set(self.capability_queries.get() + 1);
-            CaptureCapabilities {
-                platform: "test".into(),
-                desktop: Some("TestDesktop".into()),
-                session_type: Some("wayland".into()),
-                screen: ScreenCaptureCapability {
-                    backend: Some("fake".into()),
-                    available: true,
-                    unavailable_reason: None,
-                    portal_version: Some(5),
-                    target_kinds: vec![capture_api::VideoSourceKind::Monitor],
-                    cursor_modes: vec![capture_api::CursorMode::Embedded],
-                    picker: true,
-                    target_list: false,
-                },
-                audio: AudioCaptureCapability::unavailable(Some("fake"), "no server"),
+    /// Audio part with an unavailable capability, but working fake devices.
+    struct FakeAudio {
+        /// What the fake speakers played, interleaved stereo.
+        played: Arc<Mutex<Vec<f32>>>,
+    }
+
+    impl ScreenCapture for FakeScreen {
+        fn capability(&mut self) -> ScreenCaptureCapability {
+            self.capability_queries.fetch_add(1, Ordering::Relaxed);
+            ScreenCaptureCapability {
+                backend: Some("fake".into()),
+                available: true,
+                unavailable_reason: None,
+                portal_version: Some(5),
+                target_kinds: vec![capture_api::VideoSourceKind::Monitor],
+                cursor_modes: vec![capture_api::CursorMode::Embedded],
+                picker: true,
+                target_list: false,
             }
+        }
+
+        fn screen_sources(&mut self) -> Result<Vec<capture_api::ScreenSource>, CaptureError> {
+            Err(CaptureError::unsupported(
+                "this capture backend cannot list screen sources",
+            ))
+        }
+
+        fn probe_screen(
+            &mut self,
+            request: &ScreenCaptureRequest,
+        ) -> Result<VideoCaptureReport, CaptureError> {
+            Ok(VideoCaptureReport {
+                backend: "fake".into(),
+                source: VideoSourceInfo {
+                    kind: request.selection.target_kinds.first().copied(),
+                    width: Some(1920),
+                    height: Some(1080),
+                },
+                format: None,
+                buffer_memory: None,
+                stats: VideoStatsAccumulator::new().finish(request.duration),
+                warnings: Vec::new(),
+            })
+        }
+
+        fn start_screen_stream(
+            &mut self,
+            selection: &ScreenSelection,
+        ) -> Result<Box<dyn VideoStream>, CaptureError> {
+            // A source that went away, e.g. a closed window.
+            if selection.capture_target_id.as_deref() == Some("fake:gone") {
+                return Err(CaptureError::new(
+                    capture_api::CaptureErrorKind::NotFound,
+                    "no such source",
+                ));
+            }
+            self.screen_starts.fetch_add(1, Ordering::Relaxed);
+            let mailbox = Arc::new(FrameMailbox::new());
+            // One solid red 32x18 frame.
+            let pixels = [0u8, 0, 255, 0].repeat(32 * 18);
+            mailbox.publish(
+                VideoFrame::new(
+                    32,
+                    18,
+                    32 * 4,
+                    PixelFormat::Bgrx8,
+                    None,
+                    FrameBuffer::unpooled(pixels),
+                )
+                .expect("frame"),
+            );
+            let ended = Arc::new(capture_api::CaptureEnd::new());
+            self.screen_ends
+                .lock()
+                .expect("screen ends")
+                .push(Arc::clone(&ended));
+            Ok(Box::new(FakeStream {
+                mailbox,
+                ended,
+                source: VideoSourceInfo {
+                    kind: Some(capture_api::VideoSourceKind::Monitor),
+                    width: Some(32),
+                    height: Some(18),
+                },
+            }))
+        }
+    }
+
+    impl AudioDevices for FakeAudio {
+        fn capability(&mut self) -> AudioCaptureCapability {
+            AudioCaptureCapability::unavailable(Some("fake"), "no server")
         }
 
         fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
@@ -368,32 +440,6 @@ mod tests {
                 description: Some("Speakers".into()),
                 media_class: "Audio/Sink".into(),
             }])
-        }
-
-        fn start_playback(
-            &mut self,
-            request: &capture_api::PlaybackRequest,
-            feed: media_core::SampleReader,
-        ) -> Result<Box<dyn capture_api::PlaybackStream>, CaptureError> {
-            monitor::start_fake_playback(request, feed, &self.played)
-        }
-
-        fn probe_screen(
-            &mut self,
-            request: &ScreenCaptureRequest,
-        ) -> Result<VideoCaptureReport, CaptureError> {
-            Ok(VideoCaptureReport {
-                backend: "fake".into(),
-                source: VideoSourceInfo {
-                    kind: request.selection.target_kinds.first().copied(),
-                    width: Some(1920),
-                    height: Some(1080),
-                },
-                format: None,
-                buffer_memory: None,
-                stats: VideoStatsAccumulator::new().finish(request.duration),
-                warnings: Vec::new(),
-            })
         }
 
         fn probe_audio(
@@ -450,43 +496,12 @@ mod tests {
             }))
         }
 
-        fn start_screen_stream(
+        fn start_playback(
             &mut self,
-            selection: &ScreenSelection,
-        ) -> Result<Box<dyn VideoStream>, CaptureError> {
-            // A source that went away, e.g. a closed window.
-            if selection.capture_target_id.as_deref() == Some("fake:gone") {
-                return Err(CaptureError::new(
-                    capture_api::CaptureErrorKind::NotFound,
-                    "no such source",
-                ));
-            }
-            self.screen_starts.set(self.screen_starts.get() + 1);
-            let mailbox = Arc::new(FrameMailbox::new());
-            // One solid red 32x18 frame.
-            let pixels = [0u8, 0, 255, 0].repeat(32 * 18);
-            mailbox.publish(
-                VideoFrame::new(
-                    32,
-                    18,
-                    32 * 4,
-                    PixelFormat::Bgrx8,
-                    None,
-                    FrameBuffer::unpooled(pixels),
-                )
-                .expect("frame"),
-            );
-            let ended = Arc::new(capture_api::CaptureEnd::new());
-            self.screen_ends.borrow_mut().push(Arc::clone(&ended));
-            Ok(Box::new(FakeStream {
-                mailbox,
-                ended,
-                source: VideoSourceInfo {
-                    kind: Some(capture_api::VideoSourceKind::Monitor),
-                    width: Some(32),
-                    height: Some(18),
-                },
-            }))
+            request: &capture_api::PlaybackRequest,
+            feed: media_core::SampleReader,
+        ) -> Result<Box<dyn capture_api::PlaybackStream>, CaptureError> {
+            monitor::start_fake_playback(request, feed, &self.played)
         }
     }
 
@@ -553,19 +568,24 @@ mod tests {
         }
     }
 
-    fn engine_with_counter() -> (Engine, Rc<Cell<usize>>) {
-        let queries = Rc::new(Cell::new(0));
-        let engine = Engine::with_capture(Box::new(FakeCapture {
-            capability_queries: Rc::clone(&queries),
-            screen_starts: Rc::new(Cell::new(0)),
-            screen_ends: Rc::default(),
-            played: Arc::default(),
-        }));
+    fn engine_with_counter() -> (Engine, Arc<AtomicUsize>) {
+        let queries = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::with_capture(Capture {
+            screen: Box::new(FakeScreen {
+                capability_queries: Arc::clone(&queries),
+                screen_starts: Arc::new(AtomicUsize::new(0)),
+                screen_ends: Arc::default(),
+            }),
+            audio: Box::new(FakeAudio {
+                played: Arc::default(),
+            }),
+            ..Capture::unsupported("no fake camera")
+        });
         (engine, queries)
     }
 
     /// Engine with the fake backend, counting screen captures started.
-    fn engine_with_screen_counter() -> (Engine, Rc<Cell<usize>>) {
+    fn engine_with_screen_counter() -> (Engine, Arc<AtomicUsize>) {
         let (engine, starts, _) = engine_with_screen_streams();
         (engine, starts)
     }
@@ -575,17 +595,22 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn engine_with_screen_streams() -> (
         Engine,
-        Rc<Cell<usize>>,
-        Rc<RefCell<Vec<Arc<capture_api::CaptureEnd>>>>,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<Arc<capture_api::CaptureEnd>>>>,
     ) {
-        let starts = Rc::new(Cell::new(0));
-        let ends = Rc::new(RefCell::new(Vec::new()));
-        let engine = Engine::with_capture(Box::new(FakeCapture {
-            capability_queries: Rc::new(Cell::new(0)),
-            screen_starts: Rc::clone(&starts),
-            screen_ends: Rc::clone(&ends),
-            played: Arc::default(),
-        }));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::with_capture(Capture {
+            screen: Box::new(FakeScreen {
+                capability_queries: Arc::new(AtomicUsize::new(0)),
+                screen_starts: Arc::clone(&starts),
+                screen_ends: Arc::clone(&ends),
+            }),
+            audio: Box::new(FakeAudio {
+                played: Arc::default(),
+            }),
+            ..Capture::unsupported("no fake camera")
+        });
         (engine, starts, ends)
     }
 
@@ -1555,7 +1580,7 @@ mod tests {
             json!({"scene_name": "Main"}),
         );
         run(&mut engine, "set_preview", json!({"enabled": true}));
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         // Each scene's source starts once; switching back reuses it.
         run(
             &mut engine,
@@ -1572,7 +1597,7 @@ mod tests {
             "set_active_scene",
             json!({"scene_name": "BRB"}),
         );
-        assert_eq!(starts.get(), 2);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
         // Removing a source from every scene ends its capture at once, also
         // when its scene is not the rendered one.
         let brb_desk = source_id(&mut engine, "BRB", "desk");
@@ -1641,7 +1666,7 @@ mod tests {
             json!({"scene_name": "Main"}),
         );
         run(&mut engine, "set_preview", json!({"enabled": true}));
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         for visible in [false, true, false] {
             run(
                 &mut engine,
@@ -1666,7 +1691,7 @@ mod tests {
             "update_source",
             json!({"scene_name": "Main", "source_name": "desk", "visible": true}),
         );
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         assert_eq!(health(&mut engine).captures.len(), 1);
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
@@ -1726,7 +1751,7 @@ mod tests {
 
         // The system ends the capture: health says so, with the reason, and
         // the recording keeps going.
-        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        ends.lock().expect("screen ends")[0].end(|| "the captured window was closed".to_owned());
         let ended = health(&mut engine);
         assert_eq!(
             desk(&ended).state,
@@ -1766,7 +1791,7 @@ mod tests {
             ErrorCode::InvalidState
         );
         start(&mut engine, json!({"file_name": "restart.mkv"})).expect("start");
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         let desk = |health: &command_api::HealthReport| {
             health
                 .captures
@@ -1775,7 +1800,7 @@ mod tests {
                 .cloned()
                 .expect("desk capture")
         };
-        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        ends.lock().expect("screen ends")[0].end(|| "the captured window was closed".to_owned());
         assert!(matches!(
             desk(&health(&mut engine)).state,
             capture_api::CaptureState::Ended { .. }
@@ -1788,7 +1813,7 @@ mod tests {
             .counters
             .frames_encoded;
         restart(&mut engine, "Test pattern", "desk").expect("restart");
-        assert_eq!(starts.get(), 2);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
         assert_eq!(
             desk(&health(&mut engine)).state,
             capture_api::CaptureState::Running
@@ -1865,12 +1890,12 @@ mod tests {
             "add_source",
             json!({"scene_name": "Test pattern", "name": "desk", "kind": "screen"}),
         );
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         start(&mut engine, json!({"file_name": "picker.mkv"})).expect("start");
         let err = restart(&mut engine).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidState);
         assert!(err.message.contains("picker"), "{err}");
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         // The refused restart kept the running capture.
         let captures = health(&mut engine).captures;
         assert!(
@@ -1881,7 +1906,7 @@ mod tests {
         engine.handle(Command::StopRecording).expect("stop");
         // Only the preview runs: the picker may ask again.
         restart(&mut engine).expect("restart");
-        assert_eq!(starts.get(), 2);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
         run(&mut engine, "set_preview", json!({"enabled": false}));
     }
 
@@ -2266,7 +2291,7 @@ mod tests {
         );
         // A running capture keeps its target; restart_source switches it.
         run(&mut engine, "set_preview", json!({"enabled": true}));
-        assert_eq!(starts.get(), 1);
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
         let capturing = try_run(
             &mut engine,
             "set_capture_target",
@@ -2330,7 +2355,7 @@ mod tests {
                    "capture_target_id": "fake:1"}),
         );
         start(&mut engine, json!({"file_name": "retarget.mkv"})).expect("start");
-        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        ends.lock().expect("screen ends")[0].end(|| "the captured window was closed".to_owned());
 
         // The window's id is gone: restarting on it fails, and nothing
         // changes (the scene keeps its id, the old capture stays listed).
@@ -2356,7 +2381,7 @@ mod tests {
             "restart_source",
             json!({"scene_name": "Test pattern", "source_name": "desk", "capture_target_id": "fake:2"}),
         );
-        assert_eq!(starts.get(), 2);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
         assert_eq!(
             screen_ids(&mut engine, "Test pattern"),
             [("desk".to_owned(), Some("fake:2".to_owned()))]
@@ -2390,13 +2415,13 @@ mod tests {
             "set_active_scene",
             json!({"scene_name": "BRB"}),
         );
-        assert_eq!(starts.get(), 2);
+        assert_eq!(starts.load(Ordering::Relaxed), 2);
         // Main's capture keeps running off air, and ends there.
-        ends.borrow()[0].end(|| "the captured window was closed".to_owned());
+        ends.lock().expect("screen ends")[0].end(|| "the captured window was closed".to_owned());
         // By id alone: source ids are unique across scenes.
         let cam = source_id(&mut engine, "Main", "cam");
         run(&mut engine, "restart_source", json!({"source_id": cam}));
-        assert_eq!(starts.get(), 3);
+        assert_eq!(starts.load(Ordering::Relaxed), 3);
         let captures = health(&mut engine).captures;
         assert_eq!(captures.len(), 2, "{captures:?}");
         assert!(
@@ -2430,7 +2455,7 @@ mod tests {
         let err = engine.handle(add).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidState);
         assert!(err.message.contains("picker"), "{err}");
-        assert_eq!(starts.get(), 0);
+        assert_eq!(starts.load(Ordering::Relaxed), 0);
         // The refused edit was undone.
         let CommandOutput::SceneList(list) = run(&mut engine, "list_scenes", json!({})) else {
             panic!("unexpected output");
@@ -2500,17 +2525,22 @@ mod tests {
         let (mut engine, queries) = engine_with_counter();
         engine.handle(Command::GetStatus).expect("status");
         engine.handle(Command::GetStatus).expect("status");
-        assert_eq!(queries.get(), 1, "get_status must reuse the cached query");
+        assert_eq!(
+            queries.load(Ordering::Relaxed),
+            1,
+            "get_status must reuse the cached query"
+        );
         let output = engine
             .handle(Command::GetCaptureCapabilities)
             .expect("capabilities");
         let CommandOutput::CaptureCapabilities(caps) = output else {
             panic!("unexpected output: {output:?}");
         };
-        assert_eq!(caps.desktop.as_deref(), Some("TestDesktop"));
+        assert_eq!(caps.platform, std::env::consts::OS);
+        assert_eq!(caps.desktop, std::env::var("XDG_CURRENT_DESKTOP").ok());
         assert_eq!(caps.audio.unavailable_reason.as_deref(), Some("no server"));
         assert_eq!(
-            queries.get(),
+            queries.load(Ordering::Relaxed),
             2,
             "get_capture_capabilities must query again"
         );

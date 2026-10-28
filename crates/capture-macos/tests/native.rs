@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    CaptureBackend, CaptureErrorKind, CaptureState, CursorMode, ScreenCaptureRequest,
+    CaptureErrorKind, CaptureState, CursorMode, ScreenCapture, ScreenCaptureRequest,
     ScreenSelection, ScreenSource, VideoSourceKind,
 };
 use capture_macos::SckCapture;
@@ -39,12 +39,9 @@ fn sources(capture: &mut SckCapture) -> Option<Vec<ScreenSource>> {
 
 #[test]
 fn capabilities_describe_named_sources_without_a_picker() {
-    let capabilities = SckCapture::new().capabilities();
-    println!("{capabilities:#?}");
-    assert_eq!(capabilities.platform, "macos");
-    let screen = &capabilities.screen;
+    let screen = SckCapture::new().capability();
+    println!("{screen:#?}");
     assert!(screen.available && screen.target_list && !screen.picker);
-    assert!(!capabilities.audio.available, "audio comes from cpal");
 }
 
 #[test]

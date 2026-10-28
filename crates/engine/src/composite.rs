@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use capture_api::{CaptureBackend, VideoStream};
+use capture_api::{ScreenCapture, VideoStream};
 use command_api::{
     CommandError, CompositeReport, CompositeRequest, ErrorCode, ErrorSummary, SnapshotResult,
 };
@@ -45,7 +45,7 @@ const OVERLAY_PERIOD: u64 = 240;
 const WATCH_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) fn probe(
-    capture: &mut dyn CaptureBackend,
+    capture: &mut dyn ScreenCapture,
     output_dir: &Path,
     request: &CompositeRequest,
 ) -> Result<CompositeReport, CommandError> {

@@ -4,9 +4,9 @@ use media_core::{AudioRing, FrameMailbox, SampleReader};
 
 use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput,
-    AudioStreamRequest, CaptureCapabilities, CaptureError, CaptureState, PlaybackRequest,
-    ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
-    VideoCaptureReport, VideoSourceInfo,
+    AudioStreamRequest, Camera, CameraCaptureCapability, CameraRequest, CaptureCapabilities,
+    CaptureError, CaptureState, PlaybackRequest, ScreenCaptureCapability, ScreenCaptureRequest,
+    ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
 };
 
 /// A running audio capture delivering interleaved `f32` samples until stopped.
@@ -62,35 +62,24 @@ pub trait VideoStream: Send {
     fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError>;
 }
 
-/// A platform capture implementation.
+/// Screen capture from the running system.
 ///
 /// Probes block for the requested duration plus any user interaction the
 /// platform requires (e.g. a portal selection dialog); implementations bound
 /// every wait on system services with a timeout.
-pub trait CaptureBackend {
-    /// Query capabilities from the running system. Never fails: unavailable
-    /// capabilities are reported with a reason.
-    fn capabilities(&mut self) -> CaptureCapabilities;
-
-    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError>;
+pub trait ScreenCapture: Send {
+    /// Query the screen capability from the running system. Never fails:
+    /// unavailable capabilities are reported with a reason.
+    fn capability(&mut self) -> ScreenCaptureCapability;
 
     /// Screen sources that can be captured by id, for backends whose
-    /// capability has `target_list`; the default has none.
-    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
-        Err(CaptureError::unsupported(
-            "this capture backend cannot list screen sources",
-        ))
-    }
+    /// capability has `target_list`.
+    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError>;
 
     fn probe_screen(
         &mut self,
         request: &ScreenCaptureRequest,
     ) -> Result<VideoCaptureReport, CaptureError>;
-
-    fn probe_audio(
-        &mut self,
-        request: &AudioCaptureRequest,
-    ) -> Result<AudioCaptureReport, CaptureError>;
 
     /// Capture the selected screen source continuously (the named one, or
     /// the one the user picks).
@@ -98,6 +87,27 @@ pub trait CaptureBackend {
         &mut self,
         selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError>;
+}
+
+/// Audio capture and playback from the running system.
+///
+/// Probes block for the requested duration plus any user interaction the
+/// platform requires; implementations bound every wait on system services
+/// with a timeout.
+pub trait AudioDevices: Send {
+    /// Query the audio capability from the running system. Never fails:
+    /// unavailable capabilities are reported with a reason.
+    fn capability(&mut self) -> AudioCaptureCapability;
+
+    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError>;
+
+    /// Audio output devices, for backends that can play.
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError>;
+
+    fn probe_audio(
+        &mut self,
+        request: &AudioCaptureRequest,
+    ) -> Result<AudioCaptureReport, CaptureError>;
 
     /// Capture an audio input continuously in the requested format.
     fn start_audio_stream(
@@ -105,24 +115,81 @@ pub trait CaptureBackend {
         request: &AudioStreamRequest,
     ) -> Result<Box<dyn AudioStream>, CaptureError>;
 
-    /// Audio output devices, for backends that can play; the default has
-    /// none.
-    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
-        Err(CaptureError::unsupported(
-            "this backend cannot play audio yet",
-        ))
-    }
-
     /// Play `feed` on an output in the requested format. On an error the
     /// feed is dropped, which closes it.
     fn start_playback(
         &mut self,
-        _request: &PlaybackRequest,
-        _feed: SampleReader,
-    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
-        Err(CaptureError::unsupported(
-            "this backend cannot play audio yet",
-        ))
+        request: &PlaybackRequest,
+        feed: SampleReader,
+    ) -> Result<Box<dyn PlaybackStream>, CaptureError>;
+}
+
+/// Camera capture from the running system; implementations bound every wait
+/// on system services with a timeout.
+pub trait CameraCapture: Send {
+    /// Query the camera capability from the running system. Never fails:
+    /// unavailable capabilities are reported with a reason.
+    fn capability(&mut self) -> CameraCaptureCapability;
+    fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError>;
+    /// A camera stream is a `VideoStream`, like a screen capture.
+    fn start_camera_stream(
+        &mut self,
+        request: &CameraRequest,
+    ) -> Result<Box<dyn VideoStream>, CaptureError>;
+}
+
+/// The capture parts of one system; the engine drives only these.
+pub struct Capture {
+    pub screen: Box<dyn ScreenCapture>,
+    pub audio: Box<dyn AudioDevices>,
+    pub camera: Box<dyn CameraCapture>,
+}
+
+impl Capture {
+    /// Every part unsupported with `reason` (for engines and builds without capture).
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        let part = UnsupportedCapture::new(reason);
+        Self {
+            screen: Box::new(part.clone()),
+            audio: Box::new(part.clone()),
+            camera: Box::new(part),
+        }
+    }
+
+    /// Like `UnsupportedCapture::for_current_platform()` for every part.
+    pub fn for_unsupported_platform() -> Self {
+        let part = UnsupportedCapture::for_current_platform();
+        Self {
+            screen: Box::new(part.clone()),
+            audio: Box::new(part.clone()),
+            camera: Box::new(part),
+        }
+    }
+
+    /// The capabilities as `get_capture_capabilities` reports them.
+    ///
+    /// Screen and audio are queried in parallel, so a slow system service
+    /// costs one query timeout, not two. Audio stays on the calling thread:
+    /// cpal's WASAPI host keeps its device enumerator in the COM apartment
+    /// of the first thread that uses it, which must outlive the query.
+    /// `desktop` and `session_type` come from `XDG_CURRENT_DESKTOP` and
+    /// `XDG_SESSION_TYPE` on every OS. Camera is not part of this report yet.
+    pub fn capabilities(&mut self) -> CaptureCapabilities {
+        let (screen, audio) = std::thread::scope(|scope| {
+            let screen = scope.spawn(|| self.screen.capability());
+            let audio = self.audio.capability();
+            let screen = screen.join().unwrap_or_else(|_| {
+                ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
+            });
+            (screen, audio)
+        });
+        CaptureCapabilities {
+            platform: std::env::consts::OS.to_owned(),
+            desktop: std::env::var("XDG_CURRENT_DESKTOP").ok(),
+            session_type: std::env::var("XDG_SESSION_TYPE").ok(),
+            screen,
+            audio,
+        }
     }
 }
 
@@ -153,19 +220,9 @@ impl UnsupportedCapture {
     }
 }
 
-impl CaptureBackend for UnsupportedCapture {
-    fn capabilities(&mut self) -> CaptureCapabilities {
-        CaptureCapabilities {
-            platform: std::env::consts::OS.to_owned(),
-            desktop: None,
-            session_type: None,
-            screen: ScreenCaptureCapability::unavailable(None, self.reason.clone()),
-            audio: AudioCaptureCapability::unavailable(None, self.reason.clone()),
-        }
-    }
-
-    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        Err(self.error())
+impl ScreenCapture for UnsupportedCapture {
+    fn capability(&mut self) -> ScreenCaptureCapability {
+        ScreenCaptureCapability::unavailable(None, self.reason.clone())
     }
 
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
@@ -179,6 +236,27 @@ impl CaptureBackend for UnsupportedCapture {
         Err(self.error())
     }
 
+    fn start_screen_stream(
+        &mut self,
+        _selection: &ScreenSelection,
+    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        Err(self.error())
+    }
+}
+
+impl AudioDevices for UnsupportedCapture {
+    fn capability(&mut self) -> AudioCaptureCapability {
+        AudioCaptureCapability::unavailable(None, self.reason.clone())
+    }
+
+    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
+        Err(self.error())
+    }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        Err(self.error())
+    }
+
     fn probe_audio(
         &mut self,
         _request: &AudioCaptureRequest,
@@ -186,21 +264,10 @@ impl CaptureBackend for UnsupportedCapture {
         Err(self.error())
     }
 
-    fn start_screen_stream(
-        &mut self,
-        _selection: &ScreenSelection,
-    ) -> Result<Box<dyn VideoStream>, CaptureError> {
-        Err(self.error())
-    }
-
     fn start_audio_stream(
         &mut self,
         _request: &AudioStreamRequest,
     ) -> Result<Box<dyn AudioStream>, CaptureError> {
-        Err(self.error())
-    }
-
-    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
         Err(self.error())
     }
 
@@ -213,73 +280,20 @@ impl CaptureBackend for UnsupportedCapture {
     }
 }
 
-/// Screen capture from one backend and audio capture from another, e.g.
-/// native screen capture with `cpal` audio.
-#[derive(Debug)]
-pub struct SplitCapture<V, A> {
-    pub video: V,
-    pub audio: A,
-}
-
-impl<V: CaptureBackend, A: CaptureBackend> CaptureBackend for SplitCapture<V, A> {
-    fn capabilities(&mut self) -> CaptureCapabilities {
-        let video = self.video.capabilities();
-        let audio = self.audio.capabilities();
-        CaptureCapabilities {
-            platform: video.platform,
-            desktop: video.desktop.or(audio.desktop),
-            session_type: video.session_type.or(audio.session_type),
-            screen: video.screen,
-            audio: audio.audio,
-        }
+impl CameraCapture for UnsupportedCapture {
+    fn capability(&mut self) -> CameraCaptureCapability {
+        CameraCaptureCapability::unavailable(None, self.reason.clone())
     }
 
-    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        self.audio.audio_inputs()
+    fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError> {
+        Err(self.error())
     }
 
-    fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
-        self.video.screen_sources()
-    }
-
-    fn probe_screen(
+    fn start_camera_stream(
         &mut self,
-        request: &ScreenCaptureRequest,
-    ) -> Result<VideoCaptureReport, CaptureError> {
-        self.video.probe_screen(request)
-    }
-
-    fn probe_audio(
-        &mut self,
-        request: &AudioCaptureRequest,
-    ) -> Result<AudioCaptureReport, CaptureError> {
-        self.audio.probe_audio(request)
-    }
-
-    fn start_screen_stream(
-        &mut self,
-        selection: &ScreenSelection,
+        _request: &CameraRequest,
     ) -> Result<Box<dyn VideoStream>, CaptureError> {
-        self.video.start_screen_stream(selection)
-    }
-
-    fn start_audio_stream(
-        &mut self,
-        request: &AudioStreamRequest,
-    ) -> Result<Box<dyn AudioStream>, CaptureError> {
-        self.audio.start_audio_stream(request)
-    }
-
-    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
-        self.audio.audio_outputs()
-    }
-
-    fn start_playback(
-        &mut self,
-        request: &PlaybackRequest,
-        feed: SampleReader,
-    ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
-        self.audio.start_playback(request, feed)
+        Err(self.error())
     }
 }
 
@@ -291,11 +305,46 @@ mod tests {
     #[test]
     fn unsupported_backend_reports_reason_everywhere() {
         let mut backend = UnsupportedCapture::new("not here");
-        let caps = backend.capabilities();
+        let mut capture = Capture::unsupported("not here");
+        let caps = capture.capabilities();
         assert_eq!(caps.platform, std::env::consts::OS);
+        assert_eq!(caps.desktop, std::env::var("XDG_CURRENT_DESKTOP").ok());
+        assert_eq!(caps.session_type, std::env::var("XDG_SESSION_TYPE").ok());
         assert!(!caps.screen.available);
         assert_eq!(caps.screen.unavailable_reason.as_deref(), Some("not here"));
-        assert!(!caps.audio.available);
+        assert_eq!(
+            caps.audio,
+            AudioCaptureCapability::unavailable(None, "not here")
+        );
+        assert_eq!(ScreenCapture::capability(&mut backend), caps.screen);
+        assert_eq!(AudioDevices::capability(&mut backend), caps.audio);
+        assert_eq!(
+            backend
+                .probe_audio(&AudioCaptureRequest {
+                    input: None,
+                    duration: DEFAULT_PROBE_DURATION,
+                })
+                .unwrap_err()
+                .message,
+            "not here"
+        );
+        let selection = ScreenSelection {
+            target_kinds: vec![VideoSourceKind::Monitor],
+            cursor_mode: CursorMode::Embedded,
+            capture_target_id: None,
+        };
+        let Err(err) = backend.start_screen_stream(&selection) else {
+            panic!("screen started");
+        };
+        assert_eq!(err.message, "not here");
+        let Err(err) = backend.start_audio_stream(&AudioStreamRequest {
+            input: None,
+            rate: 48_000,
+            channels: 2,
+        }) else {
+            panic!("audio started");
+        };
+        assert_eq!(err.message, "not here");
 
         let err = backend
             .probe_screen(&ScreenCaptureRequest {
@@ -331,17 +380,35 @@ mod tests {
             panic!("playback started");
         };
         assert_eq!(err.message, "not here");
+        let camera = CameraCapture::capability(&mut backend);
+        assert_eq!(
+            camera,
+            CameraCaptureCapability::unavailable(None, "not here")
+        );
+        assert_eq!(backend.cameras().unwrap_err().message, "not here");
+        let Err(err) = backend.start_camera_stream(&CameraRequest {
+            camera_id: "camera".into(),
+            size: None,
+            fps: None,
+        }) else {
+            panic!("camera started");
+        };
+        assert_eq!(err.message, "not here");
         // The refused feed is closed.
         assert!(writer.is_closed());
     }
 
     #[test]
-    fn split_capture_takes_screen_and_audio_from_their_backends() {
-        let mut split = SplitCapture {
-            video: UnsupportedCapture::new("no screen here"),
-            audio: UnsupportedCapture::new("no audio here"),
+    fn capture_takes_screen_and_audio_from_their_parts() {
+        let mut capture = Capture {
+            screen: Box::new(UnsupportedCapture::new("no screen here")),
+            audio: Box::new(UnsupportedCapture::new("no audio here")),
+            ..Capture::unsupported("no camera here")
         };
-        let caps = split.capabilities();
+        let caps = capture.capabilities();
+        assert_eq!(caps.platform, std::env::consts::OS);
+        assert_eq!(caps.desktop, std::env::var("XDG_CURRENT_DESKTOP").ok());
+        assert_eq!(caps.session_type, std::env::var("XDG_SESSION_TYPE").ok());
         assert_eq!(
             caps.screen.unavailable_reason.as_deref(),
             Some("no screen here")
@@ -350,10 +417,132 @@ mod tests {
             caps.audio.unavailable_reason.as_deref(),
             Some("no audio here")
         );
-        assert_eq!(split.audio_inputs().unwrap_err().message, "no audio here");
         assert_eq!(
-            split.screen_sources().unwrap_err().message,
+            capture.audio.audio_inputs().unwrap_err().message,
+            "no audio here"
+        );
+        assert_eq!(
+            capture.screen.screen_sources().unwrap_err().message,
             "no screen here"
+        );
+    }
+
+    struct TestAudio(Box<dyn FnMut() -> AudioCaptureCapability + Send>);
+
+    impl AudioDevices for TestAudio {
+        fn capability(&mut self) -> AudioCaptureCapability {
+            (self.0)()
+        }
+
+        fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+
+        fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+
+        fn probe_audio(
+            &mut self,
+            _request: &AudioCaptureRequest,
+        ) -> Result<AudioCaptureReport, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+
+        fn start_audio_stream(
+            &mut self,
+            _request: &AudioStreamRequest,
+        ) -> Result<Box<dyn AudioStream>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+
+        fn start_playback(
+            &mut self,
+            _request: &PlaybackRequest,
+            _feed: SampleReader,
+        ) -> Result<Box<dyn PlaybackStream>, CaptureError> {
+            Err(CaptureError::unsupported("unused"))
+        }
+    }
+
+    #[test]
+    fn panicking_screen_query_preserves_audio_capability() {
+        let mut capture = Capture {
+            screen: Box::new(TestScreen(Box::new(|| panic!("test screen panic")))),
+            ..Capture::unsupported("audio reason")
+        };
+        let caps = capture.capabilities();
+        assert_eq!(
+            caps.screen,
+            ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
+        );
+        assert_eq!(
+            caps.audio,
+            AudioCaptureCapability::unavailable(None, "audio reason")
+        );
+    }
+
+    struct TestScreen(Box<dyn FnMut() -> ScreenCaptureCapability + Send>);
+
+    impl ScreenCapture for TestScreen {
+        fn capability(&mut self) -> ScreenCaptureCapability {
+            (self.0)()
+        }
+
+        fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
+            UnsupportedCapture::new("unused").screen_sources()
+        }
+
+        fn probe_screen(
+            &mut self,
+            request: &ScreenCaptureRequest,
+        ) -> Result<VideoCaptureReport, CaptureError> {
+            UnsupportedCapture::new("unused").probe_screen(request)
+        }
+
+        fn start_screen_stream(
+            &mut self,
+            selection: &ScreenSelection,
+        ) -> Result<Box<dyn VideoStream>, CaptureError> {
+            UnsupportedCapture::new("unused").start_screen_stream(selection)
+        }
+    }
+
+    #[test]
+    fn capabilities_query_in_parallel_with_audio_on_the_calling_thread() {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+
+        let caller = std::thread::current().id();
+        let (audio_started, wait_audio) = sync_channel(1);
+        let (screen_started, wait_screen) = sync_channel(1);
+        let mut capture = Capture {
+            screen: Box::new(TestScreen(Box::new(move || {
+                assert_ne!(std::thread::current().id(), caller);
+                screen_started.send(()).expect("screen started");
+                wait_audio
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("audio runs alongside screen");
+                ScreenCaptureCapability::unavailable(None, "test screen")
+            }))),
+            audio: Box::new(TestAudio(Box::new(move || {
+                assert_eq!(std::thread::current().id(), caller);
+                audio_started.send(()).expect("audio started");
+                wait_screen
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("screen runs alongside audio");
+                AudioCaptureCapability::unavailable(None, "test audio")
+            }))),
+            ..Capture::unsupported("no camera")
+        };
+        let caps = capture.capabilities();
+        assert_eq!(
+            caps.screen,
+            ScreenCaptureCapability::unavailable(None, "test screen")
+        );
+        assert_eq!(
+            caps.audio,
+            AudioCaptureCapability::unavailable(None, "test audio")
         );
     }
 }

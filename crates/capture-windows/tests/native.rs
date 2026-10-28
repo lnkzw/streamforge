@@ -8,7 +8,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    CaptureBackend, CaptureErrorKind, CaptureState, CursorMode, ScreenCaptureRequest,
+    CaptureErrorKind, CaptureState, CursorMode, ScreenCapture, ScreenCaptureRequest,
     ScreenSelection, VideoSourceKind,
 };
 use capture_windows::WgcCapture;
@@ -23,16 +23,13 @@ fn selection(source: Option<&str>, cursor_mode: CursorMode) -> ScreenSelection {
 
 #[test]
 fn capabilities_describe_named_sources_without_a_picker() {
-    let capabilities = WgcCapture::new().capabilities();
-    println!("{capabilities:#?}");
-    assert_eq!(capabilities.platform, "windows");
-    let screen = &capabilities.screen;
+    let screen = WgcCapture::new().capability();
+    println!("{screen:#?}");
     assert_eq!(screen.available, screen.unavailable_reason.is_none());
     if screen.available {
         assert!(screen.target_list && !screen.picker);
         assert!(screen.target_kinds.contains(&VideoSourceKind::Monitor));
     }
-    assert!(!capabilities.audio.available, "audio comes from cpal");
 }
 
 #[test]
@@ -42,7 +39,7 @@ fn a_listed_monitor_delivers_frames_of_its_size() {
         Ok(sources) => sources,
         Err(error) => {
             println!("no source list: {error:?}");
-            assert!(!capture.capabilities().screen.available, "{error:?}");
+            assert!(!capture.capability().available, "{error:?}");
             return;
         }
     };
@@ -105,7 +102,7 @@ fn a_monitor_probe_reports_frames() {
 #[test]
 fn bad_selections_are_structured_errors() {
     let mut capture = WgcCapture::new();
-    let screen = capture.capabilities().screen;
+    let screen = capture.capability();
     if !screen.available {
         return;
     }
@@ -166,7 +163,7 @@ impl Drop for KillOnDrop {
 #[test]
 fn a_closed_window_ends_the_stream() {
     let mut capture = WgcCapture::new();
-    if !capture.capabilities().screen.available {
+    if !capture.capability().available {
         return;
     }
     let title = format!("streamforge-test-window-{}", std::process::id());

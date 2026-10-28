@@ -1,8 +1,8 @@
-//! Linux capture backend: XDG desktop portal ScreenCast + PipeWire.
+//! Linux screen and audio capture: XDG desktop portal ScreenCast + PipeWire.
 //!
-//! - Screen: the portal shows the compositor's picker and hands out a PipeWire
+//! - `PortalScreen`: the portal shows the compositor's picker and hands out a PipeWire
 //!   node; frames arrive as shared-memory buffers with optional header metadata.
-//! - Audio: PipeWire source nodes, and the monitor of each sink, are
+//! - `PipeWireAudio`: PipeWire source nodes, and the monitor of each sink, are
 //!   enumerated through the registry and captured as interleaved F32 at their
 //!   native rate and channel count.
 //! - Playback (the monitor, ADR 0017): an output stream to a sink, whose
@@ -25,48 +25,48 @@ mod video;
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput,
-    AudioStream, AudioStreamRequest, CaptureBackend, CaptureCapabilities, CaptureError,
-    PlaybackRequest, PlaybackStream, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, ScreenSource, VideoCaptureReport, VideoStream,
+    AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,
+    AudioOutput, AudioStream, AudioStreamRequest, CaptureError, PlaybackRequest, PlaybackStream,
+    ScreenCapture, ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
+    VideoCaptureReport, VideoStream,
 };
 use media_core::SampleReader;
 
 /// Upper bound for each portal or PipeWire query. Screen and audio
-/// capabilities are queried in parallel, so `capabilities()` (and the first
-/// `get_status`) waits at most this long.
+/// capabilities are queried in parallel by `Capture::capabilities` (in
+/// `capture-api`), so it and the first `get_status` wait at most this long.
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a listing of audio devices is reused for name checks, so
 /// starting several streams does not rescan the PipeWire registry each time.
 const NODE_CACHE_TTL: Duration = Duration::from_secs(2);
 
+/// Screen capture through the XDG ScreenCast portal.
 #[derive(Debug, Default)]
-pub struct LinuxCapture {
+pub struct PortalScreen;
+
+impl PortalScreen {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Audio devices and playback through PipeWire.
+#[derive(Debug, Default)]
+pub struct PipeWireAudio {
     /// The last listing of audio devices, and when it was made.
     nodes: pw::AudioNodes,
     scanned_at: Option<Instant>,
 }
 
-impl LinuxCapture {
+impl PipeWireAudio {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl CaptureBackend for LinuxCapture {
-    fn capabilities(&mut self) -> CaptureCapabilities {
-        let (portal, audio) = std::thread::scope(|scope| {
-            let portal = scope.spawn(|| portal::query(QUERY_TIMEOUT));
-            // PipeWire objects are !Send; they stay on this thread.
-            let audio = pw::server_version(QUERY_TIMEOUT);
-            let portal = portal.join().unwrap_or_else(|_| {
-                Err(CaptureError::backend(
-                    "the portal capability query panicked",
-                ))
-            });
-            (portal, audio)
-        });
-        let screen = match portal {
+impl ScreenCapture for PortalScreen {
+    fn capability(&mut self) -> ScreenCaptureCapability {
+        match portal::query(QUERY_TIMEOUT) {
             Ok(info) => ScreenCaptureCapability {
                 backend: Some(screen::BACKEND.to_owned()),
                 available: !info.target_kinds.is_empty(),
@@ -82,35 +82,11 @@ impl CaptureBackend for LinuxCapture {
                 target_list: false,
             },
             Err(err) => ScreenCaptureCapability::unavailable(Some(screen::BACKEND), err.message),
-        };
-        let audio = match audio {
-            Ok(version) => AudioCaptureCapability {
-                backend: Some(pw::BACKEND.to_owned()),
-                available: true,
-                unavailable_reason: None,
-                server_version: Some(version),
-            },
-            Err(err) => AudioCaptureCapability::unavailable(Some(pw::BACKEND), err.message),
-        };
-        CaptureCapabilities {
-            platform: std::env::consts::OS.to_owned(),
-            desktop: std::env::var("XDG_CURRENT_DESKTOP").ok(),
-            session_type: std::env::var("XDG_SESSION_TYPE").ok(),
-            screen,
-            audio,
         }
     }
 
     fn screen_sources(&mut self) -> Result<Vec<ScreenSource>, CaptureError> {
         Err(screen::no_target_list())
-    }
-
-    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
-        Ok(self.scan_nodes()?.inputs.clone())
-    }
-
-    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
-        Ok(self.scan_nodes()?.outputs.clone())
     }
 
     fn probe_screen(
@@ -125,6 +101,28 @@ impl CaptureBackend for LinuxCapture {
         selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError> {
         screen::start_stream(selection)
+    }
+}
+
+impl AudioDevices for PipeWireAudio {
+    fn capability(&mut self) -> AudioCaptureCapability {
+        match pw::server_version(QUERY_TIMEOUT) {
+            Ok(version) => AudioCaptureCapability {
+                backend: Some(pw::BACKEND.to_owned()),
+                available: true,
+                unavailable_reason: None,
+                server_version: Some(version),
+            },
+            Err(err) => AudioCaptureCapability::unavailable(Some(pw::BACKEND), err.message),
+        }
+    }
+
+    fn audio_inputs(&mut self) -> Result<Vec<AudioInput>, CaptureError> {
+        Ok(self.scan_nodes()?.inputs.clone())
+    }
+
+    fn audio_outputs(&mut self) -> Result<Vec<AudioOutput>, CaptureError> {
+        Ok(self.scan_nodes()?.outputs.clone())
     }
 
     fn probe_audio(
@@ -156,7 +154,7 @@ impl CaptureBackend for LinuxCapture {
     }
 }
 
-impl LinuxCapture {
+impl PipeWireAudio {
     fn scan_nodes(&mut self) -> Result<&pw::AudioNodes, CaptureError> {
         self.nodes = pw::audio_nodes(QUERY_TIMEOUT)?;
         self.scanned_at = Some(Instant::now());

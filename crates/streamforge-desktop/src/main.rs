@@ -74,7 +74,7 @@ fn main() -> ExitCode {
             let ctx = cc.egui_ctx.clone();
             let worker = EngineWorker::spawn(
                 move || {
-                    Engine::with_capture(capture_platform::backend())
+                    Engine::with_capture(capture_platform::capture())
                         .with_output_dir(output_dir)
                         .with_project_dir(project_dir)
                 },

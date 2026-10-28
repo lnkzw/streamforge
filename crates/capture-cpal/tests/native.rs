@@ -266,12 +266,15 @@ fn the_default_output_plays_or_reports_that_there_is_none() {
         }
         Err(error) => {
             println!("{error:?}");
+            // A CI VM's audio device may also not open in time (seen on
+            // macOS runners): that is a structured report too.
             assert!(
                 matches!(
                     error.kind,
                     CaptureErrorKind::NotFound
                         | CaptureErrorKind::Unavailable
                         | CaptureErrorKind::PermissionDenied
+                        | CaptureErrorKind::Timeout
                 ),
                 "{error:?}"
             );

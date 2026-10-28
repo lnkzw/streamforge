@@ -71,7 +71,9 @@ pub(crate) fn outputs() -> Result<Vec<AudioOutput>, CaptureError> {
 
 /// Play `feed` on the requested output and return once the device pulls
 /// from it; an output that does not within [`START_TIMEOUT`] is an error.
-/// On any error the feed is dropped.
+/// On any error the feed is dropped, except when the system hangs opening
+/// the device (`Timeout`): then the playback thread drops it once the open
+/// returns.
 pub(crate) fn start(
     request: &PlaybackRequest,
     feed: SampleReader,

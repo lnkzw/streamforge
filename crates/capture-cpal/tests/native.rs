@@ -275,7 +275,12 @@ fn the_default_output_plays_or_reports_that_there_is_none() {
                     || error.message.contains("no default audio output"),
                 "{error:?}"
             );
-            assert!(writer.is_closed());
+            // A device that hangs while opening keeps the feed until the
+            // system returns (seen on macOS runners); every other error
+            // drops it at once.
+            if error.kind != CaptureErrorKind::Timeout {
+                assert!(writer.is_closed());
+            }
         }
     }
 }

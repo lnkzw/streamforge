@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_api::{
-    AudioInput, AudioOutput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
-    DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EncoderPreference, EngineStatus, HealthReport,
-    ImageFileList, MixerState, OutputHealth, OutputKind, OutputProfiles, ProjectFileList,
-    ProjectValidation, RecordingStarted, SceneList, ScreenSource, SendTap, StreamState,
-    StreamingStarted, VideoEncoderInfo,
+    AudioInput, AudioOutput, Camera, CameraModeSpec, CaptureHealth, CaptureKind, CaptureState,
+    ChannelInput, CommandError, CommandOutput, DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS,
+    EncoderPreference, EngineStatus, HealthReport, ImageFileList, MixerState, OutputHealth,
+    OutputKind, OutputProfiles, ProjectFileList, ProjectValidation, RecordingStarted, SceneList,
+    ScreenSource, SendTap, StreamState, StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -66,6 +66,7 @@ pub enum SourceType {
     Solid,
     Screen,
     Image,
+    Camera,
 }
 
 /// What a new source should be; filled in by the UI.
@@ -83,6 +84,11 @@ pub struct SourceForm {
     pub screen_source: Option<String>,
     /// Image sources: a file name from [`Model::images`].
     pub image_file: Option<String>,
+    /// Camera sources: a camera id from [`Model::cameras`].
+    pub camera_id: Option<String>,
+    /// Camera sources: one of that camera's modes; `None`: the engine
+    /// chooses.
+    pub camera_mode: Option<CameraModeSpec>,
 }
 
 impl Default for SourceForm {
@@ -95,6 +101,8 @@ impl Default for SourceForm {
             opacity: 1.0,
             screen_source: None,
             image_file: None,
+            camera_id: None,
+            camera_mode: None,
         }
     }
 }
@@ -186,6 +194,8 @@ enum Pending {
     Projects,
     /// `list_images`, for image sources.
     Images,
+    /// `list_cameras`, for camera sources.
+    Cameras,
     /// `validate_project` of this file, before it is opened.
     Validation(String),
 }
@@ -228,6 +238,9 @@ pub struct Model {
     /// The image files in the project directory, or why they cannot be
     /// listed; `None` until asked for.
     pub images: Option<Result<ImageFileList, String>>,
+    /// The cameras with their modes, or why they cannot be listed; `None`
+    /// until asked for. A new list replaces it on arrival.
+    pub cameras: Option<Result<Vec<Camera>, String>>,
     /// The check of the file chosen to open: its name and the result, or
     /// why it could not be checked.
     pub validation: Option<(String, Result<ProjectValidation, String>)>,
@@ -264,6 +277,7 @@ impl Model {
             audio_outputs_asked: None,
             projects: None,
             images: None,
+            cameras: None,
             validation: None,
             project: None,
             unsaved: false,
@@ -393,14 +407,25 @@ impl Model {
         self.health_received.map(|received| received.elapsed())
     }
 
-    /// The capture behind screen source `source_id`, from the last health
-    /// reading.
+    /// The capture behind screen or camera source `source_id`, from the
+    /// last health reading.
     pub fn source_health(&self, source_id: &str) -> SourceHealth {
         self.health
             .as_ref()
             .map_or(SourceHealth::NotCapturing, |health| {
                 source_health(health, source_id)
             })
+    }
+
+    /// The running pipeline's capture of source `source_id` (a camera's
+    /// has the format it runs in).
+    pub fn source_capture(&self, source_id: &str) -> Option<&CaptureHealth> {
+        self.health
+            .as_ref()
+            .filter(|health| health.pipeline_running)?
+            .captures
+            .iter()
+            .find(|capture| is_source_capture(capture, source_id))
     }
 
     /// Ask the engine which screen sources can be captured by id.
@@ -513,6 +538,31 @@ impl Model {
             .any(|pending| matches!(pending, Pending::Images))
     }
 
+    /// Ask for the cameras (skipped while asked); a new list replaces
+    /// [`Model::cameras`] on arrival.
+    pub fn list_cameras(&mut self) {
+        // As for the images: a busy engine leaves a reason.
+        if !self.listing_cameras() && !self.submit("list_cameras", json!({}), Pending::Cameras) {
+            self.cameras = Some(Err("The engine is busy; refresh to try again.".to_owned()));
+        }
+    }
+
+    /// Whether the list of cameras is on its way.
+    pub fn listing_cameras(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Cameras))
+    }
+
+    /// The listed cameras; `None` while not known (asked for, or failed),
+    /// so nothing counts as missing.
+    pub fn listed_cameras(&self) -> Option<&[Camera]> {
+        match &self.cameras {
+            Some(Ok(cameras)) => Some(cameras),
+            _ => None,
+        }
+    }
+
     /// Check `file_name` before it is opened; [`Model::validation`] holds
     /// the answer.
     pub fn validate_project(&mut self, file_name: &str) {
@@ -594,6 +644,15 @@ impl Model {
                 }
                 "image"
             }
+            SourceType::Camera => {
+                if let Some(id) = &form.camera_id {
+                    params.insert("camera_id".into(), id.clone().into());
+                }
+                if let Some(mode) = &form.camera_mode {
+                    params.insert("mode".into(), json!(mode));
+                }
+                "camera"
+            }
         };
         params.insert("kind".into(), kind.into());
         if let Some([x, y, width, height]) = form.rect {
@@ -627,6 +686,20 @@ impl Model {
         self.act("update_source", json!({ "source_id": id, "file": file }));
     }
 
+    /// Capture `camera_id` in `mode` (`None`: the engine chooses) in
+    /// camera source `id`; a running camera opens again.
+    pub fn set_source_camera(&mut self, id: &str, camera_id: &str, mode: Option<&CameraModeSpec>) {
+        self.act(
+            "update_source",
+            json!({
+                "source_id": id,
+                "camera_id": camera_id,
+                // An empty mode lets the engine choose again.
+                "mode": mode.copied().unwrap_or_default(),
+            }),
+        );
+    }
+
     /// Draw source `id` or not; a hidden screen source keeps capturing.
     pub fn set_source_visible(&mut self, id: &str, visible: bool) {
         self.act(
@@ -648,7 +721,8 @@ impl Model {
     /// Start a screen source's capture again, optionally on another source
     /// from [`Model::screen_sources`]; outputs keep running. It ends the
     /// running capture, so the UI asks first while that one still works.
-    /// An image source reads its file again.
+    /// A camera source opens its camera again; an image source reads its
+    /// file again.
     pub fn restart_source(&mut self, id: &str, capture_target_id: Option<&str>) {
         let mut params = Map::new();
         params.insert("source_id".into(), id.into());
@@ -941,6 +1015,14 @@ impl Model {
                     });
                     continue;
                 }
+                Some(Pending::Cameras) => {
+                    self.cameras = Some(match response.result {
+                        Ok(CommandOutput::Cameras(list)) => Ok(list.cameras),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    continue;
+                }
                 Some(Pending::Validation(file_name)) => {
                     let result = match response.result {
                         Ok(CommandOutput::ProjectValidation(validation)) => Ok(validation),
@@ -973,7 +1055,13 @@ impl Model {
     fn apply(&mut self, output: CommandOutput) {
         match output {
             CommandOutput::Status(status) => self.status = Some(status),
-            CommandOutput::SceneList(scenes) => self.scenes = Some(scenes),
+            CommandOutput::SceneList(mut scenes) => {
+                // Cameras the command opened: not found, or in another mode.
+                for warning in std::mem::take(&mut scenes.warnings) {
+                    self.push(Level::Warning, warning);
+                }
+                self.scenes = Some(scenes);
+            }
             CommandOutput::MixerState(mixer) => self.mixer = Some(mixer),
             // A reading asked for before a change that is still on its way
             // would undo what the matrix shows; that change's answer
@@ -1115,7 +1203,7 @@ impl Model {
     }
 }
 
-/// What the sources list shows next to a screen source.
+/// What the sources list shows next to a screen or camera source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceHealth {
     /// No capture runs for it: no pipeline, or its scene is not rendered.
@@ -1136,6 +1224,11 @@ fn track_refs(tracks: &[String]) -> Value {
     tracks.iter().map(|id| json!({ "bus_id": id })).collect()
 }
 
+/// Whether `capture` is source `source_id`'s (channels have ids too).
+fn is_source_capture(capture: &CaptureHealth, source_id: &str) -> bool {
+    matches!(capture.kind, CaptureKind::Screen | CaptureKind::Camera) && capture.id == source_id
+}
+
 fn source_health(health: &HealthReport, source_id: &str) -> SourceHealth {
     // A stopped pipeline renders nothing; its last states are history.
     if !health.pipeline_running {
@@ -1144,7 +1237,7 @@ fn source_health(health: &HealthReport, source_id: &str) -> SourceHealth {
     let capture = health
         .captures
         .iter()
-        .find(|capture| capture.kind == CaptureKind::Screen && capture.id == source_id);
+        .find(|capture| is_source_capture(capture, source_id));
     match capture.map(|capture| &capture.state) {
         None => SourceHealth::NotCapturing,
         Some(CaptureState::Ended { reason }) => SourceHealth::Ended {
@@ -1415,6 +1508,35 @@ mod tests {
         // A stopped pipeline's last states are history.
         health.pipeline_running = false;
         assert_eq!(source_health(&health, "src_1"), SourceHealth::NotCapturing);
+    }
+
+    #[test]
+    fn camera_sources_have_health_and_channels_do_not() {
+        let mut health = report();
+        health.captures.push(CaptureHealth {
+            kind: CaptureKind::Camera,
+            id: "src_5".to_owned(),
+            name: "host cam".to_owned(),
+            state: CaptureState::Ended {
+                reason: "could not start: camera `cam:1` not found".to_owned(),
+            },
+            format: None,
+        });
+        // Only screen and camera captures are sources.
+        health.captures.push(CaptureHealth {
+            kind: CaptureKind::Audio,
+            id: "src_6".to_owned(),
+            name: "mic".to_owned(),
+            state: CaptureState::Running,
+            format: None,
+        });
+        assert_eq!(
+            source_health(&health, "src_5"),
+            SourceHealth::Ended {
+                reason: "could not start: camera `cam:1` not found".to_owned()
+            }
+        );
+        assert_eq!(source_health(&health, "src_6"), SourceHealth::NotCapturing);
     }
 
     #[test]

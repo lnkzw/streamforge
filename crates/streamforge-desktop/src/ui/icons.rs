@@ -26,6 +26,8 @@ pub enum Icon {
     Solid,
     /// A framed landscape with a sun: an image file.
     Image,
+    /// A video camera: a body with a lens cone.
+    Camera,
     /// Vertical bars: the test pattern.
     Bars,
     /// A sine wave: a test tone.
@@ -144,6 +146,10 @@ impl Icon {
                 ]);
                 painter.circle_filled(at(10.5, 6.0), 1.3 * scale, color);
             }
+            Self::Camera => {
+                closed(&[(1.5, 4.5), (10.5, 4.5), (10.5, 11.5), (1.5, 11.5)]);
+                closed(&[(10.5, 7.0), (14.5, 4.5), (14.5, 11.5), (10.5, 9.0)]);
+            }
             Self::Bars => {
                 for x in [3.5, 6.5, 9.5, 12.5] {
                     line(&[(x, 3.0), (x, 13.0)]);
@@ -247,7 +253,7 @@ impl Icon {
     }
 
     /// Every icon, for the specimen render.
-    pub const ALL: [Icon; 27] = [
+    pub const ALL: [Icon; 28] = [
         Self::Record,
         Self::Live,
         Self::Stop,
@@ -258,6 +264,7 @@ impl Icon {
         Self::Screen,
         Self::Solid,
         Self::Image,
+        Self::Camera,
         Self::Bars,
         Self::Tone,
         Self::Mic,

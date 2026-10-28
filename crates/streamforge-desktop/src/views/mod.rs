@@ -13,14 +13,18 @@ mod sources;
 mod top_bar;
 
 use command_api::{
-    BusState, MAX_COORDINATE, PROGRAM_BUS_ID, SceneList, SceneSpec, SourceKind, SourceSpec,
+    BusState, Camera, CameraModeSpec, MAX_COORDINATE, PROGRAM_BUS_ID, SceneList, SceneSpec,
+    SourceKind, SourceSpec,
 };
 use eframe::egui;
 
 use crate::ui::icons::Icon;
-use crate::ui::theme::size;
-use crate::ui::widgets;
+use crate::ui::theme::{TextRole, size};
+use crate::ui::widgets::{self, StatusLevel};
 use crate::workspace::{self, Shortcut};
+
+/// The camera mode menu scrolls beyond this.
+const MODE_MENU_HEIGHT: f32 = 320.0;
 
 /// The value edit to send, if any: when a drag ends, or right away for
 /// keyboard and typed input. Mid-drag values are not sent, so a drag is
@@ -161,9 +165,49 @@ fn kind_label(kind: &SourceKind) -> (Icon, &'static str) {
         SourceKind::Solid { .. } => (Icon::Solid, "solid colour"),
         SourceKind::Screen { .. } => (Icon::Screen, "screen capture"),
         SourceKind::Image { .. } => (Icon::Image, "image"),
-        // Its own icon comes with the camera dialog.
-        SourceKind::Camera { .. } => (Icon::Screen, "camera"),
+        SourceKind::Camera { .. } => (Icon::Camera, "camera"),
     }
+}
+
+/// The modes `camera` lists, or none: the engine chooses. Shared by the
+/// add-source dialog and the inspector; returns whether the choice changed.
+fn camera_mode_picker(
+    ui: &mut egui::Ui,
+    mode: &mut Option<CameraModeSpec>,
+    camera: &Camera,
+    width: f32,
+) -> bool {
+    let mut changed = false;
+    ui.label(TextRole::Label.text("Mode"));
+    let text = workspace::camera_mode_label(mode.as_ref());
+    widgets::dropdown(ui, &text, "Camera mode", width, |ui| {
+        // A camera lists many modes; the menu stays on the screen.
+        egui::ScrollArea::vertical()
+            .max_height(MODE_MENU_HEIGHT)
+            .show(ui, |ui| {
+                changed |= widgets::choice(ui, mode, None, "Automatic")
+                    .on_hover_text(
+                        "The engine chooses: the largest size up to 1920×1080 at 30 fps or \
+                         more, at the highest rate up to 60",
+                    )
+                    .changed();
+                for listed in &camera.modes {
+                    let spec = workspace::camera_mode_spec(listed);
+                    changed |=
+                        widgets::choice(ui, mode, Some(spec), &workspace::camera_mode_text(listed))
+                            .changed();
+                }
+            });
+    })
+    .on_hover_text("Camera mode");
+    if camera.modes.is_empty() {
+        widgets::status_line(
+            ui,
+            StatusLevel::Warn,
+            "This camera offers no format StreamForge can convert.",
+        );
+    }
+    changed
 }
 
 pub(crate) fn scene<'a>(scenes: &'a SceneList, id: &str) -> Option<&'a SceneSpec> {

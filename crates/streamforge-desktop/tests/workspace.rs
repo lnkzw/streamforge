@@ -17,9 +17,9 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable, by};
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
-use streamforge_desktop::model::{Model, SourceForm, SourceType};
+use streamforge_desktop::model::{Level, Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
-use support::ListedDevices;
+use support::{FRONT_CAMERA, ListedCameras, ListedDevices};
 
 struct TempDir(PathBuf);
 
@@ -55,13 +55,19 @@ fn wait(model: &mut Model, what: &str, done: impl Fn(&Model) -> bool) {
 }
 
 /// A model on a fresh engine whose program scene has one source; the
-/// engine lists audio inputs but captures nothing.
+/// engine lists audio inputs and cameras, and captures only the cameras.
 fn model(dir: &TempDir) -> Model {
+    model_with(dir, ListedCameras::default())
+}
+
+/// As [`model`], on `cameras`.
+fn model_with(dir: &TempDir, cameras: ListedCameras) -> Model {
     let out = dir.0.clone();
     let worker = EngineWorker::spawn(
         move || {
             Engine::with_capture(capture_api::Capture {
                 audio: Box::new(ListedDevices::new()),
+                camera: Box::new(cameras),
                 ..capture_api::Capture::unsupported("the tests capture nothing")
             })
             .with_output_dir(&out)
@@ -88,6 +94,8 @@ fn model(dir: &TempDir) -> Model {
             opacity: 1.0,
             screen_source: None,
             image_file: None,
+            camera_id: None,
+            camera_mode: None,
         },
     );
     wait(&mut model, "the source", |m| {
@@ -1620,5 +1628,133 @@ fn an_image_from_the_project_folder_is_added_changed_and_read_again() {
     step_until(&mut harness, "the error", |h| {
         h.query_by_label_contains("no image file `other.png`")
             .is_some()
+    });
+}
+
+#[test]
+fn a_camera_is_added_with_a_mode_and_changed_in_the_inspector() {
+    let dir = TempDir::new("camera");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Add a source to this scene").click();
+    step_until(&mut harness, "the dialog", |h| {
+        h.query_by_label("Camera").is_some()
+    });
+    harness.get_by_label("Camera").click();
+    step_until(&mut harness, "the camera list", |h| {
+        field_value(h, "Camera device").as_deref() == Some("Choose a camera")
+    });
+    // A camera must be chosen first.
+    assert!(!clickable(&harness, "Add source"));
+    harness.get_by_label("Camera device").click();
+    step_until(&mut harness, "the cameras", |h| {
+        h.query_by_label("Front Camera").is_some()
+    });
+    harness.get_by_label("Front Camera").click();
+    step_until(&mut harness, "the modes", |h| {
+        field_value(h, "Camera mode").as_deref() == Some("Automatic")
+    });
+    harness.get_by_label("Camera mode").click();
+    step_until(&mut harness, "the mode list", |h| {
+        h.query_by_label("1280×720 · 30 fps").is_some()
+    });
+    harness.get_by_label("1280×720 · 30 fps").click();
+    step_until(&mut harness, "the mode", |h| {
+        field_value(h, "Camera mode").as_deref() == Some("1280×720 · 30 fps")
+    });
+    // Named after its camera.
+    harness.get_by_label("Add source").click();
+    step_until(&mut harness, "the new layer", |h| {
+        row(h, "Front Camera").is_some()
+    });
+
+    row(&harness, "Front Camera").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        field_value(h, "Camera device").as_deref() == Some("Front Camera")
+    });
+    assert_eq!(
+        field_value(&harness, "Camera mode").as_deref(),
+        Some("1280×720 · 30 fps")
+    );
+    // Another camera keeps the mode, since it has it.
+    harness.get_by_label("Camera device").click();
+    step_until(&mut harness, "the cameras", |h| {
+        h.query_by_label("Desk Camera").is_some()
+    });
+    harness.get_by_label("Desk Camera").click();
+    step_until(&mut harness, "the other camera", |h| {
+        field_value(h, "Camera device").as_deref() == Some("Desk Camera")
+    });
+    assert_eq!(
+        field_value(&harness, "Camera mode").as_deref(),
+        Some("1280×720 · 30 fps")
+    );
+    harness.get_by_label("Camera mode").click();
+    step_until(&mut harness, "the mode list", |h| {
+        h.query_by_label("1280×720 · 60 fps").is_some()
+    });
+    harness.get_by_label("1280×720 · 60 fps").click();
+    step_until(&mut harness, "the other mode", |h| {
+        field_value(h, "Camera mode").as_deref() == Some("1280×720 · 60 fps")
+    });
+
+    // Rendered, the camera runs in that mode.
+    harness
+        .get_by_role_and_label(Role::CheckBox, "Preview")
+        .click();
+    step_until(&mut harness, "the running camera", |h| {
+        h.query_by_label_contains("Runs in 1280×720 · 60 fps · YUY2")
+            .is_some()
+    });
+}
+
+#[test]
+fn a_missing_camera_warns_and_restarts_once_plugged_in() {
+    let dir = TempDir::new("camera-missing");
+    let cameras = ListedCameras::default();
+    let mut model = model_with(&dir, cameras.clone());
+    model.set_preview(true);
+    wait(&mut model, "the preview", |m| m.preview_enabled);
+    cameras.plug(FRONT_CAMERA, false);
+    let program = model
+        .scenes
+        .as_ref()
+        .expect("scenes")
+        .active_scene_id
+        .clone();
+    model.add_source(
+        &program,
+        &SourceForm {
+            name: "host cam".to_owned(),
+            kind: SourceType::Camera,
+            camera_id: Some(FRONT_CAMERA.to_owned()),
+            ..SourceForm::default()
+        },
+    );
+    // Added all the same; the scene list's warning reaches the log.
+    wait(&mut model, "the warning", |m| {
+        m.log
+            .iter()
+            .any(|entry| entry.level == Level::Warning && entry.text.contains("not found"))
+    });
+    let mut harness = harness(model);
+    row(&harness, "host cam").expect("the row").click();
+    step_until(&mut harness, "the ended capture", |h| {
+        h.query_by_label_contains("Ended: could not start")
+            .is_some()
+    });
+    step_until(&mut harness, "the missing camera", |h| {
+        field_value(h, "Camera device").as_deref() == Some("v4l2_input.usb-front (not found)")
+    });
+
+    // Back, it opens on a restart, in the mode the engine chooses.
+    cameras.plug(FRONT_CAMERA, true);
+    harness.get_by_label("Restart capture").click();
+    step_until(&mut harness, "the running camera", |h| {
+        h.query_by_label_contains("Runs in 1920×1080 · 30 fps · YUY2")
+            .is_some()
+    });
+    harness.get_by_label("Refresh list").click();
+    step_until(&mut harness, "the camera listed", |h| {
+        field_value(h, "Camera device").as_deref() == Some("Front Camera")
     });
 }

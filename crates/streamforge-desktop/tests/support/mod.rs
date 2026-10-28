@@ -1,7 +1,14 @@
-//! A capture backend for the tests: like `Engine::new()`'s, nothing can be
-//! captured or played, but it lists audio inputs (one of them desktop
-//! audio) and audio outputs, and a listed input reads as unplugged when a
-//! pipeline starts, so its channel runs silent.
+//! A capture backend for the tests: like `Engine::new()`'s, no screen can
+//! be captured and nothing played, but it lists audio inputs (one of them
+//! desktop audio) and audio outputs, and a listed input reads as unplugged
+//! when a pipeline starts, so its channel runs silent. Its cameras
+//! (`cameras`) capture.
+
+mod cameras;
+
+// Each test binary uses some of them.
+#[allow(unused_imports)]
+pub use cameras::{DESK_CAMERA, FRONT_CAMERA, ListedCameras};
 
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,

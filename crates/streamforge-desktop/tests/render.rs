@@ -26,7 +26,7 @@ use serde_json::json;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::model::{Model, SourceForm, SourceType};
 use streamforge_desktop::worker::EngineWorker;
-use support::ListedDevices;
+use support::{FRONT_CAMERA, ListedCameras, ListedDevices};
 
 struct TempDir(PathBuf);
 
@@ -106,6 +106,11 @@ enum Situation {
     ImageDialog,
     /// Live, with the image source selected.
     ImageInspector,
+    /// Idle, with the dialog for adding a source on a camera and its list
+    /// of modes open.
+    CameraDialog,
+    /// Live, with the camera source selected.
+    CameraInspector,
 }
 
 /// What the render does before it is taken, in order.
@@ -199,11 +204,12 @@ fn routed_engine(dir: PathBuf) -> Engine {
     engine
 }
 
-/// An engine that lists audio devices (`support`) but captures and plays
-/// nothing.
+/// An engine that lists audio devices and cameras (`support`) and
+/// captures only the cameras.
 fn engine(dir: PathBuf) -> Engine {
     Engine::with_capture(capture_api::Capture {
         audio: Box::new(ListedDevices::new()),
+        camera: Box::new(ListedCameras::default()),
         ..capture_api::Capture::unsupported("the tests capture nothing")
     })
     .with_output_dir(dir)
@@ -259,6 +265,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             | Situation::Health
             | Situation::Quit
             | Situation::ImageInspector
+            | Situation::CameraInspector
     );
     project_files(&dir);
     let worker = EngineWorker::spawn(
@@ -295,6 +302,12 @@ fn model(dir: &Path, situation: Situation) -> Model {
         for (name, kind, color, rect) in [
             ("backdrop", SourceType::Solid, [24, 32, 48, 255], None),
             (
+                "host cam",
+                SourceType::Camera,
+                [0, 0, 0, 255],
+                Some([240.0, 140.0, 1280.0, 720.0]),
+            ),
+            (
                 "bars",
                 SourceType::ColorBars,
                 [0, 0, 0, 255],
@@ -323,6 +336,8 @@ fn model(dir: &Path, situation: Situation) -> Model {
                     opacity: 1.0,
                     screen_source: None,
                     image_file: (kind == SourceType::Image).then(|| "logo.png".to_owned()),
+                    camera_id: (kind == SourceType::Camera).then(|| FRONT_CAMERA.to_owned()),
+                    camera_mode: None,
                 },
             );
         }
@@ -330,7 +345,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             m.scenes.as_ref().is_some_and(|list| {
                 list.scenes
                     .iter()
-                    .any(|scene| scene.name == "Interview" && scene.sources.len() == 4)
+                    .any(|scene| scene.name == "Interview" && scene.sources.len() == 5)
             })
         });
         // One hidden layer, to show its row.
@@ -413,6 +428,14 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
             Step::Click("Image file"),
         ],
         Situation::ImageInspector => vec![Step::Click("logo")],
+        Situation::CameraDialog => vec![
+            Step::Click("Add a source to this scene"),
+            Step::Click("Camera"),
+            Step::Click("Camera device"),
+            Step::Click("Front Camera"),
+            Step::Click("Camera mode"),
+        ],
+        Situation::CameraInspector => vec![Step::Click("host cam")],
     };
     for step in steps {
         match step {
@@ -527,6 +550,18 @@ fn render_the_workspace() {
         &out,
         "image-inspector-1400x900",
         Situation::ImageInspector,
+        [1400.0, 900.0],
+    );
+    render(
+        &out,
+        "camera-dialog-1400x900",
+        Situation::CameraDialog,
+        [1400.0, 900.0],
+    );
+    render(
+        &out,
+        "camera-inspector-1400x900",
+        Situation::CameraInspector,
         [1400.0, 900.0],
     );
     for (size, label) in [

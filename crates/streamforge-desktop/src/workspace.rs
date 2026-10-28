@@ -2,17 +2,18 @@
 //! without widgets: the scene selection, the transport states, the monitor
 //! rectangle, meter ballistics, the health summary, the project's name
 //! and files, recording names, what a channel plays, where and whether the monitor plays,
-//! and what the keys do. The views draw these; keeping them here keeps
+//! a camera's name and modes, and what the keys do. The views draw these; keeping them here keeps
 //! them unit-tested.
 
 use std::time::Duration;
 
 use chrono::Timelike;
 use command_api::{
-    AudioInput, AudioOutput, CaptureState, ChannelInput, HealthReport, MonitorProfile,
-    OutputHealth, RecordingState, SceneList, SourceSpec, StreamState,
+    AudioInput, AudioOutput, Camera, CameraMode, CameraModeSpec, CaptureState, ChannelInput,
+    HealthReport, MonitorProfile, OutputHealth, RecordingState, SceneList, SourceSpec, StreamState,
 };
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, Rect, vec2};
+use media_core::Rational;
 
 use crate::model::{HealthItem, Level};
 use crate::ui::icons::Icon;
@@ -429,6 +430,115 @@ pub fn output_label(device: Option<&str>, outputs: Option<&[AudioOutput]>) -> Ou
     } else {
         label(name, format!("{name} ({device})"))
     }
+}
+
+/// A camera source's camera, as the dialog and the inspector show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraLabel {
+    /// Short, for the field.
+    pub text: String,
+    /// All of it, for the tooltip.
+    pub detail: String,
+    /// A camera the engine does not list now: the source shows nothing
+    /// (or its last frame) until it is back and restarted.
+    pub missing: bool,
+}
+
+/// Camera `camera_id`, given the engine's cameras (`None` while they are
+/// not known, so nothing counts as missing).
+pub fn camera_label(camera_id: &str, cameras: Option<&[Camera]>) -> CameraLabel {
+    let Some(cameras) = cameras else {
+        return CameraLabel {
+            text: camera_id.to_owned(),
+            detail: camera_id.to_owned(),
+            missing: false,
+        };
+    };
+    match cameras.iter().find(|camera| camera.camera_id == camera_id) {
+        Some(camera) => CameraLabel {
+            text: camera.name.clone(),
+            detail: format!("{} ({camera_id})", camera.name),
+            missing: false,
+        },
+        None => CameraLabel {
+            text: format!("{camera_id} (not found)"),
+            detail: format!(
+                "{camera_id} is not among the cameras now; restart the source once it is \
+                 plugged in"
+            ),
+            missing: true,
+        },
+    }
+}
+
+/// A frame rate for people: `30 fps`, `29.97 fps`; `0/1` is how a camera
+/// that states no rate is listed: it runs at its own.
+pub fn fps_text(fps: Rational) -> String {
+    if fps.num == 0 || fps.den == 0 {
+        return "own rate".to_owned();
+    }
+    if fps.num.is_multiple_of(fps.den) {
+        return format!("{} fps", fps.num / fps.den);
+    }
+    let text = format!("{:.2}", f64::from(fps.num) / f64::from(fps.den));
+    format!("{} fps", text.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// A listed camera mode: `1280×720 · 30 fps`.
+pub fn camera_mode_text(mode: &CameraMode) -> String {
+    format!("{}×{} · {}", mode.width, mode.height, fps_text(mode.fps))
+}
+
+/// What a camera source asks for: a listed mode, a part of one (an agent
+/// may ask for only a size or a rate), or `Automatic`.
+pub fn camera_mode_label(mode: Option<&CameraModeSpec>) -> String {
+    let Some(mode) = mode.filter(|mode| !mode.is_auto()) else {
+        return "Automatic".to_owned();
+    };
+    let size = mode
+        .size()
+        .map(|(width, height)| format!("{width}×{height}"));
+    [size, mode.fps.map(fps_text)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The request for a listed mode, as the engine keeps it: the rate in
+/// lowest terms, and none for a camera that states none (`0/1`), so it
+/// compares equal with the source's mode in the scene list.
+pub fn camera_mode_spec(mode: &CameraMode) -> CameraModeSpec {
+    let fps = (mode.fps.num != 0 && mode.fps.den != 0).then(|| {
+        let (mut a, mut b) = (mode.fps.num, mode.fps.den);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        Rational {
+            num: mode.fps.num / a,
+            den: mode.fps.den / a,
+        }
+    });
+    CameraModeSpec {
+        width: Some(mode.width),
+        height: Some(mode.height),
+        fps,
+    }
+}
+
+/// The mode a camera source keeps when it switches to `camera`: its own,
+/// if that camera lists a mode with that size and rate; else none, and
+/// the engine chooses.
+pub fn mode_for_camera(
+    mode: Option<&CameraModeSpec>,
+    camera: Option<&Camera>,
+) -> Option<CameraModeSpec> {
+    let mode = mode.filter(|mode| !mode.is_auto())?;
+    let listed = camera?.modes.iter().map(camera_mode_spec).any(|listed| {
+        mode.size().is_none_or(|size| listed.size() == Some(size))
+            && mode.fps.is_none_or(|fps| listed.fps == Some(fps))
+    });
+    listed.then_some(*mode)
 }
 
 /// Whether the monitor plays, for its row in the outputs dock.
@@ -1147,5 +1257,104 @@ mod tests {
         assert_eq!(list_step(2, 3, 1), 2);
         assert_eq!(list_step(0, 3, 5), 2);
         assert_eq!(list_step(0, 1, 1), 0);
+    }
+
+    fn camera(id: &str, name: &str, modes: &[(u32, u32, u32, u32)]) -> Camera {
+        Camera {
+            camera_id: id.to_owned(),
+            name: name.to_owned(),
+            modes: modes
+                .iter()
+                .map(|&(width, height, num, den)| CameraMode {
+                    width,
+                    height,
+                    fps: Rational { num, den },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn camera_labels_name_listed_cameras_and_flag_missing_ones() {
+        let cameras = [camera("v4l2_input.usb", "USB Camera", &[])];
+        let listed = camera_label("v4l2_input.usb", Some(&cameras));
+        assert_eq!(listed.text, "USB Camera");
+        assert_eq!(listed.detail, "USB Camera (v4l2_input.usb)");
+        assert!(!listed.missing);
+        let missing = camera_label("v4l2_input.gone", Some(&cameras));
+        assert_eq!(missing.text, "v4l2_input.gone (not found)");
+        assert!(missing.missing);
+        // Not known yet: nothing is missing.
+        let unknown = camera_label("v4l2_input.gone", None);
+        assert_eq!(unknown.text, "v4l2_input.gone");
+        assert!(!unknown.missing);
+    }
+
+    #[test]
+    fn camera_modes_read_as_size_and_rate() {
+        let fps = |num, den| fps_text(Rational { num, den });
+        assert_eq!(fps(30, 1), "30 fps");
+        assert_eq!(fps(60, 2), "30 fps");
+        assert_eq!(fps(30_000, 1001), "29.97 fps");
+        assert_eq!(fps(15, 2), "7.5 fps");
+        assert_eq!(fps(0, 1), "own rate");
+        let modes = camera("cam", "cam", &[(1280, 720, 30, 1), (640, 480, 0, 1)]).modes;
+        assert_eq!(camera_mode_text(&modes[0]), "1280×720 · 30 fps");
+        assert_eq!(camera_mode_text(&modes[1]), "640×480 · own rate");
+
+        let spec = |width, height, fps| CameraModeSpec { width, height, fps };
+        assert_eq!(camera_mode_label(None), "Automatic");
+        assert_eq!(
+            camera_mode_label(Some(&spec(None, None, None))),
+            "Automatic"
+        );
+        let thirty = Some(Rational::integer(30));
+        assert_eq!(
+            camera_mode_label(Some(&spec(Some(1280), Some(720), thirty))),
+            "1280×720 · 30 fps"
+        );
+        assert_eq!(camera_mode_label(Some(&spec(None, None, thirty))), "30 fps");
+        assert_eq!(
+            camera_mode_label(Some(&spec(Some(640), Some(480), None))),
+            "640×480"
+        );
+    }
+
+    #[test]
+    fn a_listed_mode_is_asked_for_as_the_engine_keeps_it() {
+        let modes = camera("cam", "cam", &[(1280, 720, 60, 2), (640, 480, 0, 1)]).modes;
+        assert_eq!(
+            camera_mode_spec(&modes[0]),
+            CameraModeSpec {
+                width: Some(1280),
+                height: Some(720),
+                fps: Some(Rational::integer(30)),
+            }
+        );
+        // No rate stated: none asked for.
+        assert_eq!(camera_mode_spec(&modes[1]).fps, None);
+    }
+
+    #[test]
+    fn switching_cameras_keeps_a_mode_the_new_one_has() {
+        let desk = camera("desk", "Desk", &[(1920, 1080, 30, 1), (1280, 720, 30, 1)]);
+        let front = camera("front", "Front", &[(1280, 720, 60, 1)]);
+        let hd = CameraModeSpec {
+            width: Some(1280),
+            height: Some(720),
+            fps: Some(Rational::integer(30)),
+        };
+        assert_eq!(mode_for_camera(Some(&hd), Some(&desk)), Some(hd));
+        // Same size at another rate only: the engine chooses.
+        assert_eq!(mode_for_camera(Some(&hd), Some(&front)), None);
+        // A part of a mode is kept where some mode has it.
+        let size_only = CameraModeSpec { fps: None, ..hd };
+        assert_eq!(
+            mode_for_camera(Some(&size_only), Some(&front)),
+            Some(size_only)
+        );
+        // Automatic stays automatic; an unknown camera keeps nothing.
+        assert_eq!(mode_for_camera(None, Some(&desk)), None);
+        assert_eq!(mode_for_camera(Some(&hd), None), None);
     }
 }

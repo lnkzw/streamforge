@@ -83,16 +83,16 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 
 - **Top bar:** the project menu and its name (a dot means unsaved changes), the **REC** and **LIVE** buttons with their running time, and the health summary on the right. Click the summary for details and the activity log.
 - **Scenes** (left, top): your scenes. The one marked **PGM** is on program, which is what the recording and the stream show.
-- **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture keeps running, so showing it again is immediate.
+- **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture or camera keeps running, so showing it again is immediate.
 - **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming; the line below shows the frame rate and render time.
-- **Inspector** (right): position, size and opacity of the selected source, and an image source's file.
+- **Inspector** (right): position, size and opacity of the selected source, an image source's file, and a camera source's camera and mode.
 - **Mixer** (bottom): the **Console** with a strip per channel and bus, and the **Routing** matrix.
 - **Outputs** (bottom right): **Record**, **Stream** and **Monitor**, each with its state and a settings button (the gear).
 
 ### A first recording
 
 1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine.
-2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, a **screen capture**, or an **image**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
+2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, a **screen capture**, an **image**, or a **camera**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
 3. **Audio.** Open **Routing** in the mixer. A new setup has one channel, **Tone**, a 1 kHz test tone on the program bus; mute or remove it before a real recording, or switch its input to your microphone.
    - Add a channel with **+** next to *Channels*, then choose its input in the *Input* column: a microphone or other device, the desktop audio of an output (listed separately, as `<output>.monitor`), the system's default input, or a test tone.
    - Each channel sends to the **Program** bus. Add aux buses with **+** at the right of the bus columns, for example a separate mix for headphones or a second recording track. Each send has a switch, a level, and a tap: PRE (before the channel fader) or POST (after it).
@@ -112,9 +112,9 @@ Images can be up to 8192 pixels on a side and 16 megapixels; all images shown to
 
 ### Cameras
 
-On Linux, a camera source shows a webcam (or another camera PipeWire offers, such as a virtual one). `streamforge capture cameras` lists the cameras with their ids and modes. In this version, camera sources are added through commands, for example by an agent (`add_source` with `kind` `camera` and the `camera_id`); the desktop app shows them but cannot add them yet.
+On Linux, a camera source shows a webcam (or another camera PipeWire offers, such as a virtual one). In the add dialog, choose **Camera**, then the camera and its mode: **Automatic** lets StreamForge choose, or pick one of the sizes and frame rates the camera offers. **Refresh** lists a camera plugged in meanwhile. The inspector switches a source to another camera (keeping the mode if that camera has it) or mode; a running camera turns off and on again for it. `streamforge capture cameras` lists the cameras with their ids and modes, for agents (`add_source` with `kind` `camera` and the `camera_id`).
 
-The camera turns on when its scene first goes on program while the preview or an output runs, also during a recording or stream, and stays on until the preview and all outputs stop, so switching scenes is instant. Without a chosen mode, StreamForge takes the largest size up to 1920×1080 that runs at 30 fps or more. A camera that is not plugged in does not stop the show: its source stays empty and a warning says so; plug it in and restart the source. A project stores which camera a source shows and its mode.
+The camera turns on when its scene first goes on program while the preview or an output runs, also during a recording or stream, and stays on until the preview and all outputs stop, so switching scenes is instant. Without a chosen mode, StreamForge takes the largest size up to 1920×1080 that runs at 30 fps or more. A camera that is not plugged in does not stop the show: its source stays empty, the activity log says so, and the inspector shows it as not found; plug it in and press **Restart capture** in the inspector. A project stores which camera a source shows and its mode.
 
 ### Screen capture on Linux
 

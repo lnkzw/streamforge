@@ -40,8 +40,13 @@ const RANGE_SIZES: [(u32, u32); 8] = [
 const RANGE_RATES: [u32; 8] = [60, 50, 30, 25, 24, 15, 10, 5];
 /// Bound on the modes kept per param and per camera, whatever its params say.
 const MAX_OFFERS: usize = 1024;
-/// Bound on the formats offered when connecting: the chosen one and fallbacks.
-const MAX_CONNECT_FORMATS: usize = 64;
+/// Bound on the exact modes offered when connecting: the chosen one and the
+/// closest others. After them, one format with any size and rate per
+/// pixel format catches whatever mode the camera runs in.
+const MAX_CONNECT_MODES: usize = 32;
+/// The rate of a mode whose camera does not state its rates (libcamera
+/// nodes, and nodes with only a variable rate); the camera runs at its own.
+pub(crate) const UNSTATED_RATE: Rational = Rational { num: 0, den: 1 };
 
 /// How a camera's frames are encoded, for the formats StreamForge converts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +134,7 @@ pub(crate) fn parse_offers(param: &[u8]) -> Vec<ModeOffer> {
     let mut subtype = None;
     let mut raw_formats = Vec::new();
     let mut sizes = Vec::new();
-    let mut rates = Vec::new();
+    let mut rates = None;
     for property in &object.properties {
         match property.key {
             key if key == FormatProperties::MediaType.as_raw() => {
@@ -145,7 +150,7 @@ pub(crate) fn parse_offers(param: &[u8]) -> Vec<ModeOffer> {
                 sizes = sizes_of(&property.value);
             }
             key if key == FormatProperties::VideoFramerate.as_raw() => {
-                rates = rates_of(&property.value);
+                rates = Some(rates_of(&property.value));
             }
             _ => {}
         }
@@ -160,6 +165,10 @@ pub(crate) fn parse_offers(param: &[u8]) -> Vec<ModeOffer> {
         Some(raw) if raw == MediaSubtype::Mjpg.as_raw() => vec![CameraFormat::Mjpeg],
         _ => Vec::new(),
     };
+    // No rate, or none we can name: the camera picks its own.
+    let rates = rates
+        .filter(|rates| !rates.is_empty())
+        .unwrap_or_else(|| vec![UNSTATED_RATE]);
     let mut offers = Vec::new();
     for format in formats.into_iter().filter(|f| f.rank().is_some()) {
         for &(width, height) in &sizes {
@@ -270,10 +279,12 @@ fn rates_of(value: &Value) -> Vec<Rational> {
         num: f.num,
         den: f.denom,
     };
-    let within = |min: &Fraction, max: &Fraction| {
-        let (min, max) = (rational(min), rational(max));
+    let within = |min: &Fraction, max: &Fraction, step: Option<&Fraction>| {
+        let (min, max, step) = (rational(min), rational(max), step.map(rational));
         move |rate: &Rational| {
-            compare(*rate, min) != Ordering::Less && compare(*rate, max) != Ordering::Greater
+            compare(*rate, min) != Ordering::Less
+                && compare(*rate, max) != Ordering::Greater
+                && step.is_none_or(|step| on_step(*rate, min, step))
         }
     };
     let mut found: Vec<Rational> = match value {
@@ -287,15 +298,25 @@ fn rates_of(value: &Value) -> Vec<Rational> {
                 .chain(alternatives)
                 .map(rational)
                 .collect(),
-            ChoiceEnum::Range { default, min, max }
-            | ChoiceEnum::Step {
-                default, min, max, ..
+            ChoiceEnum::Range { default, min, max } => std::iter::once(rational(default))
+                .chain(
+                    RANGE_RATES
+                        .into_iter()
+                        .map(Rational::integer)
+                        .filter(within(min, max, None)),
+                )
+                .collect(),
+            ChoiceEnum::Step {
+                default,
+                min,
+                max,
+                step,
             } => std::iter::once(rational(default))
                 .chain(
                     RANGE_RATES
                         .into_iter()
                         .map(Rational::integer)
-                        .filter(within(min, max)),
+                        .filter(within(min, max, Some(step))),
                 )
                 .collect(),
             ChoiceEnum::Flags { .. } => Vec::new(),
@@ -335,7 +356,23 @@ pub(crate) fn reduce(rate: Rational) -> Rational {
     }
 }
 
-/// Order of two positive rates by value.
+/// Whether `rate` (at least `min`) is `min` plus a whole number of `step`s.
+/// A zero step allows any rate.
+fn on_step(rate: Rational, min: Rational, step: Rational) -> bool {
+    if step.num == 0 || step.den == 0 || rate.den == 0 || min.den == 0 {
+        return true;
+    }
+    // (rate - min) / step = (rn·md − mn·rd)·sd / (rd·md·sn)
+    let (rn, rd) = (u128::from(rate.num), u128::from(rate.den));
+    let (mn, md) = (u128::from(min.num), u128::from(min.den));
+    let (sn, sd) = (u128::from(step.num), u128::from(step.den));
+    let Some(diff) = (rn * md).checked_sub(mn * rd) else {
+        return false;
+    };
+    (diff * sd).is_multiple_of(rd * md * sn)
+}
+
+/// Order of two rates by value (0/1, the unstated rate, is the lowest).
 fn compare(a: Rational, b: Rational) -> Ordering {
     (u64::from(a.num) * u64::from(b.den)).cmp(&(u64::from(b.num) * u64::from(a.den)))
 }
@@ -405,7 +442,15 @@ pub(crate) fn choose(offers: &[ModeOffer], request: &CameraRequest) -> Option<Ch
                 let distance = |r: &Rational| (fps_value(*r) - fps_value(wanted)).abs();
                 distance(a).total_cmp(&distance(b))
             })?;
-            if compare(fps, wanted) != Ordering::Equal {
+            if fps == UNSTATED_RATE {
+                warnings.push(format!(
+                    "the camera does not state its frame rates at {}x{}; it runs at its own \
+                     rate, not necessarily {} fps",
+                    size.0,
+                    size.1,
+                    rate_text(wanted)
+                ));
+            } else if compare(fps, wanted) != Ordering::Equal {
                 warnings.push(format!(
                     "the camera has no {} fps mode at {}x{}; using {}",
                     rate_text(wanted),
@@ -466,9 +511,8 @@ pub(crate) fn rate_text(rate: Rational) -> String {
     }
 }
 
-/// The offers to connect with: `chosen` first, then the camera's other
-/// modes, closest first, so a camera that already runs in another mode for
-/// another application still connects.
+/// The exact modes to connect with: `chosen` first, then the camera's
+/// other modes, closest first (at most [`MAX_CONNECT_MODES`]).
 pub(crate) fn connect_order(offers: &[ModeOffer], chosen: ModeOffer) -> Vec<ModeOffer> {
     let mut rest: Vec<ModeOffer> = offers.iter().copied().filter(|o| *o != chosen).collect();
     let fps_distance = |o: &ModeOffer| (fps_value(o.fps) - fps_value(chosen.fps)).abs();
@@ -486,13 +530,47 @@ pub(crate) fn connect_order(offers: &[ModeOffer], chosen: ModeOffer) -> Vec<Mode
     });
     let mut order = vec![chosen];
     order.extend(rest);
-    order.truncate(MAX_CONNECT_FORMATS);
+    order.truncate(MAX_CONNECT_MODES);
     order
 }
 
-/// `EnumFormat` naming exactly one mode.
+/// The `EnumFormat` pods to connect with: the exact modes of
+/// [`connect_order`], then each pixel format the camera offers with any
+/// size and rate, by rank, so a camera that already runs in another mode
+/// for another application still connects.
+pub(crate) fn connect_pods(
+    offers: &[ModeOffer],
+    chosen: ModeOffer,
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut pods = connect_order(offers, chosen)
+        .iter()
+        .map(format_pod)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut formats: Vec<CameraFormat> = Vec::new();
+    for offer in offers {
+        if !formats.contains(&offer.format) {
+            formats.push(offer.format);
+        }
+    }
+    formats.sort_by_key(|format| format.rank());
+    for format in formats {
+        pods.push(any_mode_pod(format)?);
+    }
+    Ok(pods)
+}
+
+/// `EnumFormat` of one pixel format at any size and rate.
+fn any_mode_pod(format: CameraFormat) -> Result<Vec<u8>, String> {
+    serialize_format(format, None)
+}
+
+/// `EnumFormat` naming exactly one mode (without a rate for the unstated one).
 pub(crate) fn format_pod(offer: &ModeOffer) -> Result<Vec<u8>, String> {
-    let (subtype, raw) = match offer.format {
+    serialize_format(offer.format, Some(offer))
+}
+
+fn serialize_format(format: CameraFormat, mode: Option<&ModeOffer>) -> Result<Vec<u8>, String> {
+    let (subtype, raw) = match format {
         CameraFormat::Raw(raw) => (MediaSubtype::Raw, Some(raw)),
         CameraFormat::Mjpeg => (MediaSubtype::Mjpg, None),
     };
@@ -512,20 +590,24 @@ pub(crate) fn format_pod(offer: &ModeOffer) -> Result<Vec<u8>, String> {
             Value::Id(Id(raw)),
         ));
     }
-    properties.push(Property::new(
-        FormatProperties::VideoSize.as_raw(),
-        Value::Rectangle(Rectangle {
-            width: offer.width,
-            height: offer.height,
-        }),
-    ));
-    properties.push(Property::new(
-        FormatProperties::VideoFramerate.as_raw(),
-        Value::Fraction(Fraction {
-            num: offer.fps.num,
-            denom: offer.fps.den,
-        }),
-    ));
+    if let Some(offer) = mode {
+        properties.push(Property::new(
+            FormatProperties::VideoSize.as_raw(),
+            Value::Rectangle(Rectangle {
+                width: offer.width,
+                height: offer.height,
+            }),
+        ));
+        if offer.fps != UNSTATED_RATE {
+            properties.push(Property::new(
+                FormatProperties::VideoFramerate.as_raw(),
+                Value::Fraction(Fraction {
+                    num: offer.fps.num,
+                    denom: offer.fps.den,
+                }),
+            ));
+        }
+    }
     formats::serialize(Object {
         type_: SpaTypes::ObjectParamFormat.as_raw(),
         id: ParamType::EnumFormat.as_raw(),
@@ -536,6 +618,7 @@ pub(crate) fn format_pod(offer: &ModeOffer) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spa::pod::Pod;
     use spa::utils::{Choice as SpaChoice, ChoiceFlags};
 
     const YUY2: CameraFormat = CameraFormat::Raw(spa::sys::SPA_VIDEO_FORMAT_YUY2);
@@ -942,6 +1025,109 @@ mod tests {
                 (320, 240)
             ]
         );
+    }
+
+    #[test]
+    fn params_without_a_rate_give_modes_at_the_unstated_rate() {
+        // As spa-libcamera enumerates: format and size, no frame rate.
+        let bytes = enum_format(vec![
+            id_property(FormatProperties::MediaType, MediaType::Video.as_raw()),
+            id_property(FormatProperties::MediaSubtype, MediaSubtype::Raw.as_raw()),
+            id_property(
+                FormatProperties::VideoFormat,
+                spa::sys::SPA_VIDEO_FORMAT_NV12,
+            ),
+            Property::new(
+                FormatProperties::VideoSize.as_raw(),
+                Value::Rectangle(Rectangle {
+                    width: 1920,
+                    height: 1080,
+                }),
+            ),
+        ]);
+        let offers = parse_offers(&bytes);
+        assert_eq!(
+            offers,
+            [ModeOffer {
+                fps: UNSTATED_RATE,
+                ..offer(1920, 1080, 1, NV12)
+            }]
+        );
+        let choice = choose(&offers, &request(None, None)).expect("choice");
+        assert_eq!(choice.offer, offers[0]);
+        assert!(choice.warnings.is_empty());
+        let choice = choose(&offers, &request(None, Some(30))).expect("choice");
+        assert_eq!(
+            choice.warnings,
+            [
+                "the camera does not state its frame rates at 1920x1080; it runs at its own \
+                 rate, not necessarily 30 fps"
+            ]
+        );
+        // Connecting names no rate either.
+        let pod = format_pod(&offers[0]).expect("pod");
+        assert_eq!(parse_offers(&pod), offers);
+    }
+
+    #[test]
+    fn rate_steps_keep_only_rates_on_the_step() {
+        let stepped = |default: Fraction, min: Fraction, max: Fraction, step: Fraction| {
+            let bytes = enum_format(vec![
+                id_property(FormatProperties::MediaType, MediaType::Video.as_raw()),
+                id_property(FormatProperties::MediaSubtype, MediaSubtype::Mjpg.as_raw()),
+                Property::new(
+                    FormatProperties::VideoSize.as_raw(),
+                    Value::Rectangle(Rectangle {
+                        width: 640,
+                        height: 480,
+                    }),
+                ),
+                Property::new(
+                    FormatProperties::VideoFramerate.as_raw(),
+                    Value::Choice(ChoiceValue::Fraction(SpaChoice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::Step {
+                            default,
+                            min,
+                            max,
+                            step,
+                        },
+                    ))),
+                ),
+            ]);
+            parse_offers(&bytes)
+                .iter()
+                .map(|o| (o.fps.num, o.fps.den))
+                .collect::<Vec<_>>()
+        };
+        let whole = |num| Fraction { num, denom: 1 };
+        assert_eq!(
+            stepped(whole(5), whole(5), whole(55), whole(10)),
+            [(5, 1), (25, 1), (15, 1)]
+        );
+        let half = Fraction { num: 15, denom: 2 };
+        assert_eq!(
+            stepped(half, half, whole(60), half),
+            [(15, 2), (60, 1), (30, 1), (15, 1)]
+        );
+    }
+
+    #[test]
+    fn connect_pods_end_with_any_mode_of_each_format() {
+        let many: Vec<ModeOffer> = (1..=100)
+            .map(|width| offer(width * 8, 480, 30, YUY2))
+            .chain([offer(640, 480, 30, CameraFormat::Mjpeg)])
+            .collect();
+        let chosen = many[40];
+        assert_eq!(connect_order(&many, chosen).len(), MAX_CONNECT_MODES);
+        let pods = connect_pods(&many, chosen).expect("pods");
+        assert_eq!(pods.len(), MAX_CONNECT_MODES + 2);
+        assert_eq!(parse_offers(&pods[0]), [chosen]);
+        // The last two name a format but no size: any mode of it.
+        for pod in &pods[MAX_CONNECT_MODES..] {
+            assert!(Pod::from_bytes(pod).is_some());
+            assert!(parse_offers(pod).is_empty());
+        }
     }
 
     #[test]

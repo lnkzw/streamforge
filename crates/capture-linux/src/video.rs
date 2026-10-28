@@ -247,7 +247,10 @@ pub(crate) fn capture(
                 };
                 let chunk = data.chunk();
                 let (size, stride) = (chunk.size(), chunk.stride());
-                let corrupted = chunk.flags().contains(ChunkFlags::CORRUPTED)
+                // Any plane's block can carry the flag.
+                let corrupted = datas
+                    .iter()
+                    .any(|data| data.chunk().flags().contains(ChunkFlags::CORRUPTED))
                     || header
                         .is_some_and(|(_, _, flags)| flags.contains(MetaHeaderFlags::CORRUPTED));
                 let kind = if corrupted {

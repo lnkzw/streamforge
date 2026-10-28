@@ -222,8 +222,9 @@ impl TestNode {
                 },
             )
             .expect("create the camera stream");
-            let (frame, stride) = format.frame();
-            let buffers = buffers_pod(frame.len(), stride);
+            let frames = format.frames();
+            let buffers = buffers_pod(&frames[0]);
+            let next = std::cell::Cell::new(0);
             let listener = stream
                 .add_local_listener_with_user_data(())
                 .param_changed(move |stream, _, id, param| {
@@ -236,18 +237,21 @@ impl TestNode {
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
-                    let Some(data) = buffer.datas_mut().first_mut() else {
-                        return;
-                    };
-                    let Some(memory) = data.data() else {
-                        return;
-                    };
-                    let size = frame.len().min(memory.len());
-                    memory[..size].copy_from_slice(&frame[..size]);
-                    let chunk = data.chunk_mut();
-                    *chunk.offset_mut() = 0;
-                    *chunk.size_mut() = size as u32;
-                    *chunk.stride_mut() = stride;
+                    // The frames take turns, so a stale frame shows.
+                    let frame = &frames[next.get() % frames.len()];
+                    next.set(next.get() + 1);
+                    for (data, block) in buffer.datas_mut().iter_mut().zip(frame) {
+                        let Some(memory) = data.data() else {
+                            return;
+                        };
+                        let at = block.offset as usize;
+                        let size = block.bytes.len().min(memory.len().saturating_sub(at));
+                        memory[at..at + size].copy_from_slice(&block.bytes[..size]);
+                        let chunk = data.chunk_mut();
+                        *chunk.offset_mut() = block.offset;
+                        *chunk.size_mut() = size as u32;
+                        *chunk.stride_mut() = block.stride;
+                    }
                 })
                 .register()
                 .expect("camera listener");
@@ -467,41 +471,79 @@ fn an_output_gone_since_the_listing_does_not_fall_back_to_the_default() {
 }
 
 /// The one mode a test camera offers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum TestFormat {
-    /// 640x480, every pixel the same red.
+    /// 640x480, red and blue halves that swap every frame.
     Yuy2,
-    /// 640x480, every pixel the same red.
+    /// 640x480, swapping halves, both planes in one block 64 bytes into it.
     Nv12,
+    /// 640x480, swapping halves, one block per plane.
+    Nv12Planes,
     /// 1920x1080, the `frame-decode` camera fixture.
     Mjpeg,
 }
 
+/// One data block of a test frame.
+struct Block {
+    bytes: Vec<u8>,
+    /// Where the frame starts in the block (the chunk offset).
+    offset: u32,
+    stride: i32,
+}
+
 const MJPEG_FRAME: &[u8] = include_bytes!("../../frame-decode/tests/data/camera-1080p-422.jpg");
-/// Pure red in BT.601 limited range, the default for formats that do not say.
-const RED_YUV: (u8, u8, u8) = (81, 90, 240);
+/// Pure red and blue in BT.601 limited range, the default for formats that
+/// do not say.
+const RED_YUV: [u8; 3] = [81, 90, 240];
+const BLUE_YUV: [u8; 3] = [41, 240, 110];
 
 impl TestFormat {
     fn size(self) -> (u32, u32) {
         match self {
-            Self::Yuy2 | Self::Nv12 => (640, 480),
+            Self::Yuy2 | Self::Nv12 | Self::Nv12Planes => (640, 480),
             Self::Mjpeg => (1920, 1080),
         }
     }
 
-    /// One frame and its row stride.
-    fn frame(self) -> (Vec<u8>, i32) {
+    /// The frames the camera sends in turn: the left half red and the right
+    /// half blue, then the other way round (MJPEG: the fixture).
+    fn frames(self) -> Vec<Vec<Block>> {
         let (width, height) = self.size();
         let (w, h) = (width as usize, height as usize);
-        let (y, u, v) = RED_YUV;
-        match self {
-            Self::Yuy2 => ([y, u, y, v].repeat(w / 2 * h), (w * 2) as i32),
-            Self::Nv12 => {
-                let mut frame = vec![y; w * h];
-                frame.extend([u, v].repeat(w / 2 * h / 2));
-                (frame, w as i32)
+        let frame = |[left, right]: [[u8; 3]; 2]| {
+            // (Y, U, V) of the half that pixel `x` is in.
+            let at = |x: usize| if x < w / 2 { left } else { right };
+            let yuy2: Vec<u8> = (0..h)
+                .flat_map(|_| {
+                    (0..w).step_by(2).flat_map(|x| {
+                        let [y, u, v] = at(x);
+                        [y, u, y, v]
+                    })
+                })
+                .collect();
+            let luma: Vec<u8> = (0..h).flat_map(|_| (0..w).map(|x| at(x)[0])).collect();
+            let chroma: Vec<u8> = (0..h / 2)
+                .flat_map(|_| (0..w).step_by(2).flat_map(|x| [at(x)[1], at(x)[2]]))
+                .collect();
+            let block = |bytes, offset, stride| Block {
+                bytes,
+                offset,
+                stride,
+            };
+            match self {
+                Self::Yuy2 => vec![block(yuy2, 0, (w * 2) as i32)],
+                Self::Nv12 => vec![block([luma, chroma].concat(), 64, w as i32)],
+                Self::Nv12Planes => vec![block(luma, 0, w as i32), block(chroma, 0, w as i32)],
+                Self::Mjpeg => unreachable!(),
             }
-            Self::Mjpeg => (MJPEG_FRAME.to_vec(), 0),
+        };
+        match self {
+            Self::Mjpeg => vec![vec![Block {
+                bytes: MJPEG_FRAME.to_vec(),
+                offset: 0,
+                stride: 0,
+            }]],
+            _ => vec![frame([RED_YUV, BLUE_YUV]), frame([BLUE_YUV, RED_YUV])],
         }
     }
 
@@ -515,7 +557,7 @@ impl TestFormat {
             |key: FormatProperties, value: u32| Property::new(key.as_raw(), Value::Id(Id(value)));
         let mut properties = vec![id(FormatProperties::MediaType, MediaType::Video.as_raw())];
         match self {
-            Self::Yuy2 | Self::Nv12 => {
+            Self::Yuy2 | Self::Nv12 | Self::Nv12Planes => {
                 properties.push(id(
                     FormatProperties::MediaSubtype,
                     MediaSubtype::Raw.as_raw(),
@@ -549,18 +591,23 @@ impl TestFormat {
     }
 }
 
-/// One block per buffer, large enough for a frame.
-fn buffers_pod(size: usize, stride: i32) -> Vec<u8> {
+/// Buffers with the frame's blocks, each large enough for the largest.
+fn buffers_pod(frame: &[Block]) -> Vec<u8> {
     use pw::spa::pod::{Object, Property, Value};
     let int = |key: u32, value: i32| Property::new(key, Value::Int(value));
+    let size = frame
+        .iter()
+        .map(|block| block.offset as usize + block.bytes.len())
+        .max()
+        .expect("a block");
     serialize(Object {
         type_: pw::spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
         id: pw::spa::param::ParamType::Buffers.as_raw(),
         properties: vec![
             int(pw::spa::sys::SPA_PARAM_BUFFERS_buffers, 4),
-            int(pw::spa::sys::SPA_PARAM_BUFFERS_blocks, 1),
+            int(pw::spa::sys::SPA_PARAM_BUFFERS_blocks, frame.len() as i32),
             int(pw::spa::sys::SPA_PARAM_BUFFERS_size, size as i32),
-            int(pw::spa::sys::SPA_PARAM_BUFFERS_stride, stride),
+            int(pw::spa::sys::SPA_PARAM_BUFFERS_stride, frame[0].stride),
         ],
     })
 }
@@ -596,9 +643,12 @@ fn a_test_camera_is_listed_with_its_mode() {
     );
 }
 
-/// Capture a test camera for two seconds; returns the last frame and the
-/// report.
-fn capture_test_camera(format: TestFormat) -> (VideoFrame, VideoCaptureReport) {
+/// Capture a test camera for two seconds, showing every frame taken to
+/// `inspect`; returns the report.
+fn capture_test_camera(
+    format: TestFormat,
+    mut inspect: impl FnMut(&VideoFrame),
+) -> VideoCaptureReport {
     let node = TestNode::camera(format);
     let stream = PipeWireCamera::new()
         .start_camera_stream(&CameraRequest {
@@ -613,14 +663,13 @@ fn capture_test_camera(format: TestFormat) -> (VideoFrame, VideoCaptureReport) {
         (Some(width), Some(height))
     );
     let frames = stream.frames();
-    let mut last = None;
     let mut seen = 0;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if let Some(frame) = frames.take() {
             assert_eq!((frame.width(), frame.height()), (width, height));
             assert_eq!(frame.format(), PixelFormat::Bgrx8);
-            last = Some(frame);
+            inspect(&frame);
             seen += 1;
         }
         thread::sleep(Duration::from_millis(5));
@@ -640,14 +689,54 @@ fn capture_test_camera(format: TestFormat) -> (VideoFrame, VideoCaptureReport) {
     assert!(report.stats.frames >= 20, "{:?}", report.stats);
     assert_eq!(report.stats.frames_discarded, 0, "{:?}", report.stats);
     assert!(seen >= 10, "took {seen} frames");
-    (last.expect("a frame"), report)
+    report
 }
 
-/// The BGRX pixel in the middle of `frame`.
-fn middle(frame: &VideoFrame) -> [u8; 4] {
-    let (x, y) = (frame.width() as usize / 2, frame.height() as usize / 2);
+/// The BGRX pixel at `x`, `y`.
+fn pixel(frame: &VideoFrame, x: usize, y: usize) -> [u8; 4] {
     let at = y * frame.stride() + x * 4;
     frame.data()[at..at + 4].try_into().expect("pixel")
+}
+
+/// Whether a split test frame has red on the left (else blue), checked at
+/// the corners and at both sides of the middle of each half's edge.
+fn red_on_the_left(frame: &VideoFrame) -> bool {
+    let red = |[b, g, r, x]: [u8; 4]| b <= 2 && g <= 2 && r >= 252 && x == 255;
+    let blue = |[b, g, r, x]: [u8; 4]| b >= 252 && g <= 2 && r <= 2 && x == 255;
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
+    let left = [(0, 0), (w / 2 - 1, h / 2), (0, h - 1), (w / 2 - 1, h - 1)];
+    let right = [(w / 2, 0), (w - 1, h / 2), (w / 2, h - 1), (w - 1, h - 1)];
+    let all = |points: &[(usize, usize)], colour: &dyn Fn([u8; 4]) -> bool| {
+        points.iter().all(|&(x, y)| colour(pixel(frame, x, y)))
+    };
+    if all(&left, &red) && all(&right, &blue) {
+        true
+    } else if all(&left, &blue) && all(&right, &red) {
+        false
+    } else {
+        let points: Vec<_> = left
+            .iter()
+            .chain(&right)
+            .map(|&(x, y)| ((x, y), pixel(frame, x, y)))
+            .collect();
+        panic!("not a split frame: {points:?}");
+    }
+}
+
+/// A camera whose frames swap halves must deliver both, each intact.
+fn check_split_camera(format: TestFormat, pixel_format: &str) {
+    let mut sides = Vec::new();
+    let report = capture_test_camera(format, |frame| {
+        let side = red_on_the_left(frame);
+        if !sides.contains(&side) {
+            sides.push(side);
+        }
+    });
+    let negotiated = report.format.expect("negotiated format");
+    assert_eq!(negotiated.pixel_format, pixel_format);
+    assert_eq!(negotiated.framerate, Rational::integer(30));
+    // A stale frame published again would show one side only.
+    assert_eq!(sides.len(), 2, "new frames did not arrive");
 }
 
 #[test]
@@ -656,16 +745,7 @@ fn a_yuy2_camera_delivers_converted_frames() {
     if !session_available() {
         return;
     }
-    let (frame, report) = capture_test_camera(TestFormat::Yuy2);
-    let format = report.format.expect("negotiated format");
-    assert_eq!(format.pixel_format, "YUY2");
-    assert_eq!(format.framerate, Rational::integer(30));
-    let [b, g, r, x] = middle(&frame);
-    assert!(
-        b <= 2 && g <= 2 && r >= 252 && x == 255,
-        "{:?}",
-        [b, g, r, x]
-    );
+    check_split_camera(TestFormat::Yuy2, "YUY2");
 }
 
 #[test]
@@ -674,14 +754,17 @@ fn an_nv12_camera_delivers_converted_frames() {
     if !session_available() {
         return;
     }
-    let (frame, report) = capture_test_camera(TestFormat::Nv12);
-    assert_eq!(report.format.expect("format").pixel_format, "NV12");
-    let [b, g, r, x] = middle(&frame);
-    assert!(
-        b <= 2 && g <= 2 && r >= 252 && x == 255,
-        "{:?}",
-        [b, g, r, x]
-    );
+    // Both planes in one block, starting 64 bytes into it.
+    check_split_camera(TestFormat::Nv12, "NV12");
+}
+
+#[test]
+#[ignore = "creates a temporary PipeWire camera and captures it for two seconds"]
+fn an_nv12_camera_with_a_block_per_plane_delivers_converted_frames() {
+    if !session_available() {
+        return;
+    }
+    check_split_camera(TestFormat::Nv12Planes, "NV12");
 }
 
 #[test]
@@ -690,12 +773,18 @@ fn an_mjpeg_camera_delivers_decoded_frames() {
     if !session_available() {
         return;
     }
-    let (frame, report) = capture_test_camera(TestFormat::Mjpeg);
-    assert_eq!(report.format.expect("format").pixel_format, "MJPG");
     let image = frame_decode::decode_image(MJPEG_FRAME, frame_decode::Limits::IMAGE)
         .expect("decode the fixture");
-    // The same decoder: BGRX with X = 255 equals opaque premultiplied BGRA.
-    assert_eq!(middle(&frame), middle(&image));
+    let mut compared = 0;
+    let report = capture_test_camera(TestFormat::Mjpeg, |frame| {
+        // The same decoder: BGRX with X = 255 equals opaque premultiplied
+        // BGRA, every pixel.
+        assert_eq!(frame.stride(), image.stride());
+        assert!(frame.data() == image.data(), "the decoded frame differs");
+        compared += 1;
+    });
+    assert!(compared > 0);
+    assert_eq!(report.format.expect("format").pixel_format, "MJPG");
 }
 
 #[test]

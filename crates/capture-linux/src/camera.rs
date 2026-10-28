@@ -17,7 +17,6 @@ use media_core::{FrameMailbox, FramePool};
 use pipewire as pw;
 use pw::registry::GlobalObject;
 use pw::spa::param::ParamType;
-use pw::spa::utils::dict::DictRef;
 use pw::types::ObjectType;
 
 use crate::modes::{self, ModeOffer};
@@ -54,12 +53,18 @@ impl CameraNode {
     }
 }
 
-/// Cameras are video sources from a camera device API or with the camera
-/// role; screen-cast nodes have neither.
-fn is_camera(props: &DictRef) -> bool {
-    props.get(*pw::keys::MEDIA_CLASS) == Some("Video/Source")
-        && (props.get(*pw::keys::MEDIA_ROLE) == Some("Camera")
-            || matches!(props.get(*pw::keys::DEVICE_API), Some("v4l2" | "libcamera")))
+/// A video source is a camera when it comes from a camera device API or
+/// has the camera role (virtual cameras); screen-cast nodes have neither.
+fn is_camera(device_api: Option<&str>, media_role: Option<&str>) -> bool {
+    media_role == Some("Camera") || matches!(device_api, Some("v4l2" | "libcamera"))
+}
+
+/// The properties that tell a camera apart, from a bound node's info:
+/// registry globals carry `media.role` but not `device.api`.
+#[derive(Debug, Default)]
+struct NodeKind {
+    device_api: Option<String>,
+    media_role: Option<String>,
 }
 
 /// List the cameras, sorted by id. Both roundtrips share `timeout`.
@@ -70,6 +75,7 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
         .core
         .get_registry()
         .map_err(|err| CaptureError::backend(format!("cannot get PipeWire registry: {err}")))?;
+    // Every video source; which are cameras shows once they are bound.
     let globals = Rc::new(RefCell::new(Vec::new()));
     let _listener = registry
         .add_listener_local()
@@ -85,7 +91,7 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
                 let Some(name) = props.get(*pw::keys::NODE_NAME) else {
                     return;
                 };
-                if is_camera(props) {
+                if props.get(*pw::keys::MEDIA_CLASS) == Some("Video/Source") {
                     let description = props
                         .get(*pw::keys::NODE_DESCRIPTION)
                         .or_else(|| props.get(*pw::keys::NODE_NICK))
@@ -100,16 +106,34 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
     connection.roundtrip(timeout)?;
     let globals: Vec<(GlobalObject<_>, String, Option<String>)> = globals.take();
 
-    // Every node's EnumFormat params; nodes run in the daemon, so they
-    // answer before the next roundtrip completes.
+    // Each node's info and EnumFormat params; nodes run in the daemon, so
+    // they answer before the next roundtrip completes.
+    let kinds = Rc::new(RefCell::new(
+        std::iter::repeat_with(NodeKind::default)
+            .take(globals.len())
+            .collect::<Vec<_>>(),
+    ));
     let params = Rc::new(RefCell::new(vec![Vec::new(); globals.len()]));
     let mut bound = Vec::with_capacity(globals.len());
     for (index, (global, name, _)) in globals.iter().enumerate() {
         let node: pw::node::Node = registry.bind(global).map_err(|err| {
-            CaptureError::backend(format!("cannot bind camera node `{name}`: {err}"))
+            CaptureError::backend(format!("cannot bind video node `{name}`: {err}"))
         })?;
         let listener = node
             .add_listener_local()
+            .info({
+                let kinds = Rc::clone(&kinds);
+                move |info| {
+                    let Some(props) = info.props() else {
+                        return;
+                    };
+                    let get = |key: &str| props.get(key).map(str::to_owned);
+                    kinds.borrow_mut()[index] = NodeKind {
+                        device_api: get(*pw::keys::DEVICE_API),
+                        media_role: get(*pw::keys::MEDIA_ROLE),
+                    };
+                }
+            })
             .param({
                 let params = Rc::clone(&params);
                 move |_seq, id, _index, _next, param| {
@@ -126,12 +150,14 @@ pub(crate) fn camera_nodes(timeout: Duration) -> Result<Vec<CameraNode>, Capture
         connection.roundtrip(deadline.saturating_duration_since(Instant::now()))?;
     }
     drop(bound);
-    let params = params.take();
+    let (kinds, params) = (kinds.take(), params.take());
 
     let mut nodes: Vec<CameraNode> = globals
         .into_iter()
+        .zip(kinds)
         .zip(params)
-        .map(|((_, name, description), params)| CameraNode {
+        .filter(|((_, kind), _)| is_camera(kind.device_api.as_deref(), kind.media_role.as_deref()))
+        .map(|(((_, name, description), _), params)| CameraNode {
             name,
             description,
             offers: modes::camera_offers(params.iter().map(Vec::as_slice)),
@@ -169,11 +195,7 @@ pub(crate) fn start_stream(
             node.name
         )));
     };
-    let formats = modes::connect_order(&node.offers, choice.offer)
-        .iter()
-        .map(modes::format_pod)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CaptureError::backend)?;
+    let formats = modes::connect_pods(&node.offers, choice.offer).map_err(CaptureError::backend)?;
     let mailbox = Arc::new(FrameMailbox::new());
     let delivery = Delivery {
         mailbox: Arc::clone(&mailbox),
@@ -276,16 +298,23 @@ fn other_mode(chosen: &ModeOffer, negotiated: Option<&VideoFormatInfo>) -> Optio
             modes::rate_text(fps)
         )
     };
+    let got_fps = modes::reduce(negotiated.framerate);
+    // A camera that does not state its rates runs at whatever it reports.
+    let wanted_fps = if chosen.fps == modes::UNSTATED_RATE {
+        got_fps
+    } else {
+        chosen.fps
+    };
     let wanted = text(
         chosen.width,
         chosen.height,
-        chosen.fps,
+        wanted_fps,
         &chosen.format.name(),
     );
     let got = text(
         negotiated.width,
         negotiated.height,
-        modes::reduce(negotiated.framerate),
+        got_fps,
         &negotiated.pixel_format,
     );
     (wanted != got).then(|| {
@@ -377,31 +406,13 @@ mod tests {
 
     #[test]
     fn cameras_are_told_apart_from_screen_casts() {
-        let dict = |pairs: &[(&str, &str)]| {
-            let mut props = pw::properties::PropertiesBox::new();
-            for (key, value) in pairs {
-                props.insert(*key, *value);
-            }
-            props
-        };
-        for camera in [
-            dict(&[("media.class", "Video/Source"), ("device.api", "v4l2")]),
-            dict(&[("media.class", "Video/Source"), ("device.api", "libcamera")]),
-            dict(&[("media.class", "Video/Source"), ("media.role", "Camera")]),
-        ] {
-            assert!(is_camera(camera.dict()), "{camera:?}");
-        }
-        for other in [
-            // A portal's screen cast.
-            dict(&[
-                ("media.class", "Video/Source"),
-                ("node.name", "xdph-streaming-0"),
-            ]),
-            dict(&[("media.class", "Video/Sink"), ("device.api", "v4l2")]),
-            dict(&[("media.class", "Audio/Source"), ("media.role", "Camera")]),
-        ] {
-            assert!(!is_camera(other.dict()), "{other:?}");
-        }
+        assert!(is_camera(Some("v4l2"), None));
+        assert!(is_camera(Some("libcamera"), None));
+        assert!(is_camera(None, Some("Camera")));
+        // A portal's screen cast, and other video sources.
+        assert!(!is_camera(None, None));
+        assert!(!is_camera(None, Some("Screen")));
+        assert!(!is_camera(Some("videotestsrc"), None));
     }
 
     #[test]

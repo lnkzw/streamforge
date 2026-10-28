@@ -192,7 +192,7 @@ Commands that create or read a file (`start_recording`, `probe_composite`'s snap
 
 - `camera_id` is opaque and stable on one machine: the PipeWire `node.name` on Linux (for example `v4l2_input.pci-0000_00_14.0-usb-0_1_1.0`, which names the USB port). A camera source will name it.
 - `name` is the system's description of the camera.
-- `modes` lists every size and frame rate once (`fps` as `{"num", "den"}`), largest first, then fastest. A camera that offers a range of sizes or rates lists the common ones inside it (sizes from 320x240 to 3840x2160, rates from 5 to 60). A format StreamForge cannot convert (for example H.264) adds no modes, so a camera may list none.
+- `modes` lists every size and frame rate once (`fps` as `{"num", "den"}`), largest first, then fastest. A camera that offers a range of sizes or rates lists the common ones inside it (sizes from 320x240 to 3840x2160, rates from 5 to 60, on the range's step). A camera that does not state its rates (libcamera cameras do not) lists `fps` as `{"num": 0, "den": 1}`: it runs at its own rate. A format StreamForge cannot convert (for example H.264) adds no modes, so a camera may list none.
 
 Camera names are device names, like audio inputs, so the listing is `read_only`. Capturing a camera will be `sensitive`.
 

@@ -241,6 +241,8 @@ pub struct Model {
     /// The cameras with their modes, or why they cannot be listed; `None`
     /// until asked for. A new list replaces it on arrival.
     pub cameras: Option<Result<Vec<Camera>, String>>,
+    /// As `audio_inputs_asked`.
+    cameras_asked: Option<Instant>,
     /// The check of the file chosen to open: its name and the result, or
     /// why it could not be checked.
     pub validation: Option<(String, Result<ProjectValidation, String>)>,
@@ -278,6 +280,7 @@ impl Model {
             projects: None,
             images: None,
             cameras: None,
+            cameras_asked: None,
             validation: None,
             project: None,
             unsaved: false,
@@ -541,10 +544,20 @@ impl Model {
     /// Ask for the cameras (skipped while asked); a new list replaces
     /// [`Model::cameras`] on arrival.
     pub fn list_cameras(&mut self) {
-        // As for the images: a busy engine leaves a reason.
-        if !self.listing_cameras() && !self.submit("list_cameras", json!({}), Pending::Cameras) {
+        if self.listing_cameras() {
+            return;
+        }
+        self.cameras_asked = Some(Instant::now());
+        // As for the images, a busy engine leaves a reason while there is
+        // no list; a list it has stays.
+        if !self.submit("list_cameras", json!({}), Pending::Cameras) && self.cameras.is_none() {
             self.cameras = Some(Err("The engine is busy; refresh to try again.".to_owned()));
         }
+    }
+
+    /// Since the cameras were last asked for; cameras come and go.
+    pub fn cameras_age(&self) -> Option<Duration> {
+        self.cameras_asked.map(|asked| asked.elapsed())
     }
 
     /// Whether the list of cameras is on its way.
@@ -686,18 +699,23 @@ impl Model {
         self.act("update_source", json!({ "source_id": id, "file": file }));
     }
 
-    /// Capture `camera_id` in `mode` (`None`: the engine chooses) in
-    /// camera source `id`; a running camera opens again.
-    pub fn set_source_camera(&mut self, id: &str, camera_id: &str, mode: Option<&CameraModeSpec>) {
-        self.act(
-            "update_source",
-            json!({
-                "source_id": id,
-                "camera_id": camera_id,
-                // An empty mode lets the engine choose again.
-                "mode": mode.copied().unwrap_or_default(),
-            }),
-        );
+    /// Capture `camera_id` (`None`: the same camera) in `mode` (`None`:
+    /// the engine chooses) in camera source `id`; a running camera opens
+    /// again.
+    pub fn set_source_camera(
+        &mut self,
+        id: &str,
+        camera_id: Option<&str>,
+        mode: Option<&CameraModeSpec>,
+    ) {
+        let mut params = Map::new();
+        params.insert("source_id".into(), id.into());
+        if let Some(camera_id) = camera_id {
+            params.insert("camera_id".into(), camera_id.into());
+        }
+        // An empty mode lets the engine choose again.
+        params.insert("mode".into(), json!(mode.copied().unwrap_or_default()));
+        self.act("update_source", Value::Object(params));
     }
 
     /// Draw source `id` or not; a hidden screen source keeps capturing.

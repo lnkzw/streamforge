@@ -14,8 +14,8 @@ use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 use crate::workspace::{self, Shortcut};
 
 use super::{
-    camera_mode_picker, commit, coordinate_range, kind_label, named, opacity_row, right_to_left,
-    with_keys,
+    camera_mode_picker, commit, coordinate_range, kind_label, named, opacity_row, refresh_cameras,
+    right_to_left, with_keys,
 };
 
 impl DesktopApp {
@@ -337,7 +337,9 @@ impl DesktopApp {
 
     /// A camera source's camera and mode: another listed camera (keeping
     /// the mode where it has it), or another of its modes. A running camera
-    /// opens again with them.
+    /// opens again with them, which can take seconds; until the engine
+    /// answers, the choices wait, so a second one does not build on the
+    /// camera being replaced.
     fn camera(
         &mut self,
         ui: &mut egui::Ui,
@@ -345,9 +347,7 @@ impl DesktopApp {
         camera_id: &str,
         mode: Option<&CameraModeSpec>,
     ) {
-        if self.model.cameras.is_none() {
-            self.model.list_cameras();
-        }
+        refresh_cameras(&mut self.model);
         let label = workspace::camera_label(camera_id, self.model.listed_cameras());
         let width = ui.available_width();
         let mut chosen = camera_id.to_owned();
@@ -356,25 +356,34 @@ impl DesktopApp {
         let fixed_mode = |ui: &mut egui::Ui| {
             ui.label(TextRole::Body.text(format!("Mode: {}", workspace::camera_mode_label(mode))));
         };
+        let changing = self.model.pending("update_source");
         match &self.model.cameras {
             Some(Ok(cameras)) => {
-                widgets::dropdown(ui, &label.text, "Camera device", width, |ui| {
-                    for camera in cameras {
-                        widgets::choice(ui, &mut chosen, camera.camera_id.clone(), &camera.name)
+                ui.add_enabled_ui(!changing, |ui| {
+                    widgets::dropdown(ui, &label.text, "Camera device", width, |ui| {
+                        for camera in cameras {
+                            widgets::choice(
+                                ui,
+                                &mut chosen,
+                                camera.camera_id.clone(),
+                                &camera.name,
+                            )
                             .on_hover_text(&camera.camera_id);
+                        }
+                    })
+                    .on_hover_text(&label.detail)
+                    .on_disabled_hover_text("Waiting for the engine");
+                    if label.missing {
+                        widgets::status_line(ui, StatusLevel::Warn, &label.detail);
                     }
-                })
-                .on_hover_text(&label.detail);
-                if label.missing {
-                    widgets::status_line(ui, StatusLevel::Warn, &label.detail);
-                }
-                match cameras.iter().find(|camera| camera.camera_id == camera_id) {
-                    Some(camera) => {
-                        mode_changed = camera_mode_picker(ui, &mut chosen_mode, camera, width);
+                    match cameras.iter().find(|camera| camera.camera_id == camera_id) {
+                        Some(camera) => {
+                            mode_changed = camera_mode_picker(ui, &mut chosen_mode, camera, width);
+                        }
+                        // Its modes are not known; the mode it asks for stays.
+                        None => fixed_mode(ui),
                     }
-                    // Its modes are not known; the mode it asks for stays.
-                    None => fixed_mode(ui),
-                }
+                });
             }
             Some(Err(reason)) => {
                 ui.label(TextRole::Body.text(&label.text));
@@ -392,10 +401,10 @@ impl DesktopApp {
                 .listed_cameras()
                 .and_then(|cameras| cameras.iter().find(|camera| camera.camera_id == chosen));
             let mode = workspace::mode_for_camera(mode, camera);
-            self.model.set_source_camera(id, &chosen, mode.as_ref());
-        } else if mode_changed {
             self.model
-                .set_source_camera(id, camera_id, chosen_mode.as_ref());
+                .set_source_camera(id, Some(&chosen), mode.as_ref());
+        } else if mode_changed {
+            self.model.set_source_camera(id, None, chosen_mode.as_ref());
         }
         if ui
             .add(

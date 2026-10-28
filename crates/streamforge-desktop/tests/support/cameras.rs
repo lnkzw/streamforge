@@ -1,6 +1,7 @@
 //! A camera backend for the tests: two cameras with their modes. A started
-//! camera delivers small frames in its own colour at about 30 fps until it
-//! stops; an unplugged one is neither listed nor found.
+//! camera delivers small frames in its own colour at its rate until it
+//! stops or is unplugged (then it ended); an unplugged one is neither
+//! listed nor found.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -122,11 +123,20 @@ impl CameraCapture for ListedCameras {
         let mailbox = Arc::new(FrameMailbox::new());
         let stop = Arc::new(AtomicBool::new(false));
         let (frame_width, frame_height) = (width / 20, height / 20);
+        let ended = Arc::new(AtomicBool::new(false));
         let thread = {
             let mailbox = Arc::clone(&mailbox);
             let stop = Arc::clone(&stop);
+            let ended = Arc::clone(&ended);
+            let unplugged = Arc::clone(&self.unplugged);
+            let camera_id = id.to_owned();
             thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
+                    // Like a real camera, it stays ended when plugged in again.
+                    if unplugged.lock().expect("unplugged").contains(&camera_id) {
+                        ended.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     let pixels = [b, g, r, 0].repeat((frame_width * frame_height) as usize);
                     let frame = VideoFrame::new(
                         frame_width,
@@ -138,7 +148,7 @@ impl CameraCapture for ListedCameras {
                     )
                     .expect("frame");
                     mailbox.publish(frame);
-                    thread::sleep(Duration::from_millis(33));
+                    thread::sleep(Duration::from_secs(1) / fps);
                 }
             })
         };
@@ -153,6 +163,8 @@ impl CameraCapture for ListedCameras {
                 stop,
                 thread: Some(thread),
                 source,
+                camera_id: id.to_owned(),
+                ended,
             }),
             format: Some(VideoFormatInfo {
                 pixel_format: "YUY2".to_owned(),
@@ -170,6 +182,9 @@ struct TestCameraStream {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     source: VideoSourceInfo,
+    camera_id: String,
+    /// Its camera was unplugged while it ran.
+    ended: Arc<AtomicBool>,
 }
 
 impl Drop for TestCameraStream {
@@ -191,7 +206,13 @@ impl VideoStream for TestCameraStream {
     }
 
     fn state(&self) -> CaptureState {
-        CaptureState::Running
+        if self.ended.load(Ordering::Relaxed) {
+            CaptureState::Ended {
+                reason: format!("camera `{}` was unplugged", self.camera_id),
+            }
+        } else {
+            CaptureState::Running
+        }
     }
 
     fn stop(self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {

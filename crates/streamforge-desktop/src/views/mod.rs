@@ -12,12 +12,15 @@ mod scenes;
 mod sources;
 mod top_bar;
 
+use std::time::Duration;
+
 use command_api::{
     BusState, Camera, CameraModeSpec, MAX_COORDINATE, PROGRAM_BUS_ID, SceneList, SceneSpec,
     SourceKind, SourceSpec,
 };
 use eframe::egui;
 
+use crate::model::Model;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, size};
 use crate::ui::widgets::{self, StatusLevel};
@@ -25,6 +28,8 @@ use crate::workspace::{self, Shortcut};
 
 /// The camera mode menu scrolls beyond this.
 const MODE_MENU_HEIGHT: f32 = 320.0;
+/// How often a view with a camera choice asks for the cameras again.
+const CAMERAS_REFRESH: Duration = Duration::from_secs(5);
 
 /// The value edit to send, if any: when a drag ends, or right away for
 /// keyboard and typed input. Mid-drag values are not sent, so a drag is
@@ -166,6 +171,14 @@ fn kind_label(kind: &SourceKind) -> (Icon, &'static str) {
         SourceKind::Screen { .. } => (Icon::Screen, "screen capture"),
         SourceKind::Image { .. } => (Icon::Image, "image"),
         SourceKind::Camera { .. } => (Icon::Camera, "camera"),
+    }
+}
+
+/// Ask for the cameras when they were never asked for or a while ago:
+/// cameras come and go, and the views show which one is missing.
+fn refresh_cameras(model: &mut Model) {
+    if model.cameras_age().is_none_or(|age| age > CAMERAS_REFRESH) {
+        model.list_cameras();
     }
 }
 

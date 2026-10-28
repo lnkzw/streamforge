@@ -1697,13 +1697,14 @@ fn a_camera_is_added_with_a_mode_and_changed_in_the_inspector() {
         field_value(h, "Camera mode").as_deref() == Some("1280×720 · 60 fps")
     });
 
-    // Rendered, the camera runs in that mode.
+    // Rendered, the camera delivers frames in that mode.
     harness
         .get_by_role_and_label(Role::CheckBox, "Preview")
         .click();
     step_until(&mut harness, "the running camera", |h| {
-        h.query_by_label_contains("Runs in 1280×720 · 60 fps · YUY2")
-            .is_some()
+        h.query_by_label("Capturing").is_some()
+            && h.query_by_label_contains("Runs in 1280×720 · 60 fps · YUY2")
+                .is_some()
     });
 }
 
@@ -1746,15 +1747,32 @@ fn a_missing_camera_warns_and_restarts_once_plugged_in() {
         field_value(h, "Camera device").as_deref() == Some("v4l2_input.usb-front (not found)")
     });
 
-    // Back, it opens on a restart, in the mode the engine chooses.
+    // Back, it opens on a restart, in the mode the engine chooses, and
+    // the list finds it again by itself.
     cameras.plug(FRONT_CAMERA, true);
     harness.get_by_label("Restart capture").click();
     step_until(&mut harness, "the running camera", |h| {
-        h.query_by_label_contains("Runs in 1920×1080 · 30 fps · YUY2")
-            .is_some()
+        h.query_by_label("Capturing").is_some()
+            && h.query_by_label_contains("Runs in 1920×1080 · 30 fps · YUY2")
+                .is_some()
     });
-    harness.get_by_label("Refresh list").click();
     step_until(&mut harness, "the camera listed", |h| {
         field_value(h, "Camera device").as_deref() == Some("Front Camera")
+    });
+
+    // Unplugged while it runs, it ends and is missing; once back, a restart
+    // opens it again.
+    cameras.plug(FRONT_CAMERA, false);
+    step_until(&mut harness, "the ended camera", |h| {
+        h.query_by_label_contains("Ended: camera `v4l2_input.usb-front` was unplugged")
+            .is_some()
+    });
+    step_until(&mut harness, "the missing camera", |h| {
+        field_value(h, "Camera device").as_deref() == Some("v4l2_input.usb-front (not found)")
+    });
+    cameras.plug(FRONT_CAMERA, true);
+    harness.get_by_label("Restart capture").click();
+    step_until(&mut harness, "the camera again", |h| {
+        h.query_by_label("Capturing").is_some()
     });
 }

@@ -19,7 +19,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
 use crate::workspace;
 
-use super::{camera_mode_picker, coordinate_range, labelled, opacity_row};
+use super::{camera_mode_picker, coordinate_range, labelled, opacity_row, refresh_cameras};
 
 const DIALOG_WIDTH: f32 = 420.0;
 /// Problems of a project file shown before the rest are counted.
@@ -1224,16 +1224,15 @@ fn image_picker(
 /// Choose a camera from `list_cameras`, and one of its modes or none (the
 /// engine chooses).
 fn camera_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceForm) {
-    if model.cameras.is_none() {
-        model.list_cameras();
-    }
-    // A camera that is no longer listed is not sent.
-    let listed = |id: &String| {
+    refresh_cameras(model);
+    // A camera that a new list leaves out is not sent; a list that failed
+    // says nothing about it.
+    let gone = |id: &String| {
         model
             .listed_cameras()
-            .is_some_and(|cameras| cameras.iter().any(|camera| &camera.camera_id == id))
+            .is_some_and(|cameras| !cameras.iter().any(|camera| &camera.camera_id == id))
     };
-    if form.camera_id.as_ref().is_some_and(|id| !listed(id)) {
+    if form.camera_id.as_ref().is_some_and(gone) {
         form.camera_id = None;
         form.camera_mode = None;
     }

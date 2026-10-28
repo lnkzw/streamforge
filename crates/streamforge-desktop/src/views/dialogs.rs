@@ -4,6 +4,7 @@
 //! and saving projects.
 //! One is open at a time; Escape or a click outside cancels.
 
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use command_api::{
@@ -61,7 +62,7 @@ impl DesktopApp {
                     } => add_source(
                         ui,
                         &mut self.model,
-                        self.project_folder.as_deref(),
+                        self.project_path.as_deref(),
                         scene_id,
                         scene_name,
                         form,
@@ -621,7 +622,7 @@ impl DesktopApp {
 fn add_source(
     ui: &mut egui::Ui,
     model: &mut Model,
-    project_folder: Option<&str>,
+    project_folder: Option<&Path>,
     scene_id: &str,
     scene_name: &str,
     form: &mut SourceForm,
@@ -1127,7 +1128,7 @@ fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceF
 fn image_picker(
     ui: &mut egui::Ui,
     model: &mut Model,
-    project_folder: Option<&str>,
+    project_folder: Option<&Path>,
     form: &mut SourceForm,
 ) {
     if model.images.is_none() {
@@ -1199,13 +1200,16 @@ fn image_picker(
         if let Some(folder) = project_folder
             && ui
                 .add(Button::new(ButtonKind::Ghost, "Open folder").icon(Icon::Folder))
-                .on_hover_text(format!("Open {folder} in the file manager"))
+                .on_hover_text(format!("Open {} in the file manager", folder.display()))
                 .clicked()
             && let Err(error) = crate::folder::open(folder)
         {
             model.push_log(
                 Level::Warning,
-                format!("Cannot open the project folder {folder}: {error}"),
+                format!(
+                    "Cannot open the project folder {}: {error}",
+                    folder.display()
+                ),
             );
         }
     });

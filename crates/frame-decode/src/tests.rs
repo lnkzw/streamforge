@@ -616,3 +616,85 @@ fn sixteen_bit_image_fits_its_explicit_memory_budget() {
         );
     }
 }
+
+/// `jpeg` with `segment` (marker and body) spliced in right after its
+/// frame header.
+fn after_sof(jpeg: &[u8], marker: u8, body: &[u8]) -> Vec<u8> {
+    let end = sof_end(jpeg);
+    let mut bytes = jpeg[..end].to_vec();
+    bytes.extend([0xff, marker]);
+    bytes.extend(u16::try_from(body.len() + 2).unwrap().to_be_bytes());
+    bytes.extend(body);
+    bytes.extend(&jpeg[end..]);
+    bytes
+}
+
+/// `jpeg` with `count` APP2 segments of `size` bytes each after its SOI.
+fn with_app2(jpeg: &[u8], count: usize, size: usize) -> Vec<u8> {
+    let mut bytes = jpeg[..2].to_vec();
+    for _ in 0..count {
+        bytes.extend([0xff, 0xe2]);
+        bytes.extend(u16::try_from(size + 2).unwrap().to_be_bytes());
+        bytes.extend(std::iter::repeat_n(0x55, size));
+    }
+    bytes.extend(&jpeg[2..]);
+    bytes
+}
+
+#[test]
+fn exif_after_the_frame_header_is_applied() {
+    let mut body = b"Exif\0\0".to_vec();
+    body.extend(tiff(6, true));
+    let bytes = after_sof(JPEG, 0xe1, &body);
+    let shown = ImageInfo {
+        format: ImageFormat::Jpeg,
+        width: 16,
+        height: 24,
+    };
+    assert_eq!(probe(&bytes).unwrap(), shown);
+    assert_eq!(
+        probe_reader(&mut std::io::Cursor::new(&bytes)).unwrap(),
+        shown
+    );
+    let frame = decode_image(&bytes, Limits::IMAGE).unwrap();
+    assert_eq!((frame.width(), frame.height()), (16, 24));
+}
+
+#[test]
+fn a_file_probe_seeks_past_large_metadata() {
+    // EXIF orientation 6, then 320 KiB of ICC-like segments before the
+    // frame header: more than a prefix of 256 KiB holds.
+    let bytes = with_exif(&with_app2(JPEG, 5, 65_000), &tiff(6, false));
+    assert!(bytes.len() > 320_000);
+    let shown = probe_reader(&mut std::io::Cursor::new(&bytes)).unwrap();
+    assert_eq!((shown.width, shown.height), (16, 24));
+    assert!(probe(&bytes[..256 * 1024]).is_err());
+
+    let png = png(3, 2, ColorType::Rgb, BitDepth::Eight, &[9; 18]);
+    let info = probe_reader(&mut std::io::Cursor::new(&png)).unwrap();
+    assert_eq!(
+        (info.format, info.width, info.height),
+        (ImageFormat::Png, 3, 2)
+    );
+    // Cut off before the frame header, or not an image at all.
+    let cut = &bytes[..1000];
+    assert!(probe_reader(&mut std::io::Cursor::new(cut)).is_err());
+    assert!(matches!(
+        probe_reader(&mut std::io::Cursor::new(b"GIF89a")),
+        Err(DecodeError::Unsupported(_))
+    ));
+}
+
+#[test]
+fn too_many_segments_are_refused_before_decoding() {
+    let many = with_app2(JPEG, MAX_JPEG_SEGMENTS, 4);
+    assert!(matches!(
+        decode_image(&many, Limits::IMAGE),
+        Err(DecodeError::Unsupported(message)) if message.contains("segments")
+    ));
+    assert!(probe(&many).is_err());
+    assert!(probe_reader(&mut std::io::Cursor::new(&many)).is_err());
+    // Below the bound, they are only metadata.
+    let some = with_app2(JPEG, 100, 4);
+    assert!(decode_image(&some, Limits::IMAGE).is_ok());
+}

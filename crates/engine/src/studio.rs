@@ -128,7 +128,8 @@ impl Engine {
         })
     }
 
-    /// Change a source; an image source's new `file` is read first.
+    /// Change a source; an image source's `file` is read first, also when
+    /// it is the one shown (a refresh at `control` access).
     pub(crate) fn update_source(
         &mut self,
         request: &UpdateSourceRequest,
@@ -140,7 +141,7 @@ impl Engine {
         let Some(file) = request.file.as_deref().filter(|_| image) else {
             return self.edit_scenes(|scenes| scenes.update_source(request));
         };
-        let replaced = self.read_image(file, false)?;
+        let replaced = self.read_image(file, true)?;
         self.edit_scenes_reading(file, replaced, |scenes| scenes.update_source(request))
     }
 

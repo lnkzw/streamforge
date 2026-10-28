@@ -120,6 +120,10 @@ fn an_image_keeps_its_own_size_and_bad_files_are_refused() {
             height: 540.0
         }
     );
+    // A side scaled below a pixel stays a pixel.
+    write_png(&dir.0, "tall.png", 1, 4000, [0, 0, 255]);
+    add_image(&mut engine, "tall", "tall.png").expect("add");
+    assert_eq!(source_rect(&mut engine, "tall").width, 1.0);
     // A rectangle given is kept; the image is fitted into it when drawn.
     run(
         &mut engine,
@@ -142,7 +146,7 @@ fn an_image_keeps_its_own_size_and_bad_files_are_refused() {
         (Some(8193), Some(8192))
     );
     // Refused adds leave nothing behind.
-    assert_eq!(scene_list(&mut engine).scenes[1].sources.len(), 3);
+    assert_eq!(scene_list(&mut engine).scenes[1].sources.len(), 4);
     assert!(engine.images.frame("broken.png").is_none());
     assert!(engine.images.frame("huge.png").is_none());
 }
@@ -158,17 +162,20 @@ fn image_frames_are_shared_bounded_and_dropped_with_their_sources() {
     engine.images = ImageStore::with_max_total_bytes(2 * 100 * 100 * 4);
     run(&mut engine, "create_scene", json!({"name": "Show"}));
     add_image(&mut engine, "a1", "a.png").expect("add");
-    let frame = Arc::clone(engine.images.frame("a.png").expect("frame"));
+    let frame = Arc::downgrade(engine.images.frame("a.png").expect("frame"));
     // The same file again is the same frame, counted once.
     add_image(&mut engine, "a2", "a.png").expect("add");
-    assert!(Arc::ptr_eq(
-        &frame,
-        engine.images.frame("a.png").expect("frame")
-    ));
+    let shared = engine.images.frame("a.png").expect("frame");
+    assert!(Arc::ptr_eq(&frame.upgrade().expect("alive"), shared));
     add_image(&mut engine, "b", "b.png").expect("add");
     let full = add_image(&mut engine, "c", "c.png").unwrap_err();
     assert_eq!(full.code, ErrorCode::InvalidParams, "{full}");
     assert_eq!(full.details.expect("details")["bytes_used"], 80_000);
+    // An image over its own limits says so, whatever the total.
+    write_png(&dir.0, "huge.png", 8193, 1, [0, 0, 0]);
+    let huge = add_image(&mut engine, "huge", "huge.png").unwrap_err();
+    let details = huge.details.expect("details");
+    assert_eq!(details["max_side"], 8192, "{}", huge.message);
     // Its frame goes with the last source showing it.
     run(
         &mut engine,
@@ -182,6 +189,7 @@ fn image_frames_are_shared_bounded_and_dropped_with_their_sources() {
         json!({"scene_name": "Show", "source_name": "a2"}),
     );
     assert!(engine.images.frame("a.png").is_none());
+    assert!(frame.upgrade().is_none(), "the frame is freed");
     // A file read for an add that then fails (the name is taken) is not
     // kept.
     let duplicate = add_image(&mut engine, "b", "c.png").unwrap_err();
@@ -226,6 +234,21 @@ fn images_draw_live_and_are_read_again_on_restart() {
     );
     wait_for_preview_pixel(&engine, 10, 10, [0, 255, 0, 255]);
     assert!(engine.images.frame("logo.png").is_none());
+    // The same file again reads it again (a refresh at control access);
+    // the old frame is freed once the compositor has swapped it.
+    let old = Arc::downgrade(engine.images.frame("other.png").expect("frame"));
+    write_png(&dir.0, "other.png", 960, 540, [255, 255, 255]);
+    run(
+        &mut engine,
+        "update_source",
+        json!({"scene_name": "Show", "source_name": "logo", "file": "other.png"}),
+    );
+    wait_for_preview_pixel(&engine, 10, 10, [255, 255, 255, 255]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while old.upgrade().is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(old.upgrade().is_none(), "the replaced frame is freed");
     // A missing file changes nothing.
     let missing = try_run(
         &mut engine,
@@ -242,7 +265,7 @@ fn images_draw_live_and_are_read_again_on_restart() {
     )
     .unwrap_err();
     assert_eq!(gone.code, ErrorCode::NotFound, "{gone}");
-    wait_for_preview_pixel(&engine, 10, 10, [0, 255, 0, 255]);
+    wait_for_preview_pixel(&engine, 10, 10, [255, 255, 255, 255]);
     run(&mut engine, "set_preview", json!({"enabled": false}));
 }
 
@@ -343,6 +366,16 @@ fn a_project_whose_image_is_missing_loads_with_a_warning() {
     )
     .expect("build");
     assert!(update.scene.layers.is_empty());
+    // In an engine that had read the file, the old frame goes too.
+    let CommandOutput::ProjectLoaded(again) = run(
+        &mut fresh,
+        "load_project",
+        json!({"file_name": "show.json"}),
+    ) else {
+        panic!("unexpected output");
+    };
+    assert_eq!(again.warnings.len(), 1, "{:?}", again.warnings);
+    assert!(fresh.images.frame("logo.png").is_none());
     // Once the file is back, restart_source shows it.
     write_png(&dir.0, "logo.png", 64, 32, [255, 0, 0]);
     run(

@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -71,6 +72,8 @@ pub struct DesktopApp {
     pub(crate) mixer_view: MixerView,
     /// Where project files are, as the project dialogs show it.
     pub(crate) project_folder: Option<String>,
+    /// The same folder as a path, to open it in the file manager.
+    pub(crate) project_path: Option<PathBuf>,
     /// The operator chose to quit despite unsaved changes or running
     /// outputs.
     quit_confirmed: bool,
@@ -231,6 +234,7 @@ impl DesktopApp {
             meters: HashMap::new(),
             mixer_view: MixerView::Console,
             project_folder: None,
+            project_path: None,
             quit_confirmed: false,
             quit_signal: None,
             quit_after_save: false,
@@ -244,9 +248,12 @@ impl DesktopApp {
         }
     }
 
-    /// Name the project folder in the project dialogs.
-    pub fn with_project_folder(mut self, folder: impl Into<String>) -> Self {
-        self.project_folder = Some(folder.into());
+    /// Name the project folder in the project dialogs, and open it from
+    /// the image dialog.
+    pub fn with_project_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        let folder = folder.into();
+        self.project_folder = Some(folder.display().to_string());
+        self.project_path = Some(folder);
         self
     }
 

@@ -8,7 +8,7 @@
 
 mod exif;
 
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use media_core::{FrameBuffer, PixelFormat, VideoFrame};
 use zune_core::{colorspace::ColorSpace, options::DecoderOptions};
@@ -29,6 +29,21 @@ impl Limits {
         max_side: 8192,
         max_pixels: 16 * 1024 * 1024,
     };
+
+    /// Whether a `width` x `height` image is within the limits.
+    pub fn check(self, width: u32, height: u32) -> Result<(), DecodeError> {
+        if width > self.max_side
+            || height > self.max_side
+            || u64::from(width) * u64::from(height) > self.max_pixels
+        {
+            return Err(DecodeError::TooLarge {
+                width,
+                height,
+                limits: self,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// An image's signature format.
@@ -84,6 +99,145 @@ pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
     }
 }
 
+/// [`probe`] from a file: reads only the header, skipping a JPEG's other
+/// segments (ICC profiles, XMP, thumbnails) by seeking past them, however
+/// large they are.
+pub fn probe_reader<R: Read + Seek>(reader: &mut R) -> Result<ImageInfo, DecodeError> {
+    let mut head = [0; 8];
+    let read = read_full(reader, &mut head).map_err(invalid)?;
+    match format(&head[..read])? {
+        ImageFormat::Png => {
+            // The signature, then IHDR: length, type and 13 bytes of data.
+            let mut bytes = vec![0; 33];
+            bytes[..8].copy_from_slice(&head);
+            let read = read_full(reader, &mut bytes[8..]).map_err(invalid)?;
+            bytes.truncate(8 + read);
+            probe(&bytes)
+        }
+        ImageFormat::Jpeg => {
+            let mut segments = JpegSegments {
+                reader,
+                pending: head[2..read].to_vec(),
+            };
+            segments.header().map(|header| header.info)
+        }
+    }
+}
+
+/// Walks a JPEG file's segments, keeping only those the header parser
+/// needs (EXIF and the frame header) in a minimal JPEG.
+struct JpegSegments<'r, R> {
+    reader: &'r mut R,
+    /// Bytes read ahead of the walk.
+    pending: Vec<u8>,
+}
+
+impl<R: Read + Seek> JpegSegments<'_, R> {
+    /// A minimal JPEG for [`jpeg_header`]: the first EXIF segment and the
+    /// first frame header, up to the image data; the rest is skipped. Where
+    /// the file ends early, the parser decides what that prefix gives.
+    fn header(&mut self) -> Result<JpegHeader, DecodeError> {
+        let mut kept = vec![0xff, 0xd8];
+        let (mut exif, mut frame) = (false, false);
+        for _ in 0..=MAX_JPEG_SEGMENTS {
+            let Ok(mut marker) = self.next(2) else {
+                return jpeg_header(&kept);
+            };
+            while marker[1] == 0xff {
+                let Ok(next) = self.next(1) else {
+                    return jpeg_header(&kept);
+                };
+                marker[1] = next[0];
+            }
+            if marker[0] != 0xff || matches!(marker[1], 0 | 0xd8..=0xda | 0xcc) {
+                // The image data, or what the parser refuses.
+                kept.extend_from_slice(&marker);
+                kept.extend_from_slice(&[0, 2]);
+                return jpeg_header(&kept);
+            }
+            if marker[1] == 1 || (0xd0..=0xd7).contains(&marker[1]) {
+                continue;
+            }
+            let Ok(length) = self.next(2) else {
+                return jpeg_header(&kept);
+            };
+            let body = usize::from(u16::from_be_bytes([length[0], length[1]])).saturating_sub(2);
+            let sof = (0xc0..=0xcf).contains(&marker[1]) && !matches!(marker[1], 0xc4 | 0xc8);
+            let wanted = if marker[1] == 0xe1 && !exif {
+                let prefix = body.min(6);
+                let Ok(start) = self.next(prefix) else {
+                    return jpeg_header(&kept);
+                };
+                if start == b"Exif\0\0" {
+                    let Ok(rest) = self.next(body - prefix) else {
+                        return jpeg_header(&kept);
+                    };
+                    exif = true;
+                    Some([start, rest].concat())
+                } else {
+                    self.skip(body - prefix)?;
+                    None
+                }
+            } else if sof && !frame {
+                frame = true;
+                let Ok(segment) = self.next(body) else {
+                    return jpeg_header(&kept);
+                };
+                Some(segment)
+            } else {
+                self.skip(body)?;
+                None
+            };
+            if let Some(segment) = wanted {
+                kept.extend_from_slice(&marker);
+                kept.extend_from_slice(&length);
+                kept.extend_from_slice(&segment);
+            }
+        }
+        Err(DecodeError::Unsupported(format!(
+            "the JPEG has more than {MAX_JPEG_SEGMENTS} segments before its image data"
+        )))
+    }
+
+    /// Skip `count` bytes.
+    fn skip(&mut self, count: usize) -> Result<(), DecodeError> {
+        let buffered = count.min(self.pending.len());
+        self.pending.drain(..buffered);
+        let skip = i64::try_from(count - buffered).map_err(invalid)?;
+        self.reader.seek(SeekFrom::Current(skip)).map_err(invalid)?;
+        Ok(())
+    }
+
+    /// The next `count` bytes.
+    fn next(&mut self, count: usize) -> Result<Vec<u8>, DecodeError> {
+        let mut bytes: Vec<u8> = self
+            .pending
+            .drain(..count.min(self.pending.len()))
+            .collect();
+        let start = bytes.len();
+        bytes.resize(count, 0);
+        let read = read_full(self.reader, &mut bytes[start..]).map_err(invalid)?;
+        if start + read < count {
+            return Err(invalid("truncated JPEG header"));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Read until `buffer` is full or the input ends; returns the bytes read.
+fn read_full<R: Read>(reader: &mut R, buffer: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(filled)
+}
+
 /// Decode a whole PNG or JPEG file into a tightly packed `PixelFormat::Bgra8` frame with
 /// premultiplied alpha (`media_core::VideoFrame`, `FrameBuffer::unpooled`, pts `None`),
 /// shown as the file says: the JPEG's EXIF orientation applied. The limits are checked
@@ -112,17 +266,7 @@ fn invalid(error: impl std::fmt::Display) -> DecodeError {
 }
 
 fn check_size(width: u32, height: u32, limits: Limits) -> Result<(), DecodeError> {
-    if width > limits.max_side
-        || height > limits.max_side
-        || u64::from(width) * u64::from(height) > limits.max_pixels
-    {
-        return Err(DecodeError::TooLarge {
-            width,
-            height,
-            limits,
-        });
-    }
-    Ok(())
+    limits.check(width, height)
 }
 
 fn buffer(len: usize) -> Result<Vec<u8>, DecodeError> {
@@ -178,30 +322,39 @@ fn decode_png(bytes: &[u8], limits: Limits) -> Result<VideoFrame, DecodeError> {
     check_size(width, height, limits)?;
     let stride = VideoFrame::packed_stride(width).map_err(invalid)?;
     let len = VideoFrame::required_len(width, height, stride).map_err(invalid)?;
-    let mut raw = buffer(
-        reader
-            .output_buffer_size()
-            .ok_or_else(|| invalid("the PNG's size overflows usize"))?,
-    )?;
-    let output = reader.next_frame(&mut raw).map_err(invalid)?;
+    // Decoded 8-bit samples (at most four per pixel) fit in the frame's
+    // buffer and are expanded in place: one buffer, not two.
+    let decoded = reader
+        .output_buffer_size()
+        .ok_or_else(|| invalid("the PNG's size overflows usize"))?;
+    let mut pixels = buffer(len.max(decoded))?;
+    let output = reader.next_frame(&mut pixels).map_err(invalid)?;
     reader.finish().map_err(invalid)?;
-    let mut bgra = buffer(len)?;
     let channels = output.color_type.samples();
-    for (src, dst) in raw[..output.buffer_size()]
-        .chunks_exact(channels)
-        .zip(bgra.as_chunks_mut::<4>().0)
+    if output.color_type == png::ColorType::Indexed || output.line_size != width as usize * channels
     {
+        return Err(invalid("the PNG was not expanded to 8-bit samples"));
+    }
+    // Backwards: pixel i's samples start at or before byte 4i, and a write
+    // overwrites only samples of pixels already expanded.
+    for index in (0..len / 4).rev() {
+        let src = &pixels[index * channels..index * channels + channels];
         let (r, g, b, a) = match output.color_type {
             png::ColorType::Grayscale => (src[0], src[0], src[0], 255),
             png::ColorType::GrayscaleAlpha => (src[0], src[0], src[0], src[1]),
             png::ColorType::Rgb => (src[0], src[1], src[2], 255),
-            png::ColorType::Rgba => (src[0], src[1], src[2], src[3]),
-            png::ColorType::Indexed => return Err(invalid("the PNG palette was not expanded")),
+            _ => (src[0], src[1], src[2], src[3]),
         };
         let premultiply = |c| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
-        dst.copy_from_slice(&[premultiply(b), premultiply(g), premultiply(r), a]);
+        pixels[index * 4..index * 4 + 4].copy_from_slice(&[
+            premultiply(b),
+            premultiply(g),
+            premultiply(r),
+            a,
+        ]);
     }
-    frame(width, height, bgra)
+    pixels.truncate(len);
+    frame(width, height, pixels)
 }
 
 fn jpeg_error(error: DecodeErrors) -> DecodeError {
@@ -323,75 +476,75 @@ struct JpegHeader {
     orientation: u8,
 }
 
-/// Walk length-delimited JPEG segments without decoding or allocating metadata.
+/// Most segments a JPEG may have before its image data. zune-jpeg's
+/// handling of extended XMP grows with the square of their number, so a
+/// small hostile file could stall the engine; real files have dozens.
+const MAX_JPEG_SEGMENTS: usize = 1024;
+
+/// Walk length-delimited JPEG segments up to the image data (SOS) without
+/// decoding or allocating metadata: the first frame header, the first EXIF
+/// orientation (before or after the frame header), and the segment count.
+/// A prefix of a file that ends after the frame header gives what it has
+/// (a listing reads only the start of a file).
 fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, DecodeError> {
     let mut offset = 2usize;
-    let mut orientation = 1;
+    let mut orientation = None;
+    let mut size: Option<(u32, u32)> = None;
+    let mut segments = 0;
+    // A prefix that ends after the frame header gives what it has.
+    let ended = |size: Option<(u32, u32)>, what: &str| match size {
+        Some(_) => Ok(()),
+        None => Err(invalid(format!("truncated JPEG {what}"))),
+    };
     loop {
-        if bytes.get(offset) != Some(&0xff) {
+        if offset >= bytes.len() {
+            ended(size, "header")?;
+            break;
+        }
+        if bytes[offset] != 0xff {
             return Err(invalid("a JPEG marker is missing"));
         }
         while bytes.get(offset) == Some(&0xff) {
             offset += 1;
         }
-        let marker = *bytes
-            .get(offset)
-            .ok_or_else(|| invalid("truncated JPEG marker"))?;
+        let Some(&marker) = bytes.get(offset) else {
+            ended(size, "marker")?;
+            break;
+        };
         offset += 1;
-        if matches!(marker, 0 | 0xd8..=0xda) {
-            return Err(invalid("the JPEG ends before its frame header"));
+        match marker {
+            0xda if size.is_some() => break,
+            0 | 0xd8..=0xda => return Err(invalid("the JPEG ends before its frame header")),
+            0x01 | 0xd0..=0xd7 => continue,
+            _ => {}
         }
-        if marker == 1 || (0xd0..=0xd7).contains(&marker) {
-            continue;
+        segments += 1;
+        if segments > MAX_JPEG_SEGMENTS {
+            return Err(DecodeError::Unsupported(format!(
+                "the JPEG has more than {MAX_JPEG_SEGMENTS} segments before its image data"
+            )));
         }
-        let length_bytes = bytes
-            .get(offset..offset + 2)
-            .ok_or_else(|| invalid("truncated JPEG segment length"))?;
+        let Some(length_bytes) = bytes.get(offset..offset + 2) else {
+            ended(size, "segment length")?;
+            break;
+        };
         let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
         if length < 2 {
             return Err(invalid("invalid JPEG segment length"));
         }
-        let end = offset
-            .checked_add(length)
-            .ok_or_else(|| invalid("a JPEG offset overflows usize"))?;
-        let segment = bytes
-            .get(offset + 2..end)
-            .ok_or_else(|| invalid("truncated JPEG segment"))?;
-        if marker == 0xe1 && segment.starts_with(b"Exif\0\0") {
-            orientation = exif::orientation(&segment[6..]);
+        let end = offset + length;
+        let Some(segment) = bytes.get(offset + 2..end) else {
+            ended(size, "segment")?;
+            break;
+        };
+        if marker == 0xe1 && orientation.is_none() && segment.starts_with(b"Exif\0\0") {
+            orientation = Some(exif::orientation(&segment[6..]));
         }
-        if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
-            if !matches!(marker, 0xc0..=0xc2) {
-                return Err(DecodeError::Unsupported(format!(
-                    "unsupported JPEG frame type (SOF marker FF{marker:02X})"
-                )));
-            }
-            if segment.len() < 6 {
-                return Err(invalid("truncated JPEG frame header"));
-            }
-            if segment[0] != 8 {
-                return Err(DecodeError::Unsupported(format!(
-                    "unsupported {}-bit JPEG",
-                    segment[0]
-                )));
-            }
-            if segment.len() != 6 + usize::from(segment[5]) * 3 || segment[5] == 0 {
-                return Err(invalid("invalid JPEG frame components"));
-            }
-            let height = u32::from(u16::from_be_bytes([segment[1], segment[2]]));
-            let width = u32::from(u16::from_be_bytes([segment[3], segment[4]]));
-            if width == 0 || height == 0 {
-                return Err(invalid("the JPEG has a width or height of 0"));
-            }
-            let (width, height) = oriented_size(width, height, orientation);
-            return Ok(JpegHeader {
-                info: ImageInfo {
-                    format: ImageFormat::Jpeg,
-                    width,
-                    height,
-                },
-                orientation,
-            });
+        if size.is_none()
+            && (0xc0..=0xcf).contains(&marker)
+            && !matches!(marker, 0xc4 | 0xc8 | 0xcc)
+        {
+            size = Some(frame_size(marker, segment)?);
         }
         if marker == 0xcc {
             return Err(DecodeError::Unsupported(
@@ -400,6 +553,46 @@ fn jpeg_header(bytes: &[u8]) -> Result<JpegHeader, DecodeError> {
         }
         offset = end;
     }
+    let Some((width, height)) = size else {
+        return Err(invalid("the JPEG ends before its frame header"));
+    };
+    let orientation = orientation.unwrap_or(1);
+    let (width, height) = oriented_size(width, height, orientation);
+    Ok(JpegHeader {
+        info: ImageInfo {
+            format: ImageFormat::Jpeg,
+            width,
+            height,
+        },
+        orientation,
+    })
+}
+
+/// The stored size from a frame header (SOF) segment.
+fn frame_size(marker: u8, segment: &[u8]) -> Result<(u32, u32), DecodeError> {
+    if !matches!(marker, 0xc0..=0xc2) {
+        return Err(DecodeError::Unsupported(format!(
+            "unsupported JPEG frame type (SOF marker FF{marker:02X})"
+        )));
+    }
+    if segment.len() < 6 {
+        return Err(invalid("truncated JPEG frame header"));
+    }
+    if segment[0] != 8 {
+        return Err(DecodeError::Unsupported(format!(
+            "unsupported {}-bit JPEG",
+            segment[0]
+        )));
+    }
+    if segment.len() != 6 + usize::from(segment[5]) * 3 || segment[5] == 0 {
+        return Err(invalid("invalid JPEG frame components"));
+    }
+    let height = u32::from(u16::from_be_bytes([segment[1], segment[2]]));
+    let width = u32::from(u16::from_be_bytes([segment[3], segment[4]]));
+    if width == 0 || height == 0 {
+        return Err(invalid("the JPEG has a width or height of 0"));
+    }
+    Ok((width, height))
 }
 
 #[cfg(test)]

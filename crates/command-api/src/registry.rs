@@ -294,7 +294,8 @@ const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     summary: "Move, resize, fade, hide or show a source, or show another image file. Params: \
               source_id, or scene_name (or scene_id) and source_name; any of x, y, width, height, \
               opacity, visible (a hidden source is not drawn; a screen source keeps capturing), \
-              file (image sources: a file name from list_images). Returns the scene list.",
+              file (image sources: a file name from list_images, read again even if it is \
+              the one shown). Returns the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -1398,7 +1399,7 @@ struct UpdateSourceParams {
     opacity: Option<f32>,
     /// Whether the source is drawn; a hidden screen source keeps capturing.
     visible: Option<bool>,
-    /// Image sources: show this PNG or JPEG file from list_images instead.
+    /// Image sources: show this PNG or JPEG file from list_images (read again even if it is the one shown).
     file: Option<String>,
 }
 

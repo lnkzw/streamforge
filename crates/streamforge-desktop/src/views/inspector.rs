@@ -244,7 +244,9 @@ impl DesktopApp {
         let mut chosen = file.to_owned();
         match &self.model.images {
             Some(Ok(list)) => {
-                let listed = list.files.iter().any(|info| info.file_name == file);
+                // A list cut off at its limit may leave the file out.
+                let missing =
+                    list.omitted == 0 && !list.files.iter().any(|info| info.file_name == file);
                 let width = ui.available_width();
                 widgets::dropdown(ui, file, "Image file", width, |ui| {
                     for info in &list.files {
@@ -252,12 +254,12 @@ impl DesktopApp {
                     }
                 })
                 .on_hover_text("Image file");
-                if !listed {
+                if missing {
                     widgets::status_line(
                         ui,
                         StatusLevel::Warn,
-                        "Not in the project folder: the source draws nothing until the file is \
-                         there and read again.",
+                        "Not in the project folder: what was read before (if anything) stays \
+                         until the file is back and read again.",
                     );
                 }
             }

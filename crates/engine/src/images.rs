@@ -4,11 +4,12 @@
 //!
 //! One frame per file name: every source showing a file shows the same
 //! frame, and an unchanged file (same modification time and length) is not
-//! decoded again. All frames together stay within [`MAX_TOTAL_BYTES`].
+//! decoded again. All frames together stay within [`MAX_TOTAL_BYTES`],
+//! counting a file's old frame while a new one replaces it.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,9 +29,6 @@ pub(crate) const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest image file read: more than a maximal image needs, even as an
 /// uncompressed 16-bit PNG.
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
-/// How much of a file `list_images` reads for its size: a PNG's header is
-/// in the first bytes, a JPEG's may follow an EXIF thumbnail.
-const HEADER_PREFIXES: [u64; 2] = [4 * 1024, 256 * 1024];
 
 /// What makes two reads of a file the same file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,20 +128,24 @@ impl ImageStore {
         }
         let bytes = read_up_to(&path, MAX_FILE_BYTES).map_err(|error| io_error(file, &error))?;
         let info = frame_decode::probe(&bytes).map_err(|error| decode_error(file, error))?;
+        Limits::IMAGE
+            .check(info.width, info.height)
+            .map_err(|error| decode_error(file, error))?;
+        // Within the limits, so this cannot overflow. A file's old frame
+        // counts too: it lives until the new one has replaced it.
         let needed = u64::from(info.width) * u64::from(info.height) * 4;
-        let others: u64 = self
+        let used: u64 = self
             .entries
-            .iter()
-            .filter(|(name, _)| name.as_str() != file)
-            .map(|(_, entry)| frame_bytes(&entry.frame))
+            .values()
+            .map(|entry| frame_bytes(&entry.frame))
             .sum();
-        if others + needed > self.max_total_bytes {
+        if used + needed > self.max_total_bytes {
             return Err(image_error(
                 ErrorCode::InvalidParams,
                 file,
                 format!(
                     "`{file}` ({}×{} pixels, {needed} bytes decoded) does not fit: the images \
-                     shown take {others} of at most {} bytes; remove an image source or use a \
+                     read take {used} of at most {} bytes; remove an image source or use a \
                      smaller image",
                     info.width, info.height, self.max_total_bytes
                 ),
@@ -151,7 +153,7 @@ impl ImageStore {
             .with_details(json!({
                 "file": file,
                 "bytes_needed": needed,
-                "bytes_used": others,
+                "bytes_used": used,
                 "max_total_bytes": self.max_total_bytes,
             })));
         }
@@ -182,13 +184,18 @@ impl ImageStore {
         }
     }
 
+    /// Drop the frame of `file`, if any.
+    pub fn forget(&mut self, file: &str) {
+        self.entries.remove(file);
+    }
+
     /// Drop the frames of files that no source shows.
     pub fn retain(&mut self, shown: &HashSet<&str>) {
         self.entries.retain(|file, _| shown.contains(file.as_str()));
     }
 
     /// Where an image goes without a rectangle: its own size at the top
-    /// left, scaled down to the canvas if larger.
+    /// left, scaled down to the canvas if larger (at least a pixel a side).
     pub fn natural_rect(&self, file: &str) -> Option<SourceRect> {
         let frame = self.frame(file)?;
         let (width, height) = (frame.width() as f32, frame.height() as f32);
@@ -198,8 +205,8 @@ impl ImageStore {
         Some(SourceRect {
             x: 0.0,
             y: 0.0,
-            width: width * scale,
-            height: height * scale,
+            width: (width * scale).max(1.0),
+            height: (height * scale).max(1.0),
         })
     }
 }
@@ -235,7 +242,7 @@ pub(crate) fn list(dir: &Path) -> io::Result<ImageFileList> {
     let files = files
         .into_iter()
         .map(|(file_name, metadata)| {
-            let size = header_size(&dir.join(&file_name), metadata.len());
+            let size = header_size(&dir.join(&file_name));
             ImageFileInfo {
                 bytes: metadata.len(),
                 modified_unix_ms: metadata
@@ -252,18 +259,12 @@ pub(crate) fn list(dir: &Path) -> io::Result<ImageFileList> {
     Ok(ImageFileList { files, omitted })
 }
 
-/// The size an image file's header gives, from as little of it as needed.
-fn header_size(path: &Path, len: u64) -> Option<(u32, u32)> {
-    for prefix in HEADER_PREFIXES {
-        let bytes = read_up_to(path, prefix).ok()?;
-        if let Ok(info) = frame_decode::probe(&bytes) {
-            return Some((info.width, info.height));
-        }
-        if len <= prefix {
-            return None;
-        }
-    }
-    None
+/// The size an image file's header gives; a JPEG's other segments are
+/// skipped, not read.
+fn header_size(path: &Path) -> Option<(u32, u32)> {
+    let mut file = BufReader::new(File::open(path).ok()?);
+    let info = frame_decode::probe_reader(&mut file).ok()?;
+    Some((info.width, info.height))
 }
 
 fn read_up_to(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
@@ -374,6 +375,8 @@ impl Engine {
         let mut warnings = Vec::new();
         for file in files {
             if let Err(error) = self.read_image(&file, false) {
+                // A frame from before would contradict the warning.
+                self.images.forget(&file);
                 let names = self.scenes.sources_showing(&file).join("`, `");
                 warnings.push(format!(
                     "image source(s) `{names}` draw nothing: {} (restart_source reads the file \

@@ -19,7 +19,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
 use crate::workspace;
 
-use super::{coordinate_range, labelled, opacity_row};
+use super::{camera_mode_picker, coordinate_range, labelled, opacity_row, refresh_cameras};
 
 const DIALOG_WIDTH: f32 = 420.0;
 /// Problems of a project file shown before the rest are counted.
@@ -643,6 +643,7 @@ fn add_source(
             (SourceType::ColorBars, "Colour bars"),
             (SourceType::Screen, "Screen capture"),
             (SourceType::Image, "Image"),
+            (SourceType::Camera, "Camera"),
         ],
     );
     match form.kind {
@@ -654,6 +655,7 @@ fn add_source(
         }
         SourceType::Screen => screen_source_picker(ui, model, form),
         SourceType::Image => image_picker(ui, model, project_folder, form),
+        SourceType::Camera => camera_picker(ui, model, form),
         SourceType::ColorBars => {}
     }
     // Without a rectangle an image keeps its own size; the rest fill the
@@ -689,7 +691,11 @@ fn add_source(
         form.opacity = (percent / 100.0).clamp(0.0, 1.0);
     }
     ui.add_space(size::SPACE_8);
-    let complete = form.kind != SourceType::Image || form.image_file.is_some();
+    let complete = match form.kind {
+        SourceType::Image => form.image_file.is_some(),
+        SourceType::Camera => form.camera_id.is_some(),
+        _ => true,
+    };
     match buttons(
         ui,
         ButtonKind::Primary,
@@ -1213,6 +1219,77 @@ fn image_picker(
             );
         }
     });
+}
+
+/// Choose a camera from `list_cameras`, and one of its modes or none (the
+/// engine chooses).
+fn camera_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceForm) {
+    refresh_cameras(model);
+    // A camera that a new list leaves out is not sent; a list that failed
+    // says nothing about it.
+    let gone = |id: &String| {
+        model
+            .listed_cameras()
+            .is_some_and(|cameras| !cameras.iter().any(|camera| &camera.camera_id == id))
+    };
+    if form.camera_id.as_ref().is_some_and(gone) {
+        form.camera_id = None;
+        form.camera_mode = None;
+    }
+    match &model.cameras {
+        Some(Ok(cameras)) if !cameras.is_empty() => {
+            const NONE: &str = "Choose a camera";
+            let before = form.camera_id.clone();
+            let find = |id: Option<&str>| {
+                id.and_then(|id| cameras.iter().find(|camera| camera.camera_id == id))
+            };
+            let selected = find(before.as_deref()).map_or(NONE, |camera| camera.name.as_str());
+            let width = ui.available_width();
+            widgets::dropdown(ui, selected, "Camera device", width, |ui| {
+                for camera in cameras {
+                    widgets::choice(
+                        ui,
+                        &mut form.camera_id,
+                        Some(camera.camera_id.clone()),
+                        &camera.name,
+                    )
+                    .on_hover_text(&camera.camera_id);
+                }
+            })
+            .on_hover_text("Camera device");
+            let camera = find(form.camera_id.as_deref());
+            if form.camera_id != before {
+                // A mode the new camera lacks would only be replaced.
+                form.camera_mode = workspace::mode_for_camera(form.camera_mode.as_ref(), camera);
+                // A new choice names an unnamed source after its camera.
+                if let Some(camera) = camera
+                    && form.name.trim().is_empty()
+                    && command_api::is_valid_name(&camera.name)
+                {
+                    camera.name.clone_into(&mut form.name);
+                }
+            }
+            if let Some(camera) = camera {
+                camera_mode_picker(ui, &mut form.camera_mode, camera, width);
+            }
+        }
+        Some(Ok(_)) => {
+            ui.label(TextRole::Meta.text("No cameras found: plug one in and refresh."));
+        }
+        Some(Err(reason)) => {
+            ui.label(TextRole::Meta.text(reason.as_str()));
+        }
+        None => {
+            ui.label(TextRole::Meta.text("Looking for cameras…"));
+        }
+    }
+    if ui
+        .add(Button::new(ButtonKind::Ghost, "Refresh").enabled(!model.listing_cameras()))
+        .on_hover_text("List the cameras again")
+        .clicked()
+    {
+        model.list_cameras();
+    }
 }
 
 /// Cancel and the dialog's action, right-aligned. `Some(true)`: the

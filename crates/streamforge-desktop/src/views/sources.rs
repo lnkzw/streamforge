@@ -66,12 +66,16 @@ impl DesktopApp {
                 let mut rows = Vec::with_capacity(len);
                 for (row_index, source) in scene.sources.iter().rev().enumerate() {
                     let (icon, kind) = kind_label(&source.kind);
-                    let meta = match &source.kind {
-                        SourceKind::Screen { .. } => match self.model.source_health(&source.id) {
-                            SourceHealth::NotCapturing => "screen",
-                            SourceHealth::Capturing { .. } => "screen · live",
-                            SourceHealth::Ended { .. } => "screen · ended",
-                        },
+                    let meta = match (&source.kind, self.model.source_health(&source.id)) {
+                        (SourceKind::Screen { .. }, SourceHealth::NotCapturing) => "screen",
+                        (SourceKind::Screen { .. }, SourceHealth::Capturing { .. }) => {
+                            "screen · live"
+                        }
+                        (SourceKind::Screen { .. }, SourceHealth::Ended { .. }) => "screen · ended",
+                        (SourceKind::Camera { .. }, SourceHealth::Capturing { .. }) => {
+                            "camera · live"
+                        }
+                        (SourceKind::Camera { .. }, SourceHealth::Ended { .. }) => "camera · ended",
                         _ => kind,
                     };
                     let layer = workspace::layer_of_row(row_index, len);

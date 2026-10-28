@@ -1,8 +1,9 @@
 //! The inspector: the selected source's position, size and opacity, a
-//! screen source's capture with its restart, and an image source's file. A
-//! dock in wide windows, a drawer over the workspace in narrow ones.
+//! screen source's capture with its restart, an image source's file, and a
+//! camera source's camera and mode with its capture. A dock in wide
+//! windows, a drawer over the workspace in narrow ones.
 
-use command_api::{SourceKind, SourceSpec};
+use command_api::{CameraModeSpec, SourceKind, SourceSpec};
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
@@ -10,9 +11,12 @@ use crate::model::SourceHealth;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
-use crate::workspace::Shortcut;
+use crate::workspace::{self, Shortcut};
 
-use super::{commit, coordinate_range, kind_label, named, opacity_row, right_to_left, with_keys};
+use super::{
+    camera_mode_picker, commit, coordinate_range, kind_label, named, opacity_row, refresh_cameras,
+    right_to_left, with_keys,
+};
 
 impl DesktopApp {
     pub(crate) fn inspector_dock(&mut self, ui: &mut egui::Ui) {
@@ -135,18 +139,25 @@ impl DesktopApp {
                 .update_source(&source.id, None, Some((percent / 100.0).clamp(0.0, 1.0)));
         }
 
-        if let SourceKind::Screen {
-            capture_target_id, ..
-        } = &source.kind
-        {
-            ui.add_space(size::SPACE_8);
-            widgets::section_header(ui, "Capture", None);
-            self.capture(ui, &source, capture_target_id.is_none());
-        }
-        if let SourceKind::Image { file } = &source.kind {
-            ui.add_space(size::SPACE_8);
-            widgets::section_header(ui, "Image", None);
-            self.image_file(ui, &source.id, file);
+        match &source.kind {
+            SourceKind::Screen { .. } => {
+                ui.add_space(size::SPACE_8);
+                widgets::section_header(ui, "Capture", None);
+                self.capture(ui, &source);
+            }
+            SourceKind::Image { file } => {
+                ui.add_space(size::SPACE_8);
+                widgets::section_header(ui, "Image", None);
+                self.image_file(ui, &source.id, file);
+            }
+            SourceKind::Camera { camera_id, mode } => {
+                ui.add_space(size::SPACE_8);
+                widgets::section_header(ui, "Camera", None);
+                self.camera(ui, &source.id, camera_id, mode.as_ref());
+                ui.add_space(size::SPACE_4);
+                self.capture(ui, &source);
+            }
+            SourceKind::ColorBars | SourceKind::Solid { .. } => {}
         }
 
         ui.add_space(size::SPACE_16);
@@ -165,12 +176,19 @@ impl DesktopApp {
         }
     }
 
-    /// A screen source's capture state, and a restart while it has a
-    /// capture (running or ended). Restarting ends a working capture, so
-    /// that asks first. An ended named source can restart on another
-    /// listed source: a closed window's id does not come back.
-    fn capture(&mut self, ui: &mut egui::Ui, source: &SourceSpec, picker: bool) {
+    /// A screen or camera source's capture state (a camera's with the mode
+    /// it runs in), and a restart while it has a capture (running or
+    /// ended). Restarting ends a working capture, so that asks first. An
+    /// ended named screen source can restart on another listed source: a
+    /// closed window's id does not come back.
+    fn capture(&mut self, ui: &mut egui::Ui, source: &SourceSpec) {
         let id = source.id.as_str();
+        let (screen, picker) = match &source.kind {
+            SourceKind::Screen {
+                capture_target_id, ..
+            } => (true, capture_target_id.is_none()),
+            _ => (false, false),
+        };
         let ended = match self.model.source_health(id) {
             SourceHealth::NotCapturing => {
                 widgets::status_line(
@@ -193,6 +211,19 @@ impl DesktopApp {
                     (_, seconds) => format!("Capturing, last frame {seconds} s ago"),
                 };
                 widgets::status_line(ui, StatusLevel::Ok, &text);
+                if let Some(format) = self
+                    .model
+                    .source_capture(id)
+                    .and_then(|capture| capture.format.as_ref())
+                {
+                    ui.label(TextRole::Meta.text(format!(
+                        "Runs in {}×{} · {} · {}",
+                        format.width,
+                        format.height,
+                        workspace::fps_text(format.framerate),
+                        format.pixel_format
+                    )));
+                }
                 false
             }
             SourceHealth::Ended { reason } => {
@@ -200,7 +231,7 @@ impl DesktopApp {
                 true
             }
         };
-        let target = if ended && !picker {
+        let target = if ended && screen && !picker {
             self.restart_target(ui, id)
         } else {
             None
@@ -302,6 +333,89 @@ impl DesktopApp {
                 self.model.list_images();
             }
         });
+    }
+
+    /// A camera source's camera and mode: another listed camera (keeping
+    /// the mode where it has it), or another of its modes. A running camera
+    /// opens again with them, which can take seconds; until the engine
+    /// answers, the choices wait, so a second one does not build on the
+    /// camera being replaced.
+    fn camera(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        camera_id: &str,
+        mode: Option<&CameraModeSpec>,
+    ) {
+        refresh_cameras(&mut self.model);
+        let label = workspace::camera_label(camera_id, self.model.listed_cameras());
+        let width = ui.available_width();
+        let mut chosen = camera_id.to_owned();
+        let mut chosen_mode = mode.copied();
+        let mut mode_changed = false;
+        let fixed_mode = |ui: &mut egui::Ui| {
+            ui.label(TextRole::Body.text(format!("Mode: {}", workspace::camera_mode_label(mode))));
+        };
+        let changing = self.model.pending("update_source");
+        match &self.model.cameras {
+            Some(Ok(cameras)) => {
+                ui.add_enabled_ui(!changing, |ui| {
+                    widgets::dropdown(ui, &label.text, "Camera device", width, |ui| {
+                        for camera in cameras {
+                            widgets::choice(
+                                ui,
+                                &mut chosen,
+                                camera.camera_id.clone(),
+                                &camera.name,
+                            )
+                            .on_hover_text(&camera.camera_id);
+                        }
+                    })
+                    .on_hover_text(&label.detail)
+                    .on_disabled_hover_text("Waiting for the engine");
+                    if label.missing {
+                        widgets::status_line(ui, StatusLevel::Warn, &label.detail);
+                    }
+                    match cameras.iter().find(|camera| camera.camera_id == camera_id) {
+                        Some(camera) => {
+                            mode_changed = camera_mode_picker(ui, &mut chosen_mode, camera, width);
+                        }
+                        // Its modes are not known; the mode it asks for stays.
+                        None => fixed_mode(ui),
+                    }
+                });
+            }
+            Some(Err(reason)) => {
+                ui.label(TextRole::Body.text(&label.text));
+                fixed_mode(ui);
+                widgets::status_line(ui, StatusLevel::Error, reason);
+            }
+            None => {
+                ui.label(TextRole::Body.text(&label.text));
+                fixed_mode(ui);
+            }
+        }
+        if chosen != camera_id {
+            let camera = self
+                .model
+                .listed_cameras()
+                .and_then(|cameras| cameras.iter().find(|camera| camera.camera_id == chosen));
+            let mode = workspace::mode_for_camera(mode, camera);
+            self.model
+                .set_source_camera(id, Some(&chosen), mode.as_ref());
+        } else if mode_changed {
+            self.model.set_source_camera(id, None, chosen_mode.as_ref());
+        }
+        if ui
+            .add(
+                Button::new(ButtonKind::Ghost, "Refresh list")
+                    .enabled(!self.model.listing_cameras()),
+            )
+            .on_hover_text("List the cameras again")
+            .clicked()
+        {
+            self.model.list_cameras();
+        }
     }
 
     /// For an ended named source: restart on the same id, or on another

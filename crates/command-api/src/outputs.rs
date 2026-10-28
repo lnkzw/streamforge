@@ -284,20 +284,22 @@ pub struct PipelineReport {
     pub render: Option<RenderStats>,
     pub mix: Option<MixStats>,
     pub audio_captures: Vec<CaptureOutcome>,
-    /// Screen captures of scene sources during this run (the most recent
-    /// 64; `scene_captures_omitted` counts older ones).
+    /// Screen and camera captures of scene sources during this run (the
+    /// most recent 64; `scene_captures_omitted` counts older ones).
     pub scene_captures: Vec<SceneCaptureOutcome>,
     pub scene_captures_omitted: u64,
     /// The monitor at the end of the run, if it was switched on in it.
     pub monitor: Option<MonitorHealth>,
 }
 
-/// How the screen capture of one scene source ended.
+/// How the screen or camera capture of one scene source ended.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SceneCaptureOutcome {
     /// The scene source's id (as in `list_scenes`) and name.
     pub id: String,
     pub name: String,
+    /// `screen` or `camera`.
+    pub kind: crate::CaptureKind,
     pub report: Option<VideoCaptureReport>,
     pub error: Option<ErrorSummary>,
 }

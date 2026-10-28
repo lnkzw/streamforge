@@ -1,6 +1,7 @@
-use capture_api::{CursorMode, VideoSourceKind};
+use capture_api::{CursorMode, Rational, VideoSourceKind};
 use command_api::{
-    ChannelInput, EncoderPreference, MAX_AUX_BUSES, MAX_CHANNELS, Rgba, SendSpec, SendTap,
+    CameraModeSpec, ChannelInput, EncoderPreference, MAX_AUX_BUSES, MAX_CHANNELS, Rgba, SendSpec,
+    SendTap,
 };
 
 use super::*;
@@ -964,6 +965,63 @@ fn an_image_source_round_trips_in_version_4_only() {
     as_version(&mut old, 3);
     assert_eq!(
         only(&old, "unknown kind `image` in schema version 1 to 3"),
+        "scenes[1].sources[1].kind"
+    );
+}
+
+#[test]
+fn a_camera_source_round_trips_in_version_4_only() {
+    let mut with_cameras = project();
+    let camera = |id: &str, name: &str, mode| SourceSpec {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        kind: SourceKind::Camera {
+            camera_id: "v4l2_input.usb-cam".to_owned(),
+            mode,
+        },
+        rect: rect(0.0, 0.0, 640.0, 360.0),
+        opacity: 1.0,
+        visible: true,
+    };
+    with_cameras.scenes[1].sources.extend([
+        camera(
+            "src_cam00000001",
+            "cam",
+            Some(CameraModeSpec {
+                width: Some(1280),
+                height: Some(720),
+                fps: Some(Rational::integer(30)),
+            }),
+        ),
+        camera("src_cam00000002", "auto", None),
+    ]);
+    let bytes = to_json(&with_cameras, CANVAS);
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let cam = &value["scenes"][1]["sources"][1];
+    assert_eq!(cam["kind"], "camera");
+    assert_eq!(cam["camera_id"], "v4l2_input.usb-cam");
+    assert_eq!(
+        cam["mode"],
+        json!({"width": 1280, "height": 720, "fps": {"num": 30, "den": 1}})
+    );
+    // The engine's choice is no field.
+    assert!(value["scenes"][1]["sources"][2].get("mode").is_none());
+    assert_eq!(parse(&bytes, CANVAS).unwrap().project, with_cameras);
+
+    // The mode follows the camera source's rule.
+    let mut bad = value.clone();
+    bad["scenes"][1]["sources"][1]["mode"] = json!({"width": 1280});
+    assert_eq!(
+        only(&bad, "give `mode.width` and `mode.height` together"),
+        "scenes[1].sources[1]"
+    );
+
+    // Version 3 had no camera sources.
+    let mut old = value;
+    old["scenes"][1]["sources"].as_array_mut().unwrap().pop();
+    as_version(&mut old, 3);
+    assert_eq!(
+        only(&old, "unknown kind `camera` in schema version 1 to 3"),
         "scenes[1].sources[1].kind"
     );
 }

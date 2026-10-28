@@ -47,9 +47,10 @@ pub use registry::{
     is_valid_name, params_schema, project_file_name, registry,
 };
 pub use scenes::{
-    AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
-    MoveSourceRequest, PreviewState, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef,
-    SceneSpec, SourceKind, SourceRect, SourceRef, SourceSpec, UpdateSourceRequest,
+    AddSourceRequest, CameraModeSpec, MAX_CAMERA_FPS, MAX_CAMERA_SIDE, MAX_COORDINATE, MAX_ID_LEN,
+    MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES, MoveSourceRequest, PreviewState, Rgba,
+    SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SceneList, SceneRef, SceneSpec, SourceKind, SourceRect,
+    SourceRef, SourceSpec, UpdateSourceRequest,
 };
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not

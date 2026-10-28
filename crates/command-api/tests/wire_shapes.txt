@@ -3,7 +3,7 @@
 # --test wire_shapes. A change here changes protocol v1.
 
 == enum values
-CaptureKind: screen|audio
+CaptureKind: screen|audio|camera
 CaptureState: running|ended
 ChannelInput: device|tone
 CommandAccess: read_only|control|sensitive
@@ -13,7 +13,7 @@ ErrorCode: unknown_command|invalid_params|invalid_state|unsupported|unavailable|
 OutputKind: recording|stream|monitor
 RecordingState: running|failed
 SendTap: pre_fader|post_fader
-SourceKind: color_bars|solid|screen|image
+SourceKind: color_bars|solid|screen|image|camera
 StreamState: connecting|connected|reconnecting|failed|stopped
 VideoSourceKind: monitor|window|virtual
 
@@ -45,6 +45,13 @@ session_type: string
 == get_health
 captures: array
 captures[]: object
+captures[].format: absent|object
+captures[].format.framerate: absent|object
+captures[].format.framerate.den: absent|number
+captures[].format.framerate.num: absent|number
+captures[].format.height: absent|number
+captures[].format.pixel_format: absent|string
+captures[].format.width: absent|number
 captures[].id: string
 captures[].kind: string
 captures[].name: string
@@ -295,6 +302,7 @@ scenes[].id: string
 scenes[].name: string
 scenes[].sources: array
 scenes[].sources[]: object
+scenes[].sources[].camera_id: absent|string
 scenes[].sources[].capture_target_id: absent|string
 scenes[].sources[].color: absent|string
 scenes[].sources[].cursor_mode: absent|string
@@ -302,6 +310,12 @@ scenes[].sources[].file: absent|string
 scenes[].sources[].height: number
 scenes[].sources[].id: string
 scenes[].sources[].kind: string
+scenes[].sources[].mode: absent|object
+scenes[].sources[].mode.fps: absent|object
+scenes[].sources[].mode.fps.den: absent|number
+scenes[].sources[].mode.fps.num: absent|number
+scenes[].sources[].mode.height: absent|number
+scenes[].sources[].mode.width: absent|number
 scenes[].sources[].name: string
 scenes[].sources[].opacity: number
 scenes[].sources[].target_kinds: absent|array
@@ -310,6 +324,8 @@ scenes[].sources[].visible: bool
 scenes[].sources[].width: number
 scenes[].sources[].x: number
 scenes[].sources[].y: number
+warnings: array
+warnings[]: string
 
 == load_project
 active_scene_id: string
@@ -362,6 +378,7 @@ scenes[].id: string
 scenes[].name: string
 scenes[].sources: array
 scenes[].sources[]: object
+scenes[].sources[].camera_id: absent|string
 scenes[].sources[].capture_target_id: absent|string
 scenes[].sources[].color: absent|string
 scenes[].sources[].cursor_mode: absent|string
@@ -369,6 +386,12 @@ scenes[].sources[].file: absent|string
 scenes[].sources[].height: number
 scenes[].sources[].id: string
 scenes[].sources[].kind: string
+scenes[].sources[].mode: absent|object
+scenes[].sources[].mode.fps: absent|object
+scenes[].sources[].mode.fps.den: absent|number
+scenes[].sources[].mode.fps.num: absent|number
+scenes[].sources[].mode.height: absent|number
+scenes[].sources[].mode.width: absent|number
 scenes[].sources[].name: string
 scenes[].sources[].opacity: number
 scenes[].sources[].target_kinds: absent|array
@@ -821,6 +844,7 @@ pipeline.scene_captures[].error.code: string
 pipeline.scene_captures[].error.details: object
 pipeline.scene_captures[].error.message: string
 pipeline.scene_captures[].id: string
+pipeline.scene_captures[].kind: string
 pipeline.scene_captures[].name: string
 pipeline.scene_captures[].report: object
 pipeline.scene_captures[].report.backend: string
@@ -1059,6 +1083,7 @@ pipeline.scene_captures[].error.code: string
 pipeline.scene_captures[].error.details: object
 pipeline.scene_captures[].error.message: string
 pipeline.scene_captures[].id: string
+pipeline.scene_captures[].kind: string
 pipeline.scene_captures[].name: string
 pipeline.scene_captures[].report: object
 pipeline.scene_captures[].report.backend: string
@@ -1295,6 +1320,7 @@ pipeline.scene_captures[].error.code: string
 pipeline.scene_captures[].error.details: object
 pipeline.scene_captures[].error.message: string
 pipeline.scene_captures[].id: string
+pipeline.scene_captures[].kind: string
 pipeline.scene_captures[].name: string
 pipeline.scene_captures[].report: object
 pipeline.scene_captures[].report.backend: string
@@ -1531,6 +1557,7 @@ pipeline.scene_captures[].error.code: string
 pipeline.scene_captures[].error.details: object
 pipeline.scene_captures[].error.message: string
 pipeline.scene_captures[].id: string
+pipeline.scene_captures[].kind: string
 pipeline.scene_captures[].name: string
 pipeline.scene_captures[].report: object
 pipeline.scene_captures[].report.backend: string
@@ -1775,6 +1802,7 @@ pipeline.scene_captures[].error.code: string
 pipeline.scene_captures[].error.details: object
 pipeline.scene_captures[].error.message: string
 pipeline.scene_captures[].id: string
+pipeline.scene_captures[].kind: string
 pipeline.scene_captures[].name: string
 pipeline.scene_captures[].report: object
 pipeline.scene_captures[].report.backend: string

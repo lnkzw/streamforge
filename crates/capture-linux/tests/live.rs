@@ -650,7 +650,7 @@ fn capture_test_camera(
     mut inspect: impl FnMut(&VideoFrame),
 ) -> VideoCaptureReport {
     let node = TestNode::camera(format);
-    let stream = PipeWireCamera::new()
+    let camera = PipeWireCamera::new()
         .start_camera_stream(&CameraRequest {
             camera_id: node.name.clone(),
             size: None,
@@ -658,6 +658,13 @@ fn capture_test_camera(
         })
         .unwrap_or_else(|err| panic!("start the {format:?} camera: {err:?}"));
     let (width, height) = format.size();
+    let negotiated = camera.format.expect("the negotiated format");
+    assert_eq!(
+        (negotiated.width, negotiated.height, negotiated.framerate),
+        (width, height, Rational::integer(30))
+    );
+    assert!(camera.warnings.is_empty(), "{:?}", camera.warnings);
+    let stream = camera.stream;
     assert_eq!(
         (stream.source().width, stream.source().height),
         (Some(width), Some(height))
@@ -800,7 +807,8 @@ fn a_removed_camera_ends_its_capture() {
             size: None,
             fps: None,
         })
-        .expect("start the camera");
+        .expect("start the camera")
+        .stream;
     node.remove();
     assert!(
         wait_until(Duration::from_secs(3), || stream.state()

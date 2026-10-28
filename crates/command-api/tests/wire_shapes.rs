@@ -26,10 +26,10 @@ use capture_api::{
     VideoStats,
 };
 use command_api::{
-    AudioInputList, AudioOutputList, BusState, CameraList, CaptureHealth, CaptureKind,
-    CaptureOutcome, CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandAccess,
-    CommandList, CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary,
-    HealthReport, ImageFileInfo, ImageFileList, MixReport, MixerState, MonitorHealth,
+    AudioInputList, AudioOutputList, BusState, CameraList, CameraModeSpec, CaptureHealth,
+    CaptureKind, CaptureOutcome, CaptureTargetList, ChannelInput, ChannelSpec, ChannelState,
+    CommandAccess, CommandList, CommandOutput, CompositeReport, EngineStatus, ErrorCode,
+    ErrorSummary, HealthReport, ImageFileInfo, ImageFileList, MixReport, MixerState, MonitorHealth,
     MonitorProfile, OutputHealth, OutputKind, OutputMix, OutputProfileSet, OutputProfiles,
     PipelineReport, PreviewState, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem,
     ProjectSaved, ProjectValidation, RecordingProfile, RecordingReport, RecordingStarted,
@@ -507,7 +507,7 @@ fn enum_values() -> BTreeSet<String> {
         CaptureState::Running | CaptureState::Ended { .. } => {}
     };
     let _ = |kind: CaptureKind| match kind {
-        CaptureKind::Screen | CaptureKind::Audio => {}
+        CaptureKind::Screen | CaptureKind::Audio | CaptureKind::Camera => {}
     };
     use OutputKind as O;
     let _ = |output: O| match output {
@@ -524,7 +524,8 @@ fn enum_values() -> BTreeSet<String> {
         SourceKind::ColorBars
         | SourceKind::Solid { .. }
         | SourceKind::Screen { .. }
-        | SourceKind::Image { .. } => {}
+        | SourceKind::Image { .. }
+        | SourceKind::Camera { .. } => {}
     };
     let _ = |input: ChannelInput| match input {
         ChannelInput::Device { .. } | ChannelInput::Tone { .. } => {}
@@ -576,7 +577,7 @@ fn enum_values() -> BTreeSet<String> {
         line(
             "CaptureKind",
             None,
-            &[CaptureKind::Screen, CaptureKind::Audio],
+            &[CaptureKind::Screen, CaptureKind::Audio, CaptureKind::Camera],
         ),
         line("OutputKind", None, &[O::Recording, O::Stream, O::Monitor]),
         line(
@@ -600,6 +601,10 @@ fn enum_values() -> BTreeSet<String> {
                 },
                 SourceKind::Image {
                     file: String::new(),
+                },
+                SourceKind::Camera {
+                    camera_id: String::new(),
+                    mode: None,
                 },
             ],
         ),
@@ -919,6 +924,7 @@ fn pipeline() -> PipelineReport {
         scene_captures: vec![SceneCaptureOutcome {
             id: "src_desk".to_owned(),
             name: "desk".to_owned(),
+            kind: CaptureKind::Screen,
             report: Some(video_capture()),
             error: Some(error()),
         }],
@@ -995,6 +1001,19 @@ fn health() -> HealthReport {
                 id: "src_desk".to_owned(),
                 name: "desk".to_owned(),
                 state: CaptureState::Running,
+                format: None,
+            },
+            CaptureHealth {
+                kind: CaptureKind::Camera,
+                id: "src_cam".to_owned(),
+                name: "cam".to_owned(),
+                state: CaptureState::Running,
+                format: Some(VideoFormatInfo {
+                    pixel_format: "YUY2".to_owned(),
+                    width: 1280,
+                    height: 720,
+                    framerate: Rational::integer(30),
+                }),
             },
             CaptureHealth {
                 kind: CaptureKind::Audio,
@@ -1003,6 +1022,7 @@ fn health() -> HealthReport {
                 state: CaptureState::Ended {
                     reason: "the device was removed".to_owned(),
                 },
+                format: None,
             },
         ],
     }
@@ -1091,8 +1111,28 @@ fn scene_list() -> SceneList {
                         file: "logo.png".to_owned(),
                     },
                 ),
+                source(
+                    "src_cam",
+                    SourceKind::Camera {
+                        camera_id: "v4l2_input.usb-cam".to_owned(),
+                        mode: Some(CameraModeSpec {
+                            width: Some(1280),
+                            height: Some(720),
+                            fps: Some(Rational::integer(30)),
+                        }),
+                    },
+                ),
+                // The engine chooses the mode, which is then left out.
+                source(
+                    "src_auto",
+                    SourceKind::Camera {
+                        camera_id: "v4l2_input.usb-cam".to_owned(),
+                        mode: None,
+                    },
+                ),
             ],
         }],
+        warnings: vec!["camera `v4l2_input.usb-cam` has no 1280x720 mode".to_owned()],
     }
 }
 

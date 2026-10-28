@@ -2,7 +2,7 @@
 //! reports count, while it happens.
 
 use audio_engine::{LiveMixStats, PlaybackFeedStats};
-use capture_api::CaptureState;
+use capture_api::{CaptureState, VideoFormatInfo};
 use encoder_api::{LiveConnectionStats, LiveOutputStats, StreamState, VideoEncoderInfo};
 
 use crate::RecordingState;
@@ -24,9 +24,10 @@ pub struct HealthReport {
     pub streaming: Option<OutputHealth<StreamState>>,
     /// The monitor, once it was switched on in this run.
     pub monitor: Option<MonitorHealth>,
-    /// Every running capture: screen sources of the scenes and live audio
-    /// inputs. An `ended` capture delivers nothing more. Screen sources can
-    /// be started again with `restart_source`; audio inputs cannot.
+    /// Every running capture: screen and camera sources of the scenes and
+    /// live audio inputs. An `ended` capture delivers nothing more. Screen
+    /// and camera sources can be started again with `restart_source`; audio
+    /// inputs cannot.
     pub captures: Vec<CaptureHealth>,
 }
 
@@ -35,6 +36,7 @@ pub struct HealthReport {
 pub enum CaptureKind {
     Screen,
     Audio,
+    Camera,
 }
 
 impl CaptureKind {
@@ -42,6 +44,7 @@ impl CaptureKind {
         match self {
             Self::Screen => "screen",
             Self::Audio => "audio",
+            Self::Camera => "camera",
         }
     }
 }
@@ -58,6 +61,9 @@ pub struct CaptureHealth {
     /// `{"state": "running"}` or `{"state": "ended", "reason": ...}`.
     #[serde(flatten)]
     pub state: CaptureState,
+    /// A camera's negotiated size, rate and pixel format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<VideoFormatInfo>,
 }
 
 /// The monitor's playback (ADR 0017).
@@ -110,7 +116,7 @@ mod tests {
 
     #[test]
     fn capture_kind_names_match_the_wire() {
-        for kind in [CaptureKind::Screen, CaptureKind::Audio] {
+        for kind in [CaptureKind::Screen, CaptureKind::Audio, CaptureKind::Camera] {
             assert_eq!(json!(kind), json!(kind.as_str()));
         }
     }
@@ -130,6 +136,7 @@ mod tests {
                 state: CaptureState::Ended {
                     reason: "the captured window was closed".to_owned(),
                 },
+                format: None,
             }],
             streaming: Some(OutputHealth {
                 target: "rtmp://example.com/live/<stream key>".to_owned(),

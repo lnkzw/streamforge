@@ -93,14 +93,20 @@ impl SceneCollection {
             active_scene_name: active.name.clone(),
             active_scene_id: active.id.clone(),
             scenes: self.scenes.clone(),
+            warnings: Vec::new(),
         }
     }
 
-    /// Ids of the screen sources in any scene (their captures may keep
-    /// running while another scene is shown).
-    pub fn screen_source_ids(&self) -> Vec<String> {
+    /// Ids of the screen and camera sources in any scene (their captures
+    /// may keep running while another scene is shown).
+    pub fn capture_source_ids(&self) -> Vec<String> {
         self.sources()
-            .filter(|source| matches!(source.kind, SourceKind::Screen { .. }))
+            .filter(|source| {
+                matches!(
+                    source.kind,
+                    SourceKind::Screen { .. } | SourceKind::Camera { .. }
+                )
+            })
             .map(|source| source.id.clone())
             .collect()
     }
@@ -296,6 +302,24 @@ impl SceneCollection {
             };
             shown.clone_from(file);
         }
+        if request.camera_id.is_some() || request.mode.is_some() {
+            let SourceKind::Camera { camera_id, mode } = &mut source.kind else {
+                return Err(CommandError::new(
+                    ErrorCode::InvalidParams,
+                    format!(
+                        "`{}` is not a camera source; only camera sources have a `camera_id` \
+                         and a `mode`",
+                        source.name
+                    ),
+                ));
+            };
+            if let Some(id) = &request.camera_id {
+                camera_id.clone_from(id);
+            }
+            if let Some(wanted) = request.mode {
+                *mode = (!wanted.is_auto()).then_some(wanted);
+            }
+        }
         let rect = &mut source.rect;
         rect.x = request.x.unwrap_or(rect.x);
         rect.y = request.y.unwrap_or(rect.y);
@@ -433,16 +457,16 @@ impl FrameCache {
     }
 }
 
-/// Inputs the build can use besides its own static frames: screen captures
-/// by source id, and the image sources' frames.
+/// Inputs the build can use besides its own static frames: screen and
+/// camera captures by source id, and the image sources' frames.
 pub(crate) struct LiveFrames<'a> {
-    pub screens: &'a [(String, Arc<FrameMailbox>)],
+    pub captures: &'a [(String, Arc<FrameMailbox>)],
     pub images: &'a ImageStore,
 }
 
-/// Turn `scene` into compositor input. Screen sources without a running
-/// capture and image sources without a frame (their file was missing when
-/// a project loaded) are left out.
+/// Turn `scene` into compositor input. Screen and camera sources without a
+/// capture (or whose camera was not found) and image sources without a
+/// frame (their file was missing when a project loaded) are left out.
 pub(crate) fn build(
     scene: &SceneSpec,
     live: &LiveFrames<'_>,
@@ -467,8 +491,9 @@ pub(crate) fn build(
                 stretched(spec, id.clone(), SOLID_SIZE, SOLID_SIZE),
                 SourceInput::Static(cache.solid(*color)?),
             ),
-            SourceKind::Screen { .. } => {
-                let Some((_, mailbox)) = live.screens.iter().find(|(source, _)| *source == spec.id)
+            SourceKind::Screen { .. } | SourceKind::Camera { .. } => {
+                let Some((_, mailbox)) =
+                    live.captures.iter().find(|(source, _)| *source == spec.id)
                 else {
                     continue;
                 };
@@ -567,7 +592,7 @@ mod tests {
         let update = build(
             collection.active(),
             &LiveFrames {
-                screens: &[],
+                captures: &[],
                 images: &ImageStore::default(),
             },
             &mut FrameCache::default(),
@@ -582,7 +607,7 @@ mod tests {
     fn only_the_builtin_overlay_in_place_is_animated() {
         let mut collection = SceneCollection::new();
         let none = LiveFrames {
-            screens: &[],
+            captures: &[],
             images: &ImageStore::default(),
         };
         let mut cache = FrameCache::default();
@@ -596,6 +621,8 @@ mod tests {
                 opacity: None,
                 visible: None,
                 file: None,
+                camera_id: None,
+                mode: None,
             })
             .expect("move");
         // Moved by the user: it stays where it was put.
@@ -815,6 +842,8 @@ mod tests {
                 opacity: None,
                 visible: Some(false),
                 file: None,
+                camera_id: None,
+                mode: None,
             })
             .expect("hide");
         let scene = collection.get(&SceneRef::name("Show")).expect("scene");
@@ -824,7 +853,7 @@ mod tests {
         let update = build(
             scene,
             &LiveFrames {
-                screens: &[],
+                captures: &[],
                 images: &ImageStore::default(),
             },
             &mut FrameCache::default(),
@@ -864,7 +893,7 @@ mod tests {
             .clone();
         let mut cache = FrameCache::default();
         let none = LiveFrames {
-            screens: &[],
+            captures: &[],
             images: &ImageStore::default(),
         };
         let first = build(&scene, &none, &mut cache).expect("build");
@@ -882,7 +911,7 @@ mod tests {
         let with_capture = build(
             &scene,
             &LiveFrames {
-                screens: &[(screen_id, Arc::clone(&mailbox))],
+                captures: &[(screen_id, Arc::clone(&mailbox))],
                 images: &ImageStore::default(),
             },
             &mut cache,

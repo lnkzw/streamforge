@@ -56,6 +56,8 @@ Protocol v1 is stable since 0.1.0 (`docs/protocol.md`), so everything below is a
 - **Health:** `get_health.captures` and the pipeline report gain the kind `camera` with the negotiated size, rate and format.
 - **Placement:** without a rectangle, the whole canvas, fitted with its aspect kept.
 
+Implemented in step 4b2 (the engine's `camera` kind), with these choices confirmed by the project owner on 2026-10-28: the mode is an object, `"mode": {"width", "height", "fps"}`, since a source's flat `width` and `height` are its rectangle; each member is optional (`width` and `height` together), so an entry of `list_cameras`' `modes` fits as it is, and an empty or missing `mode` lets the engine choose. `update_source` changes a camera source's `camera_id` and `mode`, and with them needs `sensitive`. The scene list gains `warnings` for the cameras a command started. A camera that is reopened (`restart_source`, a new camera or mode) closes first, since a running PipeWire camera hands a new stream its running mode and Windows and macOS open a camera once; a failed change is undone and the old camera opens again. `get_health.captures` gives a camera's `format`, and `pipeline.scene_captures` entries gain `kind`. The backend returns the negotiated format and the mode warnings with the stream (`CameraStream`). A camera that is not found is kept as a capture that ended (`could not start: …`), so `restart_source` reopens it and switching scenes does not retry it.
+
 ### Capture traits
 
 `CaptureBackend` is split into three traits in `capture-api`:

@@ -21,14 +21,15 @@ use audio_engine::{
     MixerThread, PlaybackFeed, RATE,
 };
 use capture_api::{
-    AudioDevices, AudioStream, Capture, CaptureErrorKind, CaptureState, PlaybackRequest,
-    PlaybackStream, ScreenCapture, ScreenSelection, VideoStream,
+    AudioDevices, AudioStream, CameraCapture, CameraRequest, Capture, CaptureErrorKind,
+    CaptureState, PlaybackRequest, PlaybackStream, ScreenCapture, ScreenSelection, VideoFormatInfo,
+    VideoStream,
 };
 use command_api::{
-    AudioGraphSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError, ErrorCode,
-    ErrorSummary, MixerState, MonitorHealth, PROGRAM_BUS_ID, PROGRAM_BUS_NAME, PipelineReport,
-    SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec, UpdateBusRequest,
-    UpdateChannelRequest,
+    AudioGraphSpec, CameraModeSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError,
+    ErrorCode, ErrorSummary, MixerState, MonitorHealth, PROGRAM_BUS_ID, PROGRAM_BUS_NAME,
+    PipelineReport, SceneCaptureOutcome, SceneSpec, SetSendRequest, SourceKind, SourceSpec,
+    UpdateBusRequest, UpdateChannelRequest,
 };
 use encoder_ffmpeg::{MAX_AUDIO_TRACKS, OutputInput};
 use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame, sample_ring};
@@ -54,8 +55,8 @@ pub(crate) const PREVIEW_FACTOR: u32 = 4;
 pub(crate) const PREVIEW_EVERY: u64 = 2;
 /// The newest preview frame, one in the mailbox and one being drawn.
 const PREVIEW_BUFFERS: usize = 3;
-/// Capture outcomes of removed screen sources kept for the report (the most
-/// recent ones; older ones are counted).
+/// Capture outcomes of removed screen and camera sources kept for the
+/// report (the most recent ones; older ones are counted).
 const MAX_RETIRED_CAPTURES: usize = 64;
 /// How long finishing an output waits for producers running late.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -72,11 +73,47 @@ pub(crate) enum OutputId {
     Streaming,
 }
 
+/// The capture of a screen or camera source.
 struct SceneCapture {
     /// The scene source's id.
     id: String,
     name: String,
-    stream: Box<dyn VideoStream>,
+    kind: CaptureKind,
+    /// `Err`: a camera that did not start (it was not found, or a restart
+    /// failed); the source draws nothing until `restart_source`.
+    stream: Result<Box<dyn VideoStream>, ErrorSummary>,
+    /// A camera's negotiated format.
+    format: Option<VideoFormatInfo>,
+    /// Why a camera runs in another mode than asked, or shows nothing;
+    /// repeated by the run's warnings.
+    warnings: Vec<String>,
+}
+
+impl SceneCapture {
+    fn state(&self) -> CaptureState {
+        match &self.stream {
+            Ok(stream) => stream.state(),
+            Err(error) => CaptureState::Ended {
+                reason: format!("could not start: {}", error.message),
+            },
+        }
+    }
+
+    /// A camera that did not start, with why.
+    fn failed(source: &SourceSpec, error: ErrorSummary) -> Self {
+        let warning = format!(
+            "camera source `{}` shows nothing: {}",
+            source.name, error.message
+        );
+        Self {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            kind: CaptureKind::Camera,
+            stream: Err(error),
+            format: None,
+            warnings: vec![warning],
+        }
+    }
 }
 
 /// A device channel's capture for one run.
@@ -193,8 +230,8 @@ pub(crate) struct Pipeline {
     compositor: Compositor,
     mixer: MixerThread,
     control: MixerControl,
-    scene_screens: Vec<SceneCapture>,
-    retired_screens: Vec<SceneCaptureOutcome>,
+    scene_captures: Vec<SceneCapture>,
+    retired_captures: Vec<SceneCaptureOutcome>,
     retired_omitted: u64,
     audio_streams: Vec<DeviceCapture>,
     /// The monitor's device, once it was switched on in this run; after the
@@ -242,7 +279,7 @@ impl Pipeline {
         images: &ImageStore,
         audio: AudioGraphSpec,
     ) -> Result<Self, CommandError> {
-        let scene_screens = start_screens(capture.screen.as_mut(), scene, &[])?;
+        let scene_captures = start_captures(capture, scene, &[])?;
         // On an error, the captures already started are dropped, which
         // stops them.
         let audio_streams = audio::devices(&audio)
@@ -253,7 +290,7 @@ impl Pipeline {
         let update = scenes::build(
             scene,
             &LiveFrames {
-                screens: &mailboxes(&scene_screens),
+                captures: &mailboxes(&scene_captures),
                 images,
             },
             &mut cache,
@@ -285,8 +322,8 @@ impl Pipeline {
             compositor,
             mixer,
             control,
-            scene_screens,
-            retired_screens: Vec::new(),
+            scene_captures,
+            retired_captures: Vec::new(),
             retired_omitted: 0,
             audio_streams,
             monitor: None,
@@ -444,21 +481,22 @@ impl Pipeline {
     }
 
     /// Render `scene` from the next frame on: start captures for its new
-    /// screen sources (opens the picker), then swap the compositor's scene,
-    /// then end captures of screen sources no longer in any scene (`keep`
-    /// lists those that still exist, so switching back and forth between
-    /// scenes does not ask again). Starting a picker source waits for the
-    /// picker, which `allow_new_captures: false` refuses (open outputs must
-    /// not stall behind a human); named sources start without one. On error
-    /// nothing changes.
+    /// screen and camera sources (a screen may open the picker), then swap
+    /// the compositor's scene, then end captures of sources no longer in any
+    /// scene (`keep` lists those that still exist, so switching back and
+    /// forth between scenes does not ask again or reopen a camera). Starting
+    /// a picker source waits for the picker, which `allow_new_captures:
+    /// false` refuses (open outputs must not stall behind a human); named
+    /// sources and cameras start without one. Returns the started cameras'
+    /// warnings (e.g. one was not found). On error nothing changes.
     pub fn apply_scene(
         &mut self,
-        capture: &mut dyn ScreenCapture,
+        capture: &mut Capture,
         scene: &SceneSpec,
         images: &ImageStore,
         keep: &[String],
         allow_new_captures: bool,
-    ) -> Result<(), CommandError> {
+    ) -> Result<Vec<String>, CommandError> {
         if !allow_new_captures
             && let Some(source) = scene.sources.iter().find(|source| {
                 matches!(
@@ -468,9 +506,9 @@ impl Pipeline {
                         ..
                     }
                 ) && !self
-                    .scene_screens
+                    .scene_captures
                     .iter()
-                    .any(|screen| screen.id == source.id)
+                    .any(|running| running.id == source.id)
             })
         {
             return Err(CommandError::new(
@@ -483,56 +521,66 @@ impl Pipeline {
                 ),
             ));
         }
-        let started = start_screens(capture, scene, &self.scene_screens)?;
-        let mut live = mailboxes(&self.scene_screens);
+        let started = start_captures(capture, scene, &self.scene_captures)?;
+        let mut live = mailboxes(&self.scene_captures);
         live.extend(mailboxes(&started));
         let live = LiveFrames {
-            screens: &live,
+            captures: &live,
             images,
         };
         let applied = scenes::build(scene, &live, &mut self.cache)
             .and_then(|update| self.compositor.update(update).map_err(internal));
         match applied {
             Ok(()) => {
-                let mut screens = std::mem::take(&mut self.scene_screens);
-                screens.extend(started);
-                let (running, retire): (Vec<_>, Vec<_>) = screens
+                let warnings = started
+                    .iter()
+                    .flat_map(|started| started.warnings.iter().cloned())
+                    .collect();
+                let mut captures = std::mem::take(&mut self.scene_captures);
+                captures.extend(started);
+                let (running, retire): (Vec<_>, Vec<_>) = captures
                     .into_iter()
-                    .partition(|screen| keep.contains(&screen.id));
-                self.scene_screens = running;
-                for screen in retire {
-                    self.retire(stop_scene_capture(screen));
+                    .partition(|capture| keep.contains(&capture.id));
+                self.scene_captures = running;
+                for capture in retire {
+                    self.retire(stop_scene_capture(capture));
                 }
-                Ok(())
+                Ok(warnings)
             }
             Err(error) => {
                 // The scene stays as it was; captures started for it end.
-                for screen in started {
-                    self.retire(stop_scene_capture(screen));
+                for capture in started {
+                    self.retire(stop_scene_capture(capture));
                 }
                 Err(error)
             }
         }
     }
 
-    /// Start the running capture of screen source `source` again, then end
-    /// the old one. A source of the rendered scene goes through the path of
-    /// a scene change, so the compositor gets the new capture's frames; a
-    /// kept source of another scene starts alone. On error the old capture
-    /// keeps running (a new one that started first is stopped and reported).
-    pub fn restart_screen(
+    /// Start the capture of screen or camera source `source` again (as
+    /// `source` says now). A source of the rendered scene goes through the
+    /// path of a scene change, so the compositor gets the new capture's
+    /// frames; a kept source of another scene starts alone.
+    ///
+    /// A screen's new capture starts before the old one ends, and on error
+    /// the old one keeps running (a new one that started first is stopped
+    /// and reported). A camera ends first, since a camera that runs hands a
+    /// new stream its running mode (and Windows and macOS open a camera
+    /// once); on error the source shows nothing until it is restarted.
+    /// Returns a camera's warnings (e.g. it was not found).
+    pub fn restart_capture(
         &mut self,
-        capture: &mut dyn ScreenCapture,
+        capture: &mut Capture,
         rendered: &SceneSpec,
         images: &ImageStore,
         source: &SourceSpec,
         keep: &[String],
         allow_new_captures: bool,
-    ) -> Result<(), CommandError> {
+    ) -> Result<Vec<String>, CommandError> {
         let index = self
-            .scene_screens
+            .scene_captures
             .iter()
-            .position(|screen| screen.id == source.id)
+            .position(|running| running.id == source.id)
             .ok_or_else(|| {
                 CommandError::new(
                     ErrorCode::InvalidState,
@@ -561,7 +609,14 @@ impl Pipeline {
                 ),
             ));
         }
-        let old = self.scene_screens.remove(index);
+        let old = self.scene_captures.remove(index);
+        let camera = matches!(source.kind, SourceKind::Camera { .. });
+        let old = if camera {
+            self.retire(stop_scene_capture(old));
+            None
+        } else {
+            Some(old)
+        };
         let started = if rendered.sources.iter().any(|other| other.id == source.id) {
             self.apply_scene(capture, rendered, images, keep, allow_new_captures)
         } else {
@@ -570,46 +625,74 @@ impl Pipeline {
                 name: String::new(),
                 sources: vec![source.clone()],
             };
-            start_screens(capture, &alone, &[]).map(|started| self.scene_screens.extend(started))
+            start_captures(capture, &alone, &[]).map(|started| {
+                let warnings = started
+                    .iter()
+                    .flat_map(|started| started.warnings.iter().cloned())
+                    .collect();
+                self.scene_captures.extend(started);
+                warnings
+            })
         };
-        match started {
-            Ok(()) => {
-                self.retire(stop_scene_capture(old));
-                Ok(())
+        match (started, old) {
+            (Ok(warnings), old) => {
+                if let Some(old) = old {
+                    self.retire(stop_scene_capture(old));
+                }
+                Ok(warnings)
             }
-            Err(error) => {
-                self.scene_screens.insert(index, old);
+            (Err(error), Some(old)) => {
+                self.scene_captures.insert(index, old);
+                Err(error)
+            }
+            (Err(error), None) => {
+                // The compositor keeps the stopped camera's last frame.
+                self.scene_captures.insert(
+                    index,
+                    SceneCapture::failed(source, ErrorSummary::from(error.clone())),
+                );
                 Err(error)
             }
         }
     }
 
     /// End the captures of sources that no scene has any more (`keep` lists
-    /// the screen sources of every scene). A scene change does this as
-    /// part of [`Pipeline::apply_scene`]; this is for edits that leave the
-    /// rendered scene as it is, e.g. removing a kept source elsewhere.
+    /// the screen and camera sources of every scene). A scene change does
+    /// this as part of [`Pipeline::apply_scene`]; this is for edits that
+    /// leave the rendered scene as it is, e.g. removing a kept source
+    /// elsewhere.
     pub fn retire_unkept(&mut self, keep: &[String]) {
-        let (running, retire): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scene_screens)
+        let (running, retire): (Vec<_>, Vec<_>) = std::mem::take(&mut self.scene_captures)
             .into_iter()
-            .partition(|screen| keep.contains(&screen.id));
-        self.scene_screens = running;
-        for screen in retire {
-            self.retire(stop_scene_capture(screen));
+            .partition(|capture| keep.contains(&capture.id));
+        self.scene_captures = running;
+        for capture in retire {
+            self.retire(stop_scene_capture(capture));
         }
     }
 
     /// Whether scene source `id` has a capture (running or ended).
     pub fn has_scene_capture(&self, id: &str) -> bool {
-        self.scene_screens.iter().any(|screen| screen.id == id)
+        self.scene_captures.iter().any(|capture| capture.id == id)
+    }
+
+    /// Why cameras of this run show nothing or run in another mode than
+    /// asked; for the results of the commands that start an output.
+    pub fn capture_warnings(&self) -> Vec<String> {
+        self.scene_captures
+            .iter()
+            .flat_map(|capture| capture.warnings.iter().cloned())
+            .collect()
     }
 
     /// State of every running capture; never blocks.
     pub fn captures(&self) -> Vec<CaptureHealth> {
-        let screens = self.scene_screens.iter().map(|screen| CaptureHealth {
-            kind: CaptureKind::Screen,
-            id: screen.id.clone(),
-            name: screen.name.clone(),
-            state: screen.stream.state(),
+        let scene = self.scene_captures.iter().map(|capture| CaptureHealth {
+            kind: capture.kind,
+            id: capture.id.clone(),
+            name: capture.name.clone(),
+            state: capture.state(),
+            format: capture.format.clone(),
         });
         let audio =
             audio::devices(&self.audio)
@@ -619,16 +702,17 @@ impl Pipeline {
                     id: channel.id.clone(),
                     name: channel.name.clone(),
                     state: capture.state(),
+                    format: None,
                 });
-        screens.chain(audio).collect()
+        scene.chain(audio).collect()
     }
 
     fn retire(&mut self, outcome: SceneCaptureOutcome) {
-        if self.retired_screens.len() == MAX_RETIRED_CAPTURES {
-            self.retired_screens.remove(0);
+        if self.retired_captures.len() == MAX_RETIRED_CAPTURES {
+            self.retired_captures.remove(0);
             self.retired_omitted += 1;
         }
-        self.retired_screens.push(outcome);
+        self.retired_captures.push(outcome);
     }
 
     /// Feed `input` from now on; returns the output's epoch (media time 0).
@@ -830,8 +914,8 @@ impl Pipeline {
             compositor,
             mixer,
             control: _,
-            scene_screens,
-            mut retired_screens,
+            scene_captures,
+            mut retired_captures,
             retired_omitted,
             audio_streams,
             monitor,
@@ -879,7 +963,7 @@ impl Pipeline {
                 feed,
             }
         });
-        retired_screens.extend(scene_screens.into_iter().map(stop_scene_capture));
+        retired_captures.extend(scene_captures.into_iter().map(stop_scene_capture));
         // A missing device's channel was silent the whole run: say which.
         let (mut silent, mut failed) = (Vec::new(), Vec::new());
         let mut audio_captures = Vec::with_capacity(audio_streams.len());
@@ -914,11 +998,13 @@ impl Pipeline {
         }
         warnings.extend(silent);
         warnings.extend(failed);
-        for outcome in &retired_screens {
+        for outcome in &retired_captures {
             if let Some(error) = &outcome.error {
                 warnings.push(format!(
-                    "screen capture of source `{}` failed: {}",
-                    outcome.name, error.message
+                    "{} capture of source `{}` failed: {}",
+                    outcome.kind.as_str(),
+                    outcome.name,
+                    error.message
                 ));
             }
         }
@@ -927,7 +1013,7 @@ impl Pipeline {
             render,
             mix,
             audio_captures,
-            scene_captures: retired_screens,
+            scene_captures: retired_captures,
             scene_captures_omitted: retired_omitted,
             monitor,
         };
@@ -935,64 +1021,126 @@ impl Pipeline {
     }
 }
 
-/// Start captures for the screen sources of `scene` not in `running`. On
-/// error, the captures started by this call are stopped again.
-fn start_screens(
-    capture: &mut dyn ScreenCapture,
+/// Start captures for the screen and camera sources of `scene` not in
+/// `running`. On error, the captures started by this call are stopped
+/// again (by dropping them).
+fn start_captures(
+    capture: &mut Capture,
     scene: &SceneSpec,
     running: &[SceneCapture],
 ) -> Result<Vec<SceneCapture>, CommandError> {
     let mut started = Vec::new();
     for source in &scene.sources {
-        let SourceKind::Screen {
-            target_kinds,
-            cursor_mode,
-            capture_target_id,
-        } = &source.kind
-        else {
-            continue;
-        };
-        if running.iter().any(|screen| screen.id == source.id) {
+        if running.iter().any(|capture| capture.id == source.id) {
             continue;
         }
-        let selection = ScreenSelection {
-            target_kinds: target_kinds.clone(),
-            cursor_mode: *cursor_mode,
-            capture_target_id: capture_target_id.clone(),
-        };
-        let stream = capture.start_screen_stream(&selection).map_err(|error| {
-            CommandError::from(error).with_details(serde_json::json!({ "source": source.name }))
-        })?;
-        started.push(SceneCapture {
-            id: source.id.clone(),
-            name: source.name.clone(),
-            stream,
-        });
+        match &source.kind {
+            SourceKind::Screen {
+                target_kinds,
+                cursor_mode,
+                capture_target_id,
+            } => {
+                let selection = ScreenSelection {
+                    target_kinds: target_kinds.clone(),
+                    cursor_mode: *cursor_mode,
+                    capture_target_id: capture_target_id.clone(),
+                };
+                started.push(start_screen(capture.screen.as_mut(), source, &selection)?);
+            }
+            SourceKind::Camera { camera_id, mode } => {
+                started.push(start_camera(
+                    capture.camera.as_mut(),
+                    source,
+                    camera_id,
+                    mode.as_ref(),
+                )?);
+            }
+            SourceKind::ColorBars | SourceKind::Solid { .. } | SourceKind::Image { .. } => {}
+        }
     }
     Ok(started)
 }
 
-fn mailboxes(screens: &[SceneCapture]) -> Vec<(String, Arc<FrameMailbox>)> {
-    screens
+fn start_screen(
+    capture: &mut dyn ScreenCapture,
+    source: &SourceSpec,
+    selection: &ScreenSelection,
+) -> Result<SceneCapture, CommandError> {
+    let stream = capture
+        .start_screen_stream(selection)
+        .map_err(|error| in_source(CommandError::from(error), source))?;
+    Ok(SceneCapture {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        kind: CaptureKind::Screen,
+        stream: Ok(stream),
+        format: None,
+        warnings: Vec::new(),
+    })
+}
+
+/// Open the camera of `source`. One that is not found leaves the source
+/// empty, with a warning (ADR 0019): an unplugged camera must not keep a
+/// show from starting. Every other error (busy, no permission) fails.
+fn start_camera(
+    capture: &mut dyn CameraCapture,
+    source: &SourceSpec,
+    camera_id: &str,
+    mode: Option<&CameraModeSpec>,
+) -> Result<SceneCapture, CommandError> {
+    let request = CameraRequest {
+        camera_id: camera_id.to_owned(),
+        size: mode.and_then(CameraModeSpec::size),
+        fps: mode.and_then(|mode| mode.fps),
+    };
+    match capture.start_camera_stream(&request) {
+        Ok(started) => Ok(SceneCapture {
+            id: source.id.clone(),
+            name: source.name.clone(),
+            kind: CaptureKind::Camera,
+            stream: Ok(started.stream),
+            format: started.format,
+            warnings: started
+                .warnings
+                .into_iter()
+                .map(|warning| format!("camera source `{}`: {warning}", source.name))
+                .collect(),
+        }),
+        Err(error) if error.kind == CaptureErrorKind::NotFound => {
+            Ok(SceneCapture::failed(source, ErrorSummary::from(error)))
+        }
+        Err(error) => Err(in_source(CommandError::from(error), source)),
+    }
+}
+
+/// `error` with the source it happened to in `details.source`.
+fn in_source(error: CommandError, source: &SourceSpec) -> CommandError {
+    error.with_details(serde_json::json!({ "source": source.name }))
+}
+
+/// The frames of the captures that run (or ran).
+fn mailboxes(captures: &[SceneCapture]) -> Vec<(String, Arc<FrameMailbox>)> {
+    captures
         .iter()
-        .map(|screen| (screen.id.clone(), screen.stream.frames()))
+        .filter_map(|capture| {
+            let stream = capture.stream.as_ref().ok()?;
+            Some((capture.id.clone(), stream.frames()))
+        })
         .collect()
 }
 
-fn stop_scene_capture(screen: SceneCapture) -> SceneCaptureOutcome {
-    match screen.stream.stop() {
-        Ok(report) => SceneCaptureOutcome {
-            id: screen.id,
-            name: screen.name,
-            report: Some(report),
-            error: None,
-        },
-        Err(error) => SceneCaptureOutcome {
-            id: screen.id,
-            name: screen.name,
-            report: None,
-            error: Some(ErrorSummary::from(error)),
-        },
+fn stop_scene_capture(capture: SceneCapture) -> SceneCaptureOutcome {
+    let (report, error) = match capture.stream.map(|stream| stream.stop()) {
+        Ok(Ok(report)) => (Some(report), None),
+        Ok(Err(error)) => (None, Some(ErrorSummary::from(error))),
+        Err(error) => (None, Some(error)),
+    };
+    SceneCaptureOutcome {
+        id: capture.id,
+        name: capture.name,
+        kind: capture.kind,
+        report,
+        error,
     }
 }
 

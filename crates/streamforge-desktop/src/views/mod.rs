@@ -161,6 +161,8 @@ fn kind_label(kind: &SourceKind) -> (Icon, &'static str) {
         SourceKind::Solid { .. } => (Icon::Solid, "solid colour"),
         SourceKind::Screen { .. } => (Icon::Screen, "screen capture"),
         SourceKind::Image { .. } => (Icon::Image, "image"),
+        // Its own icon comes with the camera dialog.
+        SourceKind::Camera { .. } => (Icon::Screen, "camera"),
     }
 }
 

@@ -627,6 +627,7 @@ mod tests {
                     sources: Vec::new(),
                 })
                 .collect(),
+            warnings: Vec::new(),
         }
     }
 

@@ -359,7 +359,7 @@ fn a_project_whose_image_is_missing_loads_with_a_warning() {
     let update = crate::scenes::build(
         scene,
         &crate::scenes::LiveFrames {
-            screens: &[],
+            captures: &[],
             images: &moved.images,
         },
         &mut crate::scenes::FrameCache::default(),

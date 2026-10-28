@@ -58,6 +58,8 @@ pub struct ProjectSaved {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProjectLoaded {
     pub file_name: String,
+    /// Its `warnings` stay empty, so they never clash with this result's:
+    /// a project loads only while idle, so loading starts no capture.
     #[serde(flatten)]
     pub scenes: SceneList,
     pub mixer: MixerState,

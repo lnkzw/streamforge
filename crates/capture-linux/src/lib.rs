@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use capture_api::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioDevices, AudioInput,
     AudioOutput, AudioStream, AudioStreamRequest, Camera, CameraCapture, CameraCaptureCapability,
-    CameraRequest, CaptureError, PlaybackRequest, PlaybackStream, ScreenCapture,
+    CameraRequest, CameraStream, CaptureError, PlaybackRequest, PlaybackStream, ScreenCapture,
     ScreenCaptureCapability, ScreenCaptureRequest, ScreenSelection, ScreenSource,
     VideoCaptureReport, VideoStream,
 };
@@ -114,7 +114,7 @@ impl CameraCapture for PipeWireCamera {
     fn start_camera_stream(
         &mut self,
         request: &CameraRequest,
-    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+    ) -> Result<CameraStream, CaptureError> {
         let recent = self
             .scanned_at
             .is_some_and(|at| at.elapsed() < NODE_CACHE_TTL);

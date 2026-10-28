@@ -306,7 +306,7 @@ Cameras, images and layer control (ADR 0019). Everything is additive to protocol
   - [x] 4a: `CaptureBackend` split into `ScreenCapture`, `AudioDevices` and `CameraCapture`, without behaviour change.
   - [ ] 4b: cameras through PipeWire, in three parts (decided with the project owner on 2026-10-28):
     - [x] 4b1: the capture backend. `PipeWireCamera` lists camera nodes with their modes and captures them on their own thread; `frame-decode` converts YUY2, UYVY, NV12, I420 and MJPEG to BGRX; `list_cameras`, CLI `capture cameras`, `camera` in `get_capture_capabilities`; the conversion cost measured.
-    - [ ] 4b2: the `camera` source kind in the engine (it starts with its scene, also on air, `restart_source`, a missing camera warns), health, the project file, a fake camera in the engine tests.
+    - [x] 4b2: the `camera` source kind in the engine (it starts with its scene, also on air, `restart_source`, a missing camera warns), health, the project file, a fake camera in the engine tests.
     - [ ] 4b3: the desktop's camera dialog and inspector.
 - [ ] Step 5: Windows (Media Foundation, 5a) and macOS (AVFoundation, 5b) cameras; real cameras go to the manual hardware tests.
 

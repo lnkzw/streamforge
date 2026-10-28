@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    Camera, CameraRequest, CaptureEnd, CaptureError, CaptureErrorKind, CaptureState,
+    Camera, CameraRequest, CameraStream, CaptureEnd, CaptureError, CaptureErrorKind, CaptureState,
     VideoCaptureReport, VideoFormatInfo, VideoSourceInfo, VideoStream,
 };
 use media_core::{FrameMailbox, FramePool};
@@ -187,7 +187,7 @@ pub(crate) fn not_found(camera_id: &str, nodes: &[CameraNode]) -> CaptureError {
 pub(crate) fn start_stream(
     request: &CameraRequest,
     node: &CameraNode,
-) -> Result<Box<dyn VideoStream>, CaptureError> {
+) -> Result<CameraStream, CaptureError> {
     let Some(choice) = modes::choose(&node.offers, request) else {
         return Err(CaptureError::unsupported(format!(
             "camera `{}` offers no format StreamForge converts \
@@ -258,7 +258,7 @@ pub(crate) fn start_stream(
     };
     let mut warnings = choice.warnings;
     warnings.extend(other_mode(&choice.offer, negotiated.as_ref()));
-    Ok(Box::new(LinuxCameraStream {
+    let stream = Box::new(LinuxCameraStream {
         source: VideoSourceInfo {
             kind: None,
             width: negotiated.as_ref().map(|format| format.width),
@@ -269,9 +269,14 @@ pub(crate) fn start_stream(
         running: Some(Running {
             stop,
             thread,
-            warnings,
+            warnings: warnings.clone(),
         }),
-    }))
+    });
+    Ok(CameraStream {
+        stream,
+        format: negotiated,
+        warnings,
+    })
 }
 
 /// WirePlumber reports a camera that is gone, at the start or later, as a

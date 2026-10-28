@@ -1652,6 +1652,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frame-decode"
+version = "0.1.0"
+dependencies = [
+ "media-core",
+ "png",
+ "thiserror 2.0.21",
+ "zune-core",
+ "zune-jpeg",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

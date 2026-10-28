@@ -1,0 +1,17 @@
+[package]
+name = "frame-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Platform-neutral video frames and owned pixel buffers.
+media-core = { path = "../media-core" }
+# PNG decoding, colour expansion and 16-bit normalization.
+png = "0.18"
+# Baseline and progressive JPEG decoding into BGRA.
+zune-jpeg = "0.5"
+# JPEG decoder options, colour spaces and slice input.
+zune-core = "0.5"
+# Structured errors at the decoder boundary.
+thiserror.workspace = true

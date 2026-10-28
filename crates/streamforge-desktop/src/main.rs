@@ -58,10 +58,7 @@ fn main() -> ExitCode {
     }
     // Shown in the project dialogs, so the operator knows where files are
     // (`absolute`, not `canonicalize`: no `\\?\` prefix on Windows).
-    let project_folder = std::path::absolute(&project_dir)
-        .unwrap_or_else(|_| project_dir.clone())
-        .display()
-        .to_string();
+    let project_folder = std::path::absolute(&project_dir).unwrap_or_else(|_| project_dir.clone());
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("StreamForge")

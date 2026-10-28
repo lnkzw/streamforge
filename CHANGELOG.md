@@ -7,10 +7,11 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 ### Added
 
 - Layers (ADR 0019): `move_source` changes a source's place in its scene's drawing order, and `visible` (in `add_source`, `update_source` and `list_scenes`) hides a source without stopping its capture. In the desktop app, drag a source row or press Ctrl+Up and Ctrl+Down to reorder, and use the eye to hide a layer.
+- Image sources (ADR 0019): the source kind `image` shows a PNG or JPEG file from the project folder, with transparency and JPEG orientation, up to 8192 pixels per side and 16 megapixels. `list_images` lists the folder's images, `update_source` switches an image's `file`, and `restart_source` reads it again after it changed. A project whose image is missing still loads, with a warning. In the desktop app, add an image from the project folder (**Open folder** opens it in the file manager) and change it in the inspector.
 
 ### Changed
 
-- Project files are schema version 4 (sources have `visible`). Versions 1 to 3 migrate on load; 0.1.0 cannot open a file saved by this version.
+- Project files are schema version 4 (sources have `visible`, and image sources their `file`). Versions 1 to 3 migrate on load; 0.1.0 cannot open a file saved by this version.
 
 ## [0.1.0] - 2026-10-27
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/media-core",
+    "crates/frame-decode",
     "crates/command-api",
     "crates/capture-api",
     "crates/capture-linux",
@@ -46,6 +47,19 @@ thiserror = "2"
 opt-level = 3
 
 [profile.dev.package.media-core]
+opt-level = 3
+
+[profile.dev.package.frame-decode]
+opt-level = 3
+
+# Image decoding and its deflate loops dominate the frame-decode tests.
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
 opt-level = 3
 
 [profile.dev.package.capture-linux]

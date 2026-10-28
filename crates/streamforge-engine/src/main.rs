@@ -30,9 +30,9 @@ struct Args {
     #[arg(long, default_value = ".")]
     output_dir: PathBuf,
     /// Directory for project files (list_projects, save_project,
-    /// load_project, validate_project); clients only choose file names
-    /// inside it.
-    /// Without it, the project commands are unavailable.
+    /// load_project, validate_project) and the images image sources show
+    /// (list_images); clients only choose file names inside it.
+    /// Without it, the project commands and image sources are unavailable.
     #[arg(long)]
     project_dir: Option<PathBuf>,
     /// Highest class of commands the client may run: read-only, control or

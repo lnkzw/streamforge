@@ -147,6 +147,7 @@ impl Engine {
                 project_file::SCHEMA_VERSION
             ));
         }
+        warnings.extend(self.read_scene_images());
         if screens > 0 {
             warnings.push(format!(
                 "{screens} screen source(s) have no capture target (it is not saved): choose one \

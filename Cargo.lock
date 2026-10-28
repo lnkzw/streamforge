@@ -1419,8 +1419,10 @@ dependencies = [
  "capture-api",
  "command-api",
  "encoder-ffmpeg",
+ "frame-decode",
  "getrandom 0.4.3",
  "media-core",
+ "png",
  "project-file",
  "rtmp-test-server",
  "serde",
@@ -1649,6 +1651,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "frame-decode"
+version = "0.1.0"
+dependencies = [
+ "media-core",
+ "png",
+ "thiserror 2.0.21",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

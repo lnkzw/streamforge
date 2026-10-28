@@ -84,6 +84,7 @@ fn model(dir: &TempDir) -> Model {
             rect: Some([80.0, 860.0, 900.0, 120.0]),
             opacity: 1.0,
             screen_source: None,
+            image_file: None,
         },
     );
     wait(&mut model, "the source", |m| {
@@ -1545,4 +1546,76 @@ fn dragging_a_dock_edge_resizes_the_dock() {
     drag(&mut harness, edge, edge - egui::vec2(0.0, 50.0));
     let after = harness.get_by_label("Console").rect();
     assert_eq!(before.top() - after.top(), 50.0);
+}
+
+/// Write a `width` x `height` PNG of one colour into the project folder.
+fn write_image(dir: &TempDir, name: &str, width: u32, height: u32, rgb: [u8; 3]) {
+    image::RgbImage::from_pixel(width, height, image::Rgb(rgb))
+        .save(dir.0.join(name))
+        .expect("png");
+}
+
+/// The value of the field labelled `label`, if shown.
+fn field_value(harness: &Harness<'static, DesktopApp>, label: &str) -> Option<String> {
+    harness
+        .query_by_label(label)
+        .and_then(|field| field.value())
+}
+
+#[test]
+fn an_image_from_the_project_folder_is_added_changed_and_read_again() {
+    let dir = TempDir::new("image");
+    write_image(&dir, "logo.png", 64, 32, [255, 0, 0]);
+    write_image(&dir, "other.png", 16, 16, [0, 255, 0]);
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Add a source to this scene").click();
+    step_until(&mut harness, "the dialog", |h| {
+        h.query_by_label("Image").is_some()
+    });
+    harness.get_by_label("Image").click();
+    step_until(&mut harness, "the image list", |h| {
+        field_value(h, "Image file").as_deref() == Some("Choose an image")
+    });
+    // A file must be chosen first.
+    assert!(!clickable(&harness, "Add source"));
+    assert!(harness.query_all_by_label("Own size").next().is_some());
+    harness.get_by_label("Image file").click();
+    step_until(&mut harness, "the files", |h| {
+        h.query_by_label("logo.png · 64×32").is_some()
+    });
+    harness.get_by_label("logo.png · 64×32").click();
+    step_until(&mut harness, "the choice", |h| clickable(h, "Add source"));
+    // Named after its file.
+    harness.get_by_label("Add source").click();
+    step_until(&mut harness, "the new layer", |h| row(h, "logo").is_some());
+
+    row(&harness, "logo").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Read again").is_some()
+    });
+    assert_eq!(
+        field_value(&harness, "Image file").as_deref(),
+        Some("logo.png")
+    );
+    harness.get_by_label("Image file").click();
+    step_until(&mut harness, "the files", |h| {
+        h.query_by_label("other.png").is_some()
+    });
+    harness.get_by_label("other.png").click();
+    step_until(&mut harness, "the other file", |h| {
+        field_value(h, "Image file").as_deref() == Some("other.png")
+    });
+    // Gone from the folder: the inspector says so, and reading it again
+    // fails in the log.
+    std::fs::remove_file(dir.0.join("other.png")).expect("remove");
+    harness.get_by_label("Refresh list").click();
+    step_until(&mut harness, "the warning", |h| {
+        h.query_by_label_contains("Not in the project folder")
+            .is_some()
+    });
+    harness.get_by_label("Read again").click();
+    step_until(&mut harness, "the error", |h| {
+        h.query_by_label_contains("no image file `other.png`")
+            .is_some()
+    });
 }

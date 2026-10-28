@@ -158,6 +158,7 @@ impl Engine {
                 let mut pipeline = Pipeline::start(
                     self.capture.as_mut(),
                     self.scenes.active(),
+                    &self.images,
                     self.audio.clone(),
                 )?;
                 if self.profiles.monitor.enabled {

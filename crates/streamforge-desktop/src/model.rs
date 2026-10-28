@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use command_api::{
     AudioInput, AudioOutput, CaptureKind, CaptureState, ChannelInput, CommandError, CommandOutput,
     DEFAULT_TONE_HZ, DEFAULT_TONE_LEVEL_DBFS, EncoderPreference, EngineStatus, HealthReport,
-    MixerState, OutputHealth, OutputKind, OutputProfiles, ProjectFileList, ProjectValidation,
-    RecordingStarted, SceneList, ScreenSource, SendTap, StreamState, StreamingStarted,
-    VideoEncoderInfo,
+    ImageFileList, MixerState, OutputHealth, OutputKind, OutputProfiles, ProjectFileList,
+    ProjectValidation, RecordingStarted, SceneList, ScreenSource, SendTap, StreamState,
+    StreamingStarted, VideoEncoderInfo,
 };
 use media_core::FrameMailbox;
 use serde_json::{Map, Value, json};
@@ -65,6 +65,7 @@ pub enum SourceType {
     ColorBars,
     Solid,
     Screen,
+    Image,
 }
 
 /// What a new source should be; filled in by the UI.
@@ -80,6 +81,8 @@ pub struct SourceForm {
     /// Screen sources: an id from [`Model::screen_sources`]; `None` opens
     /// the system picker.
     pub screen_source: Option<String>,
+    /// Image sources: a file name from [`Model::images`].
+    pub image_file: Option<String>,
 }
 
 impl Default for SourceForm {
@@ -91,6 +94,7 @@ impl Default for SourceForm {
             rect: None,
             opacity: 1.0,
             screen_source: None,
+            image_file: None,
         }
     }
 }
@@ -180,6 +184,8 @@ enum Pending {
     AudioOutputs,
     /// `list_projects`, for the open and save dialogs.
     Projects,
+    /// `list_images`, for image sources.
+    Images,
     /// `validate_project` of this file, before it is opened.
     Validation(String),
 }
@@ -219,6 +225,9 @@ pub struct Model {
     /// The project directory's files, or why they cannot be listed; `None`
     /// until asked for (and after a save, which may have added one).
     pub projects: Option<Result<ProjectFileList, String>>,
+    /// The image files in the project directory, or why they cannot be
+    /// listed; `None` until asked for.
+    pub images: Option<Result<ImageFileList, String>>,
     /// The check of the file chosen to open: its name and the result, or
     /// why it could not be checked.
     pub validation: Option<(String, Result<ProjectValidation, String>)>,
@@ -254,6 +263,7 @@ impl Model {
             audio_outputs: None,
             audio_outputs_asked: None,
             projects: None,
+            images: None,
             validation: None,
             project: None,
             unsaved: false,
@@ -486,6 +496,23 @@ impl Model {
         }
     }
 
+    /// Ask for the image files in the project directory (skipped while
+    /// asked); a new list replaces [`Model::images`] on arrival.
+    pub fn list_images(&mut self) {
+        // A busy engine leaves a reason, so views that ask while there is
+        // no list do not ask (and log) every frame.
+        if !self.listing_images() && !self.submit("list_images", json!({}), Pending::Images) {
+            self.images = Some(Err("The engine is busy; refresh to try again.".to_owned()));
+        }
+    }
+
+    /// Whether the list of image files is on its way.
+    pub fn listing_images(&self) -> bool {
+        self.pending
+            .values()
+            .any(|pending| matches!(pending, Pending::Images))
+    }
+
     /// Check `file_name` before it is opened; [`Model::validation`] holds
     /// the answer.
     pub fn validate_project(&mut self, file_name: &str) {
@@ -561,6 +588,12 @@ impl Model {
                 }
                 "screen"
             }
+            SourceType::Image => {
+                if let Some(file) = &form.image_file {
+                    params.insert("file".into(), file.clone().into());
+                }
+                "image"
+            }
         };
         params.insert("kind".into(), kind.into());
         if let Some([x, y, width, height]) = form.rect {
@@ -589,6 +622,11 @@ impl Model {
         self.act("update_source", Value::Object(params));
     }
 
+    /// Show another image file in image source `id`.
+    pub fn set_source_file(&mut self, id: &str, file: &str) {
+        self.act("update_source", json!({ "source_id": id, "file": file }));
+    }
+
     /// Draw source `id` or not; a hidden screen source keeps capturing.
     pub fn set_source_visible(&mut self, id: &str, visible: bool) {
         self.act(
@@ -610,6 +648,7 @@ impl Model {
     /// Start a screen source's capture again, optionally on another source
     /// from [`Model::screen_sources`]; outputs keep running. It ends the
     /// running capture, so the UI asks first while that one still works.
+    /// An image source reads its file again.
     pub fn restart_source(&mut self, id: &str, capture_target_id: Option<&str>) {
         let mut params = Map::new();
         params.insert("source_id".into(), id.into());
@@ -841,6 +880,12 @@ impl Model {
         self.act("stop_streaming", json!({}));
     }
 
+    /// Add a line to the log, for what the UI does itself (e.g. opening
+    /// the project folder).
+    pub fn push_log(&mut self, level: Level, text: String) {
+        self.push(level, text);
+    }
+
     fn push(&mut self, level: Level, text: String) {
         if self.log.len() == LOG_LINES {
             self.log.pop_front();
@@ -883,6 +928,14 @@ impl Model {
                 Some(Pending::Projects) => {
                     self.projects = Some(match response.result {
                         Ok(CommandOutput::ProjectFiles(list)) => Ok(list),
+                        Ok(other) => Err(format!("unexpected response: {other:?}")),
+                        Err(error) => Err(error.message),
+                    });
+                    continue;
+                }
+                Some(Pending::Images) => {
+                    self.images = Some(match response.result {
+                        Ok(CommandOutput::ImageFiles(list)) => Ok(list),
                         Ok(other) => Err(format!("unexpected response: {other:?}")),
                         Err(error) => Err(error.message),
                     });

@@ -12,10 +12,14 @@ audio-engine = { path = "../audio-engine" }
 encoder-ffmpeg = { path = "../encoder-ffmpeg" }
 media-core = { path = "../media-core" }
 project-file = { path = "../project-file" }
+# Image sources' PNG and JPEG files (ADR 0019).
+frame-decode = { path = "../frame-decode" }
 # Random scene, source and channel ids (ADR 0014), from the OS generator.
 getrandom = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# Writes the image files the image source tests show.
+png = "0.18"
 rtmp-test-server = { path = "../rtmp-test-server" }

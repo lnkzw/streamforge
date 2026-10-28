@@ -301,7 +301,7 @@ Cameras, images and layer control (ADR 0019). Everything is additive to protocol
 
 - [x] Step 1: ADR 0019 with the project owner's decisions (2026-10-27).
 - [x] Step 2: layers. `move_source` changes the drawing order, `visible` hides a source without stopping its capture, project file schema 4 migrates version 3; the desktop reorders by drag and keys and has an eye toggle.
-- [ ] Step 3: image source. PNG and JPEG by plain file name in the project folder (`list_images`), decoded by the new crate `frame-decode`, with size limits; a missing image does not block loading a project.
+- [x] Step 3: image source. PNG and JPEG by plain file name in the project folder (`list_images`), decoded by the new crate `frame-decode`, with size limits; a missing image does not block loading a project. `update_source` switches an image's file, `restart_source` reads it again; the desktop adds images from the project folder (with **Open folder**) and changes them in the inspector.
 - [ ] Step 4: Linux camera.
   - [ ] 4a: `CaptureBackend` split into `ScreenCapture`, `AudioDevices` and `CameraCapture`, without behaviour change.
   - [ ] 4b: cameras through PipeWire, YUV and MJPEG conversion, `list_cameras`, the `camera` kind (it starts with its scene, also on air), health; the desktop's camera dialog.

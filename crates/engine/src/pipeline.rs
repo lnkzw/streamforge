@@ -37,6 +37,7 @@ use video_compositor::{
 };
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
+use crate::images::ImageStore;
 use crate::scenes::{self, FrameCache, LiveFrames};
 use crate::{audio, mix};
 
@@ -238,6 +239,7 @@ impl Pipeline {
     pub fn start(
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
+        images: &ImageStore,
         audio: AudioGraphSpec,
     ) -> Result<Self, CommandError> {
         let scene_screens = start_screens(capture, scene, &[])?;
@@ -252,6 +254,7 @@ impl Pipeline {
             scene,
             &LiveFrames {
                 screens: &mailboxes(&scene_screens),
+                images,
             },
             &mut cache,
         )?;
@@ -452,6 +455,7 @@ impl Pipeline {
         &mut self,
         capture: &mut dyn CaptureBackend,
         scene: &SceneSpec,
+        images: &ImageStore,
         keep: &[String],
         allow_new_captures: bool,
     ) -> Result<(), CommandError> {
@@ -482,7 +486,11 @@ impl Pipeline {
         let started = start_screens(capture, scene, &self.scene_screens)?;
         let mut live = mailboxes(&self.scene_screens);
         live.extend(mailboxes(&started));
-        let applied = scenes::build(scene, &LiveFrames { screens: &live }, &mut self.cache)
+        let live = LiveFrames {
+            screens: &live,
+            images,
+        };
+        let applied = scenes::build(scene, &live, &mut self.cache)
             .and_then(|update| self.compositor.update(update).map_err(internal));
         match applied {
             Ok(()) => {
@@ -516,6 +524,7 @@ impl Pipeline {
         &mut self,
         capture: &mut dyn CaptureBackend,
         rendered: &SceneSpec,
+        images: &ImageStore,
         source: &SourceSpec,
         keep: &[String],
         allow_new_captures: bool,
@@ -554,7 +563,7 @@ impl Pipeline {
         }
         let old = self.scene_screens.remove(index);
         let started = if rendered.sources.iter().any(|other| other.id == source.id) {
-            self.apply_scene(capture, rendered, keep, allow_new_captures)
+            self.apply_scene(capture, rendered, images, keep, allow_new_captures)
         } else {
             let alone = SceneSpec {
                 id: String::new(),

@@ -4,6 +4,7 @@
 //! and saving projects.
 //! One is open at a time; Escape or a click outside cancels.
 
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use command_api::{
@@ -12,7 +13,7 @@ use command_api::{
 use eframe::egui;
 
 use crate::app::{Confirm, DesktopApp, Dialog};
-use crate::model::{InputForm, InputType, Model, SourceForm, SourceType};
+use crate::model::{InputForm, InputType, Level, Model, SourceForm, SourceType};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, Button, ButtonKind, ListRow, StatusLevel};
@@ -58,7 +59,14 @@ impl DesktopApp {
                         scene_id,
                         scene_name,
                         form,
-                    } => add_source(ui, &mut self.model, scene_id, scene_name, form),
+                    } => add_source(
+                        ui,
+                        &mut self.model,
+                        self.project_path.as_deref(),
+                        scene_id,
+                        scene_name,
+                        form,
+                    ),
                     Dialog::RecordSettings { file_name, encoder } => {
                         self.record_settings(ui, file_name, encoder)
                     }
@@ -614,6 +622,7 @@ impl DesktopApp {
 fn add_source(
     ui: &mut egui::Ui,
     model: &mut Model,
+    project_folder: Option<&Path>,
     scene_id: &str,
     scene_name: &str,
     form: &mut SourceForm,
@@ -633,6 +642,7 @@ fn add_source(
             (SourceType::Solid, "Solid colour"),
             (SourceType::ColorBars, "Colour bars"),
             (SourceType::Screen, "Screen capture"),
+            (SourceType::Image, "Image"),
         ],
     );
     match form.kind {
@@ -643,14 +653,22 @@ fn add_source(
             });
         }
         SourceType::Screen => screen_source_picker(ui, model, form),
+        SourceType::Image => image_picker(ui, model, project_folder, form),
         SourceType::ColorBars => {}
     }
+    // Without a rectangle an image keeps its own size; the rest fill the
+    // canvas.
+    let whole_label = if form.kind == SourceType::Image {
+        "Own size"
+    } else {
+        "Fill the canvas"
+    };
     let mut whole = form.rect.is_none();
     ui.horizontal(|ui| {
-        if widgets::toggle(ui, &mut whole, "Fill the canvas").changed() {
+        if widgets::toggle(ui, &mut whole, whole_label).changed() {
             form.rect = (!whole).then_some([0.0, 0.0, 960.0, 540.0]);
         }
-        ui.label(TextRole::Body.text("Fill the canvas"));
+        ui.label(TextRole::Body.text(whole_label));
     });
     if let Some(rect) = &mut form.rect {
         ui.horizontal(|ui| {
@@ -671,11 +689,12 @@ fn add_source(
         form.opacity = (percent / 100.0).clamp(0.0, 1.0);
     }
     ui.add_space(size::SPACE_8);
+    let complete = form.kind != SourceType::Image || form.image_file.is_some();
     match buttons(
         ui,
         ButtonKind::Primary,
         "Add source",
-        !form.name.trim().is_empty(),
+        !form.name.trim().is_empty() && complete,
     ) {
         Some(true) => {
             form.name = form.name.trim().to_owned();
@@ -1102,6 +1121,98 @@ fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceF
     {
         model.find_screen_sources();
     }
+}
+
+/// Choose an image file from the project folder. There is no file dialog
+/// (ADR 0019): the folder opens in the file manager to put files there.
+fn image_picker(
+    ui: &mut egui::Ui,
+    model: &mut Model,
+    project_folder: Option<&Path>,
+    form: &mut SourceForm,
+) {
+    if model.images.is_none() {
+        model.list_images();
+    }
+    // A file that is no longer listed is not sent.
+    let listed = |file: &String| matches!(&model.images, Some(Ok(list)) if list.files.iter().any(|info| &info.file_name == file));
+    if form.image_file.as_ref().is_some_and(|file| !listed(file)) {
+        form.image_file = None;
+    }
+    match &model.images {
+        Some(Ok(list)) if !list.files.is_empty() => {
+            const NONE: &str = "Choose an image";
+            let before = form.image_file.clone();
+            let selected = before.as_deref().unwrap_or(NONE);
+            let width = ui.available_width();
+            widgets::dropdown(ui, selected, "Image file", width, |ui| {
+                for info in &list.files {
+                    let size = match (info.width, info.height) {
+                        (Some(width), Some(height)) => format!("{width}×{height}"),
+                        _ => "cannot be read".to_owned(),
+                    };
+                    let label = format!("{} · {size}", info.file_name);
+                    widgets::choice(
+                        ui,
+                        &mut form.image_file,
+                        Some(info.file_name.clone()),
+                        &label,
+                    );
+                }
+            })
+            .on_hover_text("Image file");
+            if list.omitted > 0 {
+                ui.label(TextRole::Meta.text(format!("{} more files not listed", list.omitted)));
+            }
+            // A new choice names an unnamed source after its file.
+            if form.image_file != before
+                && form.name.trim().is_empty()
+                && let Some(stem) = form
+                    .image_file
+                    .as_deref()
+                    .and_then(|file| file.rsplit_once('.'))
+                    .map(|(stem, _)| stem)
+                && command_api::is_valid_name(stem)
+            {
+                stem.clone_into(&mut form.name);
+            }
+        }
+        Some(Ok(_)) => {
+            ui.label(TextRole::Meta.text(
+                "No PNG or JPEG files in the project folder yet: put them there and refresh.",
+            ));
+        }
+        Some(Err(reason)) => {
+            ui.label(TextRole::Meta.text(reason.as_str()));
+        }
+        None => {
+            ui.label(TextRole::Meta.text("Listing the project folder…"));
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add(Button::new(ButtonKind::Ghost, "Refresh").enabled(!model.listing_images()))
+            .on_hover_text("List the project folder's images again")
+            .clicked()
+        {
+            model.list_images();
+        }
+        if let Some(folder) = project_folder
+            && ui
+                .add(Button::new(ButtonKind::Ghost, "Open folder").icon(Icon::Folder))
+                .on_hover_text(format!("Open {} in the file manager", folder.display()))
+                .clicked()
+            && let Err(error) = crate::folder::open(folder)
+        {
+            model.push_log(
+                Level::Warning,
+                format!(
+                    "Cannot open the project folder {}: {error}",
+                    folder.display()
+                ),
+            );
+        }
+    });
 }
 
 /// Cancel and the dialog's action, right-aligned. `Some(true)`: the

@@ -34,15 +34,17 @@ pub struct Config {
     /// The only streaming target agents may use (with its secret key).
     pub stream: Option<StreamTarget>,
     /// A project directory is configured; without one, the project
-    /// commands are not offered.
+    /// commands and `list_images` are not offered.
     pub projects: bool,
 }
 
-const PROJECT_COMMANDS: [&str; 4] = [
+/// The commands that work in the project directory.
+const PROJECT_COMMANDS: [&str; 5] = [
     "list_projects",
     "save_project",
     "load_project",
     "validate_project",
+    "list_images",
 ];
 
 pub struct StreamforgeMcp {

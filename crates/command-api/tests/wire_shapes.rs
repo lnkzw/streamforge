@@ -27,13 +27,14 @@ use capture_api::{
 use command_api::{
     AudioInputList, AudioOutputList, BusState, CaptureHealth, CaptureKind, CaptureOutcome,
     CaptureTargetList, ChannelInput, ChannelSpec, ChannelState, CommandAccess, CommandList,
-    CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary, HealthReport, MixReport,
-    MixerState, MonitorHealth, MonitorProfile, OutputHealth, OutputKind, OutputMix,
-    OutputProfileSet, OutputProfiles, PipelineReport, PreviewState, ProjectFileInfo,
-    ProjectFileList, ProjectLoaded, ProjectProblem, ProjectSaved, ProjectValidation,
-    RecordingProfile, RecordingReport, RecordingStarted, RecordingState, Rgba, SceneCaptureOutcome,
-    SceneList, SceneSpec, SendSpec, SendTap, SnapshotResult, SourceKind, SourceRect, SourceSpec,
-    StopFailure, StreamProfile, StreamingReport, StreamingStarted, registry,
+    CommandOutput, CompositeReport, EngineStatus, ErrorCode, ErrorSummary, HealthReport,
+    ImageFileInfo, ImageFileList, MixReport, MixerState, MonitorHealth, MonitorProfile,
+    OutputHealth, OutputKind, OutputMix, OutputProfileSet, OutputProfiles, PipelineReport,
+    PreviewState, ProjectFileInfo, ProjectFileList, ProjectLoaded, ProjectProblem, ProjectSaved,
+    ProjectValidation, RecordingProfile, RecordingReport, RecordingStarted, RecordingState, Rgba,
+    SceneCaptureOutcome, SceneList, SceneSpec, SendSpec, SendTap, SnapshotResult, SourceKind,
+    SourceRect, SourceSpec, StopFailure, StreamProfile, StreamingReport, StreamingStarted,
+    registry,
 };
 use encoder_api::{
     AudioTrackStats, EncoderPreference, LiveConnectionStats, LiveOutputStats, RecordingStats,
@@ -417,6 +418,19 @@ fn samples() -> Vec<(&'static [&'static str], Value)> {
             })),
         ),
         (
+            &["list_images"],
+            output(CommandOutput::ImageFiles(ImageFileList {
+                files: vec![ImageFileInfo {
+                    file_name: "logo.png".to_owned(),
+                    bytes: 4_096,
+                    modified_unix_ms: Some(1_761_500_000_000),
+                    width: Some(320),
+                    height: Some(200),
+                }],
+                omitted: 0,
+            })),
+        ),
+        (
             &["save_project"],
             output(CommandOutput::ProjectSaved(ProjectSaved {
                 file_name: "show.json".to_owned(),
@@ -492,7 +506,10 @@ fn enum_values() -> BTreeSet<String> {
         SendTap::PreFader | SendTap::PostFader => {}
     };
     let _ = |kind: SourceKind| match kind {
-        SourceKind::ColorBars | SourceKind::Solid { .. } | SourceKind::Screen { .. } => {}
+        SourceKind::ColorBars
+        | SourceKind::Solid { .. }
+        | SourceKind::Screen { .. }
+        | SourceKind::Image { .. } => {}
     };
     let _ = |input: ChannelInput| match input {
         ChannelInput::Device { .. } | ChannelInput::Tone { .. } => {}
@@ -565,6 +582,9 @@ fn enum_values() -> BTreeSet<String> {
                     target_kinds: Vec::new(),
                     cursor_mode: C::Hidden,
                     capture_target_id: None,
+                },
+                SourceKind::Image {
+                    file: String::new(),
                 },
             ],
         ),
@@ -1043,6 +1063,12 @@ fn scene_list() -> SceneList {
                         target_kinds: vec![VideoSourceKind::Window],
                         cursor_mode: CursorMode::Hidden,
                         capture_target_id: None,
+                    },
+                ),
+                source(
+                    "src_logo",
+                    SourceKind::Image {
+                        file: "logo.png".to_owned(),
                     },
                 ),
             ],

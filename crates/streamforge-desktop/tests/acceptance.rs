@@ -100,6 +100,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
             rect: None,
             opacity: 1.0,
             screen_source: None,
+            image_file: None,
         },
     );
     wait(&mut model, "the new source", |m| {
@@ -131,6 +132,7 @@ fn ui_creates_a_scene_adds_a_source_and_records() {
             rect: None,
             opacity: 1.0,
             screen_source: None,
+            image_file: None,
         },
     );
     wait(&mut model, "the spare source", |m| {

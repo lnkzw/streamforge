@@ -11,6 +11,7 @@ mod audio;
 mod composite;
 mod error;
 mod health;
+mod images;
 mod mix;
 mod outputs;
 mod project;
@@ -28,6 +29,7 @@ pub use audio::{
 pub use composite::{CompositeReport, CompositeRequest, SnapshotResult};
 pub use error::{CommandError, ErrorCode, ErrorSummary};
 pub use health::{CaptureHealth, CaptureKind, HealthReport, MonitorHealth, OutputHealth};
+pub use images::{ImageFileInfo, ImageFileList, MAX_LISTED_IMAGES};
 pub use mix::{CaptureOutcome, LiveInputSpec, MAX_MIX_DURATION, MixReport, MixRequest, ToneSpec};
 pub use outputs::{
     DEFAULT_VIDEO_BITRATE_KBPS, MAX_EXTRA_TRACKS, MonitorProfile, OutputKind, OutputProfileSet,
@@ -41,8 +43,8 @@ pub use project::{
 };
 pub use registry::{
     CommandAccess, CommandDescriptor, CommandList, DEFAULT_OUTPUT_TONE_DBFS, DEFAULT_TONE_HZ,
-    DEFAULT_TONE_LEVEL_DBFS, NAME_RULE, decode_streaming_to, is_valid_id, is_valid_name,
-    params_schema, project_file_name, registry,
+    DEFAULT_TONE_LEVEL_DBFS, NAME_RULE, decode_streaming_to, image_file_name, is_valid_id,
+    is_valid_name, params_schema, project_file_name, registry,
 };
 pub use scenes::{
     AddSourceRequest, MAX_COORDINATE, MAX_ID_LEN, MAX_NAME_CHARS, MAX_SCENE_SOURCES, MAX_SCENES,
@@ -137,6 +139,8 @@ pub enum Command {
     },
     /// List the project files in the project directory.
     ListProjects,
+    /// List the image files in the project directory.
+    ListImages,
     /// Write the scenes and audio setup to a project file.
     SaveProject(SaveProjectRequest),
     /// Replace the scenes and audio setup with a project file's (only while
@@ -212,6 +216,7 @@ pub enum CommandOutput {
     OutputProfileSet(OutputProfileSet),
     PreviewState(Box<PreviewState>),
     ProjectFiles(ProjectFileList),
+    ImageFiles(ImageFileList),
     ProjectSaved(ProjectSaved),
     ProjectLoaded(Box<ProjectLoaded>),
     ProjectValidation(ProjectValidation),

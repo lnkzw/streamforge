@@ -107,6 +107,9 @@ pub enum SourceKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         capture_target_id: Option<String>,
     },
+    /// A PNG or JPEG file in the engine's project directory, by its plain
+    /// name; fitted into the rectangle with its aspect ratio kept.
+    Image { file: String },
 }
 
 /// A color as red, green, blue, alpha; serialized as `#rrggbbaa`.
@@ -183,6 +186,8 @@ pub struct UpdateSourceRequest {
     pub height: Option<f32>,
     pub opacity: Option<f32>,
     pub visible: Option<bool>,
+    /// Image sources: show this file in the project directory instead.
+    pub file: Option<String>,
 }
 
 /// Move a source to `index` in its scene's drawing order (0 is the

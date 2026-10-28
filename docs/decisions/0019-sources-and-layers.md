@@ -35,6 +35,7 @@ Protocol v1 is stable since 0.1.0 (`docs/protocol.md`), so everything below is a
 - **Limits:** at most 8192 pixels per side and 16 megapixels per image (64 MiB as BGRA), and 512 MiB for all decoded images together. Beyond a limit, adding is `invalid_params`.
 - **Errors:** a missing file is `not_found` and an undecodable one `invalid_params`. Loading a project whose image is missing or broken does not fail: the source loads, draws nothing, and the load reports a warning, so a moved logo does not block a show.
 - **Placement:** without a rectangle, an image keeps its own size (scaled down to the canvas if larger) at the top left. With one, it is fitted into it, aspect kept, like a screen.
+- **Changing the file** (added in step 3): `update_source` takes `file` for an image source, read like a new one; the rectangle stays. `restart_source` of an image source reads its file again, also while idle, and since a file has one frame, every source showing it updates. Both are additive to v1.
 
 ### Camera source
 

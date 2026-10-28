@@ -117,6 +117,7 @@ A bad request never terminates the engine. After any error the engine keeps read
 | `set_monitor_device`       | see below | `sensitive`, destructive | The profiles |
 | `set_preview`              | see below | `sensitive`, destructive | `{"enabled", "width", "height", "fps", "frames_published", "frames_dropped", "pipeline", "warnings"}` |
 | `list_projects`            | none   | `read_only` | `{"files": [{"file_name", "bytes", "modified_unix_ms"}], "omitted"}` |
+| `list_images`              | none   | `read_only` | `{"files": [{"file_name", "bytes", "modified_unix_ms", "width", "height"}], "omitted"}` |
 | `save_project`             | see below | `sensitive`, destructive | `{"file_name", "path", "replaced", "scenes", "bytes"}` |
 | `load_project`             | see below | `sensitive`, destructive | Scene list plus `{"file_name", "mixer", "warnings"}` |
 | `validate_project`         | see below | `read_only` | `{"file_name", "valid", "schema_version", "migrates", "problems": [{"path", "message"}]}` |
@@ -126,7 +127,7 @@ Units are in the names (`_ms`, `_hz`, `_bps`, `_kbps`, `_db`, `_dbfs`). A nomina
 `access` is the permission class: `read_only`, `control` or `sensitive`; levels are ordered in that sequence. "destructive" marks a command that may overwrite, remove or end something (a scene, a gain, a running output), as opposed to only adding or inspecting; it is `list_commands`' `destructive` and MCP's destructive hint. Adapters gate commands with an `AccessPolicy` chosen by whoever starts them (ADR 0008):
 - **Default level:** `streamforge-engine --allow read-only|control|sensitive` defaults to `sensitive`, since its client is whoever controls stdin. The MCP server (`streamforge-mcp`) defaults to `read-only`.
 - **Denied commands:** a command above the allowed level fails with `permission_denied` and `details: {"command", "required", "allowed"}`. Parameters are decoded first, so `required` is what that call needs.
-- **`add_source`:** needs only `control` for color bars and solid sources; screen sources need `sensitive`.
+- **`add_source`:** needs only `control` for color bars, solid and image sources; screen sources need `sensitive`.
 
 Both probes are `sensitive` because they capture private content. Screen capture through a picker asks the user, but some pickers can auto-select or remember a choice; a named source (`capture_target_id`) is captured without asking. Microphone capture has no system consent dialog at all. `list_capture_targets` is `sensitive` too: window titles can reveal private content (an open mail, a document name).
 
@@ -393,7 +394,7 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - `create_scene {name}` creates an empty scene (black); the scene list holds its id.
   - `set_active_scene {scene_id | scene_name}` switches the rendered scene.
   - `delete_scene {scene_id | scene_name, confirm}`: deletion is irreversible, so it is `sensitive`, `confirm` must be `true` (`invalid_params` otherwise), and the active scene cannot be deleted (`invalid_state`).
-- **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture. `update_source`, `move_source` and `remove_source` (undone by adding the source again) are `control`.
+- **Access:** `add_source`, `set_active_scene` and `restart_source` are `sensitive` because they can start a screen capture (`add_source` of any other kind is `control`). `update_source`, `move_source` and `remove_source` (undone by adding the source again) are `control`.
 - **Names:** 1–64 characters, no control characters, no surrounding whitespace, unique within their collection.
 - **Limits:** at most 16 scenes and 16 sources per scene (`invalid_state`). An unknown scene or source is `not_found`.
 - **`add_source`:** params `scene_id` or `scene_name`, `name`, `kind`, optional rectangle, `opacity` and `visible`. The scene list holds the new source's id.
@@ -401,7 +402,8 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
     - `color_bars`: stretched to the rectangle.
     - `solid` with `color` `#rrggbb` or `#rrggbbaa`: stretched.
     - `screen` with optional `capture_target_id`, `target_kinds` and `cursor_mode` as for the screen probe: a live capture, fitted into the rectangle with its aspect ratio kept. The scene list shows `capture_target_id` when one is set.
-  - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas).
+    - `image` with `file`: a PNG or JPEG file in the project directory (Images below), fitted into the rectangle with its aspect ratio kept.
+  - Rectangle: `x`, `y`, `width` and `height` in canvas pixels, all four or none (none means the whole canvas; for an image, its own size at the top left, scaled down to the canvas if larger, and the scene list shows that rectangle).
   - `opacity` 0..=1.
   - `visible` (default `true`): a hidden source is not drawn. A hidden screen source starts and keeps its capture like a visible one, so showing it again is immediate.
   - Sources are drawn in order, so later ones are on top; `move_source` changes the order.
@@ -409,11 +411,13 @@ At start the collection has one scene, `Test pattern`: full-canvas color bars pl
   - A capture keeps running while its source exists in any scene, so switching scenes back and forth does not ask again. Removing the source from every scene ends the capture.
   - While a recording or stream is open, a change that would open the picker for a new capture is refused (`invalid_state`): the picker waits for a human and would block the engine. Add picker sources while only the preview runs. Named sources (`capture_target_id`) start without waiting and are allowed.
   - Capture reports are in the output reports' `pipeline.scene_captures` (`{"id", "name", "report", "error"}`, with the source's id and name): the most recent 64, with `scene_captures_omitted` counting older ones.
-- **`update_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and any of `x`, `y`, `width`, `height`, `opacity`, `visible`.
+- **`update_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), and any of `x`, `y`, `width`, `height`, `opacity`, `visible`, and for an image source `file` (another image, or the same one: the file is read again either way, so this refreshes an image at `control` access; the rectangle stays). `file` on another kind is `invalid_params`.
 - **`move_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`) and `index`, its new place in the scene's drawing order (ADR 0019): 0 is the bottom, the scene's last index the top, and the sources between shift by one. Its own index changes nothing. An index past the top is `invalid_params` with `details` `{"index", "max_index"}`. It applies live, like `update_source`.
 - **`remove_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`).
 - **`restart_source`:** the source (`source_id`, or `scene_name` or `scene_id` and `source_name`), optional `capture_target_id`. Starts a screen source's running capture again and ends the old one, e.g. after `get_health` shows it `ended` (ADR 0013). Outputs keep running. Until the new capture delivers its first frame, a rendered source is not drawn (counted in `missing_ticks`).
-  - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. Other kinds are `invalid_params`. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
+  - **Which sources:** screen sources with a running capture (in `get_health.captures`): those of the active scene and those kept for other scenes. A source without a capture, no pipeline, or a pipeline that stopped is `invalid_state`.
+  - **Image sources:** it reads the file again, also while idle (the file is not watched), and every source showing that file shows the new content. `capture_target_id` is `invalid_params`; a missing or broken file is an error as for `add_source`, and the old content stays.
+  - Color bars and solid sources are `invalid_params`.
   - **`capture_target_id`:** capture this source from `list_capture_targets` from now on; the scene keeps it. A closed window's id never comes back, so restarting a window source needs the id of a window that exists. A display's id returns when the display reconnects, so the same id works then.
   - **Pickers:** a picker source asks the user again, so it is refused while a recording or stream is open (`invalid_state`). Pass a `capture_target_id`, or restart it while only the preview runs. On Linux, every screen source is a picker source.
   - **Errors change nothing:** the new capture starts before the old one ends. If it fails, the old capture keeps running, the scene keeps its old `capture_target_id`, and the error is returned (e.g. `not_found` for a gone source).
@@ -455,11 +459,22 @@ A project file holds the scenes with their ids, the active scene and the audio c
 - **`load_project {file_name}`:** replaces the scenes, the active scene and the audio with the file's, all or nothing.
   - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
   - Screen sources load without a capture target; a warning says so. Choose one with `set_capture_target`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
+  - Image files are read as for `add_source`. One that is missing, broken or over a limit does not fail the load: its sources load and draw nothing, and a warning names them and the error. `restart_source` reads it again once it is there.
   - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`, at most 100 plus one that counts the rest).
   - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.
 - **`validate_project {file_name}`:** the same checks without loading. Result `{"file_name", "valid", "schema_version", "migrates", "problems"}`; `migrates` is true for a valid file of an older schema version. An invalid file is a result, not an error. `read_only`.
 - **Errors:** a missing file (or, for a save, a missing directory) is `not_found`, an unreadable one `permission_denied`, a file over 1 MiB `invalid_params`.
-- **Not stored:** stream keys, file paths, and what screen sources capture (`capture_target_id`: machine-specific, and window titles can be private).
+- **Not stored:** stream keys, file paths, and what screen sources capture (`capture_target_id`: machine-specific, and window titles can be private). An image source stores its plain file name; the image stays a file in the project directory.
+
+### Images
+
+Image sources (ADR 0019) show PNG and JPEG files from the project directory, so a project and its images move together and an agent can show only what the user put there. Without a project directory, `list_images` and image sources are `invalid_state`.
+- **File names:** a plain name ending in `.png`, `.jpg` or `.jpeg` (any case), under the file name rule above. The format is told by the file's content, not its name.
+- **`list_images`:** the files an image source can name: regular files (or links to one) with those names, sorted by name, each with `bytes`, `modified_unix_ms` and its `width` and `height` from the file header (a JPEG's EXIF orientation applied; `null` if the header cannot be read). At most 256 are listed; `omitted` counts the rest. `read_only`.
+- **Reading:** the file is decoded on the engine thread when a source is added, when a project loads, on `update_source` with a `file`, and on `restart_source`. It is not watched. Every source showing the same file shares one frame, and when a source is added or a project loads, an unchanged file (same modification time and length) is not decoded again; `update_source` and `restart_source` always read it.
+- **Formats:** PNG (any bit depth, grey, palette, alpha, interlaced; an animated PNG shows its first image) and JPEG (baseline and progressive, grey, CMYK; arithmetic coding and files with more than 1024 segments before the image data are not supported). Alpha is premultiplied, JPEG's EXIF orientation is applied (the first EXIF segment before the image data), and colour profiles are ignored (sRGB is assumed).
+- **Limits:** at most 8192 pixels per side and 16 Mi pixels (16 777 216) per image, files up to 256 MiB, and 512 MiB for all decoded images together (4 bytes per pixel), counting a file's previous frame while it is read again. The image's own limits are checked first. Beyond one, `invalid_params` with `details`: `{"file", "width", "height", "max_side", "max_pixels"}` for an image, `{"file", "bytes_needed", "bytes_used", "max_total_bytes"}` for the total.
+- **Errors:** a missing file is `not_found`, an unreadable one `permission_denied`, one that is not a PNG or JPEG or cannot be decoded `invalid_params`, each with `details.file`. A failed command changes nothing.
 
 The file (`schema_version` 4):
 
@@ -497,7 +512,7 @@ The file (`schema_version` 4):
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
 {"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
-{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","move_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","save_project","load_project","validate_project"],"command":"nope"}}}
+{"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","move_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","list_images","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
 Key order inside `result` and `details` is not part of the contract. `capture_available` depends on the machine; this output is from a Linux desktop session.
@@ -520,6 +535,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
   - 2026-10-23, ADR 0017 step 1: the master meter (`mix.master`, `master_peak_dbfs`) measures the program bus before the output limit, so it can exceed 0 dBFS when the mix overloads; `clipped_samples` still counts what the limit changed.
 - **From 0.1.0 on**, v1 is stable, and the rules below hold. Additions since then:
   - M14 step 2, ADR 0019: `move_source`; sources' `visible` in `list_scenes` (and every result with the scene list), `add_source` and `update_source`. Project files are schema 4 (versions 1 to 3 migrate on load); a 0.1.0 build refuses a schema 4 file as newer than it reads.
-- Adding a command, adding optional fields to a result, or adding an error code is backward compatible within v1. Clients must ignore unknown result fields and treat unknown error codes as generic failures.
+  - M14 step 3, ADR 0019: `list_images`; the source kind `image` with `file` (`add_source`, `list_scenes`, project files of schema 4); `update_source`'s `file`; `restart_source` of an image source. A build of step 2 refuses a project file with an image source.
+- Adding a command, adding optional fields to a result, adding a value to an enumerated result field (e.g. a source `kind`), or adding an error code is backward compatible within v1. Clients must ignore unknown result fields, show or skip objects of an unknown kind, and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` and the pinned result shapes (`crates/command-api/tests/wire_shapes.txt`, see `docs/testing.md`) together with this document.

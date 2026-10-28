@@ -1036,10 +1036,14 @@ mod tests {
             sink: Some(Box::new(PeakSink(Arc::clone(&peaks)))),
         })
         .expect("spawn");
-        thread::sleep(Duration::from_millis(100));
+        // Five blocks, however late a loaded runner starts the thread.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while peaks.lock().expect("lock").len() < 5 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
         let stats = mixer.stop().expect("stop");
         let peaks = peaks.lock().expect("lock");
-        assert!(peaks.len() >= 5);
+        assert!(peaks.len() >= 5, "{} blocks", peaks.len());
         for block in peaks.iter() {
             assert_eq!(block.len(), 2, "program and one aux bus");
             assert!(block[0] < 0.51, "program untouched: {block:?}");

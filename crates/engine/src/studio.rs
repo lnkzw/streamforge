@@ -8,7 +8,7 @@ use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
     ErrorCode, MixerState, MoveSourceRequest, OutputKind, OutputMix, OutputProfileSet,
     OutputProfiles, PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
-    SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRef, UpdateBusRequest,
+    SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRef, SourceSpec, UpdateBusRequest,
     UpdateChannelRequest, UpdateSourceRequest,
 };
 use media_core::{FrameMailbox, Rational};
@@ -31,6 +31,14 @@ impl Engine {
 
     pub(crate) fn list_scenes(&self) -> SceneList {
         self.scenes.list()
+    }
+
+    /// The scene list with the warnings of the captures a command started.
+    fn scene_list(&self, warnings: Vec<String>) -> SceneList {
+        SceneList {
+            warnings,
+            ..self.scenes.list()
+        }
     }
 
     /// Apply `change`; if it alters what the running pipeline renders, swap
@@ -71,22 +79,29 @@ impl Engine {
     ) -> Result<SceneList, CommandError> {
         let before = self.scenes.snapshot();
         let rendered = self.scenes.active().clone();
-        change(&mut self.scenes)?;
+        if let Err(error) = change(&mut self.scenes) {
+            self.scenes.restore(before);
+            return Err(error);
+        }
         let (allow_new_captures, keep) = self.capture_policy();
+        let mut warnings = Vec::new();
         if let Some(pipeline) = &mut self.pipeline {
             let active = self.scenes.active();
             if *active != rendered
                 || changed_image.is_some_and(|file| scenes::shows_image(active, file))
             {
-                if let Err(error) = pipeline.apply_scene(
-                    self.capture.screen.as_mut(),
+                match pipeline.apply_scene(
+                    &mut self.capture,
                     active,
                     &self.images,
                     &keep,
                     allow_new_captures,
                 ) {
-                    self.scenes.restore(before);
-                    return Err(error);
+                    Ok(started) => warnings = started,
+                    Err(error) => {
+                        self.scenes.restore(before);
+                        return Err(error);
+                    }
                 }
             } else {
                 // A source removed from a scene that is not rendered (or
@@ -94,7 +109,7 @@ impl Engine {
                 pipeline.retire_unkept(&keep);
             }
         }
-        Ok(self.scenes.list())
+        Ok(self.scene_list(warnings))
     }
 
     pub(crate) fn create_scene(&mut self, name: &str) -> Result<SceneList, CommandError> {
@@ -134,15 +149,103 @@ impl Engine {
         &mut self,
         request: &UpdateSourceRequest,
     ) -> Result<SceneList, CommandError> {
-        let image = matches!(
-            self.scenes.source(&request.source)?.kind,
-            SourceKind::Image { .. }
-        );
+        let kind = &self.scenes.source(&request.source)?.kind;
+        if matches!(kind, SourceKind::Camera { .. })
+            && (request.camera_id.is_some() || request.mode.is_some())
+        {
+            return self.update_camera(request);
+        }
+        let image = matches!(kind, SourceKind::Image { .. });
         let Some(file) = request.file.as_deref().filter(|_| image) else {
             return self.edit_scenes(|scenes| scenes.update_source(request));
         };
         let replaced = self.read_image(file, true)?;
         self.edit_scenes_reading(file, replaced, |scenes| scenes.update_source(request))
+    }
+
+    /// Change a camera source's camera or mode (and whatever else
+    /// `request` changes). A camera that runs opens again as the source now
+    /// says; if it fails, the change is undone and the camera it had opens
+    /// again.
+    fn update_camera(&mut self, request: &UpdateSourceRequest) -> Result<SceneList, CommandError> {
+        let old = self.scenes.source(&request.source)?.clone();
+        let running = self
+            .pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.has_scene_capture(&old.id));
+        if !running {
+            return self.edit_scenes(|scenes| scenes.update_source(request));
+        }
+        self.live_pipeline(&old.name)?;
+        let before = self.scenes.snapshot();
+        if let Err(error) = self.scenes.update_source(request) {
+            self.scenes.restore(before);
+            return Err(error);
+        }
+        let new = self.scenes.source(&SourceRef::id(old.id.clone()))?.clone();
+        if new.kind == old.kind {
+            // It captures that camera in that mode already.
+            self.scenes.restore(before);
+            return self.edit_scenes(|scenes| scenes.update_source(request));
+        }
+        match self.restart_capture(&new) {
+            Ok(warnings) => Ok(self.scene_list(warnings)),
+            Err(mut error) => {
+                self.scenes.restore(before);
+                match self.restart_capture(&old) {
+                    Ok(warnings) if warnings.is_empty() => {}
+                    // E.g. the old camera is not found any more.
+                    Ok(warnings) => {
+                        error.message = format!(
+                            "{}; the camera it had opened again, but: {}",
+                            error.message,
+                            warnings.join("; ")
+                        );
+                    }
+                    Err(again) => {
+                        error.message = format!(
+                            "{}; the camera it had did not open again either ({}), so it shows \
+                             nothing until restart_source",
+                            error.message, again.message
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Refuse a new capture for `name` into a pipeline that stopped
+    /// unexpectedly (it would never be rendered); `Ok` without a pipeline.
+    fn live_pipeline(&self, name: &str) -> Result<(), CommandError> {
+        match &self.pipeline {
+            Some(pipeline) if !pipeline.is_running() => Err(CommandError::new(
+                ErrorCode::InvalidState,
+                format!(
+                    "the media pipeline stopped unexpectedly, so a new capture of `{name}` would \
+                     not be rendered; turn the preview off and stop the open outputs to collect \
+                     their reports"
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Start `source`'s capture again in the running pipeline, as the
+    /// scenes now say.
+    fn restart_capture(&mut self, source: &SourceSpec) -> Result<Vec<String>, CommandError> {
+        let (allow_new_captures, keep) = self.capture_policy();
+        match &mut self.pipeline {
+            Some(pipeline) => pipeline.restart_capture(
+                &mut self.capture,
+                self.scenes.active(),
+                &self.images,
+                source,
+                &keep,
+                allow_new_captures,
+            ),
+            None => Err(no_pipeline(&source.name)),
+        }
     }
 
     pub(crate) fn move_source(
@@ -157,9 +260,11 @@ impl Engine {
     }
 
     /// Restart a screen source's capture (e.g. after it ended), optionally
-    /// on another source (`capture_target_id`, kept by the scene), while the
-    /// pipeline and its outputs keep running; or read an image source's file
-    /// again, also while idle. On error nothing changes.
+    /// on another source (`capture_target_id`, kept by the scene), or open a
+    /// camera source's camera again, while the pipeline and its outputs keep
+    /// running; or read an image source's file again, also while idle. On
+    /// error nothing changes, except that a camera that does not open again
+    /// shows nothing.
     pub(crate) fn restart_source(
         &mut self,
         source: &SourceRef,
@@ -171,11 +276,16 @@ impl Engine {
         let source = &SourceRef::id(spec.id.clone());
         match &spec.kind {
             SourceKind::Screen { .. } => {}
-            SourceKind::Image { .. } if capture_target_id.is_some() => {
+            SourceKind::Image { .. } | SourceKind::Camera { .. } if capture_target_id.is_some() => {
+                let kind = if matches!(spec.kind, SourceKind::Image { .. }) {
+                    "an image"
+                } else {
+                    "a camera"
+                };
                 return Err(CommandError::new(
                     ErrorCode::InvalidParams,
                     format!(
-                        "`{name}` is an image source; `capture_target_id` applies to screen \
+                        "`{name}` is {kind} source; `capture_target_id` applies to screen \
                          sources only"
                     ),
                 ));
@@ -185,50 +295,33 @@ impl Engine {
                 let replaced = self.read_image(&file, true)?;
                 return self.edit_scenes_reading(&file, replaced, |_| Ok(()));
             }
+            SourceKind::Camera { .. } => {}
             SourceKind::ColorBars | SourceKind::Solid { .. } => {
                 return Err(CommandError::new(
                     ErrorCode::InvalidParams,
                     format!(
-                        "`{name}` does not capture or read a file; only screen and image \
-                         sources can be restarted"
+                        "`{name}` does not capture or read a file; only screen, camera and \
+                         image sources can be restarted"
                     ),
                 ));
             }
         }
-        match &self.pipeline {
-            None => return Err(no_pipeline(name)),
-            Some(pipeline) if !pipeline.is_running() => {
-                return Err(CommandError::new(
-                    ErrorCode::InvalidState,
-                    "the media pipeline stopped unexpectedly, so a new capture would not be \
-                     rendered; turn the preview off and stop the open outputs to collect their \
-                     reports",
-                ));
-            }
-            Some(_) => {}
+        if self.pipeline.is_none() {
+            return Err(no_pipeline(name));
         }
+        self.live_pipeline(name)?;
         let before = self.scenes.snapshot();
         if let Some(id) = capture_target_id {
             self.scenes.set_capture_target_id(source, id)?;
         }
         let source = self.scenes.source(source)?.clone();
-        let (allow_new_captures, keep) = self.capture_policy();
-        let restarted = match &mut self.pipeline {
-            Some(pipeline) => pipeline.restart_screen(
-                self.capture.screen.as_mut(),
-                self.scenes.active(),
-                &self.images,
-                &source,
-                &keep,
-                allow_new_captures,
-            ),
-            None => Err(no_pipeline(name)),
-        };
-        if let Err(error) = restarted {
-            self.scenes.restore(before);
-            return Err(error);
+        match self.restart_capture(&source) {
+            Ok(warnings) => Ok(self.scene_list(warnings)),
+            Err(error) => {
+                self.scenes.restore(before);
+                Err(error)
+            }
         }
-        Ok(self.scenes.list())
     }
 
     /// Choose what screen source `source` captures, while nothing captures
@@ -258,13 +351,13 @@ impl Engine {
         self.edit_scenes(|scenes| scenes.set_capture_target_id(&source, screen))
     }
 
-    /// Whether new captures may start (open outputs must not wait for a
-    /// picker; the preview alone means someone is at the UI), and the
-    /// screen sources whose captures keep running.
+    /// Whether new picker captures may start (open outputs must not wait
+    /// for a picker; the preview alone means someone is at the UI), and the
+    /// screen and camera sources whose captures keep running.
     fn capture_policy(&self) -> (bool, Vec<String>) {
         (
             self.recording.is_none() && self.streaming.is_none(),
-            self.scenes.screen_source_ids(),
+            self.scenes.capture_source_ids(),
         )
     }
 
@@ -617,6 +710,7 @@ impl Engine {
             self.preview_enabled = true;
             if let Some(pipeline) = &self.pipeline {
                 pipeline.set_preview(Some(Arc::clone(&self.preview_frames)));
+                state.warnings.extend(pipeline.capture_warnings());
                 state.warnings.extend(pipeline.audio_warnings());
             }
         } else if !enabled && self.preview_enabled {

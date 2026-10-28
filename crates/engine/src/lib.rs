@@ -302,6 +302,7 @@ pub(crate) fn file_error_code(error: &std::io::Error) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
+    mod cameras;
     mod images;
     mod monitor;
     use std::time::{Duration, Instant};

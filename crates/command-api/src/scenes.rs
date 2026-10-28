@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use capture_api::{CursorMode, VideoSourceKind};
+use capture_api::{CursorMode, Rational, VideoSourceKind};
 use serde::Serialize;
 
 /// Most scenes the engine keeps.
@@ -27,6 +27,10 @@ pub const SCENE_ID_PREFIX: &str = "scene_";
 pub const SOURCE_ID_PREFIX: &str = "src_";
 /// Longest scene or source id, in bytes (`a-z`, `0-9` and `_`).
 pub const MAX_ID_LEN: usize = 64;
+/// Largest camera mode side a camera source may ask for, in pixels.
+pub const MAX_CAMERA_SIDE: u32 = 16_384;
+/// Highest camera frame rate a camera source may ask for.
+pub const MAX_CAMERA_FPS: u32 = 1_000;
 
 /// How a command names a scene: by id, by name, or by both, which must then
 /// name the same scene. The id is looked up first.
@@ -110,6 +114,40 @@ pub enum SourceKind {
     /// A PNG or JPEG file in the engine's project directory, by its plain
     /// name; fitted into the rectangle with its aspect ratio kept.
     Image { file: String },
+    /// A camera from `list_cameras`, fitted into the rectangle with its
+    /// aspect ratio kept; it captures while its scene was rendered.
+    Camera {
+        camera_id: String,
+        /// `None`: the engine chooses (ADR 0019 "Mode choice").
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<CameraModeSpec>,
+    },
+}
+
+/// The camera mode a camera source asks for; what the camera lacks is
+/// replaced by its closest mode, with a warning. Never all `None` inside a
+/// source (that is no mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct CameraModeSpec {
+    /// Width and height come together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<Rational>,
+}
+
+impl CameraModeSpec {
+    /// Whether it asks for nothing: the engine chooses.
+    pub fn is_auto(&self) -> bool {
+        self.width.is_none() && self.height.is_none() && self.fps.is_none()
+    }
+
+    /// Width and height, when both are given.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        self.width.zip(self.height)
+    }
 }
 
 /// A color as red, green, blue, alpha; serialized as `#rrggbbaa`.
@@ -164,6 +202,10 @@ pub struct SceneList {
     pub active_scene_name: String,
     pub active_scene_id: String,
     pub scenes: Vec<SceneSpec>,
+    /// Problems of captures this command started, e.g. a camera that was
+    /// not found (its source draws nothing) or runs in another mode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +230,11 @@ pub struct UpdateSourceRequest {
     pub visible: Option<bool>,
     /// Image sources: show this file in the project directory instead.
     pub file: Option<String>,
+    /// Camera sources: capture this camera instead.
+    pub camera_id: Option<String>,
+    /// Camera sources: ask for this mode instead; an empty one lets the
+    /// engine choose.
+    pub mode: Option<CameraModeSpec>,
 }
 
 /// Move a source to `index` in its scene's drawing order (0 is the

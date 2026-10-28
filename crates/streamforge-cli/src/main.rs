@@ -988,6 +988,7 @@ mod tests {
                 state: command_api::CaptureState::Ended {
                     reason: "the captured window was closed".into(),
                 },
+                format: None,
             }],
         };
         assert_eq!(

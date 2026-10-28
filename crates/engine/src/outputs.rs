@@ -250,7 +250,8 @@ impl Engine {
             ));
         };
         let t0 = pipeline.attach(OutputId::Recording, recorder.input(), mix, tracks);
-        let warnings = pipeline.audio_warnings();
+        let mut warnings = pipeline.capture_warnings();
+        warnings.extend(pipeline.audio_warnings());
         let started = RecordingStarted {
             path: display_path(&path),
             width: CANVAS_WIDTH,
@@ -348,7 +349,8 @@ impl Engine {
         };
         let mix = mix_column(pipeline, &self.profiles, OutputKind::Stream);
         let t0 = pipeline.attach(OutputId::Streaming, streamer.input(), mix, Vec::new());
-        let warnings = pipeline.audio_warnings();
+        let mut warnings = pipeline.capture_warnings();
+        warnings.extend(pipeline.audio_warnings());
         let started = StreamingStarted {
             target: streamer.target().to_owned(),
             width: CANVAS_WIDTH,

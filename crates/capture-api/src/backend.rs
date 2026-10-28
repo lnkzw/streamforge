@@ -6,7 +6,7 @@ use crate::{
     AudioCaptureCapability, AudioCaptureReport, AudioCaptureRequest, AudioInput, AudioOutput,
     AudioStreamRequest, Camera, CameraCaptureCapability, CameraRequest, CaptureCapabilities,
     CaptureError, CaptureState, PlaybackRequest, ScreenCaptureCapability, ScreenCaptureRequest,
-    ScreenSelection, ScreenSource, VideoCaptureReport, VideoSourceInfo,
+    ScreenSelection, ScreenSource, VideoCaptureReport, VideoFormatInfo, VideoSourceInfo,
 };
 
 /// A running audio capture delivering interleaved `f32` samples until stopped.
@@ -131,11 +131,23 @@ pub trait CameraCapture: Send {
     /// unavailable capabilities are reported with a reason.
     fn capability(&mut self) -> CameraCaptureCapability;
     fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError>;
-    /// A camera stream is a `VideoStream`, like a screen capture.
+    /// Returns once the camera runs; a camera that is not listed is
+    /// `NotFound`.
     fn start_camera_stream(
         &mut self,
         request: &CameraRequest,
-    ) -> Result<Box<dyn VideoStream>, CaptureError>;
+    ) -> Result<CameraStream, CaptureError>;
+}
+
+/// A running camera with what its start negotiated.
+pub struct CameraStream {
+    /// A camera stream is a `VideoStream`, like a screen capture.
+    pub stream: Box<dyn VideoStream>,
+    /// The format the camera runs in, if the backend reports it.
+    pub format: Option<VideoFormatInfo>,
+    /// Non-fatal start problems, e.g. the closest mode instead of the
+    /// requested one; the stop report repeats them.
+    pub warnings: Vec<String>,
 }
 
 /// The capture parts of one system; the engine drives only these.
@@ -304,7 +316,7 @@ impl CameraCapture for UnsupportedCapture {
     fn start_camera_stream(
         &mut self,
         _request: &CameraRequest,
-    ) -> Result<Box<dyn VideoStream>, CaptureError> {
+    ) -> Result<CameraStream, CaptureError> {
         Err(self.error())
     }
 }
@@ -517,7 +529,7 @@ mod tests {
         fn start_camera_stream(
             &mut self,
             _request: &CameraRequest,
-        ) -> Result<Box<dyn VideoStream>, CaptureError> {
+        ) -> Result<CameraStream, CaptureError> {
             Err(CaptureError::unsupported("unused"))
         }
     }

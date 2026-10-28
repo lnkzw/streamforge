@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use capture_api::{
     AudioCaptureRequest, CursorMode, DEFAULT_PROBE_DURATION, MAX_PROBE_DURATION,
-    MIN_PROBE_DURATION, ScreenCaptureRequest, ScreenSelection, VideoSourceKind,
+    MIN_PROBE_DURATION, Rational, ScreenCaptureRequest, ScreenSelection, VideoSourceKind,
 };
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
@@ -18,12 +18,13 @@ use encoder_api::{EncoderPreference, ReconnectPolicy, StreamKey, StreamTarget};
 
 use crate::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BUS_ID_PREFIX, BusRef, CHANNEL_ID_PREFIX,
-    ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode, LiveInputSpec,
-    MAX_COORDINATE, MAX_EXTRA_TRACKS, MAX_ID_LEN, MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest,
-    MoveSourceRequest, OutputKind, RecordingRequest, Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX,
-    SaveProjectRequest, SceneRef, SendTap, SetChannelInputRequest, SetOutputProfileRequest,
-    SetSendRequest, SourceKind, SourceRect, SourceRef, StreamingRequest, ToneSpec,
-    UpdateBusRequest, UpdateChannelRequest, UpdateSourceRequest, VIDEO_BITRATE_KBPS,
+    CameraModeSpec, ChannelInput, ChannelRef, Command, CommandError, CompositeRequest, ErrorCode,
+    LiveInputSpec, MAX_CAMERA_FPS, MAX_CAMERA_SIDE, MAX_COORDINATE, MAX_EXTRA_TRACKS, MAX_ID_LEN,
+    MAX_MIX_DURATION, MAX_NAME_CHARS, MixRequest, MoveSourceRequest, OutputKind, RecordingRequest,
+    Rgba, SCENE_ID_PREFIX, SOURCE_ID_PREFIX, SaveProjectRequest, SceneRef, SendTap,
+    SetChannelInputRequest, SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRect,
+    SourceRef, StreamingRequest, ToneSpec, UpdateBusRequest, UpdateChannelRequest,
+    UpdateSourceRequest, VIDEO_BITRATE_KBPS,
 };
 
 /// Permission class of a command.
@@ -274,8 +275,9 @@ const DELETE_SCENE: CommandDescriptor = CommandDescriptor {
 const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
     name: "set_active_scene",
     summary: "Render this scene from now on (applies live while preview or outputs run; its \
-              screen sources start capturing, which opens the system picker). Params: scene_id \
-              or scene_name. Returns the scene list.",
+              screen sources start capturing, which opens the system picker, and so do its \
+              cameras). Params: scene_id or scene_name. Returns the scene list, with warnings \
+              for cameras that were not found.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -284,14 +286,17 @@ const SET_ACTIVE_SCENE: CommandDescriptor = CommandDescriptor {
 const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "add_source",
     summary: "Add a source on top of a scene. Params: scene_id or scene_name, name, kind (color_bars, solid, \
-              screen, image), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), \
-              file (image: a PNG or JPEG file name from list_images), x, \
+              screen, image, camera), color (#rrggbb[aa], solid), capture_target_id, target_kinds and cursor_mode (screen), \
+              file (image: a PNG or JPEG file name from list_images), camera_id and mode \
+              (camera: an id from list_cameras; mode {width, height, fps} is one of its modes or \
+              part of one, default chosen by the engine), x, \
               y, width, height (canvas pixels; all or none, default the whole canvas; an image \
               keeps its own size at the top left), opacity \
               (0-1), visible (default true). Screen sources start capturing when the scene is rendered: the capture_target_id from \
-              list_capture_targets, or else the one the user picks in the system dialog. Adding a \
-              screen source needs sensitive access, the other kinds control. Returns \
-              the scene list.",
+              list_capture_targets, or else the one the user picks in the system dialog. Cameras \
+              start when the scene is rendered too and run until the pipeline stops. Adding a \
+              screen or camera source needs sensitive access, the other kinds control. Returns \
+              the scene list, with warnings for a camera that was not found or lacks the mode.",
     access: CommandAccess::Sensitive,
     destructive: false,
     open_world: false,
@@ -299,11 +304,14 @@ const ADD_SOURCE: CommandDescriptor = CommandDescriptor {
 
 const UPDATE_SOURCE: CommandDescriptor = CommandDescriptor {
     name: "update_source",
-    summary: "Move, resize, fade, hide or show a source, or show another image file. Params: \
+    summary: "Move, resize, fade, hide or show a source, show another image file, or capture \
+              another camera or mode. Params: \
               source_id, or scene_name (or scene_id) and source_name; any of x, y, width, height, \
-              opacity, visible (a hidden source is not drawn; a screen source keeps capturing), \
+              opacity, visible (a hidden source is not drawn; a screen or camera source keeps capturing), \
               file (image sources: a file name from list_images, read again even if it is \
-              the one shown). Returns the scene list.",
+              the one shown), camera_id and mode (camera sources, as for add_source; mode {} lets \
+              the engine choose; a running camera opens again; needs sensitive access). Returns \
+              the scene list.",
     access: CommandAccess::Control,
     destructive: true,
     open_world: false,
@@ -337,7 +345,8 @@ const RESTART_SOURCE: CommandDescriptor = CommandDescriptor {
               window's id does not come back, a display's does when it reconnects. A picker \
               source asks the user again, so it is refused while recording or streaming. \
               An image source reads its file again (also while idle), and every source showing \
-              that file shows the new content. Returns the scene list.",
+              that file shows the new content. A camera source opens its camera again, also \
+              while recording or streaming. Returns the scene list.",
     access: CommandAccess::Sensitive,
     // It ends the running capture; a picker choice is lost.
     destructive: true,
@@ -697,10 +706,16 @@ impl Command {
 
     /// Access this particular command needs: its descriptor's class, except
     /// `add_source` of a non-capturing source (color bars, solid, an image
-    /// from the project directory), which is `control` (only screen sources
-    /// capture private content).
+    /// from the project directory), which is `control` (only screen and
+    /// camera sources capture private content), and `update_source` that
+    /// chooses what a camera captures, which is `sensitive`.
     pub fn required_access(&self) -> CommandAccess {
         match self {
+            Self::UpdateSource(request)
+                if request.camera_id.is_some() || request.mode.is_some() =>
+            {
+                CommandAccess::Sensitive
+            }
             // Listed explicitly: a new source kind needs the descriptor's
             // (sensitive) access until it is known to capture nothing.
             Self::AddSource(request)
@@ -1260,13 +1275,17 @@ struct AddSourceParams {
     scene_name: Option<String>,
     /// Source name, unique within the scene.
     name: String,
-    /// Source kind: color_bars, solid, screen or image.
-    #[schemars(extend("enum" = ["color_bars", "solid", "screen", "image"]))]
+    /// Source kind: color_bars, solid, screen, image or camera.
+    #[schemars(extend("enum" = ["color_bars", "solid", "screen", "image", "camera"]))]
     kind: String,
     /// Solid sources: #rrggbb or #rrggbbaa.
     color: Option<String>,
     /// Image sources: a PNG or JPEG file name from list_images.
     file: Option<String>,
+    /// Camera sources: a camera_id from list_cameras.
+    camera_id: Option<String>,
+    /// Camera sources: the mode to ask for, one of list_cameras' modes or part of one; default: the engine chooses.
+    mode: Option<CameraModeParams>,
     /// Capture target id from list_capture_targets: capture it without a picker.
     capture_target_id: Option<String>,
     /// Capture target kinds to offer in the picker (monitor, window, virtual); default monitor and window.
@@ -1299,23 +1318,31 @@ fn decode_add_source(
         )
     };
     let kind = match params.kind.as_str() {
-        "color_bars" | "solid" | "image"
+        "color_bars" | "solid" | "image" | "camera"
             if params.capture_target_id.is_some()
                 || params.target_kinds.is_some()
                 || params.cursor_mode.is_some() =>
         {
             return Err(screen_only());
         }
-        "color_bars" | "image" if params.color.is_some() => {
+        "color_bars" | "image" | "camera" if params.color.is_some() => {
             return Err(invalid_params(
                 command,
                 "`color` applies to solid sources only",
             ));
         }
-        "color_bars" | "solid" | "screen" if params.file.is_some() => {
+        "color_bars" | "solid" | "screen" | "camera" if params.file.is_some() => {
             return Err(invalid_params(
                 command,
                 "`file` applies to image sources only",
+            ));
+        }
+        "color_bars" | "solid" | "screen" | "image"
+            if params.camera_id.is_some() || params.mode.is_some() =>
+        {
+            return Err(invalid_params(
+                command,
+                "`camera_id` and `mode` apply to camera sources only",
             ));
         }
         "color_bars" => SourceKind::ColorBars,
@@ -1355,10 +1382,23 @@ fn decode_add_source(
                     .ok_or_else(|| invalid_params(command, "image sources need a `file`"))?,
             )?,
         },
+        "camera" => SourceKind::Camera {
+            camera_id: valid_camera_id(
+                command,
+                params
+                    .camera_id
+                    .ok_or_else(|| invalid_params(command, "camera sources need a `camera_id`"))?,
+            )?,
+            mode: params
+                .mode
+                .map(|mode| camera_mode(command, mode))
+                .transpose()?
+                .filter(|mode| !mode.is_auto()),
+        },
         _ => {
             return Err(invalid_params(
                 command,
-                "`kind` must be color_bars, solid, screen or image",
+                "`kind` must be color_bars, solid, screen, image or camera",
             ));
         }
     };
@@ -1412,6 +1452,29 @@ struct UpdateSourceParams {
     visible: Option<bool>,
     /// Image sources: show this PNG or JPEG file from list_images (read again even if it is the one shown).
     file: Option<String>,
+    /// Camera sources: capture this camera from list_cameras instead (needs sensitive access).
+    camera_id: Option<String>,
+    /// Camera sources: ask for this mode instead; {} lets the engine choose (needs sensitive access).
+    mode: Option<CameraModeParams>,
+}
+
+/// A camera mode as `list_cameras` lists it; every member is optional.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CameraModeParams {
+    /// Width in camera pixels; give height too.
+    width: Option<u32>,
+    /// Height in camera pixels; give width too.
+    height: Option<u32>,
+    /// Frames per second as a fraction, e.g. {"num": 30, "den": 1}; num 0 means the camera's own rate.
+    fps: Option<FpsParams>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FpsParams {
+    num: u32,
+    den: u32,
 }
 
 fn decode_update_source(
@@ -1430,10 +1493,12 @@ fn decode_update_source(
     .all(Option::is_none)
         && params.visible.is_none()
         && params.file.is_none()
+        && params.camera_id.is_none()
+        && params.mode.is_none()
     {
         return Err(invalid_params(
             command,
-            "give at least one of x, y, width, height, opacity, visible or file",
+            "give at least one of x, y, width, height, opacity, visible, file, camera_id or mode",
         ));
     }
     let check = |field: &str, value: Option<f32>, size: bool| {
@@ -1458,6 +1523,14 @@ fn decode_update_source(
         file: params
             .file
             .map(|file| image_file(command, file))
+            .transpose()?,
+        camera_id: params
+            .camera_id
+            .map(|id| valid_camera_id(command, id))
+            .transpose()?,
+        mode: params
+            .mode
+            .map(|mode| camera_mode(command, mode))
             .transpose()?,
     })
 }
@@ -2325,6 +2398,77 @@ fn valid_capture_target_id(command: &str, id: String) -> Result<String, CommandE
         ));
     }
     Ok(id)
+}
+
+fn valid_camera_id(command: &str, id: String) -> Result<String, CommandError> {
+    if id.is_empty() || id.chars().count() > MAX_SOURCE_ID_CHARS || id.chars().any(char::is_control)
+    {
+        return Err(invalid_params(
+            command,
+            format!(
+                "`camera_id` must be an id from list_cameras (1 to {MAX_SOURCE_ID_CHARS} characters)"
+            ),
+        ));
+    }
+    Ok(id)
+}
+
+/// A camera source's mode; all `None` lets the engine choose. A rate of
+/// `0/1` is how `list_cameras` lists a camera that states none, so it asks
+/// for no rate. Rates are kept in lowest terms, so the same rate compares
+/// equal however it was written.
+fn camera_mode(command: &str, mode: CameraModeParams) -> Result<CameraModeSpec, CommandError> {
+    let side = |value: u32| (1..=MAX_CAMERA_SIDE).contains(&value);
+    match (mode.width, mode.height) {
+        (None, None) => {}
+        (Some(width), Some(height)) if side(width) && side(height) => {}
+        (Some(_), Some(_)) => {
+            return Err(invalid_params(
+                command,
+                format!("`mode.width` and `mode.height` must be 1 to {MAX_CAMERA_SIDE}"),
+            ));
+        }
+        _ => {
+            return Err(invalid_params(
+                command,
+                "give `mode.width` and `mode.height` together, or neither",
+            ));
+        }
+    }
+    let fps = match mode.fps {
+        None => None,
+        Some(FpsParams { den: 0, .. }) => {
+            return Err(invalid_params(command, "`mode.fps.den` must be at least 1"));
+        }
+        Some(FpsParams { num: 0, .. }) => None,
+        Some(FpsParams { num, den })
+            if u64::from(num) > u64::from(MAX_CAMERA_FPS) * u64::from(den) =>
+        {
+            return Err(invalid_params(
+                command,
+                format!("`mode.fps` must be at most {MAX_CAMERA_FPS} frames per second"),
+            ));
+        }
+        Some(FpsParams { num, den }) => {
+            let divisor = gcd(num, den);
+            Some(Rational {
+                num: num / divisor,
+                den: den / divisor,
+            })
+        }
+    };
+    Ok(CameraModeSpec {
+        width: mode.width,
+        height: mode.height,
+        fps,
+    })
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn screen_selection(
@@ -3825,7 +3969,7 @@ mod tests {
         let add = params_schema("add_source").expect("schema");
         assert_eq!(
             add["properties"]["kind"]["enum"],
-            json!(["color_bars", "solid", "screen", "image"])
+            json!(["color_bars", "solid", "screen", "image", "camera"])
         );
         assert_eq!(add["required"], json!(["name", "kind"]));
         // The advertised kinds are exactly the ones the decoder accepts.
@@ -3836,6 +3980,9 @@ mod tests {
             }
             if kind == "image" {
                 params["file"] = json!("logo.png");
+            }
+            if kind == "camera" {
+                params["camera_id"] = json!("v4l2_input.usb");
             }
             assert!(
                 Command::decode("add_source", Some(&params)).is_ok(),
@@ -3904,6 +4051,162 @@ mod tests {
     }
 
     #[test]
+    fn camera_source_params() {
+        let decode = |command: &str, params: Value| Command::decode(command, Some(&params));
+        let camera = |extra: Value| {
+            let mut params = json!({"scene_name": "Main", "name": "cam", "kind": "camera"});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            decode("add_source", params)
+        };
+        let kind = |extra: Value| match camera(extra) {
+            Ok(Command::AddSource(add)) => add.kind,
+            other => panic!("{other:?}"),
+        };
+        let mode = |width, height, fps| CameraModeSpec { width, height, fps };
+        assert_eq!(
+            kind(json!({"camera_id": "v4l2_input.usb"})),
+            SourceKind::Camera {
+                camera_id: "v4l2_input.usb".to_owned(),
+                mode: None
+            }
+        );
+        // A list_cameras mode fits as it is, or part of one.
+        let cases = [
+            (
+                json!({"width": 1280, "height": 720, "fps": {"num": 30, "den": 1}}),
+                Some(mode(Some(1280), Some(720), Some(Rational::integer(30)))),
+            ),
+            (
+                json!({"width": 640, "height": 480}),
+                Some(mode(Some(640), Some(480), None)),
+            ),
+            (
+                json!({"fps": {"num": 30000, "den": 1001}}),
+                Some(mode(
+                    None,
+                    None,
+                    Some(Rational {
+                        num: 30000,
+                        den: 1001,
+                    }),
+                )),
+            ),
+            // In lowest terms, so the same rate is the same mode.
+            (
+                json!({"fps": {"num": 60, "den": 2}}),
+                Some(mode(None, None, Some(Rational::integer(30)))),
+            ),
+            // How list_cameras lists a camera without rates: no rate asked.
+            (
+                json!({"width": 640, "height": 480, "fps": {"num": 0, "den": 1}}),
+                Some(mode(Some(640), Some(480), None)),
+            ),
+            // Nothing asked: the engine chooses.
+            (json!({}), None),
+            (json!({"fps": {"num": 0, "den": 1}}), None),
+        ];
+        for (given, expected) in cases {
+            assert_eq!(
+                kind(json!({"camera_id": "c", "mode": given})),
+                SourceKind::Camera {
+                    camera_id: "c".to_owned(),
+                    mode: expected
+                },
+                "{given}"
+            );
+        }
+        for (bad, text) in [
+            (json!({"mode": {"width": 1}}), "`camera_id`"),
+            (json!({"camera_id": ""}), "`camera_id`"),
+            (json!({"camera_id": "a\nb"}), "`camera_id`"),
+            (
+                json!({"camera_id": "c", "mode": {"width": 640}}),
+                "together",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"height": 480}}),
+                "together",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"width": 0, "height": 480}}),
+                "1 to 16384",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"width": 640, "height": 16385}}),
+                "1 to 16384",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"fps": {"num": 30, "den": 0}}}),
+                "`mode.fps.den`",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"fps": {"num": 1001, "den": 1}}}),
+                "at most 1000",
+            ),
+            (
+                json!({"camera_id": "c", "mode": {"size": [640, 480]}}),
+                "size",
+            ),
+            (json!({"camera_id": "c", "color": "#ffffff"}), "`color`"),
+            (json!({"camera_id": "c", "file": "a.png"}), "`file`"),
+            (
+                json!({"camera_id": "c", "capture_target_id": "monitor:1"}),
+                "`capture_target_id`",
+            ),
+        ] {
+            let error = camera(bad.clone()).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams, "{bad}");
+            assert!(
+                error.message.contains(text)
+                    || error
+                        .details
+                        .as_ref()
+                        .is_some_and(|d| d.to_string().contains(text)),
+                "{bad}: {error:?}"
+            );
+        }
+        // `camera_id` and `mode` belong to cameras.
+        for other in [
+            json!({"kind": "color_bars", "camera_id": "c"}),
+            json!({"kind": "screen", "mode": {}}),
+            json!({"kind": "image", "file": "a.png", "camera_id": "c"}),
+        ] {
+            let mut params = json!({"scene_name": "Main", "name": "s"});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(other.as_object().unwrap().clone());
+            let error = decode("add_source", params).unwrap_err();
+            assert!(
+                error.message.contains("apply to camera sources only"),
+                "{other}: {error:?}"
+            );
+        }
+
+        let update = |params: Value| match decode("update_source", params) {
+            Ok(Command::UpdateSource(update)) => update,
+            other => panic!("{other:?}"),
+        };
+        let switched = update(json!({"source_id": "src_a1", "camera_id": "other"}));
+        assert_eq!(switched.camera_id.as_deref(), Some("other"));
+        assert_eq!(switched.mode, None);
+        // An empty mode lets the engine choose again.
+        let auto = update(json!({"source_id": "src_a1", "mode": {}}));
+        assert_eq!(auto.mode, Some(CameraModeSpec::default()));
+        assert!(auto.mode.unwrap().is_auto());
+        assert!(
+            decode(
+                "update_source",
+                json!({"source_id": "src_a1", "mode": {"width": 1}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn only_screen_sources_need_sensitive_access() {
         let add = |params: Value| {
             Command::decode("add_source", Some(&params))
@@ -3917,14 +4220,35 @@ mod tests {
         // An image shows only what the user put in the project directory.
         let image =
             add(json!({"scene_name": "Main", "name": "s", "kind": "image", "file": "a.png"}));
+        let camera =
+            add(json!({"scene_name": "Main", "name": "s", "kind": "camera", "camera_id": "c"}));
         assert_eq!(
-            (bars, solid, screen, image),
+            (bars, solid, screen, image, camera),
             (
                 CommandAccess::Control,
                 CommandAccess::Control,
                 CommandAccess::Sensitive,
-                CommandAccess::Control
+                CommandAccess::Control,
+                CommandAccess::Sensitive
             )
+        );
+        // Choosing what a camera captures is sensitive too; moving it is not.
+        let update = |params: Value| {
+            Command::decode("update_source", Some(&params))
+                .expect("decode")
+                .required_access()
+        };
+        assert_eq!(
+            [
+                update(json!({"source_id": "src_a", "x": 10})),
+                update(json!({"source_id": "src_a", "camera_id": "c"})),
+                update(json!({"source_id": "src_a", "mode": {}})),
+            ],
+            [
+                CommandAccess::Control,
+                CommandAccess::Sensitive,
+                CommandAccess::Sensitive
+            ]
         );
         assert!(CommandAccess::ReadOnly < CommandAccess::Control);
         assert!(CommandAccess::Control < CommandAccess::Sensitive);

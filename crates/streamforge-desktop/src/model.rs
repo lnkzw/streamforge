@@ -1350,6 +1350,7 @@ mod tests {
             id: id.to_owned(),
             name: format!("screen {}", id.trim_start_matches("src_")),
             state,
+            format: None,
         }
     }
 

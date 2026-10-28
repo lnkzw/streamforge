@@ -110,6 +110,12 @@ StreamForge reads the file when you add the source or open the project, not afte
 
 Images can be up to 8192 pixels on a side and 16 megapixels; all images shown together may take up to 512 MiB of memory (4 bytes per pixel).
 
+### Cameras
+
+On Linux, a camera source shows a webcam (or another camera PipeWire offers, such as a virtual one). `streamforge capture cameras` lists the cameras with their ids and modes. In this version, camera sources are added through commands, for example by an agent (`add_source` with `kind` `camera` and the `camera_id`); the desktop app shows them but cannot add them yet.
+
+The camera turns on when its scene first goes on program while the preview or an output runs, also during a recording or stream, and stays on until the preview and all outputs stop, so switching scenes is instant. Without a chosen mode, StreamForge takes the largest size up to 1920×1080 that runs at 30 fps or more. A camera that is not plugged in does not stop the show: its source stays empty and a warning says so; plug it in and restart the source. A project stores which camera a source shows and its mode.
+
 ### Screen capture on Linux
 
 On Linux, your desktop's screen-sharing dialog chooses the screen or window a screen capture shows. It opens when a scene with a new screen capture goes on program while the preview or an output runs. Once chosen, the capture keeps running as long as the source exists, also while its scene is off program, so switching scenes does not ask again.
@@ -156,7 +162,7 @@ The keys work while no dialog or menu is open and no text field has the focus. S
 streamforge status              # version and capture availability
 streamforge capture caps        # what this system can capture, and how
 streamforge capture inputs      # audio inputs by name
-streamforge capture cameras     # cameras and their modes (Linux; camera sources come later)
+streamforge capture cameras     # cameras and their modes (Linux)
 streamforge capture audio --input <name> --duration-ms 3000  # levels of one input, nothing stored
 streamforge capture screen      # opens the screen-sharing dialog and reports the frames
 
@@ -241,6 +247,7 @@ Most clients take a JSON entry like this:
 ### Projects and streaming
 
 - `--project-dir DIR` offers the project tools and image sources. Listing and checking projects and listing images (`list_images`) are read-only; adding an image source needs `--allow control`; loading and saving need `--allow sensitive`.
+- Cameras: listing them (`list_cameras`) is read-only; adding a camera source, or switching its camera or mode, needs `--allow sensitive`, like a screen capture.
 - Streaming needs `--allow sensitive` and `--stream-url rtmp://…`, the only target the agent may stream to. If the server needs a key, `--stream-key-env NAME` names the environment variable that holds it, in the environment the client starts the MCP server with (the server stops at start if it is not set). Claude Code passes its own environment on, so export the variable before you start it. Codex passes on only the variables listed in the server's section, as `env_vars = ["NAME"]`. An `env` entry in a client's configuration (`claude mcp add -e`, a JSON `"env"`) works too, but stores the key in that file in plain text.
 
 The MCP server runs its own engine. It does not control a desktop app that is open at the same time, and the two do not share scenes.
@@ -268,7 +275,7 @@ Version 0.1.0 is a first stable base, not a complete production suite.
 
 - **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On both, screen capture works by target id only (no picker yet), and desktop audio from outputs with more than two channels is not downmixed.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
-- **Sources:** solid colours, colour bars, screen or window capture, and PNG and JPEG images. No cameras, text, media files or browser sources yet; images are not animated (GIF, APNG) and colour profiles in them are ignored.
+- **Sources:** solid colours, colour bars, screen or window capture, PNG and JPEG images, and cameras on Linux. No cameras on Windows and macOS yet, no camera controls (focus, exposure), and no text, media files or browser sources; images are not animated (GIF, APNG) and colour profiles in them are ignored.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
 - **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.

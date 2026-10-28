@@ -66,7 +66,7 @@ Protocol v1 is stable since 0.1.0 (`docs/protocol.md`), so everything below is a
 
 The engine takes a set of the three (`Capture { screen, audio, camera }`). `capture-platform` builds it per system, and every part that a system lacks is an unsupported implementation with a reason. `SplitCapture` and the half-implemented methods that return `unsupported` go away. The split itself changes no behaviour and is its own step.
 
-Implemented in step 4a: each trait answers one capability (`capability`), and the camera's joins `get_capture_capabilities` in step 4b. The traits are `Send`, so `Capture::capabilities` queries screen and audio in parallel (the screen on the calling thread), as the Linux backend did before. `desktop` and `session_type` come from the environment on every system. The Linux parts are `PortalScreen` and `PipeWireAudio`.
+Implemented in step 4a: each trait answers one capability (`capability`), and the camera's joins `get_capture_capabilities` in step 4b. The traits are `Send`, so `Capture::capabilities` queries screen and audio in parallel, as the Linux backend did before: the screen on a scoped thread, audio on the calling one (cpal's WASAPI host keeps its device enumerator in the COM apartment of the first thread that uses it). `desktop` and `session_type` come from the environment on every system. The Linux parts are `PortalScreen` and `PipeWireAudio`.
 
 ### Cameras per system
 

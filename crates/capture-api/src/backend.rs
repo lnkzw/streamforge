@@ -167,15 +167,19 @@ impl Capture {
     }
 
     /// The capabilities as `get_capture_capabilities` reports them.
-    /// Screen is queried on the calling thread, in parallel with audio.
+    ///
+    /// Screen and audio are queried in parallel, so a slow system service
+    /// costs one query timeout, not two. Audio stays on the calling thread:
+    /// cpal's WASAPI host keeps its device enumerator in the COM apartment
+    /// of the first thread that uses it, which must outlive the query.
     /// `desktop` and `session_type` come from `XDG_CURRENT_DESKTOP` and
     /// `XDG_SESSION_TYPE` on every OS. Camera is not part of this report yet.
     pub fn capabilities(&mut self) -> CaptureCapabilities {
         let (screen, audio) = std::thread::scope(|scope| {
-            let audio = scope.spawn(|| self.audio.capability());
-            let screen = self.screen.capability();
-            let audio = audio.join().unwrap_or_else(|_| {
-                AudioCaptureCapability::unavailable(None, "the audio capability query panicked")
+            let screen = scope.spawn(|| self.screen.capability());
+            let audio = self.audio.capability();
+            let screen = screen.join().unwrap_or_else(|_| {
+                ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
             });
             (screen, audio)
         });
@@ -462,19 +466,19 @@ mod tests {
     }
 
     #[test]
-    fn panicking_audio_query_preserves_screen_capability() {
+    fn panicking_screen_query_preserves_audio_capability() {
         let mut capture = Capture {
-            audio: Box::new(TestAudio(Box::new(|| panic!("test audio panic")))),
-            ..Capture::unsupported("screen reason")
+            screen: Box::new(TestScreen(Box::new(|| panic!("test screen panic")))),
+            ..Capture::unsupported("audio reason")
         };
         let caps = capture.capabilities();
         assert_eq!(
             caps.screen,
-            ScreenCaptureCapability::unavailable(None, "screen reason")
+            ScreenCaptureCapability::unavailable(None, "the screen capability query panicked")
         );
         assert_eq!(
             caps.audio,
-            AudioCaptureCapability::unavailable(None, "the audio capability query panicked")
+            AudioCaptureCapability::unavailable(None, "audio reason")
         );
     }
 
@@ -505,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_query_in_parallel_with_screen_on_the_calling_thread() {
+    fn capabilities_query_in_parallel_with_audio_on_the_calling_thread() {
         use std::sync::mpsc::sync_channel;
         use std::time::Duration;
 
@@ -514,7 +518,7 @@ mod tests {
         let (screen_started, wait_screen) = sync_channel(1);
         let mut capture = Capture {
             screen: Box::new(TestScreen(Box::new(move || {
-                assert_eq!(std::thread::current().id(), caller);
+                assert_ne!(std::thread::current().id(), caller);
                 screen_started.send(()).expect("screen started");
                 wait_audio
                     .recv_timeout(Duration::from_secs(5))
@@ -522,7 +526,7 @@ mod tests {
                 ScreenCaptureCapability::unavailable(None, "test screen")
             }))),
             audio: Box::new(TestAudio(Box::new(move || {
-                assert_ne!(std::thread::current().id(), caller);
+                assert_eq!(std::thread::current().id(), caller);
                 audio_started.send(()).expect("audio started");
                 wait_screen
                     .recv_timeout(Duration::from_secs(5))

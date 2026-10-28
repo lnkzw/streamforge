@@ -1,6 +1,6 @@
 //! The engine on a dedicated thread, for adapters that serve requests from
-//! other threads (an async MCP server, a UI). Capture backends need not be
-//! `Send`, so the engine is built on its thread and never moves.
+//! other threads (an async MCP server, a UI). The engine is built on its
+//! thread and never moves, so what it holds need not be `Send`.
 //!
 //! Commands queue in a bounded channel; a full queue is reported as busy
 //! instead of blocking the caller. Shutting down cancels queued commands,

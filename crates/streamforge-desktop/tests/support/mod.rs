@@ -68,11 +68,15 @@ impl AudioDevices for ListedDevices {
         ))
     }
 
+    /// Refused with the text the old trait default gave, so renders of an
+    /// ended monitor stay as they were; the refused feed is dropped.
     fn start_playback(
         &mut self,
-        request: &capture_api::PlaybackRequest,
-        feed: media_core::SampleReader,
+        _request: &capture_api::PlaybackRequest,
+        _feed: media_core::SampleReader,
     ) -> Result<Box<dyn capture_api::PlaybackStream>, CaptureError> {
-        self.0.start_playback(request, feed)
+        Err(CaptureError::unsupported(
+            "this backend cannot play audio yet",
+        ))
     }
 }

@@ -18,8 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use capture_api::{
-    AudioCaptureRequest, AudioDevices, AudioStreamRequest, CaptureErrorKind, CaptureState,
-    PlaybackRequest, ScreenCapture,
+    AudioCaptureRequest, AudioDevices, AudioStreamRequest, Capture, CaptureErrorKind, CaptureState,
+    PlaybackRequest,
 };
 use capture_linux::{PipeWireAudio, PortalScreen};
 use media_core::sample_ring;
@@ -42,12 +42,23 @@ fn capabilities_report_running_services() {
     if !session_available() {
         return;
     }
-    let caps = PipeWireAudio::new().capability();
-    assert!(caps.available, "{:?}", caps.unavailable_reason);
-    assert!(caps.server_version.is_some());
-    let screen = PortalScreen::new().capability();
-    assert!(screen.available, "{:?}", screen.unavailable_reason);
-    assert!(!screen.target_kinds.is_empty());
+    // Through `Capture`, as the engine queries them: the portal on its own
+    // thread, PipeWire on this one.
+    let caps = Capture {
+        screen: Box::new(PortalScreen::new()),
+        audio: Box::new(PipeWireAudio::new()),
+        ..Capture::unsupported("no cameras in this test")
+    }
+    .capabilities();
+    assert_eq!(caps.platform, "linux");
+    assert!(caps.audio.available, "{:?}", caps.audio.unavailable_reason);
+    assert!(caps.audio.server_version.is_some());
+    assert!(
+        caps.screen.available,
+        "{:?}",
+        caps.screen.unavailable_reason
+    );
+    assert!(!caps.screen.target_kinds.is_empty());
 }
 
 #[test]

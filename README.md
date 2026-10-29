@@ -6,11 +6,11 @@ StreamForge is a streaming and recording application with its own real-time medi
 
 ## Status
 
-Version 0.1.0 is the first release, for **Linux** (packages for Ubuntu 24.04 and Arch Linux). Windows and macOS build from source and pass the test suite in CI; packages for them follow after tests on real machines.
+Version 0.2.0 adds cameras, images and layers to the first release, for **Linux** (packages for Ubuntu 24.04 and Arch Linux). Windows and macOS build from source and pass the test suite in CI; packages for them follow after tests on real machines.
 
 What works:
 
-- **Scenes** of solid colours, colour bars and screen or window capture (XDG portal and PipeWire on Linux), composed at 1920×1080 and 60 fps, with a live preview.
+- **Scenes** of solid colours, colour bars, screen or window capture (XDG portal and PipeWire on Linux), PNG and JPEG images and cameras, composed at 1920×1080 and 60 fps, with a live preview. Layers can be reordered and hidden, also on air.
 - **Audio** from microphones, desktop audio and test tones: channels with gain, mute and balance, aux buses, sends before or after the fader, and a headphone monitor.
 - **Recording** to Matroska (H.264 and AAC), with further audio tracks if you want them.
 - **Streaming** over RTMP or RTMPS at the same time as recording, with reconnects. The two fail independently.
@@ -18,7 +18,7 @@ What works:
 - **Projects** that save scenes, audio setup and output settings to a JSON file.
 - **Control** from the desktop app, the `streamforge` command line, scripts (`streamforge-engine`), and AI agents over MCP with access levels. Agents never see stream keys.
 
-The [known limitations](docs/user-guide.md#known-limitations) list what is missing, such as cameras, effects and transitions.
+The [known limitations](docs/user-guide.md#known-limitations) list what is missing, such as audio effects, transitions and text sources.
 
 ## Install
 

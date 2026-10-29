@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "audio-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "media-core",
  "serde",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "capture-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "media-core",
  "schemars",
@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "capture-cpal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-api",
  "cpal",
@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "capture-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ashpd",
  "async-io",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "capture-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2 0.6.2",
  "capture-api",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "capture-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-api",
  "capture-cpal",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "capture-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-api",
  "media-core",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "command-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "audio-engine",
  "capture-api",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "control-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "command-api",
  "serde",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "encoder-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "media-core",
  "schemars",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "encoder-ffmpeg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "encoder-api",
  "ffmpeg-next",
@@ -1424,7 +1424,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
 name = "engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "audio-engine",
  "capture-api",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "frame-decode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "media-core",
  "png",
@@ -2421,7 +2421,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "media-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3394,7 +3394,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "project-file"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-api",
  "command-api",
@@ -3426,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "quit-signal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ctrlc",
  "signal-hook",
@@ -3615,7 +3615,7 @@ dependencies = [
 
 [[package]]
 name = "rtmp-test-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ffmpeg-next",
 ]
@@ -4026,7 +4026,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "streamforge-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "streamforge-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "capture-platform",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "streamforge-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-api",
  "capture-platform",
@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "streamforge-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-platform",
  "clap",
@@ -4086,7 +4086,7 @@ dependencies = [
 
 [[package]]
 name = "streamforge-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "capture-platform",
  "clap",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "streamforge-soak"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4556,7 +4556,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "video-compositor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "media-core",
  "serde",

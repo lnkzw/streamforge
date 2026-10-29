@@ -2,7 +2,7 @@
 
 StreamForge composes scenes, mixes audio, and records and streams the result. You run it from the desktop app, the command line, scripts (JSON lines over stdin and stdout), or an AI agent over MCP. All four use the same commands and the same engine code. Each program runs its own engine, though: they do not share scenes or outputs, and one does not see what another records.
 
-This guide is for version 0.1.0 on Linux. [Known limitations](#known-limitations) lists what it does not do yet.
+This guide is for version 0.2.0 on Linux. [Known limitations](#known-limitations) lists what it does not do yet.
 
 - [Install](#install)
 - [Desktop app](#desktop-app)
@@ -112,7 +112,7 @@ Images can be up to 8192 pixels on a side and 16 megapixels; all images shown to
 
 ### Cameras
 
-On Linux, a camera source shows a webcam (or another camera PipeWire offers, such as a virtual one); on Windows, a camera Windows lists as a video capture device. On Windows, camera access for desktop apps must be on (Settings > Privacy & security > Camera), and a camera another application uses cannot be added until it lets go. In the add dialog, choose **Camera**, then the camera and its mode: **Automatic** lets StreamForge choose, or pick one of the sizes and frame rates the camera offers. **Refresh** lists a camera plugged in meanwhile. The inspector switches a source to another camera (keeping the mode if that camera has it) or mode; a running camera turns off and on again for it. `streamforge capture cameras` lists the cameras with their ids and modes, for agents (`add_source` with `kind` `camera` and the `camera_id`).
+On Linux, a camera source shows a webcam (or another camera PipeWire offers, such as a virtual one); on Windows, a camera Windows lists as a video capture device. On Windows, camera access for desktop apps must be on (Settings > Privacy & security > Camera), and a camera another application uses cannot be added until it lets go. On macOS (built from source), a camera source shows a camera AVFoundation lists; the first start asks for camera access for the app that runs StreamForge (the terminal, when you start it from one), and after you allow it, **Restart capture** opens the camera. [`platforms.md`](platforms.md) has the details for both. In the add dialog, choose **Camera**, then the camera and its mode: **Automatic** lets StreamForge choose, or pick one of the sizes and frame rates the camera offers. **Refresh** lists a camera plugged in meanwhile. The inspector switches a source to another camera (keeping the mode if that camera has it) or mode; a running camera turns off and on again for it. `streamforge capture cameras` lists the cameras with their ids and modes, for agents (`add_source` with `kind` `camera` and the `camera_id`).
 
 The camera turns on when its scene first goes on program while the preview or an output runs, also during a recording or stream, and stays on until the preview and all outputs stop, so switching scenes is instant. Without a chosen mode, StreamForge takes the largest size up to 1920×1080 that runs at 30 fps or more. A camera that is not plugged in does not stop the show: its source stays empty, the activity log says so, and the inspector shows it as not found; plug it in and press **Restart capture** in the inspector. A project stores which camera a source shows and its mode.
 
@@ -162,7 +162,7 @@ The keys work while no dialog or menu is open and no text field has the focus. S
 streamforge status              # version and capture availability
 streamforge capture caps        # what this system can capture, and how
 streamforge capture inputs      # audio inputs by name
-streamforge capture cameras     # cameras and their modes (Linux, Windows)
+streamforge capture cameras     # cameras and their modes
 streamforge capture audio --input <name> --duration-ms 3000  # levels of one input, nothing stored
 streamforge capture screen      # opens the screen-sharing dialog and reports the frames
 
@@ -191,7 +191,7 @@ printf '%s\n' '{"id":1,"command":"get_status"}' | streamforge-engine
 ```
 
 ```json
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.2.0"}}
 ```
 
 A script keeps the engine running and sends commands as it goes: create scenes, add sources, set up channels, `load_project`, `start_recording`, `get_health` while it runs, and `stop_recording` for the final report. `list_commands` lists every command. [`protocol.md`](protocol.md) specifies the requests, results and errors. From 0.1.0 on, protocol version 1 stays compatible: new commands, result fields and error codes may be added (ignore the ones you do not know), and anything that would break a client comes as version 2.
@@ -271,15 +271,15 @@ The MCP server runs its own engine. It does not control a desktop app that is op
 
 ## Known limitations
 
-Version 0.1.0 is a first stable base, not a complete production suite.
+Version 0.2.0 adds cameras, images and layers to the first stable base (0.1.0); it is not a complete production suite.
 
 - **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On both, screen capture works by target id only (no picker yet), and desktop audio from outputs with more than two channels is not downmixed.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
-- **Sources:** solid colours, colour bars, screen or window capture, PNG and JPEG images, and cameras on Linux and Windows. No cameras on macOS yet, no camera controls (focus, exposure), and no text, media files or browser sources; images are not animated (GIF, APNG) and colour profiles in them are ignored.
+- **Sources:** solid colours, colour bars, screen or window capture, PNG and JPEG images, and cameras. Cameras have been tried only with a virtual PipeWire camera on Linux, not with a real webcam, and not at all on Windows and macOS. No camera controls (focus, exposure), no cropping or flipping, and no text, media files or browser sources; images are not animated (GIF, APNG) and colour profiles in them are ignored.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
 - **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.
-- **Not planned for 0.1.0:** plugins, scripting inside the app, per-output scenes, automation. Later versions add them on the same commands.
+- **Not in 0.2.0:** plugins, scripting inside the app, per-output scenes, automation. Later versions add them on the same commands.
 
 ## Licences
 

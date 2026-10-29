@@ -539,7 +539,7 @@ The file (`schema_version` 4):
 
 ```console
 $ printf '%s\n' '{"id":1,"command":"get_status"}' '{"id":2,"command":"nope"}' | cargo run -q -p streamforge-engine
-{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.1.0"}}
+{"v":1,"id":1,"ok":true,"result":{"application":"StreamForge","capture_available":true,"pipeline_running":false,"preview_active":false,"recording_state":null,"streaming_state":null,"version":"0.2.0"}}
 {"v":1,"id":2,"ok":false,"error":{"code":"unknown_command","message":"unknown command `nope`","details":{"available":["get_status","get_health","list_commands","get_capture_capabilities","list_audio_inputs","list_audio_outputs","list_capture_targets","probe_screen_capture","probe_audio_capture","probe_composite","probe_audio_mix","start_recording","stop_recording","start_streaming","stop_streaming","list_scenes","create_scene","delete_scene","set_active_scene","add_source","update_source","move_source","remove_source","restart_source","set_capture_target","get_mixer","add_channel","remove_channel","update_channel","set_channel_input","add_bus","remove_bus","update_bus","set_send","get_output_profiles","set_output_profile","set_monitor_device","set_preview","list_projects","list_images","save_project","load_project","validate_project"],"command":"nope"}}}
 ```
 
@@ -561,7 +561,7 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
   - 2026-10-23, ADR 0017 step 2b: `add_bus`, `remove_bus` and `set_send` are new, `update_bus` gained `assign_db`; `get_mixer` channels gained `sends`, buses `assign_db`, and the result `warnings`; the project file may hold `buses` and channel `sends` (files without them read as before).
   - 2026-10-23, ADR 0017 step 2a: `set_mixer_strip`, `set_master_gain` and `set_audio_sources` are replaced by `add_channel`, `remove_channel`, `update_channel`, `set_channel_input` and `update_bus`; `get_mixer` returns `channels` and `buses` with ids instead of `strips` by index and the master fields; audio `captures` in `get_health` carry the channel's `id` and name; the project file is schema version 2 (version 1 is migrated); `validate_project` gained `migrates`.
   - 2026-10-23, ADR 0017 step 1: the master meter (`mix.master`, `master_peak_dbfs`) measures the program bus before the output limit, so it can exceed 0 dBFS when the mix overloads; `clipped_samples` still counts what the limit changed.
-- **From 0.1.0 on**, v1 is stable, and the rules below hold. Additions since then:
+- **From 0.1.0 on**, v1 is stable, and the rules below hold. Additions since then, all released in 0.2.0:
   - M14 step 2, ADR 0019: `move_source`; sources' `visible` in `list_scenes` (and every result with the scene list), `add_source` and `update_source`. Project files are schema 4 (versions 1 to 3 migrate on load); a 0.1.0 build refuses a schema 4 file as newer than it reads.
   - M14 step 3, ADR 0019: `list_images`; the source kind `image` with `file` (`add_source`, `list_scenes`, project files of schema 4); `update_source`'s `file`; `restart_source` of an image source. A build of step 2 refuses a project file with an image source.
   - M14 step 4b1, ADR 0019: `list_cameras`; `get_capture_capabilities` gained `camera`.

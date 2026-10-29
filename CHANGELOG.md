@@ -4,6 +4,10 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-29
+
+Sources and layers: cameras, images, and layers you can reorder and hide. Packages for Ubuntu 24.04 and Arch Linux on x86_64, as before; see `INSTALL.md` in each.
+
 ### Added
 
 - Layers (ADR 0019): `move_source` changes a source's place in its scene's drawing order, and `visible` (in `add_source`, `update_source` and `list_scenes`) hides a source without stopping its capture. In the desktop app, drag a source row or press Ctrl+Up and Ctrl+Down to reorder, and use the eye to hide a layer.
@@ -14,6 +18,15 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 ### Changed
 
 - Project files are schema version 4 (sources have `visible`, image sources their `file`, and camera sources their `camera_id` and `mode`). Versions 1 to 3 migrate on load; 0.1.0 cannot open a file saved by this version.
+
+### Compatibility
+
+- Protocol v1 only gained commands, optional parameters and result fields, and the source kinds `image` and `camera` ([docs/protocol.md](docs/protocol.md#versioning-policy)), so scripts and clients written for 0.1.0 keep working. A client should show or skip a source of a kind it does not know.
+- Windows and macOS still build from source only, pass the test suite in CI, and have not been tested by hand on real machines.
+
+### Known limitations
+
+Cameras have been tried only with a virtual PipeWire camera, not with a real webcam, and have no controls (focus, exposure); no text, media file or browser sources. As in 0.1.0: one canvas (1920×1080 at 60 fps) shared by every output; H.264 and Matroska only; no audio effects; scene changes are cuts. The full list is in the [user guide](docs/user-guide.md#known-limitations).
 
 ## [0.1.0] - 2026-10-27
 

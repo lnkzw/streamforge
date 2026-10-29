@@ -320,3 +320,11 @@ Acceptance (met on 2026-10-29, see "M14 acceptance" in `docs/testing.md`):
 Real cameras on Windows and macOS and the desktop's camera dialog there wait for the manual hardware tests; a real webcam on Linux has not been tried either.
 
 Not in M14: text, media file and browser sources, cropping and flipping, camera controls, an image file dialog or import.
+
+## Release 0.2.0 (Linux)
+
+M14's sources and layers as a release, with the same packages as 0.1.0 (Ubuntu 24.04 and Arch Linux).
+
+- [x] Version 0.2.0 and its changelog section; README, user guide and protocol notes updated.
+- [ ] Release check on the development machine: the Arch package from a manual release run installs with `./install.sh`, reports 0.2.0, records and streams a scene with a camera (the test camera) and an image, and passes a 10 min soak against the installed engine.
+- [ ] Tag `v0.2.0`, the draft release's package checked, published.

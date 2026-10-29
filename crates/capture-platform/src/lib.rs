@@ -8,11 +8,10 @@ use capture_api::Capture;
 
 /// Capture parts for the platform this binary was built for.
 pub fn capture() -> Capture {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    let camera = Box::new(capture_api::UnsupportedCapture::new(format!(
-        "camera capture is not implemented on {} yet",
-        std::env::consts::OS
-    )));
+    #[cfg(target_os = "macos")]
+    let camera = Box::new(capture_api::UnsupportedCapture::new(
+        "camera capture is not implemented on macOS yet",
+    ));
     #[cfg(target_os = "linux")]
     {
         Capture {
@@ -26,7 +25,7 @@ pub fn capture() -> Capture {
         Capture {
             screen: Box::new(capture_windows::WgcCapture::new()),
             audio: Box::new(capture_cpal::CpalCapture::new()),
-            camera,
+            camera: Box::new(capture_windows::MfCamera::new()),
         }
     }
     #[cfg(target_os = "macos")]

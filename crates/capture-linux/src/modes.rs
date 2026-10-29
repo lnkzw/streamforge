@@ -1,10 +1,9 @@
-//! Camera modes: what a camera node offers (its `EnumFormat` params), which
-//! mode a request gets (ADR 0019 "Mode choice"), and the formats offered
-//! back when connecting.
+//! Camera modes: what a camera node offers (its `EnumFormat` params), and the
+//! formats offered back when connecting. Mode choice is shared in `capture-api`.
 
 use std::cmp::Ordering;
 
-use capture_api::{CameraMode, CameraRequest, Rational};
+use capture_api::{OfferFormat, Rational, UNSTATED_RATE, compare_rates, reduce_rate};
 use pipewire::spa;
 use spa::param::ParamType;
 use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
@@ -15,16 +14,6 @@ use spa::utils::{ChoiceEnum, Fraction, Id, Rectangle, SpaTypes};
 
 use crate::formats;
 
-/// The canvas a camera mode is chosen for when the request names none.
-const CANVAS: (u32, u32) = (1920, 1080);
-/// Without a requested rate: the highest one up to this.
-const MAX_DEFAULT_FPS: u32 = 60;
-/// A size without a requested one runs at least this fast if it can:
-/// 30 fps, counting NTSC's 30000/1001.
-const MIN_DEFAULT_FPS: Rational = Rational {
-    num: 30000,
-    den: 1001,
-};
 /// Sizes tried within a size range (cameras with discrete sizes list their own).
 const RANGE_SIZES: [(u32, u32); 8] = [
     (3840, 2160),
@@ -44,9 +33,6 @@ const MAX_OFFERS: usize = 1024;
 /// closest others. After them, one format with any size and rate per
 /// pixel format catches whatever mode the camera runs in.
 const MAX_CONNECT_MODES: usize = 32;
-/// The rate of a mode whose camera does not state its rates (libcamera
-/// nodes, and nodes with only a variable rate); the camera runs at its own.
-pub(crate) const UNSTATED_RATE: Rational = Rational { num: 0, den: 1 };
 
 /// How a camera's frames are encoded, for the formats StreamForge converts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +46,7 @@ impl CameraFormat {
     /// Preference among the formats of one mode, lower first (ADR 0019):
     /// packed RGB, then YUY2 or UYVY, NV12, I420, MJPEG. `None` for a
     /// format that cannot be converted.
-    fn rank(self) -> Option<u8> {
+    fn convertible_rank(self) -> Option<u8> {
         match self {
             Self::Raw(raw) => {
                 let format = VideoFormat(raw);
@@ -88,24 +74,13 @@ impl CameraFormat {
     }
 }
 
-/// One size, rate and format a camera can deliver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ModeOffer {
-    pub width: u32,
-    pub height: u32,
-    pub fps: Rational,
-    pub format: CameraFormat,
-}
-
-impl ModeOffer {
-    fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    fn area(&self) -> u64 {
-        u64::from(self.width) * u64::from(self.height)
+impl capture_api::OfferFormat for CameraFormat {
+    fn rank(self) -> u8 {
+        self.convertible_rank().unwrap_or(u8::MAX)
     }
 }
+
+pub(crate) type ModeOffer = capture_api::ModeOffer<CameraFormat>;
 
 /// Every mode of a camera's `EnumFormat` params, each once and at most
 /// [`MAX_OFFERS`].
@@ -170,7 +145,10 @@ pub(crate) fn parse_offers(param: &[u8]) -> Vec<ModeOffer> {
         .filter(|rates| !rates.is_empty())
         .unwrap_or_else(|| vec![UNSTATED_RATE]);
     let mut offers = Vec::new();
-    for format in formats.into_iter().filter(|f| f.rank().is_some()) {
+    for format in formats
+        .into_iter()
+        .filter(|f| f.convertible_rank().is_some())
+    {
         for &(width, height) in &sizes {
             for &fps in &rates {
                 if offers.len() == MAX_OFFERS {
@@ -282,8 +260,8 @@ fn rates_of(value: &Value) -> Vec<Rational> {
     let within = |min: &Fraction, max: &Fraction, step: Option<&Fraction>| {
         let (min, max, step) = (rational(min), rational(max), step.map(rational));
         move |rate: &Rational| {
-            compare(*rate, min) != Ordering::Less
-                && compare(*rate, max) != Ordering::Greater
+            compare_rates(*rate, min) != Ordering::Less
+                && compare_rates(*rate, max) != Ordering::Greater
                 && step.is_none_or(|step| on_step(*rate, min, step))
         }
     };
@@ -326,7 +304,7 @@ fn rates_of(value: &Value) -> Vec<Rational> {
     // 0/1 means a variable rate; a camera mode needs a nominal one.
     found.retain(|rate| rate.num > 0 && rate.den > 0);
     for rate in &mut found {
-        *rate = reduce(*rate);
+        *rate = reduce_rate(*rate);
     }
     dedup_in_order(&mut found);
     found
@@ -340,20 +318,6 @@ fn dedup_in_order<T: PartialEq + Copy>(values: &mut Vec<T>) {
         }
     }
     *values = kept;
-}
-
-pub(crate) fn reduce(rate: Rational) -> Rational {
-    if rate.num == 0 || rate.den == 0 {
-        return rate;
-    }
-    let (mut a, mut b) = (rate.num, rate.den);
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    Rational {
-        num: rate.num / a,
-        den: rate.den / a,
-    }
 }
 
 /// Whether `rate` (at least `min`) is `min` plus a whole number of `step`s.
@@ -372,143 +336,8 @@ fn on_step(rate: Rational, min: Rational, step: Rational) -> bool {
     (diff * sd).is_multiple_of(rd * md * sn)
 }
 
-/// Order of two rates by value (0/1, the unstated rate, is the lowest).
-fn compare(a: Rational, b: Rational) -> Ordering {
-    (u64::from(a.num) * u64::from(b.den)).cmp(&(u64::from(b.num) * u64::from(a.den)))
-}
-
 fn fps_value(rate: Rational) -> f64 {
     f64::from(rate.num) / f64::from(rate.den)
-}
-
-/// The modes a camera lists: each size and rate once, largest first, then fastest.
-pub(crate) fn listed_modes(offers: &[ModeOffer]) -> Vec<CameraMode> {
-    let mut modes: Vec<CameraMode> = Vec::new();
-    for offer in offers {
-        let mode = CameraMode {
-            width: offer.width,
-            height: offer.height,
-            fps: offer.fps,
-        };
-        if !modes.contains(&mode) {
-            modes.push(mode);
-        }
-    }
-    modes.sort_by(|a, b| {
-        let area = |m: &CameraMode| u64::from(m.width) * u64::from(m.height);
-        area(b)
-            .cmp(&area(a))
-            .then(b.width.cmp(&a.width))
-            .then(compare(b.fps, a.fps))
-    });
-    modes
-}
-
-/// The mode a request gets, with warnings when it differs from the request.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Choice {
-    pub offer: ModeOffer,
-    pub warnings: Vec<String>,
-}
-
-/// Pick a mode for `request` (ADR 0019 "Mode choice"); `None` without offers.
-///
-/// - Size: the requested one, else the closest (by area, then by width and
-///   height). Without one: the largest up to the canvas (1920x1080) that runs
-///   at 30 fps or more, else the largest up to the canvas, else the smallest
-///   above it.
-/// - Rate among that size: the requested one, else the closest. Without one:
-///   the highest up to 60, else the lowest above.
-/// - Format among that size and rate: by [`CameraFormat::rank`].
-pub(crate) fn choose(offers: &[ModeOffer], request: &CameraRequest) -> Option<Choice> {
-    let mut warnings = Vec::new();
-    let size = match request.size {
-        Some(wanted) => {
-            let size = closest_size(offers, wanted)?;
-            if size != wanted {
-                warnings.push(format!(
-                    "the camera has no {}x{} mode; using {}x{}",
-                    wanted.0, wanted.1, size.0, size.1
-                ));
-            }
-            size
-        }
-        None => default_size(offers)?,
-    };
-    let at_size: Vec<&ModeOffer> = offers.iter().filter(|o| o.size() == size).collect();
-    let fps = match request.fps {
-        Some(wanted) if wanted.num > 0 && wanted.den > 0 => {
-            let fps = at_size.iter().map(|o| o.fps).min_by(|a, b| {
-                let distance = |r: &Rational| (fps_value(*r) - fps_value(wanted)).abs();
-                distance(a).total_cmp(&distance(b))
-            })?;
-            if fps == UNSTATED_RATE {
-                warnings.push(format!(
-                    "the camera does not state its frame rates at {}x{}; it runs at its own \
-                     rate, not necessarily {} fps",
-                    size.0,
-                    size.1,
-                    rate_text(wanted)
-                ));
-            } else if compare(fps, wanted) != Ordering::Equal {
-                warnings.push(format!(
-                    "the camera has no {} fps mode at {}x{}; using {}",
-                    rate_text(wanted),
-                    size.0,
-                    size.1,
-                    rate_text(fps)
-                ));
-            }
-            fps
-        }
-        _ => default_rate(at_size.iter().map(|o| o.fps))?,
-    };
-    let offer = at_size
-        .into_iter()
-        .filter(|o| compare(o.fps, fps) == Ordering::Equal)
-        .min_by_key(|o| o.format.rank())?;
-    Some(Choice {
-        offer: *offer,
-        warnings,
-    })
-}
-
-fn closest_size(offers: &[ModeOffer], (w, h): (u32, u32)) -> Option<(u32, u32)> {
-    let wanted = u64::from(w) * u64::from(h);
-    offers.iter().map(ModeOffer::size).min_by_key(|&(ow, oh)| {
-        let area = u64::from(ow) * u64::from(oh);
-        (area.abs_diff(wanted), ow.abs_diff(w) + oh.abs_diff(h))
-    })
-}
-
-fn default_size(offers: &[ModeOffer]) -> Option<(u32, u32)> {
-    let fits = |o: &&ModeOffer| o.width <= CANVAS.0 && o.height <= CANVAS.1;
-    let largest = |o: &&ModeOffer| (o.area(), o.width);
-    offers
-        .iter()
-        .filter(fits)
-        .filter(|o| compare(o.fps, MIN_DEFAULT_FPS) != Ordering::Less)
-        .max_by_key(largest)
-        .or_else(|| offers.iter().filter(fits).max_by_key(largest))
-        .or_else(|| offers.iter().min_by_key(|o| (o.area(), o.width)))
-        .map(ModeOffer::size)
-}
-
-fn default_rate(rates: impl Iterator<Item = Rational> + Clone) -> Option<Rational> {
-    let max = Rational::integer(MAX_DEFAULT_FPS);
-    rates
-        .clone()
-        .filter(|r| compare(*r, max) != Ordering::Greater)
-        .max_by(|a, b| compare(*a, *b))
-        .or_else(|| rates.min_by(|a, b| compare(*a, *b)))
-}
-
-pub(crate) fn rate_text(rate: Rational) -> String {
-    if rate.den == 1 {
-        rate.num.to_string()
-    } else {
-        format!("{}/{}", rate.num, rate.den)
-    }
 }
 
 /// The exact modes to connect with: `chosen` first, then the camera's
@@ -618,6 +447,7 @@ fn serialize_format(format: CameraFormat, mode: Option<&ModeOffer>) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capture_api::CameraRequest;
     use spa::pod::Pod;
     use spa::utils::{Choice as SpaChoice, ChoiceFlags};
 
@@ -669,59 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn default_is_the_largest_size_up_to_1080p_at_30_fps_or_more() {
-        let choice = choose(&webcam(), &request(None, None)).expect("choice");
-        assert_eq!(choice.offer, offer(1920, 1080, 30, CameraFormat::Mjpeg));
-        assert!(choice.warnings.is_empty());
-    }
-
-    #[test]
-    fn default_prefers_a_fast_smaller_size_over_a_slow_large_one() {
-        let offers = [offer(1920, 1080, 5, YUY2), offer(1280, 720, 30, YUY2)];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.size(), (1280, 720));
-    }
-
-    #[test]
-    fn default_falls_back_to_the_largest_size_up_to_1080p_at_any_rate() {
-        let offers = [
-            offer(3840, 2160, 30, YUY2),
-            offer(1920, 1080, 15, YUY2),
-            offer(640, 480, 15, YUY2),
-        ];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer, offer(1920, 1080, 15, YUY2));
-    }
-
-    #[test]
-    fn default_falls_back_to_the_smallest_size_above_1080p() {
-        let offers = [offer(3840, 2160, 30, YUY2), offer(2560, 1440, 30, YUY2)];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.size(), (2560, 1440));
-    }
-
-    #[test]
-    fn ntsc_rates_count_as_30_fps() {
-        let ntsc = Rational {
-            num: 30000,
-            den: 1001,
-        };
-        let offers = [
-            ModeOffer {
-                fps: ntsc,
-                ..offer(1920, 1080, 1, YUY2)
-            },
-            offer(1280, 720, 60, YUY2),
-        ];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.size(), (1920, 1080));
-        // 29 fps is not 30.
-        let offers = [offer(1920, 1080, 29, YUY2), offer(1280, 720, 60, YUY2)];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.size(), (1280, 720));
-    }
-
-    #[test]
     fn a_cameras_params_give_each_mode_once() {
         let yuy2 = format_pod(&offer(640, 480, 30, YUY2)).expect("pod");
         let mjpeg = format_pod(&offer(640, 480, 30, CameraFormat::Mjpeg)).expect("pod");
@@ -743,101 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn default_rate_is_the_highest_up_to_60() {
-        let offers = [
-            offer(1280, 720, 30, YUY2),
-            offer(1280, 720, 60, YUY2),
-            offer(1280, 720, 120, YUY2),
-        ];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.fps, Rational::integer(60));
-        let fast = [offer(640, 480, 90, YUY2), offer(640, 480, 120, YUY2)];
-        let choice = choose(&fast, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.fps, Rational::integer(90));
-    }
-
-    #[test]
-    fn a_requested_mode_is_used_exactly() {
-        let choice = choose(&webcam(), &request(Some((1280, 720)), Some(10))).expect("choice");
-        assert_eq!(choice.offer, offer(1280, 720, 10, YUY2));
-        assert!(choice.warnings.is_empty());
-    }
-
-    #[test]
-    fn a_missing_mode_gets_the_closest_with_a_warning() {
-        let choice = choose(&webcam(), &request(Some((1366, 768)), Some(25))).expect("choice");
-        assert_eq!(choice.offer, offer(1280, 720, 30, CameraFormat::Mjpeg));
-        assert_eq!(
-            choice.warnings,
-            [
-                "the camera has no 1366x768 mode; using 1280x720",
-                "the camera has no 25 fps mode at 1280x720; using 30",
-            ]
-        );
-    }
-
-    #[test]
-    fn a_requested_rate_without_a_size_uses_the_default_size() {
-        let choice = choose(&webcam(), &request(None, Some(15))).expect("choice");
-        assert_eq!(choice.offer, offer(1920, 1080, 15, CameraFormat::Mjpeg));
-    }
-
-    #[test]
-    fn formats_of_one_mode_are_ranked() {
-        let offers = [
-            offer(640, 480, 30, CameraFormat::Mjpeg),
-            offer(
-                640,
-                480,
-                30,
-                CameraFormat::Raw(spa::sys::SPA_VIDEO_FORMAT_I420),
-            ),
-            offer(640, 480, 30, NV12),
-            offer(640, 480, 30, YUY2),
-            offer(640, 480, 30, RGB),
-        ];
-        let mut remaining = offers.to_vec();
-        for expected in [RGB, YUY2, NV12] {
-            let choice = choose(&remaining, &request(None, None)).expect("choice");
-            assert_eq!(choice.offer.format, expected);
-            remaining.retain(|o| o.format != expected);
-        }
-        let choice = choose(&remaining, &request(None, None)).expect("choice");
-        assert_eq!(
-            choice.offer.format,
-            CameraFormat::Raw(spa::sys::SPA_VIDEO_FORMAT_I420)
-        );
-    }
-
-    #[test]
-    fn fractional_rates_compare_by_value() {
-        let ntsc = Rational {
-            num: 30000,
-            den: 1001,
-        };
-        let offers = [
-            ModeOffer {
-                fps: ntsc,
-                ..offer(1280, 720, 1, YUY2)
-            },
-            offer(1280, 720, 25, YUY2),
-        ];
-        let choice = choose(&offers, &request(None, None)).expect("choice");
-        assert_eq!(choice.offer.fps, ntsc);
-        let choice = choose(&offers, &request(None, Some(30))).expect("choice");
-        assert_eq!(choice.offer.fps, ntsc);
-        assert_eq!(
-            choice.warnings,
-            ["the camera has no 30 fps mode at 1280x720; using 30000/1001"]
-        );
-    }
-
-    #[test]
-    fn no_offers_no_choice() {
-        assert_eq!(choose(&[], &request(None, None)), None);
-    }
-
-    #[test]
     fn connect_order_starts_with_the_choice_and_keeps_the_rest() {
         let offers = webcam();
         let chosen = offer(1280, 720, 30, CameraFormat::Mjpeg);
@@ -848,26 +530,6 @@ mod tests {
         for offer in &offers {
             assert!(order.contains(offer));
         }
-    }
-
-    #[test]
-    fn listed_modes_are_unique_largest_first() {
-        let modes = listed_modes(&webcam());
-        let sizes: Vec<_> = modes
-            .iter()
-            .map(|m| (m.width, m.height, m.fps.num))
-            .collect();
-        assert_eq!(
-            sizes,
-            [
-                (1920, 1080, 30),
-                (1920, 1080, 15),
-                (1920, 1080, 5),
-                (1280, 720, 30),
-                (1280, 720, 10),
-                (640, 480, 30),
-            ]
-        );
     }
 
     #[test]
@@ -1053,10 +715,10 @@ mod tests {
                 ..offer(1920, 1080, 1, NV12)
             }]
         );
-        let choice = choose(&offers, &request(None, None)).expect("choice");
+        let choice = capture_api::choose_mode(&offers, &request(None, None)).expect("choice");
         assert_eq!(choice.offer, offers[0]);
         assert!(choice.warnings.is_empty());
-        let choice = choose(&offers, &request(None, Some(30))).expect("choice");
+        let choice = capture_api::choose_mode(&offers, &request(None, Some(30))).expect("choice");
         assert_eq!(
             choice.warnings,
             [

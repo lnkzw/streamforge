@@ -1,6 +1,6 @@
-//! Frame delivery and diagnostics shared by native screen backends whose
-//! system API calls back with mapped frames (Windows.Graphics.Capture,
-//! ScreenCaptureKit).
+//! Frame delivery and diagnostics shared by native backends whose system
+//! API calls back with mapped frames (Windows.Graphics.Capture,
+//! ScreenCaptureKit, Media Foundation cameras).
 //!
 //! The backend's callback maps a frame and hands its bytes to
 //! [`FrameSink::publish`], which copies them into one of a few pooled
@@ -95,6 +95,26 @@ impl FrameSink {
     /// means no pooled buffer was free. Allocates only while the pool warms
     /// up or when the frame size grows.
     pub fn publish(&self, frame: MappedFrame<'_>, pts_ns: Option<i64>) -> Result<bool, String> {
+        self.publish_rows(frame, pts_ns, false)
+    }
+
+    /// [`Self::publish`] for a frame stored bottom-up: `frame.data` starts
+    /// with the bottom row (a negative stride, as Media Foundation may hand
+    /// RGB). The published frame is top-down.
+    pub fn publish_bottom_up(
+        &self,
+        frame: MappedFrame<'_>,
+        pts_ns: Option<i64>,
+    ) -> Result<bool, String> {
+        self.publish_rows(frame, pts_ns, true)
+    }
+
+    fn publish_rows(
+        &self,
+        frame: MappedFrame<'_>,
+        pts_ns: Option<i64>,
+        bottom_up: bool,
+    ) -> Result<bool, String> {
         let needed = VideoFrame::required_len(frame.width, frame.height, frame.stride)
             .map_err(|err| err.to_string())?;
         if frame.data.len() < needed {
@@ -108,7 +128,18 @@ impl FrameSink {
         let Some(mut pooled) = self.pool.acquire(needed) else {
             return Ok(false);
         };
-        pooled.copy_from_slice(&frame.data[..needed]);
+        if bottom_up {
+            // `required_len` checked that every row fits, so this cannot overflow.
+            let row = needed - frame.stride * (frame.height as usize - 1);
+            for (top, bottom) in pooled
+                .chunks_mut(frame.stride)
+                .zip(frame.data[..needed].chunks(frame.stride).rev())
+            {
+                top[..row].copy_from_slice(&bottom[..row]);
+            }
+        } else {
+            pooled.copy_from_slice(&frame.data[..needed]);
+        }
         let pts = pts_ns.and_then(|ns| MediaTimestamp::new(ns, 1, 1_000_000_000).ok());
         let frame = VideoFrame::new(
             frame.width,
@@ -250,6 +281,30 @@ mod tests {
             published.pts(),
             MediaTimestamp::new(1_000, 1, 1_000_000_000).ok()
         );
+    }
+
+    #[test]
+    fn bottom_up_frames_are_published_top_down() {
+        let sink = FrameSink::new(true, "BGRx");
+        // Three rows of 2 pixels with 4 bytes of padding, the bottom row
+        // first; the last row has no padding.
+        let data: Vec<u8> = (0..32).collect();
+        let bottom_up = MappedFrame {
+            width: 2,
+            height: 3,
+            stride: 12,
+            data: &data,
+        };
+        assert_eq!(sink.publish_bottom_up(bottom_up, None), Ok(true));
+        let published = sink.mailbox().take().expect("frame");
+        assert_eq!(published.stride(), 12);
+        assert_eq!(published.row(0)[..8], data[24..32]);
+        assert_eq!(published.row(1)[..8], data[12..20]);
+        assert_eq!(published.row(2)[..8], data[..8]);
+        let err = sink
+            .publish_bottom_up(frame(&data[..8], 8), None)
+            .unwrap_err();
+        assert!(err.contains("needs 16"), "{err}");
     }
 
     #[test]

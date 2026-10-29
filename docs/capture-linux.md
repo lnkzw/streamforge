@@ -140,7 +140,7 @@ cargo test -p capture-linux --test live -- --ignored --test-threads=1
 |---------|-------------|
 | `unavailable: ... D-Bus error` | No session bus, or the portal is not installed or activatable. See Requirements and Hyprland above. |
 | `unavailable: no portal implements org.freedesktop.portal.ScreenCast` | No portal backend with ScreenCast for this desktop. Install xdph and check the portals config. |
-| `timeout: the screen cast portal dialog did not respond within 120 s` | Nobody picked a source, or the picker could not start (`hyprland-share-picker` missing). |
+| `timeout: the screen cast portal dialog did not respond within 120 s` | Nobody picked a source, or the picker could not start (`hyprland-share-picker` missing). If a source was picked, the portal backend may have lost PipeWire: after the PipeWire daemon restarted, xdg-desktop-portal-hyprland 1.4.1 still showed the picker but never answered. Restart it with `systemctl --user restart xdg-desktop-portal-hyprland`. |
 | `timeout: the screen stream did not start` | The portal created the stream, but no format was negotiated. Report the portal versions. |
 | `not_found: audio output … is gone` | The monitor's device went away during the run (unplugged, or a virtual sink removed). Connect it and switch the monitor on again, or choose another with `set_monitor_device` while idle. |
 | `not_found: no default audio input is available` | WirePlumber has no default source. Typical cause: the configured default, e.g. a removed virtual mic, no longer exists. Pass `--input`, or set a default with `wpctl set-default <id>`. |

@@ -312,9 +312,11 @@ Cameras, images and layer control (ADR 0019). Everything is additive to protocol
   - [x] 5a: Windows through Media Foundation's source reader (`MfCamera` in `capture-windows`); the mode choice moved into `capture-api` for every backend. CI covers the error paths; a real camera waits for the manual test.
   - [x] 5b: macOS through AVFoundation (`AvfCamera` in `capture-macos`): listing without camera access, BGRA from the system, macOS's camera prompt at the first start. CI covers the listing, the frame path with a synthetic sample buffer and the error paths; a real camera waits for the manual test.
 
-Acceptance:
-- A scene with a camera, an image and a screen records and streams on the development machine (its camera is a test one: PipeWire's `videotestsrc` or a v4l2loopback device, since it has no webcam), with the layers reordered and one hidden on air.
-- A project with all three kinds saves, loads and migrates from schema 3; a missing camera or image loads with a warning.
-- The camera conversion and render cost are measured against the `docs/testing.md` baseline.
+Acceptance (met on 2026-10-29, see "M14 acceptance" in `docs/testing.md`):
+- [x] A scene with a camera, an image and a screen records and streams on the development machine (its camera is a test one, `capture-linux`'s `virtual_camera`, since it has no webcam and PipeWire's `videotestsrc` aborts the daemon), with the layers reordered and one hidden on air.
+- [x] A project with all three kinds saves, loads and migrates from schema 3; a missing camera or image loads with a warning.
+- [x] The camera conversion and render cost are measured against the `docs/testing.md` baseline.
+
+Real cameras on Windows and macOS and the desktop's camera dialog there wait for the manual hardware tests; a real webcam on Linux has not been tried either.
 
 Not in M14: text, media file and browser sources, cropping and flipping, camera controls, an image file dialog or import.

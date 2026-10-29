@@ -30,10 +30,18 @@ This package is for 64-bit Windows 10 (version 1903 or newer) and Windows 11 on 
   - `streamforge-desktop.exe`: desktop app
   - `streamforge-engine.exe`: headless engine for scripts (JSON lines on stdin and stdout)
   - `streamforge-mcp.exe`: MCP server for AI agents
-- this file, the README, the documentation (`docs\`), the licences (`licenses\` and `LICENSE-*`) and `BUILD-INFO.txt`
+- this file, the README, the documentation (`docs\`), the licences (`licenses\` and `LICENSE-*`), `BUILD-INFO.txt` and `install.ps1` itself
 - a Start menu entry *StreamForge*, which starts the desktop app in your home folder (recordings and projects go there unless you choose another folder)
 
-The installer prints how to add `bin\` to your `PATH`, so you can type `streamforge status` in a new console; it does not change `PATH` itself. `-Prefix DIR` installs into another folder, and `-Uninstall` (with the same `-Prefix`) removes what it installed and the Start menu entry. Installing a new version over an old one replaces it. Projects and recordings stay where you saved them.
+The installer prints how to add `bin\` to your `PATH`, so you can type `streamforge status` in a new console; it does not change `PATH` itself. `-Prefix DIR` installs into another folder. Installing a new version over an old one replaces it.
+
+To uninstall, run the installed copy of the script, which removes what it installed and the Start menu entry; projects and recordings stay where you saved them:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\StreamForge\install.ps1" -Uninstall
+```
+
+(The package's `install.ps1 -Uninstall`, with the same `-Prefix` if you gave one, does the same.)
 
 The programs also run straight from the unpacked folder, without installing: `.\bin\streamforge.exe status`.
 
@@ -54,4 +62,10 @@ The package is not signed, so Windows does not know its publisher:
 
 StreamForge is licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License 2.0 (`LICENSE-APACHE`), at your option. The desktop app embeds the IBM Plex fonts, licensed under the SIL Open Font License 1.1 (`LICENSE-OFL-IBM-Plex.txt`).
 
-The package also contains FFmpeg, built with x264 and therefore under the GNU General Public License, version 2 or later (`licenses\FFmpeg`, `licenses\x264`), together with libvpl, the NVENC headers and the AMF headers under the MIT license (`licenses\`). The binaries in this package, which link that FFmpeg, are distributed under the GPL as a whole. The exact sources of FFmpeg and of everything built into it are attached to the same release as this package, `BUILD-INFO.txt` lists them with their checksums and FFmpeg's configuration, and `packaging/windows/build-ffmpeg.sh` in the StreamForge repository builds them. The StreamForge source code is at https://github.com/lnkzw/streamforge.
+The package also contains FFmpeg, built with x264 and therefore under the GNU General Public License, version 2 or later (`licenses\FFmpeg`, `licenses\x264`), together with libvpl, the NVENC headers and the AMF headers under the MIT license (`licenses\`). The programs in this package link that FFmpeg and also contain Rust libraries under the Apache License 2.0, which is compatible with version 3 of the GPL only; so the programs as a whole are distributed under the GNU General Public License, version 3 (`licenses\FFmpeg\COPYING.GPLv3`).
+
+The corresponding source code:
+
+- FFmpeg and everything built into it: the archives attached to the same release as this package; `BUILD-INFO.txt` lists them with their checksums and FFmpeg's configuration, and `packaging/windows/build-ffmpeg.sh` builds them.
+- StreamForge: the repository at https://github.com/lnkzw/streamforge, at the tag of this version (`BUILD-INFO.txt` names the commit), with its build and packaging scripts.
+- The Rust libraries: the exact versions in the repository's `Cargo.lock`, from https://crates.io; `cargo vendor` in a checkout of the tag downloads all of them.

@@ -14,6 +14,7 @@
 //! mailbox that the UI reads each frame.
 
 pub mod app;
+pub mod console;
 mod folder;
 pub mod identity;
 pub mod model;

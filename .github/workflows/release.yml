@@ -16,9 +16,18 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
+    # Besides the packaging, what the Windows package's checks catch and
+    # CI's tests would not (the runners have the Visual C++ runtime): the
+    # static C runtime, the dependencies, the desktop's resources and
+    # console.
     paths:
       - .github/workflows/release.yml
       - packaging/**
+      - .cargo/config.toml
+      - Cargo.lock
+      - crates/streamforge-desktop/build.rs
+      - crates/streamforge-desktop/src/console.rs
+      - crates/streamforge-desktop/assets/icon/**
 
 permissions:
   contents: read

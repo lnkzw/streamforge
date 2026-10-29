@@ -57,7 +57,7 @@ Notes:
 
 CI uses the [BtbN FFmpeg builds](https://github.com/BtbN/FFmpeg-Builds) on Windows (`ffmpeg-n8.1-latest-win64-gpl-shared`). The archive is checked against the release's checksum file. Any FFmpeg 6.1 or newer with libx264 works. Binaries that link a GPL build fall under the GPL (ADR 0005).
 
-The Windows package ships its own FFmpeg instead (ADR 0020): `packaging/windows/build-ffmpeg.sh` cross-compiles FFmpeg 8.1 with x264, NVENC, Quick Sync (libvpl), AMF and Schannel from the pinned archives in `packaging/ffmpeg/sources.txt` with mingw-w64 on Linux, as shared libraries with import libraries for the MSVC linker, and enables only what the engine uses. Its output works as `FFMPEG_DIR` for a local build too.
+The Windows package ships its own FFmpeg instead (ADR 0020): `packaging/windows/build-ffmpeg.sh` cross-compiles FFmpeg 8.1 with x264, NVENC, Quick Sync (libvpl), AMF and Schannel from the pinned archives in `packaging/ffmpeg/sources.txt` with mingw-w64 on Linux, as shared libraries with import libraries for the MSVC linker, and enables only what the engine uses. Its output works as `FFMPEG_DIR` to build the programs, but not for the test suite, which also demuxes and decodes what it recorded and serves RTMP (use a full build such as BtbN's for that).
 
 ## Verification
 

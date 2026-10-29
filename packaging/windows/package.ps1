@@ -93,25 +93,33 @@ if ($broken) {
     throw ($broken -join "`n")
 }
 
-# The binaries and DLLs import only each other and Windows' own libraries:
-# no Visual C++ runtime (the C runtime is linked statically, see
-# .cargo/config.toml) and nothing else from this machine.
+# The binaries and DLLs import only each other and libraries every
+# Windows 10 (1903 or newer) has: no Visual C++ runtime (the C runtime is
+# linked statically, see .cargo/config.toml), nothing a runner happens to
+# have. A new import fails here until it is checked and added.
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
 if (-not $dumpbin) {
     throw 'dumpbin.exe not found'
 }
-$system32 = Join-Path $env:SystemRoot 'System32'
-$runtime = '^(vcruntime|msvcp|concrt|vccorlib|ucrtbase)|^api-ms-win-crt-'
+$windows = @('advapi32', 'bcrypt', 'bcryptprimitives', 'combase', 'coremessaging', 'crypt32', 'd3d11',
+    'dwmapi', 'dxgi', 'gdi32', 'imm32', 'kernel32', 'mmdevapi', 'msvcrt', 'ncrypt', 'ntdll', 'ole32',
+    'oleaut32', 'opengl32', 'secur32', 'setupapi', 'shell32', 'shlwapi', 'uiautomationcore', 'user32',
+    'uxtheme', 'ws2_32') | ForEach-Object { "$_.dll" }
 $bad = @()
 foreach ($file in Get-ChildItem -Path "$out\bin\*" -Include *.exe, *.dll) {
-    $imports = & $dumpbin /nologo /dependents $file.FullName |
-        ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[^\s]+\.dll$' -and $_ -notmatch '^Dump of' }
+    $imports = @(& $dumpbin /nologo /dependents $file.FullName |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[^\s]+\.dll$' })
     Write-Host "$($file.Name): $($imports -join ' ')"
+    # Every one imports at least kernel32; none means the output was not read.
+    if ($imports -notcontains 'kernel32.dll') {
+        $bad += "$($file.Name): no imports read from dumpbin"
+    }
     foreach ($import in $imports) {
         $bundled = Test-Path -LiteralPath (Join-Path "$out\bin" $import)
-        $system = (Test-Path -LiteralPath (Join-Path $system32 $import)) -or $import -match '^(api|ext)-ms-win-'
-        if ($import -match $runtime -or -not ($bundled -or $system)) {
+        # API sets (api-ms-win-core-*), except the C runtime's.
+        $apiSet = $import -match '^api-ms-win-core-'
+        if (-not ($bundled -or $apiSet -or $windows -contains $import)) {
             $bad += "$($file.Name) imports $import"
         }
     }
@@ -128,6 +136,7 @@ $info = @(
     "rustc: $(rustc --version)"
     "built on: $($os.Caption) $($os.Version)"
     "C runtime: static (+crt-static)"
+    "licence: GPL version 3 for the programs as a whole (INSTALL.md)"
     ''
     (Get-Content -Raw -LiteralPath "$FFmpeg\BUILD-INFO.txt").TrimEnd()
 )
@@ -163,58 +172,115 @@ if ($video.encoder -ne 'libx264' -or $video.frames_encoded -lt 30 -or $recording
 
 # The installer, as users run it (Windows PowerShell 5.1): into a fresh
 # folder with a space, a Start menu shortcut to the installed desktop, and
-# out again, leaving only what was not its own.
+# out again, leaving only what was not its own. The prefix is also given
+# in the long form the shortcut reports, which differs where the temporary
+# folder's path has 8.3 short names (RUNNER~1).
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'StreamForge.lnk'
 $shell = New-Object -ComObject WScript.Shell
-function Invoke-Installer([string[]] $Arguments) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$out\install.ps1" @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "install.ps1 $Arguments exited with $LASTEXITCODE"
+$fso = New-Object -ComObject Scripting.FileSystemObject
+function Invoke-Installer([string] $Script, [string[]] $Arguments, [switch] $Refused) {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
+    if ($Refused -and $LASTEXITCODE -eq 0) {
+        throw "$Script $Arguments succeeded, but should have been refused"
+    }
+    if (-not $Refused -and $LASTEXITCODE -ne 0) {
+        throw "$Script $Arguments exited with $LASTEXITCODE"
     }
 }
 function Assert-Installed([string] $Prefix) {
     $null = Invoke-Program "$Prefix\bin\streamforge.exe" @('--version')
-    foreach ($file in @('docs\user-guide.md', 'CHANGELOG.md', 'BUILD-INFO.txt', 'licenses\FFmpeg\COPYING.GPLv2', 'installed-files.txt')) {
+    foreach ($file in @('docs\user-guide.md', 'CHANGELOG.md', 'BUILD-INFO.txt', 'licenses\FFmpeg\COPYING.GPLv3', 'install.ps1', 'installed-files.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Prefix $file))) {
             throw "$file is missing in $Prefix"
         }
     }
     $link = $shell.CreateShortcut($shortcut)
-    if ($link.TargetPath -ne "$Prefix\bin\streamforge-desktop.exe" -or $link.WorkingDirectory -ne $env:USERPROFILE) {
+    # The same file however its path is spelled.
+    $same = (Test-Path -LiteralPath $link.TargetPath) -and
+        $fso.GetFile($link.TargetPath).ShortPath -eq $fso.GetFile("$Prefix\bin\streamforge-desktop.exe").ShortPath
+    if (-not $same -or $link.WorkingDirectory -ne $env:USERPROFILE) {
         throw "the shortcut points to '$($link.TargetPath)' in '$($link.WorkingDirectory)'"
     }
 }
+function Assert-Removed([string] $Prefix) {
+    $left = @(Get-ChildItem -LiteralPath $Prefix -Recurse -Force | ForEach-Object { $_.FullName.Substring($Prefix.Length + 1) })
+    if ($left.Count -ne 1 -or $left[0] -ne 'notes.txt' -or (Test-Path -LiteralPath $shortcut)) {
+        throw "install.ps1 -Uninstall left behind: $($left -join ', ') (shortcut: $(Test-Path -LiteralPath $shortcut))"
+    }
+}
 
-$prefix = Join-Path $tmp 'with space\StreamForge'
-Invoke-Installer @('-Prefix', $prefix)
-Assert-Installed $prefix
-# A file of an older version listed in the installation's list is removed
-# when installing again; a file of the user's stays.
-Set-Content -LiteralPath "$prefix\bin\avcodec-61.dll" -Value 'old'
-Add-Content -LiteralPath "$prefix\installed-files.txt" -Value 'bin\avcodec-61.dll'
-Set-Content -LiteralPath "$prefix\notes.txt" -Value 'mine'
-Invoke-Installer @('-Prefix', $prefix)
-Assert-Installed $prefix
-if (Test-Path -LiteralPath "$prefix\bin\avcodec-61.dll") {
-    throw 'installing again kept a file of the previous installation'
+# The tests use the real Start menu; a shortcut of this machine's own
+# installation is put back afterwards.
+$saved = Join-Path $tmp 'StreamForge.lnk'
+if (Test-Path -LiteralPath $shortcut) {
+    Copy-Item -LiteralPath $shortcut -Destination $saved
 }
-Invoke-Installer @('-Uninstall', '-Prefix', $prefix)
-$left = @(Get-ChildItem -LiteralPath $prefix -Recurse -Force | ForEach-Object { $_.FullName.Substring($prefix.Length + 1) })
-if ($left.Count -ne 1 -or $left[0] -ne 'notes.txt' -or (Test-Path -LiteralPath $shortcut)) {
-    throw "install.ps1 -Uninstall left behind: $($left -join ', ') (shortcut: $(Test-Path -LiteralPath $shortcut))"
-}
-# Without -Prefix: under %LOCALAPPDATA%\Programs.
-$localAppData = $env:LOCALAPPDATA
-$env:LOCALAPPDATA = Join-Path $tmp 'local'
 try {
-    Invoke-Installer @()
-    Assert-Installed (Join-Path $env:LOCALAPPDATA 'Programs\StreamForge')
-    Invoke-Installer @('-Uninstall')
-    if ((Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs\StreamForge')) -or (Test-Path -LiteralPath $shortcut)) {
-        throw 'install.ps1 -Uninstall left the default installation behind'
+    $prefix = Join-Path $tmp 'with space\StreamForge'
+    Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
+    Assert-Installed $prefix
+    # A file of an older version listed in the installation's list is removed
+    # when installing again; a file of the user's stays.
+    Set-Content -LiteralPath "$prefix\bin\avcodec-61.dll" -Value 'old'
+    Add-Content -LiteralPath "$prefix\installed-files.txt" -Value 'bin\avcodec-61.dll'
+    Set-Content -LiteralPath "$prefix\notes.txt" -Value 'mine'
+    Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
+    Assert-Installed $prefix
+    if (Test-Path -LiteralPath "$prefix\bin\avcodec-61.dll") {
+        throw 'installing again kept a file of the previous installation'
+    }
+    # The installed copy of the script removes its own installation.
+    Invoke-Installer "$prefix\install.ps1" @('-Uninstall')
+    Assert-Removed $prefix
+    # The prefix in the long form the shortcut reports.
+    Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
+    $long = Split-Path -Parent (Split-Path -Parent $shell.CreateShortcut($shortcut).TargetPath)
+    Write-Host "prefix given as $prefix, uninstalled as $long"
+    Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $long)
+    Assert-Removed $prefix
+    # A folder of the installation replaced by a junction: nothing is removed
+    # through it.
+    Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
+    $outside = Join-Path $tmp 'outside'
+    New-Item -ItemType Directory -Path $outside | Out-Null
+    Set-Content -LiteralPath "$outside\user-guide.md" -Value 'not StreamForge'
+    Remove-Item -LiteralPath "$prefix\docs" -Recurse -Force
+    New-Item -ItemType Junction -Path "$prefix\docs" -Target $outside | Out-Null
+    Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $prefix) -Refused
+    if (-not (Test-Path -LiteralPath "$outside\user-guide.md")) {
+        throw 'install.ps1 -Uninstall removed a file through a junction'
+    }
+    # Removes the junction, not what it points to.
+    (Get-Item -LiteralPath "$prefix\docs" -Force).Delete()
+    Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $prefix)
+    Assert-Removed $prefix
+    # Files in the way that StreamForge did not install: refused, untouched.
+    $taken = Join-Path $tmp 'taken'
+    New-Item -ItemType Directory -Path $taken | Out-Null
+    Set-Content -LiteralPath "$taken\README.md" -Value 'mine'
+    Invoke-Installer "$out\install.ps1" @('-Prefix', $taken) -Refused
+    if ((Get-Content -Raw -LiteralPath "$taken\README.md").Trim() -ne 'mine' -or (Test-Path -LiteralPath "$taken\installed-files.txt") -or (Test-Path -LiteralPath $shortcut)) {
+        throw 'install.ps1 changed a folder whose files it refused'
+    }
+    # Without -Prefix: under %LOCALAPPDATA%\Programs.
+    $localAppData = $env:LOCALAPPDATA
+    $env:LOCALAPPDATA = Join-Path $tmp 'local'
+    try {
+        Invoke-Installer "$out\install.ps1" @()
+        Assert-Installed (Join-Path $env:LOCALAPPDATA 'Programs\StreamForge')
+        Invoke-Installer "$out\install.ps1" @('-Uninstall')
+        if ((Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs\StreamForge')) -or (Test-Path -LiteralPath $shortcut)) {
+            throw 'install.ps1 -Uninstall left the default installation behind'
+        }
+    } finally {
+        $env:LOCALAPPDATA = $localAppData
     }
 } finally {
-    $env:LOCALAPPDATA = $localAppData
+    if (Test-Path -LiteralPath $saved) {
+        Copy-Item -LiteralPath $saved -Destination $shortcut -Force
+    } elseif (Test-Path -LiteralPath $shortcut) {
+        Remove-Item -LiteralPath $shortcut
+    }
 }
 Remove-Item -LiteralPath $tmp -Recurse -Force
 

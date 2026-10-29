@@ -139,14 +139,21 @@ cp -R "$work/ffmpeg/include" "$out/"
 system_dlls=" advapi32.dll bcrypt.dll crypt32.dll gdi32.dll kernel32.dll msvcrt.dll ncrypt.dll ole32.dll oleaut32.dll secur32.dll shell32.dll shlwapi.dll user32.dll ws2_32.dll "
 bad=0
 for dll in "$out/bin/"*.dll; do
+  # Captured first, so a failing objdump stops the script; every DLL
+  # imports at least kernel32.
+  imports=$("$host-objdump" -p "$dll" | sed -n 's/^\s*DLL Name: //p')
+  if ! grep -qix 'kernel32.dll' <<< "$imports"; then
+    echo "$(basename "$dll"): no imports read from objdump" >&2
+    bad=1
+  fi
   while IFS= read -r import; do
     lower=$(tr '[:upper:]' '[:lower:]' <<< "$import")
-    if [ -e "$out/bin/$import" ] || [[ $system_dlls == *" $lower "* ]] || [[ $lower == api-ms-win-* ]]; then
+    if [ -e "$out/bin/$import" ] || [[ $system_dlls == *" $lower "* ]] || [[ $lower == api-ms-win-core-* ]]; then
       continue
     fi
     echo "$(basename "$dll") imports $import, which is neither bundled nor part of Windows" >&2
     bad=1
-  done < <("$host-objdump" -p "$dll" | sed -n 's/^\s*DLL Name: //p')
+  done <<< "$imports"
 done
 if [ "$bad" -ne 0 ]; then
   exit 1
@@ -154,7 +161,10 @@ fi
 
 mkdir -p "$out/licenses/FFmpeg" "$out/licenses/x264" "$out/licenses/libvpl" \
   "$out/licenses/nv-codec-headers" "$out/licenses/AMF"
-cp "$work/$ffmpeg/LICENSE.md" "$work/$ffmpeg/COPYING.GPLv2" "$work/$ffmpeg/COPYING.LGPLv2.1" "$out/licenses/FFmpeg/"
+# GPLv3 too: the programs that link this build also contain Rust crates
+# under Apache-2.0 alone, which only version 3 of the GPL can combine with.
+cp "$work/$ffmpeg/LICENSE.md" "$work/$ffmpeg/COPYING.GPLv2" "$work/$ffmpeg/COPYING.GPLv3" \
+  "$work/$ffmpeg/COPYING.LGPLv2.1" "$out/licenses/FFmpeg/"
 cp "$work/$x264/COPYING" "$out/licenses/x264/"
 cp "$work/$vpl/LICENSE" "$out/licenses/libvpl/"
 # The NVENC and AMF headers carry their licences in their comments.

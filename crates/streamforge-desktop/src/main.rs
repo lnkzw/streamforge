@@ -5,8 +5,6 @@
 // (console.rs).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod console;
-
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,11 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
+use streamforge_desktop::console::ParentConsole;
 use streamforge_desktop::identity;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
-
-use crate::console::ParentConsole;
 
 const USAGE: &str = "usage: streamforge-desktop [--output-dir DIR] [--project-dir DIR]\n       streamforge-desktop --version | --help";
 

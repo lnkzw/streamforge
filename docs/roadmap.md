@@ -326,5 +326,5 @@ Not in M14: text, media file and browser sources, cropping and flipping, camera 
 M14's sources and layers as a release, with the same packages as 0.1.0 (Ubuntu 24.04 and Arch Linux).
 
 - [x] Version 0.2.0 and its changelog section; README, user guide and protocol notes updated.
-- [ ] Release check on the development machine: the Arch package from a manual release run installs with `./install.sh`, reports 0.2.0, records and streams a scene with a camera (the test camera) and an image, and passes a 10 min soak against the installed engine.
-- [ ] Tag `v0.2.0`, the draft release's package checked, published.
+- [x] Release check on the development machine (2026-10-29): the Arch package from a manual release run installed with `./install.sh` and reports 0.2.0. Against the installed engine, a scene with the test camera, a PNG with a transparent hole and a background recorded and streamed to MediaMTX, with the image moved under the camera, hidden and shown again on air; all four phases were pixel-checked in the file and in the stream read back, and the project saved and loaded as schema 4. A 10 min soak against the installed engine passed (VAAPI for both outputs, no drops, the stream read back complete). The desktop from the application menu added and showed the test camera.
+- [x] Tag `v0.2.0` on dc784bb; the draft release's Arch package installed and passed the same camera and image check; published on 2026-10-29.

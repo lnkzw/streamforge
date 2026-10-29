@@ -28,9 +28,7 @@ use capture_api::{
     VideoSourceInfo, VideoStream, choose_mode, listed_modes,
 };
 use media_core::FrameMailbox;
-use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVPixelFormatType_32BGRA,
-};
+use objc2_core_video::{CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth};
 
 use crate::avf::{self, Access, PERMISSION_REMEDY, Running};
 use crate::camera_modes::{CameraFormat, NativeMode, fourcc_text, listed_rate, native_modes};
@@ -46,8 +44,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a start waits for the answer to macOS's camera prompt, on top
 /// of `START_TIMEOUT`.
 const ACCESS_WAIT: Duration = Duration::from_secs(3);
-/// Room for the camera thread's teardown after its own start bound.
-const ANSWER_MARGIN: Duration = Duration::from_secs(1);
+/// Room for the camera thread's teardown after its own start bound: the
+/// stop bound, so a failed start is answered once the camera is free.
+const ANSWER_MARGIN: Duration = STOP_TIMEOUT;
 /// Bound on a stop: stopping the session and its last callback.
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
 /// How often a running camera thread checks whether its camera ended.
@@ -205,14 +204,7 @@ fn publish(
     locked: &LockedPixels<'_>,
     pts_ns: Option<i64>,
 ) -> Result<bool, String> {
-    let format = locked.pixel_format();
-    if format != kCVPixelFormatType_32BGRA {
-        return Err(format!(
-            "the camera frame is {}, not BGRA",
-            fourcc_text(format)
-        ));
-    }
-    let (width, height, rows) = locked.rows()?;
+    let (width, height, rows) = locked.bgra_rows()?;
     sink.publish_rows(width, height, rows, pts_ns)
 }
 
@@ -288,8 +280,9 @@ fn start(request: &CameraRequest) -> Result<CameraStream, CaptureError> {
             Err(CaptureError::new(
                 CaptureErrorKind::Timeout,
                 format!(
-                    "camera `{}` did not start (AVFoundation did not answer)",
-                    request.camera_id
+                    "camera `{}` did not start: AVFoundation did not answer within {} s",
+                    request.camera_id,
+                    (ACCESS_WAIT + START_TIMEOUT + ANSWER_MARGIN).as_secs()
                 ),
             ))
         }
@@ -447,8 +440,10 @@ fn ended(open: &Open, sink: &FrameSink) -> Option<CaptureError> {
     })
 }
 
-/// The camera thread: open, watch until stopped, close. A start that sees
-/// no frame within `START_TIMEOUT` of its access decision fails.
+/// The camera thread: open, watch until stopped, close. A start fails when
+/// no frame came within `START_TIMEOUT` of its access decision; a frame
+/// that came while `startRunning` still blocked counts, as the camera then
+/// runs.
 fn run(
     request: &CameraRequest,
     sink: &Arc<FrameSink>,
@@ -589,6 +584,8 @@ impl Drop for AvfCameraStream {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_video::kCVPixelFormatType_32BGRA;
+
     use super::*;
     use crate::pixels::test_buffer;
 
@@ -653,6 +650,10 @@ mod tests {
 
     #[test]
     fn the_stop_follows_an_unread_first_frame_event() {
+        // The queue holds both events a camera thread can get unread.
+        let (events, _received) = mpsc::sync_channel(EVENT_QUEUE);
+        events.try_send(Event::Delivered).unwrap();
+        events.try_send(Event::Stop).unwrap();
         let (events, received) = mpsc::sync_channel(EVENT_QUEUE);
         let (stopped, answer) = mpsc::sync_channel(1);
         events.try_send(Event::Delivered).unwrap();

@@ -49,8 +49,10 @@ fn capture_at_rate(capture: &mut AvfCamera, request: &CameraRequest) -> Option<f
     let measured = report.stats.measured_fps.expect("a measured rate");
     let wanted = f64::from(fps.num) / f64::from(fps.den);
     println!("requested {wanted} fps, measured {measured:.2}");
+    // The rate is at most 2/3 of the default one, so a camera that kept
+    // its default cadence measures above this window.
     assert!(
-        measured < wanted * 1.25 && measured > wanted * 0.5,
+        measured < wanted * 1.2 && measured > wanted * 0.5,
         "requested {wanted} fps, measured {measured:.2}: {report:#?}"
     );
     Some(measured)
@@ -213,12 +215,13 @@ fn each_listed_camera_delivers_frames_in_its_chosen_mode() {
         )
         .map(|format| (format.width, format.height));
         assert_eq!(size, Some((smallest.width, smallest.height)));
-        // A slower rate of the default size, where the camera lists one.
+        // A rate of the default size at most 2/3 of the default one (15 for
+        // 30), where the camera lists one; modes list the fastest first.
         let slower = camera.modes.iter().find(|mode| {
             (mode.width, mode.height) == (default.width, default.height)
                 && mode.fps.num > 0
-                && u64::from(mode.fps.num) * u64::from(default.framerate.den)
-                    < u64::from(default.framerate.num) * u64::from(mode.fps.den)
+                && 3 * u64::from(mode.fps.num) * u64::from(default.framerate.den)
+                    <= 2 * u64::from(default.framerate.num) * u64::from(mode.fps.den)
         });
         if let Some(slower) = slower {
             let mut at_rate = request(&camera.camera_id, Some((slower.width, slower.height)));
@@ -226,7 +229,7 @@ fn each_listed_camera_delivers_frames_in_its_chosen_mode() {
             capture_at_rate(&mut capture, &at_rate);
         } else {
             println!(
-                "camera {} lists no slower rate at its default size",
+                "camera {} lists no rate of 2/3 or less at its default size",
                 camera.name
             );
         }

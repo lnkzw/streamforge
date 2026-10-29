@@ -5,11 +5,12 @@ use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetDataSize, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
     CVPixelBufferGetWidth, CVPixelBufferIsPlanar, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
+    kCVReturnSuccess,
 };
 use screencapturekit::cv::CVPixelBufferLockGuard;
 
-use crate::camera_modes::row_layout;
+use crate::camera_modes::{fourcc_text, row_layout};
 
 /// The bytes of a locked, non-planar pixel buffer (`height * bytes_per_row`
 /// bytes), or `None` for planar buffers or a missing base address.
@@ -44,14 +45,16 @@ impl<'a> LockedPixels<'a> {
         Ok(Self { buffer })
     }
 
-    /// The four-character code of the buffer's pixel format.
-    pub(crate) fn pixel_format(&self) -> u32 {
-        CVPixelBufferGetPixelFormatType(self.buffer)
-    }
-
     /// The width, height and pixel rows (`width * 4` bytes each, without
-    /// the row padding) of a non-planar 4-byte buffer, or why it has none.
-    pub(crate) fn rows(&self) -> Result<(u32, u32, impl Iterator<Item = &[u8]>), String> {
+    /// the row padding) of a BGRA buffer, or why it has none.
+    pub(crate) fn bgra_rows(&self) -> Result<(u32, u32, impl Iterator<Item = &[u8]>), String> {
+        let format = CVPixelBufferGetPixelFormatType(self.buffer);
+        if format != kCVPixelFormatType_32BGRA {
+            return Err(format!(
+                "the camera frame is {}, not BGRA",
+                fourcc_text(format)
+            ));
+        }
         if CVPixelBufferIsPlanar(self.buffer) {
             return Err("the camera frame is planar".to_owned());
         }

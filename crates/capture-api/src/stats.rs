@@ -153,6 +153,11 @@ impl VideoStatsAccumulator {
         self.frames_discarded += 1;
     }
 
+    /// The source reported a frame it dropped before handing it over.
+    pub fn frame_dropped(&mut self) {
+        self.dropped_frames += 1;
+    }
+
     pub fn finish(&self, elapsed: Duration) -> VideoStats {
         let measured_fps = match (self.first_arrival_ns, self.last_arrival_ns) {
             (Some(first), Some(last)) if self.frames >= 2 && last > first => {

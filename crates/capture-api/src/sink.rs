@@ -214,6 +214,12 @@ impl FrameSink {
         });
     }
 
+    /// The system dropped a frame before handing it over (e.g. AVFoundation's
+    /// late frames); counted in the report's `dropped_frames`.
+    pub fn observe_dropped(&self) {
+        self.lock().stats.frame_dropped();
+    }
+
     /// The system ended the capture (e.g. the window closed). The first
     /// reason is kept.
     pub fn end(&self, reason: impl Into<String>) {
@@ -363,6 +369,7 @@ mod tests {
         sink.observe_frame(10, 1920, 1080, Some(16), Some(Ok(false)));
         sink.observe_frame(20, 1280, 720, Some(33), Some(Err("lost".into())));
         sink.observe_empty(30);
+        sink.observe_dropped();
         assert!(!sink.ended());
         assert_eq!(sink.state(), CaptureState::Running);
         sink.end("the window closed");
@@ -388,6 +395,7 @@ mod tests {
         assert_eq!(report.stats.frames, 3);
         assert_eq!(report.stats.empty_buffers, 1);
         assert_eq!(report.stats.frames_discarded, 2);
+        assert_eq!(report.stats.dropped_frames, 1);
         let format = report.format.expect("format");
         assert_eq!((format.width, format.height), (1280, 720));
         assert_eq!(

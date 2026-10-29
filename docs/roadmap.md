@@ -308,9 +308,9 @@ Cameras, images and layer control (ADR 0019). Everything is additive to protocol
     - [x] 4b1: the capture backend. `PipeWireCamera` lists camera nodes with their modes and captures them on their own thread; `frame-decode` converts YUY2, UYVY, NV12, I420 and MJPEG to BGRX; `list_cameras`, CLI `capture cameras`, `camera` in `get_capture_capabilities`; the conversion cost measured.
     - [x] 4b2: the `camera` source kind in the engine (it starts with its scene, also on air, `restart_source`, a missing camera warns), health, the project file, a fake camera in the engine tests.
     - [x] 4b3: the desktop's camera dialog and inspector: the add dialog lists `list_cameras` with their modes, the inspector switches camera and mode and shows the format a camera runs in, and a missing camera shows as not found with its restart.
-- [ ] Step 5: Windows and macOS cameras; real cameras go to the manual hardware tests.
+- [x] Step 5: Windows and macOS cameras; real cameras go to the manual hardware tests.
   - [x] 5a: Windows through Media Foundation's source reader (`MfCamera` in `capture-windows`); the mode choice moved into `capture-api` for every backend. CI covers the error paths; a real camera waits for the manual test.
-  - [ ] 5b: macOS through AVFoundation.
+  - [x] 5b: macOS through AVFoundation (`AvfCamera` in `capture-macos`): listing without camera access, BGRA from the system, macOS's camera prompt at the first start. CI covers the listing, the frame path with a synthetic sample buffer and the error paths; a real camera waits for the manual test.
 
 Acceptance:
 - A scene with a camera, an image and a screen records and streams on the development machine (its camera is a test one: PipeWire's `videotestsrc` or a v4l2loopback device, since it has no webcam), with the layers reordered and one hidden on air.

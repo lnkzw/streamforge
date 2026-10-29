@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use capture_api::{OfferFormat, Rational, UNSTATED_RATE, compare_rates, reduce_rate};
+use capture_api::{OfferFormat, Rational, UNSTATED_RATE, compare_rates, rate_value, reduce_rate};
 use pipewire::spa;
 use spa::param::ParamType;
 use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
@@ -336,15 +336,11 @@ fn on_step(rate: Rational, min: Rational, step: Rational) -> bool {
     (diff * sd).is_multiple_of(rd * md * sn)
 }
 
-fn fps_value(rate: Rational) -> f64 {
-    f64::from(rate.num) / f64::from(rate.den)
-}
-
 /// The exact modes to connect with: `chosen` first, then the camera's
 /// other modes, closest first (at most [`MAX_CONNECT_MODES`]).
 pub(crate) fn connect_order(offers: &[ModeOffer], chosen: ModeOffer) -> Vec<ModeOffer> {
     let mut rest: Vec<ModeOffer> = offers.iter().copied().filter(|o| *o != chosen).collect();
-    let fps_distance = |o: &ModeOffer| (fps_value(o.fps) - fps_value(chosen.fps)).abs();
+    let fps_distance = |o: &ModeOffer| (rate_value(o.fps) - rate_value(chosen.fps)).abs();
     rest.sort_by(|a, b| {
         let other_mode = |o: &ModeOffer| !(o.size() == chosen.size() && o.fps == chosen.fps);
         other_mode(a)

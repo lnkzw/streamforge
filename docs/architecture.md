@@ -115,6 +115,8 @@ The desktop UI is an adapter like the CLI:
 - **Recording files:** without a typed name, each recording is named by its local start time (`recording-2026-10-27_15-30-05.mkv`, `_2` for a second take in the same second; after the clock went back, takes count on from the latest name), so the desktop's own takes never collide with the engine's no-overwrite rule. A file of that name from elsewhere (a second instance recording into the same folder) makes REC fail with a message.
 - **Views:** the production workspace (`docs/ui/design-system.md`) is drawn by one module per dock in `views` (top bar with project menu, transport and health, scenes, sources, inspector, program monitor, mixer, outputs, dialogs). What they show (scene selection, transport state and timers, monitor fit, meter ballistics, the health summary) is computed in `workspace`, without widgets, and unit-tested there.
 
+Windows camera lifecycle: a start is acknowledged after its first frame reaches the mailbox. Failure answers and stop completion follow native teardown: release the reader and source, drain queued samples, drop the receiver, then drop the Media Foundation/COM session. Start timeout, stop and Drop wait within a bound for that completion before joining; a driver call that never returns can leave a detached worker. Camera buffers expose individual pixel rows to the shared frame sink, which packs them without reading 2D-buffer padding. Screen capture keeps its mapped-frame publication API.
+
 ## Suggested future crates
 
 Add only when a milestone needs them (the socket transport, if needed, extends `control-protocol` or becomes a sibling adapter crate):

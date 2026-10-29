@@ -20,13 +20,14 @@ use std::time::{Duration, Instant};
 
 use capture_api::{
     Camera, CameraCapture, CameraCaptureCapability, CameraMode, CameraRequest, CameraStream,
-    CaptureError, CaptureErrorKind, CaptureState, FrameSink, MappedFrame, ModeOffer,
-    VideoCaptureReport, VideoFormatInfo, VideoSourceInfo, VideoStream, choose_mode, listed_modes,
+    CaptureError, CaptureErrorKind, CaptureState, FrameSink, ModeOffer, VideoCaptureReport,
+    VideoFormatInfo, VideoSourceInfo, VideoStream, choose_mode, listed_modes,
 };
 use media_core::FrameMailbox;
 use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSourceReader, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
     MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED,
 };
 
 use crate::camera_formats::CameraFormat;
@@ -97,25 +98,72 @@ struct Listed {
     modes: Option<Vec<CameraMode>>,
 }
 
-/// The cameras, reading the modes of those not in `known`.
-fn list(known: &HashSet<String>) -> Result<Vec<Listed>, CaptureError> {
+enum ListingEvent {
+    Devices(Vec<Listed>),
+    Modes {
+        index: usize,
+        modes: Vec<CameraMode>,
+    },
+    Finished(Result<(), CaptureError>),
+}
+
+/// Send the devices before opening any, then each camera's modes as read.
+fn list(known: &HashSet<String>, answer: &SyncSender<ListingEvent>) -> Result<(), CaptureError> {
     let session = Session::start()?;
-    let mut listed = Vec::new();
-    for device in session.cameras()? {
-        let modes = if known.contains(&device.link) {
-            None
-        } else {
-            // A camera that does not open now (another application holds
-            // it) is listed without modes and read again next time.
-            modes_of(&session, &device).ok()
-        };
-        listed.push(Listed {
-            camera_id: device.link,
-            name: device.name,
-            modes,
-        });
+    let devices = session.cameras()?;
+    let listed = devices
+        .iter()
+        .map(|device| Listed {
+            camera_id: device.link.clone(),
+            name: device.name.clone(),
+            modes: None,
+        })
+        .collect();
+    if answer.send(ListingEvent::Devices(listed)).is_err() {
+        return Ok(());
     }
-    Ok(listed)
+    for (index, device) in devices.iter().enumerate() {
+        if known.contains(&device.link) {
+            continue;
+        }
+        match modes_of(&session, device) {
+            Ok(modes) => {
+                if answer.send(ListingEvent::Modes { index, modes }).is_err() {
+                    break;
+                }
+            }
+            // Privacy is global: preserve the error and its Settings hint.
+            Err(err) if err.kind == CaptureErrorKind::PermissionDenied => return Err(err),
+            // In-use or otherwise unreadable cameras remain listed without
+            // modes and are retried next time (docs/platforms.md).
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn receive_listing(
+    answered: &Receiver<ListingEvent>,
+    timeout: Duration,
+) -> Result<Vec<Listed>, CaptureError> {
+    let deadline = Instant::now() + timeout;
+    let mut listed = Vec::new();
+    loop {
+        match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(ListingEvent::Devices(devices)) => listed = devices,
+            Ok(ListingEvent::Modes { index, modes }) => listed[index].modes = Some(modes),
+            Ok(ListingEvent::Finished(result)) => {
+                result?;
+                return Ok(listed);
+            }
+            Err(RecvTimeoutError::Timeout) => return Ok(listed),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(CaptureError::backend(
+                    "the camera listing thread ended without an answer",
+                ));
+            }
+        }
+    }
 }
 
 fn modes_of(session: &Session, device: &mf::Device) -> Result<Vec<CameraMode>, CaptureError> {
@@ -146,7 +194,15 @@ impl CameraCapture for MfCamera {
 
     fn cameras(&mut self) -> Result<Vec<Camera>, CaptureError> {
         let known: HashSet<String> = self.modes.keys().cloned().collect();
-        let listed = on_own_thread("camera-list", LIST_TIMEOUT, move || list(&known))?;
+        let (answer, answered) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("camera-list".to_owned())
+            .spawn(move || {
+                let result = list(&known, &answer);
+                let _ = answer.send(ListingEvent::Finished(result));
+            })
+            .map_err(|err| CaptureError::backend(format!("cannot start a camera thread: {err}")))?;
+        let listed = receive_listing(&answered, LIST_TIMEOUT)?;
         Ok(listed
             .into_iter()
             .map(|listed| {
@@ -197,7 +253,7 @@ fn start(request: &CameraRequest) -> Result<(CameraStream, Vec<CameraMode>), Cap
             let sink = Arc::clone(&sink);
             let events = events.clone();
             move || {
-                let warnings = run(&request, &sink, events, &received, started);
+                let warnings = run(&request, &sink, events, received, started);
                 let _ = stopped.send(warnings);
             }
         })
@@ -228,10 +284,13 @@ fn start(request: &CameraRequest) -> Result<(CameraStream, Vec<CameraMode>), Cap
             },
             modes,
         )),
-        Ok(Err(err)) => Err(err),
+        Ok(Err(err)) => {
+            // The error is sent only after the camera/session teardown.
+            let _ = thread.join();
+            Err(err)
+        }
         Err(RecvTimeoutError::Timeout) => {
-            // The thread closes the camera once its open returns.
-            let _ = events.try_send(ReaderEvent::Stop);
+            let _ = stop_thread(&events, &stop_answer, &mut Some(thread));
             Err(CaptureError::new(
                 CaptureErrorKind::Timeout,
                 format!(
@@ -241,10 +300,29 @@ fn start(request: &CameraRequest) -> Result<(CameraStream, Vec<CameraMode>), Cap
                 ),
             ))
         }
-        Err(RecvTimeoutError::Disconnected) => Err(CaptureError::backend(
-            "the camera thread ended without an answer",
-        )),
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = stop_thread(&events, &stop_answer, &mut Some(thread));
+            Err(CaptureError::backend(
+                "the camera thread ended without an answer",
+            ))
+        }
     }
+}
+
+/// Stop and join only after the worker confirms all native teardown is done.
+/// A driver stuck in a native call can exceed the bound; its handle detaches.
+fn stop_thread(
+    events: &SyncSender<ReaderEvent>,
+    stopped: &Receiver<Vec<String>>,
+    thread: &mut Option<JoinHandle<()>>,
+) -> Result<Vec<String>, RecvTimeoutError> {
+    let Some(thread) = thread.take() else {
+        return Ok(Vec::new());
+    };
+    let _ = events.try_send(ReaderEvent::Stop);
+    let warnings = stopped.recv_timeout(STOP_TIMEOUT)?;
+    let _ = thread.join();
+    Ok(warnings)
 }
 
 /// An open camera: its source and asynchronous reader, released (reader
@@ -324,7 +402,6 @@ fn select(
             capture_api::OfferFormat::rank(offer.format),
         )
     });
-    candidates.dedup_by_key(|(_, offer)| offer.format);
     let mut first_error = None;
     for (native, offer) in candidates {
         match session.select(reader, native) {
@@ -355,7 +432,7 @@ fn run(
     request: &CameraRequest,
     sink: &FrameSink,
     events: SyncSender<ReaderEvent>,
-    received: &Receiver<ReaderEvent>,
+    received: Receiver<ReaderEvent>,
     started: SyncSender<Result<Started, CaptureError>>,
 ) -> Vec<String> {
     // Declared first: dropped last, after every Media Foundation object.
@@ -369,6 +446,8 @@ fn run(
     let open = match open(&session, request, events) {
         Ok(open) => open,
         Err(err) => {
+            drain_events(received);
+            drop(session);
             let _ = started.send(Err(err));
             return Vec::new();
         }
@@ -376,14 +455,13 @@ fn run(
     let mut camera = Running {
         open,
         started: Some(started),
-        start_failed: false,
+        start_error: None,
         reading: false,
     };
     camera.read(sink);
     // The reader's callback holds a sender too, so the queue does not
-    // close by itself: leave on the stop request, or when the start failed
-    // (its caller is gone then).
-    while !camera.start_failed
+    // close by itself: leave on the stop request or a failed start.
+    while camera.start_error.is_none()
         && let Ok(event) = received.recv()
     {
         match event {
@@ -402,9 +480,27 @@ fn run(
             }
         }
     }
-    let warnings = camera.close(received);
+    // Hold a failed start's answer until the device and session are free.
+    let failed_start = camera
+        .start_error
+        .take()
+        .map(|err| (camera.started.take().expect("unanswered start"), err));
+    let warnings = camera.close(&received);
+    // close drops reader/source first, then every queued sample must go
+    // before MFShutdown/CoUninitialize. run owns the receiver itself.
+    drain_events(received);
     drop(session);
+    if let Some((started, err)) = failed_start {
+        let _ = started.send(Err(err));
+    }
     warnings
+}
+
+fn drain_events(received: Receiver<ReaderEvent>) {
+    while let Ok(event) = received.try_recv() {
+        drop(event);
+    }
+    drop(received);
 }
 
 struct Running {
@@ -412,7 +508,7 @@ struct Running {
     /// Answered once: with the first frame, or with the error before it.
     started: Option<SyncSender<Result<Started, CaptureError>>>,
     /// The camera ended before its first frame; the start failed.
-    start_failed: bool,
+    start_error: Option<CaptureError>,
     /// A sample was asked for and has not arrived.
     reading: bool,
 }
@@ -428,9 +524,8 @@ impl Running {
     /// The camera ended: fail the start, or end the running capture.
     fn fail(&mut self, sink: &FrameSink, err: CaptureError) {
         let reason = err.message.clone();
-        if let Some(started) = self.started.take() {
-            let _ = started.send(Err(err));
-            self.start_failed = true;
+        if self.started.is_some() {
+            self.start_error = Some(err);
         }
         sink.end(reason);
     }
@@ -468,7 +563,11 @@ impl Running {
             self.fail(sink, err);
             return false;
         }
-        if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 != 0 {
+        if flags
+            & (MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0
+                | MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED.0)
+            != 0
+        {
             match mf::current_layout(&self.open.reader) {
                 Ok(layout) => self.open.layout = layout,
                 Err(err) => {
@@ -485,19 +584,11 @@ impl Running {
         let pts_ns = timestamp.checked_mul(100);
         let layout = self.open.layout;
         let delivered = mf::with_rows(sample, layout, |rows| {
-            let frame = MappedFrame {
-                width: layout.width,
-                height: layout.height,
-                stride: rows.span.stride,
-                data: rows.data,
-            };
-            if rows.span.bottom_up {
-                sink.publish_bottom_up(frame, pts_ns)
-            } else {
-                sink.publish(frame, pts_ns)
-            }
+            sink.publish_rows(layout.width, layout.height, rows, pts_ns)
         })
         .and_then(|delivered| delivered);
+        let first_delivery_error = delivered.as_ref().err().cloned();
+        let published = matches!(delivered, Ok(true));
         sink.observe_frame(
             arrival_ns,
             layout.width,
@@ -505,7 +596,13 @@ impl Running {
             pts_ns,
             Some(delivered),
         );
-        if let Some(started) = self.started.take() {
+        if self.started.is_some()
+            && let Some(err) = first_delivery_error
+        {
+            self.fail(sink, CaptureError::backend(err));
+            return false;
+        }
+        if published && let Some(started) = self.started.take() {
             let _ = started.send(Ok(Started {
                 format: self.open.format.clone(),
                 warnings: self.open.warnings.clone(),
@@ -577,15 +674,9 @@ impl VideoStream for MfCameraStream {
     }
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {
-        let _ = self.events.try_send(ReaderEvent::Stop);
         let mut warnings = std::mem::take(&mut self.warnings);
-        match self.stopped.recv_timeout(STOP_TIMEOUT) {
-            Ok(stop_warnings) => {
-                if let Some(thread) = self.thread.take() {
-                    let _ = thread.join();
-                }
-                warnings.extend(stop_warnings);
-            }
+        match stop_thread(&self.events, &self.stopped, &mut self.thread) {
+            Ok(stop_warnings) => warnings.extend(stop_warnings),
             Err(_) => warnings.push(format!(
                 "the camera did not close within {} s; it closes on its own thread",
                 STOP_TIMEOUT.as_secs()
@@ -599,14 +690,165 @@ impl VideoStream for MfCameraStream {
             self.started.elapsed(),
         );
         // The camera's own format and rate, not the converted frames'.
-        report.format = Some(self.format.clone());
+        let mut format = self.format.clone();
+        if let Some(observed) = &report.format
+            && (observed.width, observed.height) != (format.width, format.height)
+        {
+            report.warnings.push(format!(
+                "the camera changed its size from {}x{} to {}x{} while running",
+                format.width, format.height, observed.width, observed.height
+            ));
+            format.width = observed.width;
+            format.height = observed.height;
+        }
+        report.format = Some(format);
         Ok(report)
     }
 }
 
 impl Drop for MfCameraStream {
     fn drop(&mut self) {
-        // Without a stop: the thread closes the camera on its own.
-        let _ = self.events.try_send(ReaderEvent::Stop);
+        let _ = stop_thread(&self.events, &self.stopped, &mut self.thread);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_stream() -> (Box<MfCameraStream>, Arc<std::sync::atomic::AtomicBool>) {
+        let (events, received) = mpsc::sync_channel(1);
+        let (stopped, answer) = mpsc::sync_channel(1);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_released = Arc::clone(&released);
+        let thread = thread::spawn(move || {
+            assert!(matches!(received.recv().unwrap(), ReaderEvent::Stop));
+            worker_released.store(true, std::sync::atomic::Ordering::SeqCst);
+            stopped.send(Vec::new()).unwrap();
+        });
+        (
+            Box::new(MfCameraStream {
+                sink: Arc::new(FrameSink::new(true, "BGRx")),
+                events,
+                stopped: answer,
+                thread: Some(thread),
+                source: VideoSourceInfo {
+                    kind: None,
+                    width: Some(640),
+                    height: Some(480),
+                },
+                format: VideoFormatInfo {
+                    pixel_format: "MJPG".to_owned(),
+                    width: 640,
+                    height: 480,
+                    framerate: capture_api::Rational::integer(30),
+                },
+                warnings: Vec::new(),
+                started: Instant::now(),
+            }),
+            released,
+        )
+    }
+
+    #[test]
+    fn drop_releases_the_worker_before_returning() {
+        let (stream, released) = fake_stream();
+        drop(stream);
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stop_reports_observed_size_but_keeps_native_format_and_rate() {
+        let (stream, released) = fake_stream();
+        stream
+            .sink
+            .observe_frame(0, 1280, 720, Some(0), Some(Ok(true)));
+        let report = stream.stop().expect("stop");
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        let format = report.format.expect("format");
+        assert_eq!((format.width, format.height), (1280, 720));
+        assert_eq!(format.pixel_format, "MJPG");
+        assert_eq!(format.framerate, capture_api::Rational::integer(30));
+        assert_eq!(
+            report.warnings,
+            ["the camera changed its size from 640x480 to 1280x720 while running"]
+        );
+    }
+
+    fn listed(id: &str) -> Listed {
+        Listed {
+            camera_id: id.to_owned(),
+            name: id.to_owned(),
+            modes: None,
+        }
+    }
+
+    #[test]
+    fn listing_timeout_keeps_devices_and_completed_modes() {
+        let (answer, answered) = mpsc::sync_channel(4);
+        answer
+            .send(ListingEvent::Devices(vec![listed("fast"), listed("slow")]))
+            .unwrap();
+        let modes = vec![CameraMode {
+            width: 640,
+            height: 480,
+            fps: capture_api::Rational::integer(30),
+        }];
+        answer
+            .send(ListingEvent::Modes {
+                index: 0,
+                modes: modes.clone(),
+            })
+            .unwrap();
+        let result = receive_listing(&answered, Duration::from_millis(1)).expect("partial listing");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].modes, Some(modes));
+        assert_eq!(result[1].camera_id, "slow");
+        assert!(result[1].modes.is_none());
+    }
+
+    #[test]
+    fn listing_preserves_permission_denial_and_its_hint() {
+        let (answer, answered) = mpsc::sync_channel(2);
+        answer
+            .send(ListingEvent::Devices(vec![listed("denied")]))
+            .unwrap();
+        let message = "allow desktop apps in Settings > Privacy & security > Camera";
+        answer
+            .send(ListingEvent::Finished(Err(CaptureError::new(
+                CaptureErrorKind::PermissionDenied,
+                message,
+            ))))
+            .unwrap();
+        let err = receive_listing(&answered, Duration::from_secs(1))
+            .err()
+            .expect("privacy error");
+        assert_eq!(err.kind, CaptureErrorKind::PermissionDenied);
+        assert_eq!(err.message, message);
+    }
+
+    #[test]
+    fn stop_waits_for_teardown_and_joins_the_worker() {
+        let (events, received) = mpsc::sync_channel(1);
+        let (stopped, answer) = mpsc::sync_channel(1);
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_released = Arc::clone(&released);
+        let mut thread = Some(thread::spawn(move || {
+            assert!(matches!(received.recv().unwrap(), ReaderEvent::Stop));
+            worker_released.store(true, std::sync::atomic::Ordering::SeqCst);
+            stopped.send(vec!["closed".to_owned()]).unwrap();
+        }));
+        assert_eq!(
+            stop_thread(&events, &answer, &mut thread).unwrap(),
+            ["closed"]
+        );
+        assert!(thread.is_none());
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        // A later Drop after stop must neither send nor wait a second time.
+        assert!(
+            stop_thread(&events, &answer, &mut thread)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

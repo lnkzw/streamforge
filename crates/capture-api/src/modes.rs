@@ -64,7 +64,8 @@ pub fn compare_rates(a: Rational, b: Rational) -> Ordering {
     (u64::from(a.num) * u64::from(b.den)).cmp(&(u64::from(b.num) * u64::from(a.den)))
 }
 
-fn fps_value(rate: Rational) -> f64 {
+/// The numeric value of a rate, for measuring distance between modes.
+pub fn rate_value(rate: Rational) -> f64 {
     f64::from(rate.num) / f64::from(rate.den)
 }
 
@@ -129,7 +130,7 @@ pub fn choose_mode<F: OfferFormat>(
     let fps = match request.fps {
         Some(wanted) if wanted.num > 0 && wanted.den > 0 => {
             let fps = at_size.iter().map(|o| o.fps).min_by(|a, b| {
-                let distance = |r: &Rational| (fps_value(*r) - fps_value(wanted)).abs();
+                let distance = |r: &Rational| (rate_value(*r) - rate_value(wanted)).abs();
                 distance(a).total_cmp(&distance(b))
             })?;
             if fps == UNSTATED_RATE {

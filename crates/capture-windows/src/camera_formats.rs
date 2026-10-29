@@ -7,6 +7,7 @@
 //! converts nothing itself on Windows (ADR 0019).
 
 use capture_api::{ModeOffer, OfferFormat, Rational, UNSTATED_RATE, reduce_rate};
+use media_core::VideoFrame;
 
 /// The tail every FourCC or D3DFORMAT video subtype GUID shares:
 /// `XXXXXXXX-0000-0010-8000-00AA00389B71`.
@@ -158,32 +159,10 @@ impl RowSpan {
     }
 }
 
-fn packed_row(width: u32) -> Result<usize, String> {
-    usize::try_from(width)
-        .ok()
-        .and_then(|width| width.checked_mul(4))
-        .ok_or_else(|| format!("a {width} pixel row does not fit in memory"))
-}
-
 fn span(width: u32, height: u32, pitch: i64) -> Result<(usize, usize), String> {
-    if width == 0 || height == 0 {
-        return Err(format!(
-            "the camera delivered an empty {width}x{height} frame"
-        ));
-    }
-    let row = packed_row(width)?;
     let stride = usize::try_from(pitch.unsigned_abs())
         .map_err(|_| format!("a row pitch of {pitch} bytes does not fit in memory"))?;
-    if stride < row {
-        return Err(format!(
-            "a row pitch of {pitch} bytes is shorter than a {width} pixel row"
-        ));
-    }
-    let len = usize::try_from(height - 1)
-        .ok()
-        .and_then(|rows| stride.checked_mul(rows))
-        .and_then(|rows| rows.checked_add(row))
-        .ok_or_else(|| format!("a {width}x{height} frame does not fit in memory"))?;
+    let len = VideoFrame::required_len(width, height, stride).map_err(|err| err.to_string())?;
     Ok((stride, len))
 }
 
@@ -196,7 +175,7 @@ pub(crate) fn locked_2d(width: u32, height: u32, pitch: i32) -> Result<RowSpan, 
         stride,
         len,
         back: if bottom_up {
-            len - packed_row(width)?
+            len - VideoFrame::packed_stride(width).map_err(|err| err.to_string())?
         } else {
             0
         },
@@ -206,19 +185,15 @@ pub(crate) fn locked_2d(width: u32, height: u32, pitch: i32) -> Result<RowSpan, 
 
 /// A buffer locked with `Lock`: its bytes start with the lowest row;
 /// `default_stride` is the media type's `MF_MT_DEFAULT_STRIDE`, negative
-/// for a bottom-up frame, `None` without one (then rows are packed
-/// top-down, as StreamForge asks for). `available` is the locked length.
+/// for a bottom-up frame, resolved from the subtype when the attribute
+/// is absent. `available` is the locked length.
 pub(crate) fn locked_contiguous(
     width: u32,
     height: u32,
-    default_stride: Option<i32>,
+    default_stride: i32,
     available: usize,
 ) -> Result<RowSpan, String> {
-    let pitch = match default_stride {
-        Some(stride) => i64::from(stride),
-        None => i64::try_from(packed_row(width)?)
-            .map_err(|_| format!("a {width} pixel row does not fit in memory"))?,
-    };
+    let pitch = i64::from(default_stride);
     let (stride, len) = span(width, height, pitch)?;
     if available < len {
         return Err(format!(
@@ -365,9 +340,9 @@ mod tests {
             })
         );
         assert_eq!(locked_2d(1, 1, 4).map(|span| span.len), Ok(4));
-        assert!(locked_2d(4, 2, 12).unwrap_err().contains("shorter"));
-        assert!(locked_2d(0, 2, 12).unwrap_err().contains("empty"));
-        assert!(locked_2d(2, 0, 12).unwrap_err().contains("empty"));
+        assert!(locked_2d(4, 2, 12).unwrap_err().contains("smaller"));
+        assert!(locked_2d(0, 2, 12).unwrap_err().contains("non-zero"));
+        assert!(locked_2d(2, 0, 12).unwrap_err().contains("non-zero"));
     }
 
     #[test]
@@ -387,7 +362,7 @@ mod tests {
     #[test]
     fn contiguous_frames_follow_the_default_stride() {
         assert_eq!(
-            locked_contiguous(2, 2, None, 16),
+            locked_contiguous(2, 2, 8, 16),
             Ok(RowSpan {
                 stride: 8,
                 len: 16,
@@ -396,7 +371,7 @@ mod tests {
             })
         );
         assert_eq!(
-            locked_contiguous(2, 2, Some(-8), 16),
+            locked_contiguous(2, 2, -8, 16),
             Ok(RowSpan {
                 stride: 8,
                 len: 16,
@@ -404,12 +379,12 @@ mod tests {
                 bottom_up: true
             })
         );
-        assert_eq!(locked_contiguous(2, 2, Some(12), 20).map(|s| s.len), Ok(20));
+        assert_eq!(locked_contiguous(2, 2, 12, 20).map(|s| s.len), Ok(20));
         assert!(
-            locked_contiguous(2, 2, Some(12), 19)
+            locked_contiguous(2, 2, 12, 19)
                 .unwrap_err()
                 .contains("holds 19 bytes")
         );
-        assert!(locked_contiguous(2, 2, Some(4), 64).is_err());
+        assert!(locked_contiguous(2, 2, 4, 64).is_err());
     }
 }

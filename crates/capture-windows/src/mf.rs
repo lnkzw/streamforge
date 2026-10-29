@@ -59,6 +59,7 @@ const ALL_STREAMS: u32 = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
 // (mfapi.h, mfidl.h, mfreadwrite.h); interface pointers as raw pointers.
 type StartupFn = unsafe extern "system" fn(u32, u32) -> HRESULT;
 type ShutdownFn = unsafe extern "system" fn() -> HRESULT;
+type GetStrideFn = unsafe extern "system" fn(u32, u32, *mut i32) -> HRESULT;
 type CreateAttributesFn = unsafe extern "system" fn(*mut *mut c_void, u32) -> HRESULT;
 type CreateMediaTypeFn = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
 type EnumDeviceSourcesFn =
@@ -72,6 +73,7 @@ type RawProc = unsafe extern "system" fn() -> isize;
 struct Api {
     startup: StartupFn,
     shutdown: ShutdownFn,
+    get_stride: GetStrideFn,
     create_attributes: CreateAttributesFn,
     create_media_type: CreateMediaTypeFn,
     enum_device_sources: EnumDeviceSourcesFn,
@@ -114,6 +116,10 @@ fn load() -> Result<Api, String> {
         Ok(Api {
             startup: std::mem::transmute::<RawProc, StartupFn>(export(mfplat, s!("MFStartup"))?),
             shutdown: std::mem::transmute::<RawProc, ShutdownFn>(export(mfplat, s!("MFShutdown"))?),
+            get_stride: std::mem::transmute::<RawProc, GetStrideFn>(export(
+                mfplat,
+                s!("MFGetStrideForBitmapInfoHeader"),
+            )?),
             create_attributes: std::mem::transmute::<RawProc, CreateAttributesFn>(export(
                 mfplat,
                 s!("MFCreateAttributes"),
@@ -334,24 +340,30 @@ impl Session {
                 .SetCurrentMediaType(VIDEO_STREAM, None, native)
                 .map_err(&fail)?;
         }
-        let rgb = self.rgb32(Some(native))?;
-        // SAFETY: as above.
-        let chosen = unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &rgb) };
-        if chosen.is_err() {
-            // A processor that refuses a stated stride or aspect: let the
-            // reader take everything but the subtype from the native type.
-            let plain = self.rgb32(None)?;
-            // SAFETY: as above.
-            unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &plain) }
-                .map_err(|err| error("the camera's format cannot be converted to RGB32", &err))?;
+        let mut last_error = None;
+        // Relax only the optional attributes, keeping a positive stride
+        // even when the processor must infer the size and rate.
+        for detail in [RgbDetail::Full, RgbDetail::SizeAndRate, RgbDetail::Subtype] {
+            let rgb = self.rgb32(native, detail)?;
+            // SAFETY: a live reader and media type.
+            match unsafe { reader.SetCurrentMediaType(VIDEO_STREAM, None, &rgb) } {
+                Ok(()) => return current_layout(reader),
+                Err(err) => last_error = Some(err),
+            }
         }
-        current_layout(reader)
+        Err(error(
+            "the camera's format cannot be converted to RGB32",
+            &last_error.expect("three output types tried"),
+        ))
     }
 
-    /// An RGB32 type; with `native`, of its size, rate, pixel aspect and
-    /// interlacing (the video processor matches those, so it converts
-    /// only the colours) and with top-down rows.
-    fn rgb32(&self, native: Option<&IMFMediaType>) -> Result<IMFMediaType, CaptureError> {
+    /// An RGB32 type with the native width's positive stride, optionally
+    /// its size/rate and its aspect/interlacing attributes.
+    fn rgb32(
+        &self,
+        native: &IMFMediaType,
+        detail: RgbDetail,
+    ) -> Result<IMFMediaType, CaptureError> {
         let media_type = self.media_type()?;
         let fail = backend("cannot describe RGB32 frames");
         // SAFETY: live media types; constant keys and GUIDs.
@@ -362,32 +374,52 @@ impl Session {
             media_type
                 .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
                 .map_err(&fail)?;
-            let Some(native) = native else {
-                return Ok(media_type);
-            };
             let size = native.GetUINT64(&MF_MT_FRAME_SIZE).map_err(&fail)?;
+            let (width, _) = camera_formats::unpack_size(size);
+            let stride = media_core::VideoFrame::packed_stride(width)
+                .ok()
+                .and_then(|stride| i32::try_from(stride).ok())
+                .filter(|stride| *stride > 0)
+                .ok_or_else(|| {
+                    CaptureError::backend("the RGB32 stride does not fit in a positive LONG")
+                })?;
+            media_type
+                .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride as u32)
+                .map_err(&fail)?;
+            if matches!(detail, RgbDetail::Subtype) {
+                return Ok(media_type);
+            }
             media_type
                 .SetUINT64(&MF_MT_FRAME_SIZE, size)
                 .map_err(&fail)?;
-            for key in [&MF_MT_FRAME_RATE, &MF_MT_PIXEL_ASPECT_RATIO] {
-                if let Ok(value) = native.GetUINT64(key) {
-                    media_type.SetUINT64(key, value).map_err(&fail)?;
-                }
+            if let Ok(value) = native.GetUINT64(&MF_MT_FRAME_RATE) {
+                media_type
+                    .SetUINT64(&MF_MT_FRAME_RATE, value)
+                    .map_err(&fail)?;
             }
-            let interlace = native
-                .GetUINT32(&MF_MT_INTERLACE_MODE)
-                .unwrap_or(MFVideoInterlace_Progressive.0 as u32);
-            media_type
-                .SetUINT32(&MF_MT_INTERLACE_MODE, interlace)
-                .map_err(&fail)?;
-            // A positive stride: rows top-down.
-            let (width, _) = camera_formats::unpack_size(size);
-            media_type
-                .SetUINT32(&MF_MT_DEFAULT_STRIDE, width.saturating_mul(4))
-                .map_err(&fail)?;
+            if matches!(detail, RgbDetail::Full) {
+                if let Ok(value) = native.GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO) {
+                    media_type
+                        .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, value)
+                        .map_err(&fail)?;
+                }
+                let interlace = native
+                    .GetUINT32(&MF_MT_INTERLACE_MODE)
+                    .unwrap_or(MFVideoInterlace_Progressive.0 as u32);
+                media_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, interlace)
+                    .map_err(&fail)?;
+            }
         }
         Ok(media_type)
     }
+}
+
+#[derive(Clone, Copy)]
+enum RgbDetail {
+    Full,
+    SizeAndRate,
+    Subtype,
 }
 
 impl Drop for Session {
@@ -488,24 +520,40 @@ pub(crate) struct Layout {
     pub width: u32,
     pub height: u32,
     /// `MF_MT_DEFAULT_STRIDE`, negative for bottom-up rows.
-    pub default_stride: Option<i32>,
+    pub default_stride: i32,
 }
 
 pub(crate) fn current_layout(reader: &IMFSourceReader) -> Result<Layout, CaptureError> {
+    // SAFETY: a live reader; the returned type remains owned here.
+    let current = unsafe { reader.GetCurrentMediaType(VIDEO_STREAM) }
+        .map_err(backend("cannot read the camera's output format"))?;
+    layout_of(&current)
+}
+
+fn layout_of(current: &IMFMediaType) -> Result<Layout, CaptureError> {
     let fail = backend("cannot read the camera's output format");
-    // SAFETY: a live reader and media type; constant keys.
+    // SAFETY: a live media type; constant keys and a valid stride out pointer.
     unsafe {
-        let current = reader.GetCurrentMediaType(VIDEO_STREAM).map_err(&fail)?;
         let (width, height) =
             camera_formats::unpack_size(current.GetUINT64(&MF_MT_FRAME_SIZE).map_err(&fail)?);
+        let default_stride = match current.GetUINT32(&MF_MT_DEFAULT_STRIDE) {
+            // The attribute holds a signed value in a UINT32.
+            Ok(stride) => stride as i32,
+            Err(_) => {
+                // Microsoft's default-stride procedure for contiguous
+                // buffers: derive it from the subtype's first DWORD.
+                let subtype = current.GetGUID(&MF_MT_SUBTYPE).map_err(&fail)?;
+                let mut stride = 0;
+                (api()?.get_stride)(subtype.data1, width, &mut stride)
+                    .ok()
+                    .map_err(&fail)?;
+                stride
+            }
+        };
         Ok(Layout {
             width,
             height,
-            // The attribute holds a signed value in a UINT32.
-            default_stride: current
-                .GetUINT32(&MF_MT_DEFAULT_STRIDE)
-                .ok()
-                .map(|stride| stride as i32),
+            default_stride,
         })
     }
 }
@@ -523,17 +571,11 @@ pub(crate) fn flush(reader: &IMFSourceReader) -> Result<(), CaptureError> {
     unsafe { reader.Flush(VIDEO_STREAM) }.map_err(backend("cannot flush the camera"))
 }
 
-/// One RGB32 frame's rows, borrowed while its buffer is locked.
-pub(crate) struct Rows<'a> {
-    pub data: &'a [u8],
-    pub span: RowSpan,
-}
-
 /// Lock `sample`'s buffer as `layout` frames and hand its rows to `use_rows`.
 pub(crate) fn with_rows<R>(
     sample: &Sample,
     layout: Layout,
-    use_rows: impl FnOnce(Rows<'_>) -> R,
+    use_rows: impl FnOnce(&mut dyn Iterator<Item = &[u8]>) -> R,
 ) -> Result<R, String> {
     let (width, height) = (layout.width, layout.height);
     // SAFETY: a live sample; the buffer stays referenced while locked.
@@ -562,14 +604,21 @@ pub(crate) fn with_rows<R>(
                          its {len} byte buffer"
                     )
                 })?;
-            // SAFETY: `lowest_row` checked that the `span.len` bytes from
-            // the lowest row lie inside the locked buffer, which stays
-            // locked (and unchanged, read-only) until `Unlock2D` below.
+            if scanline0.is_null() || start.is_null() {
+                return Err("the camera locked a null frame buffer".to_owned());
+            }
             debug_assert_eq!(scanline0 as usize - span.back, lowest);
-            let data = unsafe {
-                std::slice::from_raw_parts(scanline0.cast_const().wrapping_sub(span.back), span.len)
-            };
-            Ok(use_rows(Rows { data, span }))
+            // SAFETY: `lowest_row` validated every pixel row inside this
+            // locked buffer. Only pixel bytes are exposed, never padding.
+            Ok(unsafe {
+                use_locked_rows(
+                    scanline0.cast_const().wrapping_sub(span.back),
+                    span,
+                    width,
+                    height,
+                    use_rows,
+                )
+            })
         });
         // SAFETY: pairs the successful lock above.
         let _ = unsafe { buffer.Unlock2D() };
@@ -579,15 +628,45 @@ pub(crate) fn with_rows<R>(
     // SAFETY: valid out pointers; unlocked below on every path.
     unsafe { buffer.Lock(&mut data, None, Some(&mut len)) }
         .map_err(|err| format!("cannot lock the frame: {}", err.message()))?;
-    let rows = locked_contiguous(width, height, layout.default_stride, len as usize).map(|span| {
-        // SAFETY: `locked_contiguous` checked that `span.len` is at most
-        // the locked length, valid until `Unlock` below.
-        let data = unsafe { std::slice::from_raw_parts(data.cast_const(), span.len) };
-        use_rows(Rows { data, span })
-    });
+    let rows =
+        locked_contiguous(width, height, layout.default_stride, len as usize).and_then(|span| {
+            if data.is_null() {
+                return Err("the camera locked a null frame buffer".to_owned());
+            }
+            // SAFETY: `locked_contiguous` validated every pixel row inside the
+            // locked length; the buffer remains locked through the callback.
+            Ok(unsafe { use_locked_rows(data.cast_const(), span, width, height, use_rows) })
+        });
     // SAFETY: pairs the successful lock above.
     let _ = unsafe { buffer.Unlock() };
     rows
+}
+
+/// Expose the validated pixel rows of a buffer, top row first.
+///
+/// # Safety
+/// `lowest` must point to the lowest row of a locked RGB32 buffer whose
+/// geometry was validated as `span`; every row's pixels must be readable
+/// and unchanged until `use_rows` returns. Padding need not be readable.
+unsafe fn use_locked_rows<R>(
+    lowest: *const u8,
+    span: RowSpan,
+    width: u32,
+    height: u32,
+    use_rows: impl FnOnce(&mut dyn Iterator<Item = &[u8]>) -> R,
+) -> R {
+    let row_len = media_core::VideoFrame::packed_stride(width).expect("validated row size");
+    let mut rows = (0..height as usize).map(|y| {
+        let index = if span.bottom_up {
+            height as usize - 1 - y
+        } else {
+            y
+        };
+        // SAFETY: validated span bounds every row and its pixel length;
+        // no slice covers padding. The caller holds the buffer lock.
+        unsafe { std::slice::from_raw_parts(lowest.add(index * span.stride), row_len) }
+    });
+    use_rows(&mut rows)
 }
 
 /// A sample from the reader's callback.
@@ -652,6 +731,82 @@ impl IMFSourceReaderCallback_Impl for ReaderCallback_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_rows_skip_padding_in_both_orientations() {
+        let data: Vec<u8> = (0..32).collect();
+        for pitch in [12, -12] {
+            let span = locked_2d(2, 3, pitch).expect("span");
+            // SAFETY: data holds all validated rows and stays unchanged
+            // throughout the callback; this test needs no native buffer.
+            unsafe {
+                use_locked_rows(data.as_ptr(), span, 2, 3, |rows| {
+                    let actual: Vec<_> = rows.map(<[u8]>::to_vec).collect();
+                    let mut expected = vec![
+                        data[..8].to_vec(),
+                        data[12..20].to_vec(),
+                        data[24..32].to_vec(),
+                    ];
+                    if pitch < 0 {
+                        expected.reverse();
+                    }
+                    assert_eq!(actual, expected);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn rgb32_fallbacks_keep_positive_stride_and_missing_stride_is_resolved() {
+        let session = match Session::start() {
+            Ok(session) => session,
+            Err(err) => {
+                println!("Media Foundation unavailable: {err}");
+                return;
+            }
+        };
+        let native = session.media_type().expect("media type");
+        let size = (640u64 << 32) | 480;
+        let rate = (30u64 << 32) | 1;
+        // SAFETY: owned media types, constant attribute keys.
+        unsafe {
+            native.SetUINT64(&MF_MT_FRAME_SIZE, size).unwrap();
+            native.SetUINT64(&MF_MT_FRAME_RATE, rate).unwrap();
+            native
+                .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)
+                .unwrap();
+            for detail in [RgbDetail::Full, RgbDetail::SizeAndRate, RgbDetail::Subtype] {
+                let rgb = session.rgb32(&native, detail).expect("RGB32 type");
+                assert_eq!(rgb.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap(), 2560);
+                assert_eq!(rgb.GetGUID(&MF_MT_SUBTYPE).unwrap(), MFVideoFormat_RGB32);
+                if matches!(detail, RgbDetail::Subtype) {
+                    assert!(rgb.GetUINT64(&MF_MT_FRAME_SIZE).is_err());
+                    assert!(rgb.GetUINT64(&MF_MT_FRAME_RATE).is_err());
+                    // Simulate a negotiated subtype-only fallback that
+                    // supplies a size but omits the requested stride.
+                    rgb.SetUINT64(&MF_MT_FRAME_SIZE, size).unwrap();
+                    rgb.DeleteItem(&MF_MT_DEFAULT_STRIDE).unwrap();
+                    let layout = layout_of(&rgb).expect("resolved layout");
+                    let mut expected = 0;
+                    (session.api.get_stride)(MFVideoFormat_RGB32.data1, 640, &mut expected)
+                        .ok()
+                        .unwrap();
+                    assert_ne!(expected, 0);
+                    assert_eq!(layout.default_stride, expected);
+                    rgb.SetUINT32(&MF_MT_DEFAULT_STRIDE, (-2560i32) as u32)
+                        .unwrap();
+                    assert_eq!(layout_of(&rgb).unwrap().default_stride, -2560);
+                } else {
+                    assert_eq!(rgb.GetUINT64(&MF_MT_FRAME_SIZE).unwrap(), size);
+                    assert_eq!(rgb.GetUINT64(&MF_MT_FRAME_RATE).unwrap(), rate);
+                    assert_eq!(
+                        rgb.GetUINT64(&MF_MT_PIXEL_ASPECT_RATIO).is_ok(),
+                        matches!(detail, RgbDetail::Full)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn errors_name_their_kind_and_remedy() {

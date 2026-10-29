@@ -22,7 +22,7 @@ pub use backend::{
 pub use error::{CaptureError, CaptureErrorKind};
 pub use modes::{
     ModeChoice, ModeOffer, OfferFormat, UNSTATED_RATE, choose_mode, compare_rates, listed_modes,
-    rate_text, reduce_rate,
+    rate_text, rate_value, reduce_rate,
 };
 pub use sink::{FrameSink, MappedFrame};
 pub use stats::{

@@ -12,7 +12,7 @@ How to build, test and change StreamForge. For using it, see the [user guide](us
   - Arch Linux: `sudo pacman -S --needed base-devel clang pkgconf ffmpeg pipewire`
   - Runtime: PipeWire and xdg-desktop-portal with a ScreenCast backend ([`capture-linux.md`](capture-linux.md)).
 - macOS: `brew install ffmpeg pkgconf`, and Xcode 26 or newer for ScreenCaptureKit.
-- Windows: a shared FFmpeg build with headers and import libraries (for example BtbN's `win64-gpl-shared`). Set `FFMPEG_DIR` to it and put its `bin` on `PATH`; `LIBCLANG_PATH` must point to LLVM.
+- Windows: the MSVC build tools with the Windows SDK (the desktop embeds its icon through the SDK's resource compiler), and a shared FFmpeg build with headers and import libraries (for example BtbN's `win64-gpl-shared`, or the package's own from `packaging/windows/build-ffmpeg.sh`). Set `FFMPEG_DIR` to it and put its `bin` on `PATH`; `LIBCLANG_PATH` must point to LLVM. The binaries link the C runtime statically (`.cargo/config.toml`).
 
 [`platforms.md`](platforms.md) has the details per system and the capability matrix.
 
@@ -40,6 +40,8 @@ cargo build --release -p streamforge-mcp   # then point an MCP client at target/
 
 `packaging/linux/package.sh <distro>` builds the release binaries, checks them on the system it runs on, and packs `dist/streamforge-<version>-x86_64-linux-<distro>.tar.gz` with the launcher, icon, documentation and `install.sh`. The release workflow (`.github/workflows/release.yml`) runs it on Ubuntu 24.04 and Arch Linux; a pushed `v*` tag creates a draft release from both. Its notes are the version's section of `CHANGELOG.md` (`packaging/release-notes.sh <version>`); every run checks that the workspace version has one, so add the section before tagging.
 
+The Windows package (ADR 0020) takes two steps. `packaging/windows/build-ffmpeg.sh <dir>` builds the FFmpeg it ships on Linux with mingw-w64, from the pinned archives in `packaging/ffmpeg/sources.txt` (`packaging/ffmpeg/fetch-sources.sh` downloads and checks them). On Ubuntu 24.04 it needs `sudo apt install gcc mingw-w64 nasm cmake ninja-build make pkg-config curl xz-utils`; on another system, run it in an `ubuntu:24.04` container with those packages. Then, on Windows, `packaging/windows/package.ps1 -FFmpeg <dir>` (PowerShell 7) builds the binaries against it, checks what they import, smoke-tests them and `install.ps1`, and packs `dist/streamforge-<version>-x86_64-windows.zip`. The release workflow runs both, caches the FFmpeg build by its script and sources, and attaches the source archives to the draft release.
+
 ## Repository layout
 
 - `crates/media-core`: platform-independent media types and time model
@@ -66,6 +68,8 @@ cargo build --release -p streamforge-mcp   # then point an MCP client at target/
 - `crates/streamforge-bench`: measurement harness for render, drop and CPU figures
 - `crates/streamforge-soak`: soak test harness (an engine process under load for an hour)
 - `packaging/linux`: release packaging, launcher and installer
+- `packaging/windows`: the Windows package, its FFmpeg build and `install.ps1`
+- `packaging/ffmpeg`: the pinned FFmpeg sources of the Windows (and macOS) packages
 - `docs/`: user guide, architecture, media model, control protocol, platforms, roadmap, testing strategy, decisions (ADRs in `docs/decisions`), UI design system (`docs/ui`)
 
 ## Rules

@@ -4,6 +4,14 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- A Windows package (ADR 0020): `streamforge-<version>-x86_64-windows.zip` with the four programs, the FFmpeg they use (built for the package from pinned sources, with x264, NVENC, Quick Sync, AMF and RTMPS through Schannel; the source archives come with the release) and no other runtime to install. `install.ps1` installs it for your user into `%LOCALAPPDATA%\Programs\StreamForge` with a Start menu entry, and `-Uninstall` removes it again; `INSTALL.md` in the package has the steps. It has not been tried on a real Windows PC yet.
+
+### Changed
+
+- Windows: the desktop app is a window program with the app icon and version information, so no console window opens with it. Started from a console, it still prints `--version`, `--help` and startup errors there, but Ctrl+C in that console no longer closes it; closing the window does. The binaries link the C runtime statically.
+
 ## [0.2.0] - 2026-10-29
 
 Sources and layers: cameras, images, and layers you can reorder and hide. Packages for Ubuntu 24.04 and Arch Linux on x86_64, as before; see `INSTALL.md` in each.

@@ -1,6 +1,12 @@
 //! `streamforge-desktop`: the desktop UI. It embeds the engine with the
 //! platform capture backend, like the CLI and the headless engine do.
 
+// Windows: a window program, without a console window of its own
+// (console.rs).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod console;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,9 +19,12 @@ use streamforge_desktop::identity;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
 
+use crate::console::ParentConsole;
+
 const USAGE: &str = "usage: streamforge-desktop [--output-dir DIR] [--project-dir DIR]\n       streamforge-desktop --version | --help";
 
 fn main() -> ExitCode {
+    let console = ParentConsole::borrow();
     // Where recordings and project files go, as `--output-dir` and
     // `--project-dir` for the CLI and the engine; both default to the
     // working directory.
@@ -59,6 +68,8 @@ fn main() -> ExitCode {
     // Shown in the project dialogs, so the operator knows where files are
     // (`absolute`, not `canonicalize`: no `\\?\` prefix on Windows).
     let project_folder = std::path::absolute(&project_dir).unwrap_or_else(|_| project_dir.clone());
+    // From here on the window is the interface.
+    console.give_back();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("StreamForge")
@@ -90,6 +101,8 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
+            // Where the program was started, as the startup errors above.
+            let _console = ParentConsole::borrow();
             eprintln!("error: {err}");
             ExitCode::FAILURE
         }

@@ -2,7 +2,10 @@
   <!-- StreamForge app icon: the program monitor with a picture-in-picture
        layer (accent) and the on-air tally (tally.program), in the colours of
        docs/ui/design-system.md. The window icon is rendered from it:
-       rsvg-convert -w 256 -h 256 io.github.lnkzw.StreamForge.svg -o window-256.png -->
+       rsvg-convert -w 256 -h 256 io.github.lnkzw.StreamForge.svg -o window-256.png
+       and the icon of streamforge-desktop.exe (build.rs) from its sizes:
+       for s in 16 20 24 32 40 48 64 256; do rsvg-convert -w $s -h $s io.github.lnkzw.StreamForge.svg -o $s.png; done
+       magick 16.png 20.png 24.png 32.png 40.png 48.png 64.png 256.png windows.ico -->
   <rect x="12" y="12" width="232" height="232" rx="52" fill="#16171A" stroke="#33363B" stroke-width="4"/>
   <rect x="36" y="60" width="184" height="116" rx="14" fill="#0B0C0D" stroke="#E7E8EA" stroke-width="10"/>
   <rect x="112" y="108" width="86" height="50" rx="6" fill="#2CB5C2"/>

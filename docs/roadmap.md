@@ -334,7 +334,7 @@ M14's sources and layers as a release, with the same packages as 0.1.0 (Ubuntu 2
 Packages for Windows and macOS, tested on real machines, then 0.3.0 for all three systems (ADR 0020). Everything is additive to protocol v1.
 
 - [x] Step 1: ADR 0020 with the project owner's decisions (2026-10-29).
-- [ ] Step 2: Windows package. FFmpeg 8.1 and x264 built in the release workflow from pinned sources (with NVENC, Quick Sync, AMF and Schannel); binaries with the static C runtime; the desktop as a window program with icon and version information; `install.ps1` (per user, Start-menu shortcut, `-Uninstall`); a release job on `windows-latest` with the smoke test.
+- [x] Step 2: Windows package (2026-10-30). FFmpeg 8.1.3 and x264 cross-built with mingw-w64 on Ubuntu from pinned sources (with NVENC, Quick Sync, AMF and Schannel; 8 MB of DLLs, cached by the build script); binaries with the static C runtime; the desktop as a window program with icon and version information; `install.ps1` (per user, Start-menu shortcut, `-Uninstall`); a release job on `windows-latest` with the smoke test.
 - [ ] Step 3: macOS package. The same FFmpeg build for arm64 and macOS 14 (with VideoToolbox); `StreamForge.app` with its `Info.plist` (usage descriptions for camera, microphone and system audio) and the libraries in the bundle, signed ad hoc; the desktop uses the home folder when started in `/`; release jobs on `macos-15` (arm64) and a smoke run on `macos-14`; `macos-15` in the CI matrix.
 - [ ] Step 4: macOS run loop and picker.
   - [ ] 4a: the CLI, the engine process and the MCP server run the main run loop on macOS, their work on a thread of its own, without behaviour change.

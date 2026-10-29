@@ -5,3 +5,9 @@
 # replaces this setting; add the flag there too.)
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+# Windows: link the C runtime statically, so the binaries run without the
+# Visual C++ Redistributable (ADR 0020; the Windows package's smoke test
+# checks what they import).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

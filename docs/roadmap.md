@@ -328,3 +328,23 @@ M14's sources and layers as a release, with the same packages as 0.1.0 (Ubuntu 2
 - [x] Version 0.2.0 and its changelog section; README, user guide and protocol notes updated.
 - [x] Release check on the development machine (2026-10-29): the Arch package from a manual release run installed with `./install.sh` and reports 0.2.0. Against the installed engine, a scene with the test camera, a PNG with a transparent hole and a background recorded and streamed to MediaMTX, with the image moved under the camera, hidden and shown again on air; all four phases were pixel-checked in the file and in the stream read back, and the project saved and loaded as schema 4. A 10 min soak against the installed engine passed (VAAPI for both outputs, no drops, the stream read back complete). The desktop from the application menu added and showed the test camera.
 - [x] Tag `v0.2.0` on dc784bb; the draft release's Arch package installed and passed the same camera and image check; published on 2026-10-29.
+
+## M15 — Windows and macOS (release 0.3.0)
+
+Packages for Windows and macOS, tested on real machines, then 0.3.0 for all three systems (ADR 0020). Everything is additive to protocol v1.
+
+- [x] Step 1: ADR 0020 with the project owner's decisions (2026-10-29).
+- [ ] Step 2: Windows package. FFmpeg 8.1 and x264 built in the release workflow from pinned sources (with NVENC, Quick Sync, AMF and Schannel); binaries with the static C runtime; the desktop as a window program with icon and version information; `install.ps1` (per user, Start-menu shortcut, `-Uninstall`); a release job on `windows-latest` with the smoke test.
+- [ ] Step 3: macOS package. The same FFmpeg build for arm64 and macOS 14 (with VideoToolbox); `StreamForge.app` with its `Info.plist` (usage descriptions for camera, microphone and system audio) and the libraries in the bundle, signed ad hoc; the desktop uses the home folder when started in `/`; release jobs on `macos-15` (arm64) and a smoke run on `macos-14`; `macos-15` in the CI matrix.
+- [ ] Step 4: macOS run loop and picker.
+  - [ ] 4a: the CLI, the engine process and the MCP server run the main run loop on macOS, their work on a thread of its own, without behaviour change.
+  - [ ] 4b: `SCContentSharingPicker`: `picker: true` on macOS 14 or newer; a screen without `capture_target_id` opens the system dialog, with the Linux picker's rules; the desktop's add dialog offers it.
+- [ ] Step 5: hardware test round on the Windows PC and the M4 MacBook Pro, from draft packages: the manual hardware tests (audio devices, monitor, desktop audio, hardware encoders, desktop UI, quit signals, layers, images, cameras), installing and starting each package, the picker, camera hot-plug in the engine process. Fixes in their own pull requests.
+- [ ] Step 6: version 0.3.0: changelog, README and user guide per system, the draft packages checked on both machines, published.
+
+Acceptance:
+- The Windows and macOS packages install from the draft release on the project owner's machines, and the desktop, CLI, engine and MCP server work there from the installed package.
+- The hardware test round passes, or each failure is fixed or documented as a known limitation.
+- The release workflow builds and smoke-tests all four packages (two Linux, Windows, macOS) and runs the macOS package on macOS 14.
+
+Not in M15: Windows' system picker, code signing and notarization, an installer or package manager, an Intel or universal macOS package, the desktop-audio downmix beyond two channels, settings that remember folders.

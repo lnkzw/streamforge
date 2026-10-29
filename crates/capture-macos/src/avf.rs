@@ -29,11 +29,12 @@ use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
-    AVCaptureDeviceInput, AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
-    AVCaptureDeviceTypeExternal, AVCaptureOutput, AVCaptureSession, AVCaptureSessionErrorKey,
-    AVCaptureSessionRuntimeErrorNotification, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVError, AVFoundationErrorDomain, AVMediaType,
-    AVMediaTypeVideo,
+    AVCaptureDeviceFormat, AVCaptureDeviceInput, AVCaptureDevicePosition,
+    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeContinuityCamera,
+    AVCaptureDeviceTypeDeskViewCamera, AVCaptureDeviceTypeExternal, AVCaptureOutput,
+    AVCaptureSession, AVCaptureSessionErrorKey, AVCaptureSessionRuntimeErrorNotification,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVError,
+    AVFoundationErrorDomain, AVMediaType, AVMediaTypeVideo,
 };
 use objc2_core_media::{
     CMSampleBuffer, CMTime, CMTimeFlags, CMVideoFormatDescriptionGetDimensions,
@@ -46,7 +47,9 @@ use objc2_foundation::{
 };
 
 use crate::camera::Output;
-use crate::camera_modes::{FormatInfo, MAX_FORMATS, MediaTime, NativeMode, RateRange, shorter};
+use crate::camera_modes::{
+    FormatInfo, MAX_FORMATS, MediaTime, NativeMode, RateRange, selects, shorter,
+};
 
 pub(crate) const PERMISSION_REMEDY: &str = "allow the camera for the app that runs StreamForge \
      (System Settings, Privacy & Security, Camera), then restart the source";
@@ -63,9 +66,9 @@ pub(crate) struct Device {
     device: Retained<AVCaptureDevice>,
 }
 
-/// The cameras connected now: built-in ones (Continuity Camera reports as
-/// one) and external ones (USB, virtual cameras). Listing asks for no
-/// permission.
+/// The cameras connected now: built-in, Continuity Camera (reported as
+/// built-in unless the app opts in), Desk View and external ones (USB,
+/// virtual cameras). Listing asks for no permission.
 pub(crate) fn cameras() -> Result<Vec<Device>, CaptureError> {
     let video = video()?;
     // SAFETY: the device types are AVFoundation's own constants (macOS 14,
@@ -74,6 +77,8 @@ pub(crate) fn cameras() -> Result<Vec<Device>, CaptureError> {
     let devices = unsafe {
         let types = NSArray::from_slice(&[
             AVCaptureDeviceTypeBuiltInWideAngleCamera,
+            AVCaptureDeviceTypeContinuityCamera,
+            AVCaptureDeviceTypeDeskViewCamera,
             AVCaptureDeviceTypeExternal,
         ]);
         AVCaptureDeviceDiscoverySession::discoverySessionWithDeviceTypes_mediaType_position(
@@ -107,42 +112,41 @@ impl Device {
         unsafe { self.device.localizedName() }.to_string()
     }
 
-    pub(crate) fn is_connected(&self) -> bool {
-        // SAFETY: a property getter of a live device.
-        unsafe { self.device.isConnected() }
-    }
-
     /// The device's formats in its order (at most `MAX_FORMATS`); reading
     /// them opens nothing.
     pub(crate) fn formats(&self) -> Vec<FormatInfo> {
-        // SAFETY: property getters of a live device and its formats; the
-        // format description is a video one for a video device.
-        unsafe {
-            self.device
-                .formats()
-                .iter()
-                .take(MAX_FORMATS)
-                .map(|format| {
-                    let description = format.formatDescription();
-                    let size = CMVideoFormatDescriptionGetDimensions(&description);
-                    let ranges = format
-                        .videoSupportedFrameRateRanges()
-                        .iter()
-                        .filter_map(|range| {
-                            Some(RateRange {
-                                min_duration: media_time(range.minFrameDuration())?,
-                                max_duration: media_time(range.maxFrameDuration())?,
-                            })
-                        })
-                        .collect();
-                    FormatInfo {
-                        subtype: description.media_sub_type(),
-                        width: size.width,
-                        height: size.height,
-                        ranges,
-                    }
+        // SAFETY: a property getter of a live device.
+        let formats = unsafe { self.device.formats() };
+        formats
+            .iter()
+            .take(MAX_FORMATS)
+            .map(|f| format_info(&f))
+            .collect()
+    }
+}
+
+/// What a device format states: its media subtype, size and rate ranges.
+fn format_info(format: &AVCaptureDeviceFormat) -> FormatInfo {
+    // SAFETY: property getters of a live format; the format description
+    // of a video device's format is a video one.
+    unsafe {
+        let description = format.formatDescription();
+        let size = CMVideoFormatDescriptionGetDimensions(&description);
+        let ranges = format
+            .videoSupportedFrameRateRanges()
+            .iter()
+            .filter_map(|range| {
+                Some(RateRange {
+                    min_duration: media_time(range.minFrameDuration())?,
+                    max_duration: media_time(range.maxFrameDuration())?,
                 })
-                .collect()
+            })
+            .collect();
+        FormatInfo {
+            subtype: description.media_sub_type(),
+            width: size.width,
+            height: size.height,
+            ranges,
         }
     }
 }
@@ -332,20 +336,24 @@ pub(crate) fn start(
             ));
         }
         session.addOutput(&running.data);
-        let formats = device.device.formats();
-        if mode.format_index >= formats.count() {
-            session.commitConfiguration();
-            return Err(CaptureError::backend(format!(
-                "camera `{name}` changed its formats while opening"
-            )));
-        }
         if let Err(err) = device.device.lockForConfiguration() {
             session.commitConfiguration();
             return Err(ns_error(&format!("cannot configure camera `{name}`"), &err));
         }
-        device
-            .device
-            .setActiveFormat(&formats.objectAtIndex(mode.format_index));
+        // The format is read again under the lock: setting one whose ranges
+        // do not hold the duration would raise an exception.
+        let formats = device.device.formats();
+        let format = (mode.format_index < formats.count())
+            .then(|| formats.objectAtIndex(mode.format_index))
+            .filter(|format| selects(&format_info(format), mode));
+        let Some(format) = format else {
+            device.device.unlockForConfiguration();
+            session.commitConfiguration();
+            return Err(CaptureError::backend(format!(
+                "camera `{name}` changed its formats while opening; try again"
+            )));
+        };
+        device.device.setActiveFormat(&format);
         let duration = CMTime {
             value: mode.duration.value,
             timescale: mode.duration.timescale,
@@ -404,6 +412,12 @@ impl Running {
         });
     }
 
+    /// Whether the device is still connected.
+    pub(crate) fn is_connected(&self) -> bool {
+        // SAFETY: a property getter of a live device.
+        unsafe { self.device.isConnected() }
+    }
+
     /// Whether the session still runs (AVFoundation stops it on a runtime
     /// error).
     pub(crate) fn is_running(&self) -> bool {
@@ -415,16 +429,8 @@ impl Running {
     pub(crate) fn active(&self) -> Active {
         // SAFETY: property getters of a live device on its session's thread.
         unsafe {
-            let format = self.device.activeFormat();
-            let description = format.formatDescription();
-            let size = CMVideoFormatDescriptionGetDimensions(&description);
             Active {
-                format: FormatInfo {
-                    subtype: description.media_sub_type(),
-                    width: size.width,
-                    height: size.height,
-                    ranges: Vec::new(),
-                },
+                format: format_info(&self.device.activeFormat()),
                 duration: media_time(self.device.activeVideoMinFrameDuration()),
             }
         }

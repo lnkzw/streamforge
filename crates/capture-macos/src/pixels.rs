@@ -9,6 +9,8 @@ use objc2_core_video::{
 };
 use screencapturekit::cv::CVPixelBufferLockGuard;
 
+use crate::camera_modes::row_layout;
+
 /// The bytes of a locked, non-planar pixel buffer (`height * bytes_per_row`
 /// bytes), or `None` for planar buffers or a missing base address.
 pub(crate) fn locked_bytes<'a>(guard: &'a CVPixelBufferLockGuard<'_>) -> Option<&'a [u8]> {
@@ -42,51 +44,47 @@ impl<'a> LockedPixels<'a> {
         Ok(Self { buffer })
     }
 
-    pub(crate) fn width(&self) -> usize {
-        CVPixelBufferGetWidth(self.buffer)
-    }
-
-    pub(crate) fn height(&self) -> usize {
-        CVPixelBufferGetHeight(self.buffer)
-    }
-
-    pub(crate) fn bytes_per_row(&self) -> usize {
-        CVPixelBufferGetBytesPerRow(self.buffer)
-    }
-
     /// The four-character code of the buffer's pixel format.
     pub(crate) fn pixel_format(&self) -> u32 {
         CVPixelBufferGetPixelFormatType(self.buffer)
     }
 
-    /// The `height * bytes_per_row` bytes of a non-planar buffer, or `None`
-    /// for a planar buffer, a missing base address, or a size that does
-    /// not fit what Core Video says the buffer holds.
-    pub(crate) fn bytes(&self) -> Option<&[u8]> {
+    /// The width, height and pixel rows (`width * 4` bytes each, without
+    /// the row padding) of a non-planar 4-byte buffer, or why it has none.
+    pub(crate) fn rows(&self) -> Result<(u32, u32, impl Iterator<Item = &[u8]>), String> {
         if CVPixelBufferIsPlanar(self.buffer) {
-            return None;
+            return Err("the camera frame is planar".to_owned());
         }
-        let base = CVPixelBufferGetBaseAddress(self.buffer).cast::<u8>();
+        let base = CVPixelBufferGetBaseAddress(self.buffer)
+            .cast::<u8>()
+            .cast_const();
         if base.is_null() {
-            return None;
+            return Err("the camera frame has no base address".to_owned());
         }
-        let len = self.height().checked_mul(self.bytes_per_row())?;
-        let size = CVPixelBufferGetDataSize(self.buffer);
-        if size != 0 && size < len {
-            return None;
-        }
-        // SAFETY: `from_raw_parts` needs `len` readable, initialised bytes
-        // at `base` that nothing writes while the slice lives.
-        // - The buffer is locked (read-only) from `lock` until `self`
-        //   drops, and the slice borrows `self`; a locked non-planar
-        //   buffer's base address points at `height` rows of
-        //   `bytes_per_row` bytes (Core Video), and its data size, where
-        //   stated, was checked to hold them.
-        // - AVFoundation reuses a frame's memory only after every sample
-        //   buffer referring to it has been released; the caller holds the
-        //   sample buffer for the whole callback.
-        // - Nothing in this process writes camera frames.
-        Some(unsafe { std::slice::from_raw_parts(base, len) })
+        let (width, height) = (
+            CVPixelBufferGetWidth(self.buffer),
+            CVPixelBufferGetHeight(self.buffer),
+        );
+        let stride = CVPixelBufferGetBytesPerRow(self.buffer);
+        let row = row_layout(width, height, stride, CVPixelBufferGetDataSize(self.buffer))?;
+        let rows = (0..height).map(move |index| {
+            // SAFETY: `from_raw_parts` needs `row` readable, initialised
+            // bytes that nothing writes while the slice lives.
+            // - The buffer is locked (read-only) from `lock` until `self`
+            //   drops, and each slice borrows `self`. A locked non-planar
+            //   buffer's base address points at `height` rows of
+            //   `bytes_per_row` bytes (Core Video); `row_layout` checked
+            //   that a row's pixels fit its stride and, where Core Video
+            //   states the data size, the buffer. Only the pixels are read,
+            //   never the padding, which may be uninitialised.
+            // - AVFoundation reuses a frame's memory only after every sample
+            //   buffer referring to it has been released; the caller holds
+            //   the sample buffer for the whole callback.
+            // - Nothing in this process writes camera frames.
+            unsafe { std::slice::from_raw_parts(base.add(index * stride), row) }
+        });
+        // Both fit a u32: `row_layout` checked them.
+        Ok((width as u32, height as u32, rows))
     }
 }
 

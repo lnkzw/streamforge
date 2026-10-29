@@ -28,23 +28,26 @@ use capture_api::{
     VideoSourceInfo, VideoStream, choose_mode, listed_modes,
 };
 use media_core::FrameMailbox;
-use objc2_core_video::{CVPixelBuffer, kCVPixelFormatType_32BGRA};
-
-use crate::avf::{self, Access, Device, PERMISSION_REMEDY, Running};
-use crate::camera_modes::{
-    CameraFormat, NativeMode, fourcc_text, frame_rows, listed_rate, native_modes,
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVPixelFormatType_32BGRA,
 };
+
+use crate::avf::{self, Access, PERMISSION_REMEDY, Running};
+use crate::camera_modes::{CameraFormat, NativeMode, fourcc_text, listed_rate, native_modes};
 use crate::pixels::LockedPixels;
 
 pub(crate) const BACKEND: &str = "AVFoundation";
 
 /// Bound on listing the cameras.
 const LIST_TIMEOUT: Duration = Duration::from_secs(5);
-/// Bound on a camera start: the access answer, opening it and its first
-/// frame.
+/// Bound on a camera start once its access is decided: opening it and its
+/// first frame. The camera thread keeps it and answers after teardown.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a start waits for the answer to macOS's camera prompt.
+/// How long a start waits for the answer to macOS's camera prompt, on top
+/// of `START_TIMEOUT`.
 const ACCESS_WAIT: Duration = Duration::from_secs(3);
+/// Room for the camera thread's teardown after its own start bound.
+const ANSWER_MARGIN: Duration = Duration::from_secs(1);
 /// Bound on a stop: stopping the session and its last callback.
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
 /// How often a running camera thread checks whether its camera ended.
@@ -168,16 +171,14 @@ impl Output {
             self.sink.observe_empty(arrival_ns);
             return;
         };
-        let (width, height, delivered) = match LockedPixels::lock(pixels) {
-            Ok(locked) => {
-                let size = (
-                    u32::try_from(locked.width()).unwrap_or(0),
-                    u32::try_from(locked.height()).unwrap_or(0),
-                );
-                (size.0, size.1, publish(&self.sink, &locked, size, pts_ns))
-            }
-            Err(err) => (0, 0, Err(err)),
-        };
+        // The size needs no lock, so a frame that fails to lock still
+        // counts at its own size.
+        let (width, height) = (
+            u32::try_from(CVPixelBufferGetWidth(pixels)).unwrap_or(0),
+            u32::try_from(CVPixelBufferGetHeight(pixels)).unwrap_or(0),
+        );
+        let delivered =
+            LockedPixels::lock(pixels).and_then(|locked| publish(&self.sink, &locked, pts_ns));
         let announcement = match &delivered {
             Ok(true) => Some(Event::Delivered),
             Err(err) => Some(Event::Failed(err.clone())),
@@ -202,7 +203,6 @@ impl Output {
 fn publish(
     sink: &FrameSink,
     locked: &LockedPixels<'_>,
-    (width, height): (u32, u32),
     pts_ns: Option<i64>,
 ) -> Result<bool, String> {
     let format = locked.pixel_format();
@@ -212,13 +212,7 @@ fn publish(
             fourcc_text(format)
         ));
     }
-    if width == 0 || height == 0 {
-        return Err(format!("the camera frame is {width}x{height}"));
-    }
-    let data = locked
-        .bytes()
-        .ok_or("the camera frame has no readable pixels")?;
-    let rows = frame_rows(data, width, height, locked.bytes_per_row())?;
+    let (width, height, rows) = locked.rows()?;
     sink.publish_rows(width, height, rows, pts_ns)
 }
 
@@ -255,12 +249,14 @@ fn start(request: &CameraRequest) -> Result<CameraStream, CaptureError> {
             let sink = Arc::clone(&sink);
             let events = events.clone();
             move || {
-                let warnings = run(&request, &sink, events, &received, started);
-                let _ = stopped.send(warnings);
+                run(&request, &sink, events, &received, started);
+                let _ = stopped.send(());
             }
         })
         .map_err(|err| CaptureError::backend(format!("cannot start the camera thread: {err}")))?;
-    match start_answer.recv_timeout(START_TIMEOUT) {
+    // The thread bounds the start itself; this only catches a thread stuck
+    // in a system call.
+    match start_answer.recv_timeout(ACCESS_WAIT + START_TIMEOUT + ANSWER_MARGIN) {
         Ok(Ok(Started { format, warnings })) => Ok(CameraStream {
             stream: Box::new(AvfCameraStream {
                 sink,
@@ -285,13 +281,15 @@ fn start(request: &CameraRequest) -> Result<CameraStream, CaptureError> {
             Err(err)
         }
         Err(RecvTimeoutError::Timeout) => {
-            let _ = stop_thread(&events, &stop_answer, &mut Some(thread));
+            // The thread is stuck in a system call: ask it to stop and leave
+            // it, as waiting for it would not end sooner.
+            let _ = events.try_send(Event::Stop);
+            drop(thread);
             Err(CaptureError::new(
                 CaptureErrorKind::Timeout,
                 format!(
-                    "camera `{}` did not deliver a frame within {} s",
-                    request.camera_id,
-                    START_TIMEOUT.as_secs()
+                    "camera `{}` did not start (AVFoundation did not answer)",
+                    request.camera_id
                 ),
             ))
         }
@@ -309,24 +307,25 @@ fn start(request: &CameraRequest) -> Result<CameraStream, CaptureError> {
 /// detaches.
 fn stop_thread(
     events: &SyncSender<Event>,
-    stopped: &Receiver<Vec<String>>,
+    stopped: &Receiver<()>,
     thread: &mut Option<JoinHandle<()>>,
-) -> Result<Vec<String>, RecvTimeoutError> {
+) -> Result<(), RecvTimeoutError> {
     let Some(thread) = thread.take() else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     // Never full (see `EVENT_QUEUE`); a thread that ended has no queue.
     let _ = events.try_send(Event::Stop);
-    let warnings = stopped.recv_timeout(STOP_TIMEOUT)?;
+    stopped.recv_timeout(STOP_TIMEOUT)?;
     let _ = thread.join();
-    Ok(warnings)
+    Ok(())
 }
 
-/// A running camera: its session (dropped first) and device.
+/// A running camera and its name.
 struct Open {
     running: Running,
-    device: Device,
     name: String,
+    /// When its access was decided; the start bound counts from here.
+    decided: Instant,
 }
 
 fn open(
@@ -365,6 +364,7 @@ fn open(
     if let Some(err) = access_error(&access) {
         return Err(err);
     }
+    let decided = Instant::now();
     let modes = native_modes(&device.formats());
     let choice = choose_mode(&offers(&modes), request).ok_or_else(|| {
         CaptureError::unsupported(format!(
@@ -382,8 +382,8 @@ fn open(
     Ok((
         Open {
             running,
-            device,
             name,
+            decided,
         },
         Started { format, warnings },
     ))
@@ -430,7 +430,7 @@ fn running_format(
 /// Why a running camera ended, if it did: unplugged, or stopped by
 /// AVFoundation (with the runtime error's reason when it sent one).
 fn ended(open: &Open, sink: &FrameSink) -> Option<CaptureError> {
-    if !open.device.is_connected() {
+    if !open.running.is_connected() {
         return Some(CaptureError::new(
             CaptureErrorKind::NotFound,
             format!("camera `{}` was disconnected", open.name),
@@ -447,28 +447,33 @@ fn ended(open: &Open, sink: &FrameSink) -> Option<CaptureError> {
     })
 }
 
-/// The camera thread: open, watch until stopped, close. Returns the
-/// warnings of the stop.
+/// The camera thread: open, watch until stopped, close. A start that sees
+/// no frame within `START_TIMEOUT` of its access decision fails.
 fn run(
     request: &CameraRequest,
     sink: &Arc<FrameSink>,
     events: SyncSender<Event>,
     received: &Receiver<Event>,
     started: SyncSender<Result<Started, CaptureError>>,
-) -> Vec<String> {
+) {
     let (open, mut info) = match open(request, sink, events) {
         Ok(opened) => opened,
         Err(err) => {
             // `open` dropped its session already: the camera is free.
             let _ = started.send(Err(err));
-            return Vec::new();
+            return;
         }
     };
+    let deadline = open.decided + START_TIMEOUT;
     let mut pending = Some(started);
     let mut start_error = None;
     let mut watching = true;
     loop {
-        match received.recv_timeout(WATCH_INTERVAL) {
+        let wait = match pending {
+            Some(_) => WATCH_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            None => WATCH_INTERVAL,
+        };
+        match received.recv_timeout(wait) {
             Ok(Event::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(Event::Delivered) => {
                 if let Some(answer) = pending.take() {
@@ -494,19 +499,29 @@ fn run(
                 break;
             }
         }
+        if pending.is_some() && Instant::now() >= deadline {
+            start_error = Some(CaptureError::new(
+                CaptureErrorKind::Timeout,
+                format!(
+                    "camera `{}` did not deliver a frame within {} s",
+                    open.name,
+                    START_TIMEOUT.as_secs()
+                ),
+            ));
+            break;
+        }
     }
     // Answer a failed start only once the camera is free.
     drop(open);
     if let (Some(answer), Some(err)) = (pending, start_error) {
         let _ = answer.send(Err(err));
     }
-    Vec::new()
 }
 
 struct AvfCameraStream {
     sink: Arc<FrameSink>,
     events: SyncSender<Event>,
-    stopped: Receiver<Vec<String>>,
+    stopped: Receiver<()>,
     thread: Option<JoinHandle<()>>,
     source: VideoSourceInfo,
     format: VideoFormatInfo,
@@ -536,12 +551,11 @@ impl VideoStream for AvfCameraStream {
 
     fn stop(mut self: Box<Self>) -> Result<VideoCaptureReport, CaptureError> {
         let mut warnings = std::mem::take(&mut self.warnings);
-        match stop_thread(&self.events, &self.stopped, &mut self.thread) {
-            Ok(stop_warnings) => warnings.extend(stop_warnings),
-            Err(_) => warnings.push(format!(
+        if stop_thread(&self.events, &self.stopped, &mut self.thread).is_err() {
+            warnings.push(format!(
                 "the camera did not close within {} s; it closes on its own thread",
                 STOP_TIMEOUT.as_secs()
-            )),
+            ));
         }
         let mut report = self.sink.report(
             BACKEND,
@@ -586,7 +600,7 @@ mod tests {
         let thread = thread::spawn(move || {
             assert!(matches!(received.recv().unwrap(), Event::Stop));
             worker_released.store(true, Ordering::SeqCst);
-            stopped.send(Vec::new()).unwrap();
+            stopped.send(()).unwrap();
         });
         (
             Box::new(AvfCameraStream {
@@ -645,19 +659,12 @@ mod tests {
         let mut thread = Some(thread::spawn(move || {
             assert!(matches!(received.recv().unwrap(), Event::Delivered));
             assert!(matches!(received.recv().unwrap(), Event::Stop));
-            stopped.send(vec!["closed".to_owned()]).unwrap();
+            stopped.send(()).unwrap();
         }));
-        assert_eq!(
-            stop_thread(&events, &answer, &mut thread).unwrap(),
-            ["closed"]
-        );
+        stop_thread(&events, &answer, &mut thread).expect("stopped");
         assert!(thread.is_none());
         // A later Drop after stop must neither send nor wait a second time.
-        assert!(
-            stop_thread(&events, &answer, &mut thread)
-                .unwrap()
-                .is_empty()
-        );
+        stop_thread(&events, &answer, &mut thread).expect("nothing to stop");
     }
 
     #[test]

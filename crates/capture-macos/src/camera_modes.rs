@@ -8,6 +8,7 @@
 //! the way, so StreamForge converts nothing itself on macOS (ADR 0019).
 
 use capture_api::{ModeOffer, OfferFormat, Rational, rate_value, reduce_rate};
+use media_core::VideoFrame;
 
 /// Bound on the formats read from one camera, whatever it reports.
 pub(crate) const MAX_FORMATS: usize = 1024;
@@ -200,6 +201,26 @@ pub(crate) fn range_rates(range: RateRange) -> Vec<(Rational, MediaTime)> {
     rates
 }
 
+/// Whether `info` is still the format `mode` was built from: the same
+/// accepted format and size, with a range that holds the mode's duration.
+pub(crate) fn selects(info: &FormatInfo, mode: &NativeMode) -> bool {
+    CameraFormat::from_subtype(info.subtype) == Some(mode.offer.format)
+        && dimension(info.width) == Some(mode.offer.width)
+        && dimension(info.height) == Some(mode.offer.height)
+        && info.ranges.iter().any(|range| holds(*range, mode.duration))
+}
+
+/// Whether `range` offers `duration`: its own shortest one, or one inside
+/// it when its longest is usable (as [`range_rates`] offers them).
+fn holds(range: RateRange, duration: MediaTime) -> bool {
+    let usable = |time: MediaTime| time.value > 0 && time.timescale > 0;
+    if !usable(range.min_duration) || !usable(duration) || shorter(duration, range.min_duration) {
+        return false;
+    }
+    !shorter(range.min_duration, duration)
+        || (usable(range.max_duration) && !shorter(range.max_duration, duration))
+}
+
 /// Whether duration `a` is shorter than `b` (both positive).
 pub(crate) fn shorter(a: MediaTime, b: MediaTime) -> bool {
     i128::from(a.value) * i128::from(b.timescale) < i128::from(b.value) * i128::from(a.timescale)
@@ -239,33 +260,27 @@ pub(crate) fn fourcc_text(code: u32) -> String {
     }
 }
 
-/// The rows of a locked BGRA frame of `width`×`height` with `stride` bytes
-/// per row, each `width * 4` bytes long, or why they do not fit `data`.
-pub(crate) fn frame_rows(
-    data: &[u8],
-    width: u32,
-    height: u32,
+/// The length of each row to read from a locked BGRA frame of
+/// `width`×`height` with `stride` bytes per row, `size` bytes in all (0
+/// when Core Video does not state it), or why the rows do not fit
+/// (`VideoFrame`'s shared geometry checks). Rows are read one by one, so
+/// row padding (which may be uninitialised) is never read.
+pub(crate) fn row_layout(
+    width: usize,
+    height: usize,
     stride: usize,
-) -> Result<impl Iterator<Item = &[u8]>, String> {
-    let row = (width as usize)
-        .checked_mul(4)
-        .ok_or("the frame is too wide")?;
-    if stride < row {
+    size: usize,
+) -> Result<usize, String> {
+    let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
+        return Err(format!("the frame is {width}x{height}"));
+    };
+    let needed = VideoFrame::required_len(w, h, stride).map_err(|err| err.to_string())?;
+    if size != 0 && size < needed {
         return Err(format!(
-            "the frame's rows hold {stride} bytes, {width} pixels need {row}"
+            "the frame holds {size} bytes, {width}x{height} needs {needed}"
         ));
     }
-    let needed = (height as usize)
-        .checked_sub(1)
-        .map_or(Some(0), |rows| rows.checked_mul(stride)?.checked_add(row))
-        .ok_or("the frame is too large")?;
-    if data.len() < needed {
-        return Err(format!(
-            "the frame holds {} bytes, {width}x{height} needs {needed}",
-            data.len()
-        ));
-    }
-    Ok((0..height as usize).map(move |index| &data[index * stride..index * stride + row]))
+    VideoFrame::packed_stride(w).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -451,6 +466,46 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_selects_only_the_format_it_came_from() {
+        let formats = [
+            format(b"420v", 1280, 720, 30),
+            FormatInfo {
+                ranges: vec![
+                    RateRange {
+                        min_duration: time(1, 30),
+                        max_duration: time(1, 5),
+                    },
+                    RateRange {
+                        min_duration: time(1, 60),
+                        max_duration: time(1, -1),
+                    },
+                ],
+                ..format(b"dmb1", 1920, 1080, 30)
+            },
+        ];
+        let modes = native_modes(&formats);
+        assert_eq!(modes.len(), 8, "{modes:?}");
+        for mode in &modes {
+            assert!(selects(&formats[mode.format_index], mode), "{mode:?}");
+        }
+        // Formats reordered or changed between listing and start.
+        assert!(!selects(&formats[1], &modes[0]));
+        let at_25 = modes
+            .iter()
+            .find(|mode| mode.offer.fps == Rational::integer(25))
+            .expect("25 fps inside the wide range");
+        let narrower = FormatInfo {
+            ranges: vec![RateRange {
+                min_duration: time(1, 30),
+                max_duration: time(1, 30),
+            }],
+            ..formats[1].clone()
+        };
+        assert!(!selects(&narrower, at_25));
+        assert!(!selects(&format(b"420v", 1280, 720, 60), &modes[0]));
+    }
+
+    #[test]
     fn media_times_convert_to_nanoseconds_when_valid() {
         assert_eq!(media_time_ns(time(3, 30)), Some(100_000_000));
         assert_eq!(media_time_ns(time(-1, 1000)), Some(-1_000_000));
@@ -459,13 +514,17 @@ mod tests {
     }
 
     #[test]
-    fn frame_rows_skip_padding_and_check_the_buffer() {
-        // Two rows of 2 pixels with 4 bytes of padding; the last row unpadded.
-        let data: Vec<u8> = (0..20).collect();
-        let rows: Vec<&[u8]> = frame_rows(&data, 2, 2, 12).expect("rows").collect();
-        assert_eq!(rows, [&data[..8], &data[12..20]]);
-        assert!(frame_rows(&data, 2, 2, 7).is_err(), "stride below a row");
-        assert!(frame_rows(&data[..19], 2, 2, 12).is_err(), "short buffer");
-        assert_eq!(frame_rows(&[], 2, 0, 8).expect("no rows").count(), 0);
+    fn row_layout_reads_rows_without_padding_and_checks_the_buffer() {
+        assert_eq!(row_layout(2, 2, 12, 24), Ok(8));
+        // The last row's padding need not be there.
+        assert_eq!(row_layout(2, 2, 12, 20), Ok(8));
+        assert_eq!(row_layout(2, 2, 12, 0), Ok(8), "size not stated");
+        assert!(row_layout(2, 2, 7, 0).is_err(), "stride below a row");
+        assert!(row_layout(2, 2, 12, 19).is_err(), "short buffer");
+        assert!(row_layout(2, 0, 8, 0).is_err(), "empty frame");
+        assert!(
+            row_layout(usize::MAX, 1, usize::MAX, 0).is_err(),
+            "too wide"
+        );
     }
 }

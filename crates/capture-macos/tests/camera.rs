@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use capture_api::{CameraCapture, CameraRequest, CaptureErrorKind, CaptureState};
+use capture_api::{CameraCapture, CameraRequest, CaptureErrorKind, CaptureState, VideoFormatInfo};
 use capture_macos::AvfCamera;
 
 static DEVICE_TEST: Mutex<()> = Mutex::new(());
@@ -21,6 +21,39 @@ fn request(camera_id: &str, size: Option<(u32, u32)>) -> CameraRequest {
         size,
         fps: None,
     }
+}
+
+/// Capture `request` (with a rate) for two seconds; the measured rate must
+/// follow the requested one, so the frame duration was really set. `None`
+/// without camera access.
+fn capture_at_rate(capture: &mut AvfCamera, request: &CameraRequest) -> Option<f64> {
+    let fps = request.fps.expect("a rate");
+    let started = match capture.start_camera_stream(request) {
+        Ok(started) => started,
+        Err(error) if error.kind == CaptureErrorKind::PermissionDenied => return None,
+        Err(error) => panic!("start {request:?}: {error:?}"),
+    };
+    println!(
+        "format {:?}, warnings {:?}",
+        started.format, started.warnings
+    );
+    assert_eq!(started.format.as_ref().map(|f| f.framerate), Some(fps));
+    let mailbox = started.stream.frames();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        // Keep the pool free, as the compositor would.
+        let _ = mailbox.take();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let report = started.stream.stop().expect("stop");
+    let measured = report.stats.measured_fps.expect("a measured rate");
+    let wanted = f64::from(fps.num) / f64::from(fps.den);
+    println!("requested {wanted} fps, measured {measured:.2}");
+    assert!(
+        measured < wanted * 1.25 && measured > wanted * 0.5,
+        "requested {wanted} fps, measured {measured:.2}: {report:#?}"
+    );
+    Some(measured)
 }
 
 #[test]
@@ -76,8 +109,8 @@ fn an_unknown_camera_is_not_found() {
 }
 
 /// Start `request`, check three frames against the reported format and
-/// stop; returns the frame size, or `None` without camera access.
-fn capture_once(capture: &mut AvfCamera, request: &CameraRequest) -> Option<(u32, u32)> {
+/// stop; returns the format, or `None` without camera access.
+fn capture_once(capture: &mut AvfCamera, request: &CameraRequest) -> Option<VideoFormatInfo> {
     let started = match capture.start_camera_stream(request) {
         Ok(started) => started,
         Err(error) if error.kind == CaptureErrorKind::PermissionDenied => {
@@ -131,7 +164,7 @@ fn capture_once(capture: &mut AvfCamera, request: &CameraRequest) -> Option<(u32
         "{report:#?}"
     );
     assert_eq!(report.format.as_ref(), Some(&format));
-    Some(size)
+    Some(format)
 }
 
 #[test]
@@ -144,15 +177,26 @@ fn each_listed_camera_delivers_frames_in_its_chosen_mode() {
         return;
     }
     for camera in &cameras {
-        assert!(
-            !camera.modes.is_empty(),
-            "camera {} lists no mode StreamForge reads",
-            camera.name
-        );
         println!("camera {} ({})", camera.name, camera.camera_id);
-        if capture_once(&mut capture, &request(&camera.camera_id, None)).is_none() {
-            return;
+        if camera.modes.is_empty() {
+            // Only formats StreamForge does not read (docs/platforms.md).
+            let error = capture
+                .start_camera_stream(&request(&camera.camera_id, None))
+                .err()
+                .expect("a camera without modes must not start");
+            println!("no mode StreamForge reads: {error:?}");
+            assert!(
+                matches!(
+                    error.kind,
+                    CaptureErrorKind::Unsupported | CaptureErrorKind::PermissionDenied
+                ),
+                "{error:?}"
+            );
+            continue;
         }
+        let Some(default) = capture_once(&mut capture, &request(&camera.camera_id, None)) else {
+            return;
+        };
         // Drop must stop the session before the next start too.
         drop(
             capture
@@ -166,7 +210,25 @@ fn each_listed_camera_delivers_frames_in_its_chosen_mode() {
         let size = capture_once(
             &mut capture,
             &request(&camera.camera_id, Some((smallest.width, smallest.height))),
-        );
+        )
+        .map(|format| (format.width, format.height));
         assert_eq!(size, Some((smallest.width, smallest.height)));
+        // A slower rate of the default size, where the camera lists one.
+        let slower = camera.modes.iter().find(|mode| {
+            (mode.width, mode.height) == (default.width, default.height)
+                && mode.fps.num > 0
+                && u64::from(mode.fps.num) * u64::from(default.framerate.den)
+                    < u64::from(default.framerate.num) * u64::from(mode.fps.den)
+        });
+        if let Some(slower) = slower {
+            let mut at_rate = request(&camera.camera_id, Some((slower.width, slower.height)));
+            at_rate.fps = Some(slower.fps);
+            capture_at_rate(&mut capture, &at_rate);
+        } else {
+            println!(
+                "camera {} lists no slower rate at its default size",
+                camera.name
+            );
+        }
     }
 }

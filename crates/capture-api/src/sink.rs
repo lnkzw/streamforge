@@ -1,6 +1,6 @@
-//! Frame delivery and diagnostics shared by native screen backends whose
-//! system API calls back with mapped frames (Windows.Graphics.Capture,
-//! ScreenCaptureKit).
+//! Frame delivery and diagnostics shared by native backends whose system
+//! API calls back with mapped frames (Windows.Graphics.Capture,
+//! ScreenCaptureKit, Media Foundation cameras).
 //!
 //! The backend's callback maps a frame and hands its bytes to
 //! [`FrameSink::publish`], which copies them into one of a few pooled
@@ -119,6 +119,44 @@ impl FrameSink {
             pooled,
         )
         .map_err(|err| err.to_string())?;
+        self.mailbox.publish(frame);
+        Ok(true)
+    }
+
+    /// Copy pixel rows in display order into a packed pooled frame. Only
+    /// `width * 4` bytes of each row are read; row padding is never copied.
+    /// A short row or a row count other than `height` is an error.
+    pub fn publish_rows<'a>(
+        &self,
+        width: u32,
+        height: u32,
+        mut rows: impl Iterator<Item = &'a [u8]>,
+        pts_ns: Option<i64>,
+    ) -> Result<bool, String> {
+        let stride = VideoFrame::packed_stride(width).map_err(|err| err.to_string())?;
+        let needed =
+            VideoFrame::required_len(width, height, stride).map_err(|err| err.to_string())?;
+        let mut pooled = self.pool.acquire(needed);
+        for index in 0..height as usize {
+            let row = rows
+                .next()
+                .ok_or_else(|| format!("the frame needs {height} rows, got {index}"))?;
+            let pixels = row
+                .get(..stride)
+                .ok_or_else(|| format!("row {index} holds {} bytes, needs {stride}", row.len()))?;
+            if let Some(pooled) = &mut pooled {
+                pooled[index * stride..(index + 1) * stride].copy_from_slice(pixels);
+            }
+        }
+        if rows.next().is_some() {
+            return Err(format!("the frame has more than {height} rows"));
+        }
+        let Some(pooled) = pooled else {
+            return Ok(false);
+        };
+        let pts = pts_ns.and_then(|ns| MediaTimestamp::new(ns, 1, 1_000_000_000).ok());
+        let frame = VideoFrame::new(width, height, stride, self.format, pts, pooled)
+            .map_err(|err| err.to_string())?;
         self.mailbox.publish(frame);
         Ok(true)
     }
@@ -250,6 +288,57 @@ mod tests {
             published.pts(),
             MediaTimestamp::new(1_000, 1, 1_000_000_000).ok()
         );
+    }
+
+    #[test]
+    fn separate_rows_are_packed_in_display_order() {
+        let sink = FrameSink::new(true, "BGRx");
+        // Padded bottom-up storage, with no padding on the final row.
+        let data: Vec<u8> = (0..32).collect();
+        let rows = [&data[24..32], &data[12..24], &data[..12]];
+        assert_eq!(
+            sink.publish_rows(2, 3, rows.into_iter(), Some(1000)),
+            Ok(true)
+        );
+        let published = sink.mailbox().take().expect("frame");
+        assert_eq!(published.stride(), 8);
+        assert_eq!(published.data().len(), 24);
+        assert_eq!(published.row(0), &data[24..32]);
+        assert_eq!(published.row(1), &data[12..20]);
+        assert_eq!(published.row(2), &data[..8]);
+        assert_eq!(
+            published.pts(),
+            MediaTimestamp::new(1000, 1, 1_000_000_000).ok()
+        );
+    }
+
+    #[test]
+    fn row_delivery_rejects_short_rows_and_wrong_counts_without_publishing() {
+        let sink = FrameSink::new(true, "BGRx");
+        let pixels = [0; 8];
+        for rows in [
+            vec![&pixels[..]],
+            vec![&pixels[..]; 3],
+            vec![&pixels[..], &pixels[..7]],
+        ] {
+            assert!(sink.publish_rows(2, 2, rows.into_iter(), None).is_err());
+            assert!(sink.mailbox().take().is_none());
+        }
+        assert!(sink.publish_rows(0, 2, std::iter::empty(), None).is_err());
+        assert!(sink.publish_rows(2, 0, std::iter::empty(), None).is_err());
+        let mut held = Vec::new();
+        for _ in 0..POOL_BUFFERS {
+            assert_eq!(
+                sink.publish_rows(2, 2, [&pixels[..]; 2].into_iter(), None),
+                Ok(true)
+            );
+            held.push(sink.mailbox().take().expect("frame"));
+        }
+        assert_eq!(
+            sink.publish_rows(2, 2, [&pixels[..]; 2].into_iter(), None),
+            Ok(false)
+        );
+        assert!(sink.publish_rows(2, 2, std::iter::empty(), None).is_err());
     }
 
     #[test]

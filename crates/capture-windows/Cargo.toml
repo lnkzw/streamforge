@@ -13,3 +13,15 @@ media-core = { path = "../media-core" }
 # behind a safe API, so this crate needs no unsafe code of its own.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "=2.0.1"
+# Cameras through Media Foundation's source reader (ADR 0019), the same
+# `windows` version as windows-capture's. Media Foundation itself is
+# loaded at run time (`src/mf.rs`), so the binaries start on Windows
+# editions without it. `windows-core` for its `implement` macro (the
+# reader's callback).
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+] }
+windows-core = "0.62.2"

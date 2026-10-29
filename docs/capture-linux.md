@@ -28,7 +28,7 @@ Since M14 step 4b1, `PipeWireCamera` lists and captures cameras:
 
 - **Which nodes:** a `Video/Source` node is a camera when its `device.api` is `v4l2` or `libcamera`, or its `media.role` is `Camera` (virtual cameras). Screen-cast nodes have neither. The registry's globals carry `media.role` but not `device.api`, so every video source is bound and classified by its node info. A v4l2loopback device with `exclusive_caps` gets a node only if a producer was attached when WirePlumber enumerated it.
 - **Modes:** `list_cameras` binds each camera node and reads its `EnumFormat` params (one PipeWire connection, both roundtrips within 3 s), keeping each mode once and at most 1024 per camera. Formats StreamForge converts: packed RGB (32-bit and 24-bit), YUY2, UYVY, NV12, I420 and MJPEG. A size or rate range is listed as the common sizes and rates inside it, on its step. A param without a rate (libcamera) gives modes at the unstated rate 0/1: the stream then names no rate and the camera runs at its own. The listing is cached for 2 s for `start_camera_stream`, which rescans once when the id is missing.
-- **Mode choice** (ADR 0019, decided with the project owner on 2026-10-28):
+- **Mode choice**, shared by camera backends in `capture-api` (ADR 0019, decided with the project owner on 2026-10-28):
   - Size: the requested one, else the closest by area. Without one: the largest up to 1920x1080 that runs at 30 fps or more (29.97 counts); else the largest up to 1920x1080 at any rate; else the smallest above it.
   - Rate at that size: the requested one, else the closest. Without one: the highest up to 60 fps, else the lowest above.
   - Format at that size and rate: packed RGB, then YUY2 or UYVY, then NV12, then I420, then MJPEG.

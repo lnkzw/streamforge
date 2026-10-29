@@ -188,13 +188,13 @@ Commands that create or read a file (`start_recording`, `probe_composite`'s snap
   - `picker`: without `capture_target_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
   - `target_list`: `list_capture_targets` lists monitors and windows, and screen commands capture one by its `capture_target_id` without a dialog (Windows).
 - `audio` has `server_version`.
-- `camera` (since M14 step 4b) has nothing more: `available` means cameras can be listed and captured, not that one is attached. Linux uses PipeWire (`backend` `pipewire`); Windows and macOS report it unavailable until their camera steps.
+- `camera` (since M14 step 4b) has nothing more: `available` means cameras can be listed and captured, not that one is attached. Linux uses PipeWire (`backend` `pipewire`), Windows Media Foundation (`backend` `Media Foundation`, unavailable where it is not installed); macOS reports it unavailable until its camera step.
 
 ### Cameras
 
 `list_cameras` (ADR 0019) lists the cameras with the modes StreamForge can capture them in:
 
-- `camera_id` is opaque and stable on one machine: the PipeWire `node.name` on Linux (for example `v4l2_input.pci-0000_00_14.0-usb-0_1_1.0`, which names the USB port). A camera source names it (`add_source` kind `camera`), and a project file keeps it.
+- `camera_id` is opaque and stable on one machine: the PipeWire `node.name` on Linux (for example `v4l2_input.pci-0000_00_14.0-usb-0_1_1.0`, which names the USB port), the device's symbolic link on Windows (for example `\\?\usb#vid_046d&pid_085b&mi_00#…#{e5323777-f976-4f5b-9b55-b94699c46e44}\global`). A camera source names it (`add_source` kind `camera`), and a project file keeps it.
 - `name` is the system's description of the camera.
 - `modes` lists every size and frame rate once (`fps` as `{"num", "den"}`), largest first, then fastest. A camera that offers a range of sizes or rates lists the common ones inside it (sizes from 320x240 to 3840x2160, rates from 5 to 60, on the range's step). A camera that does not state its rates (libcamera cameras do not) lists `fps` as `{"num": 0, "den": 1}`: it runs at its own rate. A format StreamForge cannot convert (for example H.264) adds no modes, so a camera may list none.
 

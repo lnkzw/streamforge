@@ -48,7 +48,7 @@ impl CameraNode {
                 .description
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
-            modes: modes::listed_modes(&self.offers),
+            modes: capture_api::listed_modes(&self.offers),
         }
     }
 }
@@ -188,7 +188,7 @@ pub(crate) fn start_stream(
     request: &CameraRequest,
     node: &CameraNode,
 ) -> Result<CameraStream, CaptureError> {
-    let Some(choice) = modes::choose(&node.offers, request) else {
+    let Some(choice) = capture_api::choose_mode(&node.offers, request) else {
         return Err(CaptureError::unsupported(format!(
             "camera `{}` offers no format StreamForge converts \
              (packed RGB, YUY2, UYVY, NV12, I420 or MJPEG)",
@@ -300,12 +300,12 @@ fn other_mode(chosen: &ModeOffer, negotiated: Option<&VideoFormatInfo>) -> Optio
     let text = |width: u32, height: u32, fps, format: &str| {
         format!(
             "{width}x{height} at {} fps in {format}",
-            modes::rate_text(fps)
+            capture_api::rate_text(fps)
         )
     };
-    let got_fps = modes::reduce(negotiated.framerate);
+    let got_fps = capture_api::reduce_rate(negotiated.framerate);
     // A camera that does not state its rates runs at whatever it reports.
-    let wanted_fps = if chosen.fps == modes::UNSTATED_RATE {
+    let wanted_fps = if chosen.fps == capture_api::UNSTATED_RATE {
         got_fps
     } else {
         chosen.fps

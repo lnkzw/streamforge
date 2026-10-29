@@ -21,7 +21,7 @@ cargo test --workspace
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main`, on every pull request and on manual runs (`workflow_dispatch`), always on Linux, Windows and macOS. The repository is public, so standard runners cost nothing. (While it was private, pull requests ran on Linux only unless labeled `cross-platform`; that saved minutes but let Windows- and macOS-only code merge untested.)
+`.github/workflows/ci.yml` runs on every push to `main`, on every pull request and on manual runs (`workflow_dispatch`), always on Linux, Windows and macOS. A push to `main` whose tree a pull request's CI already tested green (the squash merge of an up-to-date pull request) skips `rustfmt` and the tests, since they would test the same code again; the first job (`already tested`) compares the trees through the GitHub API and runs everything when it cannot decide. Direct pushes to `main` are tested as usual, and `bench` always runs there. The repository is public, so standard runners cost nothing. (While it was private, pull requests ran on Linux only unless labeled `cross-platform`; that saved minutes but let Windows- and macOS-only code merge untested.)
 
 What runs:
 

@@ -18,8 +18,57 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  tested:
+    # A push to main whose tree a pull request's CI already tested green
+    # (the squash merge of an up-to-date pull request) skips rustfmt and
+    # the tests: they would test the same code again. Direct pushes,
+    # pull requests and manual runs test as usual, and so does any push
+    # where this check cannot decide. Bench still runs on main.
+    name: already tested
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      skip: ${{ steps.tree.outputs.skip }}
+    steps:
+      - id: tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          tested() {
+            [ "$EVENT" = push ] || return 1
+            tree=$(gh api "repos/$REPO/commits/$SHA" --jq .commit.tree.sha) || return 1
+            heads=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+              --jq '.[] | select(.merged_at != null) | .head.sha') || return 1
+            for head in $heads; do
+              head_tree=$(gh api "repos/$REPO/commits/$head" --jq .commit.tree.sha) || continue
+              [ "$head_tree" = "$tree" ] || continue
+              green=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&status=success" \
+                --jq .total_count) || continue
+              if [ "$green" -gt 0 ]; then
+                echo "Tree $tree was tested green as pull request head $head."
+                return 0
+              fi
+            done
+            return 1
+          }
+          if tested; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Already tested on its pull request; rustfmt and tests skipped."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   fmt:
     name: rustfmt
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -34,6 +83,8 @@ jobs:
 
   check:
     name: clippy + test (${{ matrix.os }})
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:

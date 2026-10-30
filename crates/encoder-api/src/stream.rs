@@ -89,6 +89,13 @@ impl StreamTarget {
         })
     }
 
+    /// Whether the connection uses TLS (`rtmps://`, in any case).
+    pub fn uses_tls(&self) -> bool {
+        self.url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("rtmps://"))
+    }
+
     /// The URL to connect to, including the secret key as the last path
     /// segment (before any query). Hand it only to the network layer; never
     /// log or return it.
@@ -332,6 +339,18 @@ mod tests {
         assert_eq!(with_query.connect_url(), "rtmp://host/app/k?auth=abc");
         let bare = target("rtmps://host", "").expect("valid");
         assert_eq!(bare.redacted(), "rtmps://host");
+    }
+
+    #[test]
+    fn rtmps_in_any_case_uses_tls() {
+        for (url, tls) in [
+            ("rtmps://host/app", true),
+            ("RTMPS://host/app", true),
+            ("rtmp://host/app", false),
+            ("rtmp://rtmps/app", false),
+        ] {
+            assert_eq!(target(url, "k").expect("valid").uses_tls(), tls, "{url}");
+        }
     }
 
     #[test]

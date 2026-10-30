@@ -15,7 +15,7 @@
 
 pub mod app;
 pub mod console;
-mod folder;
+pub mod folder;
 pub mod identity;
 pub mod model;
 pub mod ui;

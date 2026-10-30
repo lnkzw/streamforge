@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- StreamForge.app's Info.plist (ADR 0020); packaging/macos/package.sh
+     fills in @VERSION@. The usage descriptions are what macOS shows when
+     it asks for access. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>StreamForge</string>
+	<key>CFBundleExecutable</key>
+	<string>streamforge-desktop</string>
+	<key>CFBundleIconFile</key>
+	<string>StreamForge</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.lnkzw.StreamForge</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>StreamForge</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>StreamForge shows the cameras you add to a scene in its recordings and streams.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>StreamForge records and streams the sound of the microphones and other audio inputs you add.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>StreamForge records and streams what your Mac plays (desktop audio) when you add an output's monitor as an audio input.</string>
+</dict>
+</plist>

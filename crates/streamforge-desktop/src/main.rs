@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use engine::Engine;
 use streamforge_desktop::app::DesktopApp;
 use streamforge_desktop::console::ParentConsole;
+use streamforge_desktop::folder;
 use streamforge_desktop::identity;
 use streamforge_desktop::model::Model;
 use streamforge_desktop::worker::EngineWorker;
@@ -24,7 +25,7 @@ fn main() -> ExitCode {
     let console = ParentConsole::borrow();
     // Where recordings and project files go, as `--output-dir` and
     // `--project-dir` for the CLI and the engine; both default to the
-    // working directory.
+    // working directory (the home folder when that is the root).
     let mut output_dir = None;
     let mut project_dir = None;
     let mut args = std::env::args_os().skip(1);
@@ -51,8 +52,12 @@ fn main() -> ExitCode {
             }
         }
     }
-    let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
-    let project_dir = project_dir.unwrap_or_else(|| PathBuf::from("."));
+    let default_dir = folder::default_dir(
+        std::env::current_dir().ok().as_deref(),
+        std::env::home_dir().as_deref(),
+    );
+    let output_dir = output_dir.unwrap_or_else(|| default_dir.clone());
+    let project_dir = project_dir.unwrap_or(default_dir);
     // As the engine does: a mistyped directory stops here, not at the
     // first save.
     if !project_dir.is_dir() {

@@ -81,25 +81,34 @@ function Get-InstalledFileList {
         })
 }
 
-function Remove-Installation {
-    $files = Get-InstalledFileList
-    # The folders the files are in.
+# The folders below the prefix that files (relative paths) are in.
+function Get-FolderSet([string[]] $Files) {
     $folders = @{}
-    foreach ($file in $files) {
+    foreach ($file in $Files) {
         $dir = Split-Path -Parent $file
         while ($dir) {
             $folders[$dir] = $true
             $dir = Split-Path -Parent $dir
         }
     }
-    # A folder replaced by a link (a junction) would lead out of the
-    # prefix; nothing is removed through one.
-    foreach ($dir in $folders.Keys) {
+    $folders
+}
+
+# A folder that is a link (a junction) would lead out of the prefix;
+# nothing is copied or removed through one.
+function Assert-NoLink($Folders) {
+    foreach ($dir in $Folders.Keys) {
         $item = Get-Item -LiteralPath (Join-Path $Prefix $dir) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "$($item.FullName) is a link, which install.ps1 does not follow; remove it by hand and run it again"
         }
     }
+}
+
+function Remove-Installation {
+    $files = Get-InstalledFileList
+    $folders = Get-FolderSet $files
+    Assert-NoLink $folders
     if ((Test-Path -LiteralPath $shortcut) -and (Get-LongPath ($shell.CreateShortcut($shortcut).TargetPath)) -eq $desktop) {
         Remove-Item -LiteralPath $shortcut
     }
@@ -157,6 +166,7 @@ $ours = @{}
 foreach ($file in Get-InstalledFileList) {
     $ours[$file] = $true
 }
+Assert-NoLink (Get-FolderSet $files)
 $foreign = @($files | Where-Object { -not $ours.ContainsKey($_) -and (Test-Path -LiteralPath (Join-Path $Prefix $_)) })
 if ($foreign) {
     throw "$Prefix has files StreamForge did not install, such as $($foreign[0]); choose another folder with -Prefix, or move them"

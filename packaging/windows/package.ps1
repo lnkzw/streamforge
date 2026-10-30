@@ -119,7 +119,9 @@ foreach ($file in Get-ChildItem -Path "$out\bin\*" -Include *.exe, *.dll) {
         $bundled = Test-Path -LiteralPath (Join-Path "$out\bin" $import)
         # API sets (api-ms-win-core-*), except the C runtime's.
         $apiSet = $import -match '^api-ms-win-core-'
-        if (-not ($bundled -or $apiSet -or $windows -contains $import)) {
+        # The Visual C++ runtime is refused even if it were bundled.
+        $runtime = $import -match '^(vcruntime|msvcp|concrt|vccorlib|ucrtbase)|^api-ms-win-crt-'
+        if ($runtime -or -not ($bundled -or $apiSet -or $windows -contains $import)) {
             $bad += "$($file.Name) imports $import"
         }
     }
@@ -172,13 +174,13 @@ if ($video.encoder -ne 'libx264' -or $video.frames_encoded -lt 30 -or $recording
 
 # The installer, as users run it (Windows PowerShell 5.1): into a fresh
 # folder with a space, a Start menu shortcut to the installed desktop, and
-# out again, leaving only what was not its own. The prefix is also given
-# in the long form the shortcut reports, which differs where the temporary
-# folder's path has 8.3 short names (RUNNER~1).
+# out again, leaving only what was not its own.
 $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'StreamForge.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $fso = New-Object -ComObject Scripting.FileSystemObject
 function Invoke-Installer([string] $Script, [string[]] $Arguments, [switch] $Refused) {
+    # The exit code is checked here, also when a refusal is expected.
+    $PSNativeCommandUseErrorActionPreference = $false
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
     if ($Refused -and $LASTEXITCODE -eq 0) {
         throw "$Script $Arguments succeeded, but should have been refused"
@@ -232,12 +234,22 @@ try {
     # The installed copy of the script removes its own installation.
     Invoke-Installer "$prefix\install.ps1" @('-Uninstall')
     Assert-Removed $prefix
-    # The prefix in the long form the shortcut reports.
-    Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
-    $long = Split-Path -Parent (Split-Path -Parent $shell.CreateShortcut($shortcut).TargetPath)
-    Write-Host "prefix given as $prefix, uninstalled as $long"
-    Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $long)
-    Assert-Removed $prefix
+    # The prefix spelled with its 8.3 short name ("with space" has one where
+    # the drive makes them) for installing, the long one for removing, and
+    # the other way round.
+    $short = $fso.GetFolder($prefix).ShortPath
+    if ($short -eq $prefix) {
+        Write-Host "no 8.3 names for $prefix; the short spelling is not tested"
+    } else {
+        Write-Host "short spelling: $short"
+        Invoke-Installer "$out\install.ps1" @('-Prefix', $short)
+        Assert-Installed $prefix
+        Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $prefix)
+        Assert-Removed $prefix
+        Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)
+        Invoke-Installer "$out\install.ps1" @('-Uninstall', '-Prefix', $short)
+        Assert-Removed $prefix
+    }
     # A folder of the installation replaced by a junction: nothing is removed
     # through it.
     Invoke-Installer "$out\install.ps1" @('-Prefix', $prefix)

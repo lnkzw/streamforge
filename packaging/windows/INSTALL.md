@@ -67,5 +67,5 @@ The package also contains FFmpeg, built with x264 and therefore under the GNU Ge
 The corresponding source code:
 
 - FFmpeg and everything built into it: the archives attached to the same release as this package; `BUILD-INFO.txt` lists them with their checksums and FFmpeg's configuration, and `packaging/windows/build-ffmpeg.sh` builds them.
-- StreamForge: the repository at https://github.com/lnkzw/streamforge, at the tag of this version (`BUILD-INFO.txt` names the commit), with its build and packaging scripts.
-- The Rust libraries: the exact versions in the repository's `Cargo.lock`, from https://crates.io; `cargo vendor` in a checkout of the tag downloads all of them.
+- StreamForge: the repository at https://github.com/lnkzw/streamforge, at the commit `BUILD-INFO.txt` names (for a release, the tag of its version), with its build and packaging scripts.
+- The Rust libraries: the exact versions in that commit's `Cargo.lock`, from https://crates.io; `cargo vendor` in a checkout of it downloads all of them.

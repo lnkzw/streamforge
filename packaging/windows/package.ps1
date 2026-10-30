@@ -105,7 +105,7 @@ if (-not $dumpbin) {
 $windows = @('advapi32', 'bcrypt', 'bcryptprimitives', 'combase', 'coremessaging', 'crypt32', 'd3d11',
     'dwmapi', 'dxgi', 'gdi32', 'imm32', 'kernel32', 'mmdevapi', 'msvcrt', 'ncrypt', 'ntdll', 'ole32',
     'oleaut32', 'opengl32', 'secur32', 'setupapi', 'shell32', 'shlwapi', 'uiautomationcore', 'user32',
-    'uxtheme', 'ws2_32') | ForEach-Object { "$_.dll" }
+    'userenv', 'uxtheme', 'ws2_32') | ForEach-Object { "$_.dll" }
 $bad = @()
 foreach ($file in Get-ChildItem -Path "$out\bin\*" -Include *.exe, *.dll) {
     $imports = @(& $dumpbin /nologo /dependents $file.FullName |

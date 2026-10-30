@@ -7,10 +7,12 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 ### Added
 
 - A Windows package (ADR 0020): `streamforge-<version>-x86_64-windows.zip` with the four programs, the FFmpeg they use (built for the package from pinned sources, with x264, NVENC, Quick Sync, AMF and RTMPS through Schannel; the source archives come with the release) and no other runtime to install. `install.ps1` installs it for your user into `%LOCALAPPDATA%\Programs\StreamForge` with a Start menu entry, and `-Uninstall` removes it again; `INSTALL.md` in the package has the steps. It has not been tried on a real Windows PC yet.
+- A macOS package (ADR 0020) for Apple silicon and macOS 14 or newer: `streamforge-<version>-arm64-macos.zip` with `StreamForge.app`, which holds the desktop app, the command-line programs and the FFmpeg they use (built for the package from the same sources, with x264, VideoToolbox and RTMPS through Secure Transport). Move the app to Applications; macOS asks for the camera, the microphone and the screen under the name StreamForge. The app is signed ad hoc, not notarized, so the first start needs **Open Anyway** in System Settings, and macOS asks for the permissions again after each update. `INSTALL.md` in the package has the steps. It has not been tried on a real Mac yet.
 
 ### Changed
 
 - Windows: the desktop app is a window program with the app icon and version information, so no console window opens with it. Started from a console, it still prints `--version`, `--help` and startup errors there, but Ctrl+C in that console no longer closes it; closing the window does. The binaries link the C runtime statically.
+- The desktop app started in the file system's root, as an app opened from macOS's Finder or Dock is, saves recordings and projects in the home folder instead of the root.
 
 ### Security
 

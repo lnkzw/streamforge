@@ -87,9 +87,9 @@ rpaths() {
   otool -l "$1" | awk '/cmd LC_RPATH/ { getline; getline; sub(/^ *path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print }'
 }
 
-# The binaries find FFmpeg in the bundle. screencapturekit's Swift bridge
-# also adds the build machine's Xcode toolchain; the system's Swift
-# runtime (/usr/lib/swift) is all macOS 14 needs, so that one goes.
+# The binaries find FFmpeg in the bundle. Besides that, they need only the
+# system's Swift runtime (/usr/lib/swift, from .cargo/config.toml); any
+# other run path would point into the build machine, so it goes.
 for bin in "${bins[@]}"; do
   file="$contents/MacOS/$bin"
   while IFS= read -r rpath; do

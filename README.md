@@ -51,6 +51,6 @@ It needs FFmpeg, PipeWire and xdg-desktop-portal from your distribution. The [us
 
 ## Licence
 
-StreamForge is licensed under either of the [MIT licence](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1 (`crates/streamforge-desktop/assets/fonts`).
+StreamForge is licensed under either of the [MIT licence](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1 (`crates/streamforge-desktop/assets/fonts`). The binaries also contain the Rust crates in `Cargo.lock`, under their own licences; the packages list them with their licence texts in `LICENSE-RUST-CRATES.txt` (generated as `packaging/licenses/rust-crates.txt`).
 
 The programs link the system's FFmpeg libraries, so a binary is also subject to the licence of the FFmpeg build it links. With libx264, as in the Ubuntu and Arch Linux packages, that is the GPL. Anyone distributing StreamForge binaries must comply with it ([ADR 0005](docs/decisions/0005-recording-with-ffmpeg.md)).

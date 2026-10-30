@@ -154,7 +154,7 @@ if ($Prefix -eq $here) {
 }
 
 $items = @('bin', 'docs', 'licenses', 'README.md', 'CHANGELOG.md', 'INSTALL.md', 'BUILD-INFO.txt',
-    'LICENSE-MIT', 'LICENSE-APACHE', 'LICENSE-OFL-IBM-Plex.txt', 'install.ps1')
+    'LICENSE-MIT', 'LICENSE-APACHE', 'LICENSE-OFL-IBM-Plex.txt', 'LICENSE-RUST-CRATES.txt', 'install.ps1')
 $files = @(foreach ($item in $items) {
         Get-ChildItem -LiteralPath (Join-Path $here $item) -Recurse -File -Force |
             ForEach-Object { $_.FullName.Substring($here.Length + 1) }

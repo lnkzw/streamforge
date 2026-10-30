@@ -44,6 +44,8 @@ The Windows package (ADR 0020) takes two steps. `packaging/windows/build-ffmpeg.
 
 The macOS package (ADR 0020) builds on an arm64 Mac with Xcode 26 or newer and `brew install pkgconf`. `packaging/macos/build-ffmpeg.sh <dir>` builds its FFmpeg from the same archives, for macOS 14.2; `packaging/macos/package.sh <dir>` builds the binaries against it, puts them with the libraries into `StreamForge.app`, checks every Mach-O file (architecture, minimum macOS, linked libraries, run paths), signs the app ad hoc, runs `packaging/macos/smoke.sh` and packs `dist/streamforge-<version>-arm64-macos.zip`. The release workflow runs both on `macos-15`, with the same cache, and the smoke test again on `macos-14` with the downloaded package. The app's icon, `crates/streamforge-desktop/assets/icon/macos.icns`, is rendered from the SVG (the command is in the SVG).
 
+Every package carries `LICENSE-RUST-CRATES.txt`, the licences of the Rust crates the programs are built from: `packaging/licenses/rust-crates.txt`, generated from `Cargo.lock` by `packaging/licenses/generate.py` (Python 3.9 or newer) with cargo-about 0.9.2 (`cargo install cargo-about --version 0.9.2 --locked`). After a change to `Cargo.lock`, including a version bump, run it and commit the result; CI runs it with `--check` and fails when the file is out of date. It also fails on a crate under a licence not listed in `packaging/licenses/about.toml` (check that the licence is compatible with version 3 of the GPL before adding it there), on anything cargo-about reports, such as a clarification in `about.toml` whose file changed (check the new file, then its checksum), and on a crate whose licence needs a copyright notice it does not ship: take the notice from the crate's repository at the commit it was published from (`.cargo_vcs_info.json`) into `packaging/licenses/notices/` (or, when there is none, a note saying so), whose files start with a `Crates:` and a `Source:` line. A notice there names exact versions, so a new version fails until its notice is checked again. `notices/` also holds notices that crates keep in their source files for code or documents taken from others (libm, futures-channel, winit, cursor-icon); the script does not search source files for them, so check a new dependency's source headers when adding it.
+
 ## Repository layout
 
 - `crates/media-core`: platform-independent media types and time model
@@ -73,6 +75,7 @@ The macOS package (ADR 0020) builds on an arm64 Mac with Xcode 26 or newer and `
 - `packaging/windows`: the Windows package, its FFmpeg build and `install.ps1`
 - `packaging/macos`: the macOS package (`StreamForge.app`), its FFmpeg build, `Info.plist` and smoke test
 - `packaging/ffmpeg`: the pinned FFmpeg sources of the Windows and macOS packages
+- `packaging/licenses`: the licences of the Rust crates, which every package carries, and how they are generated
 - `docs/`: user guide, architecture, media model, control protocol, platforms, roadmap, testing strategy, decisions (ADRs in `docs/decisions`), UI design system (`docs/ui`)
 
 ## Rules

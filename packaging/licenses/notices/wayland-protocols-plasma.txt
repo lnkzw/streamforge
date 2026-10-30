@@ -1,0 +1,4 @@
+Crates: wayland-protocols-plasma 0.3.12
+Source: the crate's LICENSES/MIT.txt, which is the licence's template without a copyright line
+
+The copyright notices of the crate's protocol descriptions are in the last section, "Copyright notices of the Wayland protocol descriptions".

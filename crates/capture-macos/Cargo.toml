@@ -29,3 +29,9 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFRunLoop"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2", "block2"] }
 block2 = "0.6.2"
+
+# Shows the system picker from the main run loop, as the programs do, so
+# it has its own main instead of the test harness.
+[[test]]
+name = "picker"
+harness = false

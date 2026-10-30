@@ -1,7 +1,9 @@
 //! ScreenCaptureKit on the machine it runs on (the macOS CI runner
 //! included). Screen recording needs a permission that a CI runner may not
 //! have; without it, every query must fail with `permission_denied` and the
-//! remedy, which the tests check and print.
+//! remedy, which the tests check and print. The test harness runs no main
+//! run loop, so the system picker is not offered here (`tests/picker.rs`
+//! shows it).
 #![cfg(target_os = "macos")]
 
 use std::time::{Duration, Instant};
@@ -37,6 +39,7 @@ fn sources(capture: &mut SckCapture) -> Option<Vec<ScreenSource>> {
     }
 }
 
+/// Without a main run loop, no picker.
 #[test]
 fn capabilities_describe_named_sources_without_a_picker() {
     let screen = SckCapture::new().capability();
@@ -115,6 +118,7 @@ fn a_display_probe_reports_frames_or_permission_is_denied() {
 #[test]
 fn bad_selections_are_structured_errors() {
     let mut capture = SckCapture::new();
+    // No picker without a main run loop: a source must be named.
     let picker = capture
         .start_screen_stream(&selection(None, CursorMode::Embedded))
         .err()

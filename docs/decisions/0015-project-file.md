@@ -75,3 +75,4 @@ The user decided where files live: a project directory set when the engine start
 - Scenes and the audio setup survive a restart, and an agent can save and restore a production, within the directory the operator chose.
 - Changing a command's parameter rules changes what a project file accepts. The project tests catch a change that breaks saved files.
 - The desktop opens and saves projects since M12 step 4a: `--project-dir` (default: the working directory), and `list_projects` to pick a file, which agents use as well.
+- Since M15 step 4b (ADR 0020), macOS has a system picker too; choosing a target with `set_capture_target` (once `set_screen_source`) is still the only way on Windows.

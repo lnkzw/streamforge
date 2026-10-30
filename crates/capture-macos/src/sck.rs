@@ -1,7 +1,8 @@
 //! Screen capture through ScreenCaptureKit (`screencapturekit`).
 //!
 //! Displays and windows come from `SCShareableContent` and are captured by
-//! id; there is no picker yet. ScreenCaptureKit calls the output handler
+//! id; without an id the user picks one in the system picker (`picker`),
+//! where a main run loop runs. ScreenCaptureKit calls the output handler
 //! on its own dispatch queue: the handler maps each complete BGRA frame and
 //! hands it to a `capture_api::FrameSink`, which copies it into a pooled
 //! buffer and publishes it, or discards and counts it when no buffer is
@@ -15,7 +16,8 @@
 //! Every query needs the screen-recording permission of the app that runs
 //! StreamForge. Without it, listing and capturing fail with
 //! `permission_denied` and the remedy. Waits on ScreenCaptureKit are
-//! bounded by [`QUERY_TIMEOUT`].
+//! bounded by [`QUERY_TIMEOUT`], the wait for the user's pick by
+//! [`picker::PICK_TIMEOUT`].
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -38,6 +40,7 @@ use screencapturekit::prelude::{
 use screencapturekit::shareable_content::SCShareableContentInfo;
 
 use crate::ids::SourceRef;
+use crate::picker;
 
 pub(crate) const BACKEND: &str = "ScreenCaptureKit";
 /// Longest wait for a ScreenCaptureKit query, or for starting or stopping
@@ -50,14 +53,30 @@ const QUEUE_DEPTH: u32 = 5;
 const PERMISSION_REMEDY: &str = "allow screen recording for the app that runs StreamForge \
      (System Settings, Privacy & Security, Screen & System Audio Recording), then restart it";
 
-/// Screen capture of named displays and windows. Audio is not handled
-/// here (see `capture-cpal`).
-#[derive(Debug, Default)]
-pub struct SckCapture;
+/// Screen capture of named or picked displays and windows. Audio is not
+/// handled here (see `capture-cpal`).
+#[derive(Debug)]
+pub struct SckCapture {
+    pick_timeout: Duration,
+}
+
+impl Default for SckCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SckCapture {
     pub fn new() -> Self {
-        Self
+        Self {
+            pick_timeout: picker::PICK_TIMEOUT,
+        }
+    }
+
+    /// How long the system picker waits for the user (tests shorten it).
+    pub fn with_pick_timeout(mut self, timeout: Duration) -> Self {
+        self.pick_timeout = timeout;
+        self
     }
 }
 
@@ -115,6 +134,7 @@ fn shareable_content() -> Result<SCShareableContent, CaptureError> {
 /// ScreenCaptureKit is linked, so capture is offered. Whether the app may
 /// use it is only known by asking, which can show the system's permission
 /// prompt; capabilities therefore do not ask (`list_capture_targets` does).
+/// The picker is offered where it can be shown.
 fn screen_capability() -> ScreenCaptureCapability {
     ScreenCaptureCapability {
         backend: Some(BACKEND.to_owned()),
@@ -123,7 +143,7 @@ fn screen_capability() -> ScreenCaptureCapability {
         portal_version: None,
         target_kinds: vec![VideoSourceKind::Monitor, VideoSourceKind::Window],
         cursor_modes: vec![CursorMode::Hidden, CursorMode::Embedded],
-        picker: false,
+        picker: picker::available(),
         target_list: true,
     }
 }
@@ -177,7 +197,7 @@ impl ScreenCapture for SckCapture {
         &mut self,
         request: &ScreenCaptureRequest,
     ) -> Result<VideoCaptureReport, CaptureError> {
-        let stream = start(&request.selection, false)?;
+        let stream = start(&request.selection, false, self.pick_timeout)?;
         thread::sleep(request.duration);
         Box::new(stream).stop()
     }
@@ -186,7 +206,7 @@ impl ScreenCapture for SckCapture {
         &mut self,
         selection: &ScreenSelection,
     ) -> Result<Box<dyn VideoStream>, CaptureError> {
-        Ok(Box::new(start(selection, true)?))
+        Ok(Box::new(start(selection, true, self.pick_timeout)?))
     }
 }
 
@@ -250,15 +270,16 @@ fn resolve(id: &str) -> Result<(SCContentFilter, VideoSourceInfo), CaptureError>
     Ok((filter, info))
 }
 
-fn start(selection: &ScreenSelection, deliver: bool) -> Result<SckStream, CaptureError> {
+fn start(
+    selection: &ScreenSelection,
+    deliver: bool,
+    pick_timeout: Duration,
+) -> Result<SckStream, CaptureError> {
     selection.check_supported(&screen_capability())?;
-    let id = selection.capture_target_id.as_deref().ok_or_else(|| {
-        CaptureError::new(
-            CaptureErrorKind::InvalidRequest,
-            "name a source (`capture_target_id`) from list_capture_targets",
-        )
-    })?;
-    let (filter, source) = resolve(id)?;
+    let (filter, source) = match selection.capture_target_id.as_deref() {
+        Some(id) => resolve(id)?,
+        None => picker::pick(&selection.target_kinds, pick_timeout)?,
+    };
     let configuration = SCStreamConfiguration::new()
         .with_width(source.width.unwrap_or(1280))
         .with_height(source.height.unwrap_or(720))

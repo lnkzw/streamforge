@@ -2,8 +2,9 @@
 //! (AVFoundation).
 //!
 //! Displays and windows are listed by
-//! [`capture_api::ScreenCapture::screen_sources`] and captured by id;
-//! there is no system picker yet. Cameras are listed by
+//! [`capture_api::ScreenCapture::screen_sources`] and captured by id, or
+//! picked in the system picker (`SCContentSharingPicker`) where a main run
+//! loop runs. Cameras are listed by
 //! [`capture_api::CameraCapture::cameras`] and named by their device's
 //! unique id (ADR 0019). Audio comes from `capture-cpal`
 //! (`capture-platform` combines them). Only the id format and the camera
@@ -21,6 +22,8 @@ mod camera;
 mod camera_modes;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod ids;
+#[cfg(target_os = "macos")]
+mod picker;
 #[cfg(target_os = "macos")]
 mod pixels;
 #[cfg(target_os = "macos")]

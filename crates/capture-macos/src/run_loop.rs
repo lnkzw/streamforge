@@ -7,8 +7,9 @@
 //! moves to a thread of its own while the main thread runs the loop.
 
 use std::panic;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
+use std::thread::{self, ScopedJoinHandle};
 
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
@@ -27,40 +28,56 @@ pub fn run_with_main_run_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     if MainThreadMarker::new().is_none() {
         return work();
     }
-    let finished = AtomicBool::new(false);
-    let joined = thread::scope(|scope| {
-        let worker = thread::Builder::new()
-            .name("work".to_owned())
-            .stack_size(STACK_BYTES)
-            .spawn_scoped(scope, work)
-            .unwrap_or_else(|err| panic!("cannot start the work thread: {err}"));
-        // Joined on a thread of its own, so that the main run loop still
-        // runs while the work thread ends: its thread-local destructors may
-        // wait for the main queue. Then the stop goes through the main
-        // queue too, which runs only inside the loop, so a stop sent before
-        // the loop runs is not lost.
-        let joiner = thread::Builder::new()
+    let finished = Arc::new(AtomicBool::new(false));
+    let outcome = thread::scope(|scope| {
+        // Starts the work and joins it, so that the main run loop still
+        // runs while the work thread ends (its thread-local destructors may
+        // wait for the main queue), and stops the loop afterwards, also
+        // when the work thread cannot start or the work panics. Started
+        // first: nothing runs yet if it cannot start.
+        let stop = StopMainRunLoop(Arc::clone(&finished));
+        let supervisor = thread::Builder::new()
             .name("work-join".to_owned())
-            .spawn_scoped(scope, || {
-                let joined = worker.join();
-                finished.store(true, Ordering::Release);
-                DispatchQueue::main().exec_async(|| {
-                    if let Some(main) = CFRunLoop::main() {
-                        main.stop();
-                    }
-                });
-                joined
+            .spawn_scoped(scope, move || {
+                let _stop = stop;
+                thread::Builder::new()
+                    .name("work".to_owned())
+                    .stack_size(STACK_BYTES)
+                    .spawn_scoped(scope, work)
+                    .map(ScopedJoinHandle::join)
             })
-            .unwrap_or_else(|err| panic!("cannot start the joining thread: {err}"));
+            .unwrap_or_else(|err| panic!("cannot start the work's supervisor thread: {err}"));
         // The main dispatch queue keeps the main run loop's default mode
         // from being empty, so `run` returns only when stopped: by the
-        // joining thread, or by anything else, which the flag tells apart.
+        // supervisor's stop, which sets the flag first, or by anything
+        // else, after which the loop runs again.
         while !finished.load(Ordering::Acquire) {
             CFRunLoop::run();
         }
-        joiner.join()
+        supervisor.join()
     });
-    joined
-        .and_then(|joined| joined)
-        .unwrap_or_else(|payload| panic::resume_unwind(payload))
+    match outcome {
+        Ok(Ok(Ok(value))) => value,
+        Ok(Ok(Err(payload))) | Err(payload) => panic::resume_unwind(payload),
+        Ok(Err(err)) => panic!("cannot start the work thread: {err}"),
+    }
+}
+
+/// Stops the main run loop when dropped. The stop goes through the main
+/// queue, which runs only inside the loop, so a stop sent before the loop
+/// runs is not lost; and it sets the flag the loop checks on the main
+/// thread itself, so the loop ends only once the stop has run and none
+/// stays queued for a later run loop.
+struct StopMainRunLoop(Arc<AtomicBool>);
+
+impl Drop for StopMainRunLoop {
+    fn drop(&mut self) {
+        let finished = Arc::clone(&self.0);
+        DispatchQueue::main().exec_async(move || {
+            finished.store(true, Ordering::Release);
+            if let Some(main) = CFRunLoop::main() {
+                main.stop();
+            }
+        });
+    }
 }

@@ -71,6 +71,11 @@ fn the_result_comes_back_from_the_work() {
         assert_eq!(thread.as_deref(), Some(WORK_THREAD));
         assert!(served, "the main queue ran while the work waited");
     }
+    // Work that ends before the main run loop starts, or as it starts:
+    // the stop must not get lost (the watchdog would fire).
+    for code in 0..100_u8 {
+        assert_eq!(run_with_main_run_loop(move || code), code);
+    }
 }
 
 fn a_panic_in_the_work_continues_on_the_main_thread() {

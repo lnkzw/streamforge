@@ -5,7 +5,8 @@
 #
 # FFmpeg with libx264, VideoToolbox and Secure Transport, from the pinned
 # archives in packaging/ffmpeg/sources.txt, for Apple silicon (arm64) and
-# macOS 14.0 or newer; the release workflow runs it on macos-15. Only what
+# macOS 14.2 or newer (as package.sh); the release workflow runs it on
+# macos-15. Only what
 # the engine uses is enabled: the H.264 encoders it tries, AAC, the
 # Matroska and FLV muxers, the file and RTMP(S) protocols and swscale.
 # Shared libraries whose install names start with @rpath, so the package
@@ -41,8 +42,11 @@ archives=(
   "x264-0.165.3223-git20250910-0480cb0.tar.xz"
 )
 
-# Every object file carries this minimum version; the package checks it.
-minimum=14.0
+# The minimum macOS of everything built here. package.sh checks it in each
+# library's and binary's build version (what the linker records), which
+# does not show an object file compiled for a newer one; the flags below
+# and MACOSX_DEPLOYMENT_TARGET are what keep those at the minimum.
+minimum=14.2
 export MACOSX_DEPLOYMENT_TARGET=$minimum
 flags="-arch arm64 -mmacosx-version-min=$minimum"
 jobs=$(sysctl -n hw.ncpu)
@@ -101,19 +105,23 @@ configure=(
   make install
 )
 
-# Every encoder the engine tries on macOS must be in the build, and the
+# Everything the engine uses on macOS must be in the build (the encoders
+# it tries, the muxers and protocols for recording and streaming), and the
 # TLS must be Secure Transport.
 for macro in CONFIG_LIBX264_ENCODER CONFIG_H264_VIDEOTOOLBOX_ENCODER CONFIG_AAC_ENCODER \
-  CONFIG_RTMPS_PROTOCOL; do
+  CONFIG_MATROSKA_MUXER CONFIG_FLV_MUXER CONFIG_FILE_PROTOCOL CONFIG_TCP_PROTOCOL \
+  CONFIG_TLS_PROTOCOL CONFIG_RTMP_PROTOCOL CONFIG_RTMPS_PROTOCOL; do
   if ! grep -q "^#define $macro 1\$" "$work/$ffmpeg/config_components.h"; then
     echo "build-ffmpeg.sh: $macro is not enabled" >&2
     exit 1
   fi
 done
-if ! grep -q '^#define CONFIG_SECURETRANSPORT 1$' "$work/$ffmpeg/config.h"; then
-  echo "build-ffmpeg.sh: Secure Transport is not enabled" >&2
-  exit 1
-fi
+for macro in CONFIG_SWSCALE CONFIG_SECURETRANSPORT; do
+  if ! grep -q "^#define $macro 1\$" "$work/$ffmpeg/config.h"; then
+    echo "build-ffmpeg.sh: $macro is not enabled" >&2
+    exit 1
+  fi
+done
 
 cp -R "$work/ffmpeg/lib" "$work/ffmpeg/include" "$out/"
 rm -rf "$out/lib/pkgconfig"

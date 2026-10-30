@@ -155,7 +155,7 @@ Invoke-Program "$out\bin\streamforge.exe" @('--version')
 Invoke-Program "$out\bin\streamforge.exe" @('status', '--json')
 $response = Invoke-Program "$out\bin\streamforge-engine.exe" @() '{"id":1,"command":"get_status"}'
 Write-Host $response
-if ($response -notmatch '"ok":true') {
+if (-not $response.Contains('"id":1,"ok":true')) {
     throw 'the engine did not answer get_status'
 }
 Invoke-Program "$out\bin\streamforge-engine.exe" @('--version')

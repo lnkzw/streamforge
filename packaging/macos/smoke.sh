@@ -10,7 +10,9 @@ set -euo pipefail
 
 dir=$(cd "${1:?usage: packaging/macos/smoke.sh <package-dir>}" && pwd)
 app="$dir/StreamForge.app"
-version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+# The full version, as --version prints it (the bundle's leaves out a
+# pre-release suffix).
+version=$(sed -n 's/^StreamForge \([^ ]*\) for macOS.*/\1/p' "$dir/BUILD-INFO.txt")
 sw_vers
 
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -26,7 +28,7 @@ fi
 "$macos/streamforge" status --json
 response=$(printf '%s\n' '{"id":1,"command":"get_status"}' | "$macos/streamforge-engine")
 echo "$response"
-grep -q '"ok":true' <<< "$response"
+grep -qF '"id":1,"ok":true' <<< "$response"
 "$macos/streamforge-engine" --version
 "$macos/streamforge-mcp" --version
 
@@ -43,13 +45,21 @@ for bin in streamforge streamforge-engine streamforge-mcp; do
   "$tmp/bin/$bin" --version
 done
 
-# The packaged FFmpeg records two seconds of the test pattern with x264.
+# The packaged FFmpeg records two seconds of the test pattern with x264
+# and the test tone with AAC.
 report=$("$tmp/bin/streamforge" --output-dir "$tmp" record --file-name smoke.mkv \
   --duration-ms 2000 --video-encoder software)
 echo "$report"
-# At least a quarter of the frames: a slow runner may drop some (counted).
-if ! jq -e '.recording.video | .encoder == "libx264" and .frames_encoded >= 30' <<< "$report" > /dev/null; then
-  echo "the recording did not use libx264 for at least 30 frames" >&2
+# At least a quarter of the frames and half the samples: a slow runner may
+# drop some (counted).
+if ! jq -e '.recording
+    | (.duration_ms | type == "number" and . >= 1900)
+      and .video.encoder == "libx264"
+      and (.video.frames_encoded | type == "number" and . >= 30)
+      and (.audio_tracks | length == 1)
+      and .audio_tracks[0].encoder == "aac"
+      and (.audio_tracks[0].samples_encoded | type == "number" and . >= 48000)' <<< "$report" > /dev/null; then
+  echo "the recording is not two seconds of libx264 video (30 frames or more) and AAC audio" >&2
   exit 1
 fi
 bytes=$(stat -f %z "$tmp/smoke.mkv")

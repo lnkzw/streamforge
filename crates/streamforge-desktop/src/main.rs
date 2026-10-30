@@ -52,9 +52,12 @@ fn main() -> ExitCode {
             }
         }
     }
+    // A home folder that is not one (a stale HOME) would stop the app at
+    // the check below, with the message in a stderr nobody sees from the
+    // Finder; then the working directory stays.
     let default_dir = folder::default_dir(
         std::env::current_dir().ok().as_deref(),
-        std::env::home_dir().as_deref(),
+        std::env::home_dir().filter(|home| home.is_dir()).as_deref(),
     );
     let output_dir = output_dir.unwrap_or_else(|| default_dir.clone());
     let project_dir = project_dir.unwrap_or(default_dir);

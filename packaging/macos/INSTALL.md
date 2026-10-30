@@ -1,6 +1,6 @@
 # Installing StreamForge on macOS
 
-This package is for Macs with Apple silicon (M1 or newer) and macOS 14 Sonoma or newer. It brings everything it needs: the app with the command-line programs and the FFmpeg libraries they use (built for this package, see `BUILD-INFO.txt`). Hardware encoding uses VideoToolbox when it works, and otherwise x264 on the CPU. On a Mac with an Intel processor, build StreamForge from source (`docs/development.md`).
+This package is for Macs with Apple silicon (M1 or newer) and macOS 14.2 Sonoma or newer (Software Update brings any macOS 14 there). It brings everything it needs: the app with the command-line programs and the FFmpeg libraries they use (built for this package, see `BUILD-INFO.txt`). Hardware encoding uses VideoToolbox when it works, and otherwise x264 on the CPU. On a Mac with an Intel processor, build StreamForge from source (`docs/development.md`).
 
 ## Install
 
@@ -16,12 +16,13 @@ This package is for Macs with Apple silicon (M1 or newer) and macOS 14 Sonoma or
 
 3. Open StreamForge from Applications or Launchpad. The first time, macOS refuses (see below).
 
-To use the command-line programs, link them into a folder on your `PATH`:
+To use the command-line programs, link them into a folder on your `PATH` (with `app=~/Applications/StreamForge.app` if you moved it there):
 
 ```sh
+app=/Applications/StreamForge.app
 mkdir -p ~/.local/bin
 for bin in streamforge streamforge-engine streamforge-mcp; do
-  ln -sf /Applications/StreamForge.app/Contents/MacOS/$bin ~/.local/bin/$bin
+  ln -sf "$app/Contents/MacOS/$bin" ~/.local/bin/$bin
 done
 streamforge status
 ```
@@ -37,7 +38,9 @@ If `streamforge` is not found, add `~/.local/bin` to your `PATH` (for zsh: `echo
 
 The programs also run straight from the unpacked folder, without moving the app: `./StreamForge.app/Contents/MacOS/streamforge status`.
 
-Opened from Finder, Launchpad or the Dock, the desktop app saves recordings and projects in your home folder. To use other folders, start it from Terminal: `open -a StreamForge --args --output-dir ~/Movies --project-dir ~/Documents/shows` (both folders must exist).
+Opened from Finder, Launchpad or the Dock, the desktop app saves recordings and projects in your home folder. To use other folders, quit StreamForge and start it from Terminal: `open -a StreamForge --args --output-dir ~/Movies --project-dir ~/Documents/shows` (both folders must exist; while the app runs, `open` only brings it to the front and drops the folders).
+
+The command-line programs use the folder they are started in. An MCP client started from the Dock may start its servers in the file system's root, where nothing can be written, so give `streamforge-mcp` its folders in the client's configuration (`--output-dir`, `--project-dir`; the user guide shows how).
 
 Start with the user guide, `docs/user-guide.md`.
 
@@ -56,21 +59,21 @@ macOS remembers this for this copy of the app. Alternatively, remove the downloa
 macOS asks before an app uses the camera, the microphone, the screen or the sound of other apps:
 
 - **The desktop app** asks for itself: System Settings → Privacy & Security lists it as *StreamForge* under Camera, Microphone, and Screen & System Audio Recording. After allowing screen recording, quit and reopen StreamForge.
-- **The command-line programs** ask for the app that started them: Terminal (or iTerm, …) when you run them there, the MCP client for `streamforge-mcp`. An MCP client that does not say why it needs the camera or the microphone can be ended by macOS when it asks; allow the camera and microphone for that client first, or use the desktop app for cameras.
+- **The command-line programs** ask for the app that started them: Terminal (or iTerm, …) when you run them there, the MCP client for `streamforge-mcp`. An MCP client that does not declare why it may use the camera or the microphone can be ended by macOS when `streamforge-mcp` first asks for them, and there is no setting to allow them for it beforehand; use cameras and microphones from the desktop app or Terminal then.
 - **Screen capture** lists screens and windows, which needs the screen-recording permission. macOS 15 asks again about once a month whether the app may keep recording the screen.
 - **Desktop audio** (an output's monitor, `<output>.monitor`) needs macOS 14.6 or newer and the permission to record system audio; without it, the input stays silent and the capture report says so.
 - **After an update**, macOS treats the new version as a new app, because an ad hoc signature differs with every build, and asks again. An old *StreamForge* entry in the lists may then stay off; remove it with **−**, or reset all of StreamForge's permissions: `tccutil reset All io.github.lnkzw.StreamForge`.
 
 ## Uninstall
 
-Move `StreamForge.app` to the Trash, and remove the links if you made them:
+Remove StreamForge's permissions while the app is still there, remove the links if you made them, then move `StreamForge.app` to the Trash:
 
 ```sh
-rm ~/.local/bin/streamforge ~/.local/bin/streamforge-engine ~/.local/bin/streamforge-mcp
 tccutil reset All io.github.lnkzw.StreamForge
+rm ~/.local/bin/streamforge ~/.local/bin/streamforge-engine ~/.local/bin/streamforge-mcp
 ```
 
-The last line removes StreamForge's permissions. Projects and recordings stay where you saved them.
+Projects and recordings stay where you saved them.
 
 ## License
 

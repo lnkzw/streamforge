@@ -23,8 +23,10 @@ contents="$app/Contents"
 bins=(streamforge streamforge-engine streamforge-desktop streamforge-mcp)
 app_id=io.github.lnkzw.StreamForge
 # The oldest macOS the package runs on; every binary and library must
-# require no newer one.
-minimum=14.0
+# require no newer one. 14.2, not 14.0: cpal's Core Audio host links the
+# process-tap functions of macOS 14.2 directly, so no StreamForge program
+# starts on 14.0 or 14.1.
+minimum=14.2
 
 if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
   echo "package.sh: packs on an arm64 Mac only, not on $(uname -sm)" >&2
@@ -52,7 +54,19 @@ for lib in "$ffmpeg/lib/"lib*.dylib; do
   fi
   install -m 0644 "$lib" "$contents/Frameworks/${id#@rpath/}"
 done
-sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$contents/Info.plist"
+# macOS compares bundle versions as up to three integers, so a pre-release
+# suffix (0.3.0-rc.1) is left out there; BUILD-INFO.txt has the full one.
+bundle_version=${version%%-*}
+if ! [[ $bundle_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "package.sh: cannot make a bundle version from $version" >&2
+  exit 1
+fi
+sed -e "s/@VERSION@/$bundle_version/g" -e "s/@MINIMUM_SYSTEM_VERSION@/$minimum/g" \
+  packaging/macos/Info.plist > "$contents/Info.plist"
+if grep -q @ "$contents/Info.plist"; then
+  echo "package.sh: a placeholder is left in Info.plist" >&2
+  exit 1
+fi
 plutil -lint "$contents/Info.plist"
 install -m 0644 crates/streamforge-desktop/assets/icon/macos.icns "$contents/Resources/StreamForge.icns"
 
@@ -100,9 +114,10 @@ for bin in "${bins[@]}"; do
   install_name_tool -add_rpath @executable_path/../Frameworks "$file"
 done
 
-# Every Mach-O file is for arm64 and macOS 14, links only the system's
-# libraries and the bundled FFmpeg (or the system's Swift runtime through
-# /usr/lib/swift), and searches nothing outside the bundle and the system.
+# Every Mach-O file is for arm64 and the minimum macOS, links only the
+# system's libraries and the bundled FFmpeg (or the system's Swift runtime
+# through /usr/lib/swift), and searches nothing outside the bundle and the
+# system.
 bad=0
 for file in "$contents/MacOS/"* "$contents/Frameworks/"*; do
   short=${file#"$contents"/}
@@ -112,7 +127,13 @@ for file in "$contents/MacOS/"* "$contents/Frameworks/"*; do
     bad=1
   fi
   minos=$(otool -l "$file" | awk '/cmd LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')
-  if ! awk -v v="$minos" -v m="$minimum" 'BEGIN { split(v, a, "."); split(m, b, "."); exit !(v != "" && (a[1] < b[1] || (a[1] == b[1] && a[2] + 0 <= b[2] + 0))) }'; then
+  # Compared as major, minor and patch; an unreadable version fails.
+  if ! awk -v v="$minos" -v m="$minimum" 'BEGIN {
+      if (v !~ /^[0-9]+(\.[0-9]+)?(\.[0-9]+)?$/) exit 1
+      split(v, a, "."); split(m, b, ".")
+      for (i = 1; i <= 3; i++) { if (a[i] + 0 < b[i] + 0) exit 0; if (a[i] + 0 > b[i] + 0) exit 1 }
+      exit 0
+    }'; then
     echo "$short requires macOS '$minos', newer than $minimum" >&2
     bad=1
   fi
@@ -172,9 +193,10 @@ cp -R "$out/licenses" "$out/LICENSE-MIT" "$out/LICENSE-APACHE" "$out/LICENSE-OFL
   "$out/BUILD-INFO.txt" "$contents/Resources/"
 
 # Signed ad hoc from the inside out: the libraries, the other programs,
-# then the bundle with its executable. No hardened runtime, which needs
-# entitlements and matters only for notarization. Extended attributes
-# would break the strict check.
+# then the bundle with its executable. No hardened runtime: its runtime
+# protections need entitlements (camera, microphone, audio input) to be
+# worked out and tested, and without notarization nothing requires it yet
+# (ADR 0020). Extended attributes would break the strict check.
 xattr -cr "$app"
 for lib in "$contents/Frameworks/"*.dylib; do
   codesign --force --sign - --timestamp=none "$lib"
@@ -188,8 +210,8 @@ codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 signature=$(codesign --display --verbose=2 "$app" 2>&1)
 echo "$signature"
-grep -qx "Identifier=$app_id" <<< "$signature"
-grep -qx 'Signature=adhoc' <<< "$signature"
+grep -Fqx "Identifier=$app_id" <<< "$signature"
+grep -Fqx 'Signature=adhoc' <<< "$signature"
 
 packaging/macos/smoke.sh "$out"
 

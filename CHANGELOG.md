@@ -12,6 +12,10 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 - Windows: the desktop app is a window program with the app icon and version information, so no console window opens with it. Started from a console, it still prints `--version`, `--help` and startup errors there, but Ctrl+C in that console no longer closes it; closing the window does. The binaries link the C runtime statically.
 
+### Security
+
+- RTMPS checks the server's certificate: it must be trusted by the system and issued for the server's host name. Until now FFmpeg's default accepted any certificate, so anyone between StreamForge and the server could have taken the stream key. A server with a self-signed certificate is now refused; the connection error says that this can be the reason.
+
 ## [0.2.0] - 2026-10-29
 
 Sources and layers: cameras, images, and layers you can reorder and hide. Packages for Ubuntu 24.04 and Arch Linux on x86_64, as before; see `INSTALL.md` in each.

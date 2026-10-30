@@ -124,7 +124,7 @@ While a recording or stream runs, StreamForge does not open the dialog, since ou
 
 ### Streaming
 
-Open the gear on the **Stream** row and enter the server URL (`rtmp://` or `rtmps://`, for example `rtmp://live.example.com/app`) and the stream key from your streaming service, plus the video bitrate and encoder. Then **LIVE** (Ctrl+L) starts and stops the stream. Pressing **LIVE** without a URL opens these settings with a **Go live** button. The key goes to the engine when the stream starts; it is never saved or shown. The URL is kept until you close the app, but not saved in projects.
+Open the gear on the **Stream** row and enter the server URL (`rtmp://` or `rtmps://`, for example `rtmp://live.example.com/app`) and the stream key from your streaming service, plus the video bitrate and encoder. Then **LIVE** (Ctrl+L) starts and stops the stream. Pressing **LIVE** without a URL opens these settings with a **Go live** button. The key goes to the engine when the stream starts; it is never saved or shown. With `rtmps://`, the server's certificate must be one your system trusts and issued for the server's host name, so the key goes to that server only; a server with a self-signed certificate is refused. The URL is kept until you close the app, but not saved in projects.
 
 Recording and streaming run at the same time and independently. If the connection drops, the stream reconnects on its own and the recording continues. If reconnecting fails, the stream shows *failed*, and **LIVE** ends it.
 

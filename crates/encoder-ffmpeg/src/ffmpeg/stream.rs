@@ -19,7 +19,7 @@ use media_core::{MediaTimestamp, Rational};
 use super::{AudioTrack, EncoderChoice, Session, VideoTrack, init};
 use crate::{
     AudioTrackStats, Item, Ready, RecorderError, RecorderErrorKind, Shared, StreamConfig,
-    StreamState, StreamStats, VideoEncoderInfo, VideoTrackStats,
+    StreamState, StreamStats, StreamTarget, VideoEncoderInfo, VideoTrackStats,
 };
 
 const CONTAINER: &str = "flv";
@@ -138,16 +138,10 @@ impl<'a> Stream<'a> {
     }
 
     fn connect(&mut self) -> Result<Session, RecorderError> {
-        let mut options = Dictionary::new();
-        // Bounds connect, handshake and every write (microseconds).
-        options.set(
-            "rw_timeout",
-            &self.config.io_timeout.as_micros().to_string(),
-        );
         let opened = Session::open(
             &self.config.target.connect_url(),
             CONTAINER,
-            options,
+            connect_options(&self.config.target, self.config.io_timeout),
             &self.display,
             RecorderErrorKind::Network,
             &self.config.video,
@@ -165,7 +159,16 @@ impl<'a> Stream<'a> {
                 self.set_state(StreamState::Connected);
                 Ok(session)
             }
-            Err(error) => {
+            Err(mut error) => {
+                // FFmpeg reports a refused certificate as an I/O error; the
+                // reason is only in its log.
+                if matches!(error.kind, RecorderErrorKind::Network) && self.config.target.uses_tls()
+                {
+                    error.message.push_str(
+                        " (with rtmps://, also when this system does not trust the server's \
+                         certificate or it is issued for another host)",
+                    );
+                }
                 self.last_error = Some(error.message.clone());
                 Err(error)
             }
@@ -382,6 +385,21 @@ impl<'a> Stream<'a> {
     }
 }
 
+/// The options FFmpeg opens a connection with.
+fn connect_options(target: &StreamTarget, io_timeout: Duration) -> Dictionary<'static> {
+    let mut options = Dictionary::new();
+    // Bounds connect, handshake and every write (microseconds).
+    options.set("rw_timeout", &io_timeout.as_micros().to_string());
+    // FFmpeg checks no server certificate unless asked (until its next
+    // major version), so anyone on the way could take the stream key.
+    // RTMPS checks the certificate against the system's trusted ones and
+    // the host name.
+    if target.uses_tls() {
+        options.set("tls_verify", "1");
+    }
+    options
+}
+
 fn nanos(pts: MediaTimestamp) -> Option<i64> {
     pts.to_nanoseconds()
         .ok()
@@ -424,4 +442,24 @@ fn merge_audio(total: &mut Option<AudioTrackStats>, next: AudioTrackStats) {
     total.padding_samples += next.padding_samples;
     total.first_pts_ms = next.first_pts_ms;
     total.end_ms = next.end_ms;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StreamKey;
+
+    #[test]
+    fn rtmps_verifies_the_server_certificate() {
+        let timeout = Duration::from_millis(1500);
+        let tls =
+            StreamTarget::new("rtmps://live.example.com/app", StreamKey::new("k")).expect("valid");
+        let options = connect_options(&tls, timeout);
+        assert_eq!(options.get("tls_verify"), Some("1"));
+        assert_eq!(options.get("rw_timeout"), Some("1500000"));
+
+        let plain =
+            StreamTarget::new("rtmp://live.example.com/app", StreamKey::new("k")).expect("valid");
+        assert_eq!(connect_options(&plain, timeout).get("tls_verify"), None);
+    }
 }

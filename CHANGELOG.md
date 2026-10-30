@@ -14,7 +14,7 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 ### Security
 
-- RTMPS checks the server's certificate: it must be trusted by the system and issued for the server's host name. Until now FFmpeg's default accepted any certificate, so anyone between StreamForge and the server could have taken the stream key. A server with a self-signed certificate is now refused; the connection error says that this can be the reason.
+- RTMPS checks the server's certificate: it must be trusted by the system and issued for the server's host name. Until now FFmpeg's default accepted any certificate, so anyone between StreamForge and the server could have taken the stream key. A server with a self-signed certificate is now refused (unless the system trusts it); the connection error says that this can be the reason. An FFmpeg built with librtmp, which cannot check certificates, can no longer stream to `rtmps://`.
 
 ## [0.2.0] - 2026-10-29
 

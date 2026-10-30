@@ -353,7 +353,7 @@ If finalizing fails, the error's `details` are `{"recording", "pipeline", "warni
 
 | Param                | Type | Default | Meaning |
 |----------------------|------|---------|---------|
-| `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. With `rtmps://` the server's certificate is checked against the system's trusted certificates and the host name; a failed check is a connection failure. |
+| `url`                | string | required | `rtmp://` or `rtmps://` server URL with host and application, without credentials (`user@` is rejected) and without the key. With `rtmps://` the server's certificate is checked against the system's trusted certificates and the host name (by FFmpeg; `docs/platforms.md` lists the builds that do), and a failed check is a connection failure; an FFmpeg that streams RTMPS through librtmp cannot check it, so `start_streaming` fails `unsupported` there. |
 | `stream_key`         | string | none | Appended as the last path segment when connecting. No `/` or whitespace. **Secret:** never echoed in results, errors, logs or `Debug` output; reports show `<stream key>`. |
 | `video_bitrate_kbps` | integer 300..=50000 | the stream profile's (6000 by default) | Video bit rate (CBR, buffer of 2 s). |
 | `video_encoder`      | as for `start_recording` | the stream profile's (`"auto"` by default) | Reconnects try the encoder that opened first, then the other candidates. |

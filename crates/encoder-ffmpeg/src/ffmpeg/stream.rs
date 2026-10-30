@@ -35,7 +35,9 @@ pub(crate) fn run(
 ) -> Result<StreamStats, RecorderError> {
     let mut stream = Stream::new(&config, Arc::clone(&shared));
     // The first connection decides whether `Streamer::start` succeeds.
-    let first = init(true).and_then(|()| stream.connect());
+    let first = init(true)
+        .and_then(|()| check_tls(&config.target, ff::format::configuration()))
+        .and_then(|()| stream.connect());
     let mut session = match first {
         Ok(session) => {
             let _ = ready.send(Ok(session.video.info()));
@@ -385,6 +387,24 @@ impl<'a> Stream<'a> {
     }
 }
 
+/// An FFmpeg built with librtmp streams `rtmps://` through it instead of
+/// its own TLS, which ignores `tls_verify` and checks no certificate: such
+/// a connection would offer the stream key to anyone on the way, so it is
+/// refused before it is made.
+fn check_tls(target: &StreamTarget, configuration: &str) -> Result<(), RecorderError> {
+    let librtmp = configuration
+        .split_whitespace()
+        .any(|option| option == "--enable-librtmp");
+    if target.uses_tls() && librtmp {
+        return Err(RecorderError::new(
+            RecorderErrorKind::Unsupported,
+            "this FFmpeg streams rtmps:// through librtmp, which does not check the \
+             server's certificate; use an FFmpeg built without --enable-librtmp",
+        ));
+    }
+    Ok(())
+}
+
 /// The options FFmpeg opens a connection with.
 fn connect_options(target: &StreamTarget, io_timeout: Duration) -> Dictionary<'static> {
     let mut options = Dictionary::new();
@@ -461,5 +481,20 @@ mod tests {
         let plain =
             StreamTarget::new("rtmp://live.example.com/app", StreamKey::new("k")).expect("valid");
         assert_eq!(connect_options(&plain, timeout).get("tls_verify"), None);
+    }
+
+    #[test]
+    fn rtmps_is_refused_with_a_librtmp_build_of_ffmpeg() {
+        let tls =
+            StreamTarget::new("rtmps://live.example.com/app", StreamKey::new("k")).expect("valid");
+        let plain =
+            StreamTarget::new("rtmp://live.example.com/app", StreamKey::new("k")).expect("valid");
+        let librtmp = "--enable-gpl --enable-gnutls --enable-librtmp --enable-libx264";
+        let native = "--enable-gpl --enable-gnutls --enable-libx264";
+        let refused = check_tls(&tls, librtmp).expect_err("refused");
+        assert!(matches!(refused.kind, RecorderErrorKind::Unsupported));
+        assert!(refused.message.contains("librtmp"), "{refused}");
+        assert!(check_tls(&tls, native).is_ok());
+        assert!(check_tls(&plain, librtmp).is_ok());
     }
 }

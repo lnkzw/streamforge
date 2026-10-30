@@ -156,6 +156,14 @@ fn open(url: &str, cancel: &Arc<AtomicBool>) -> Result<ff::format::context::Inpu
         // In microseconds; without it a silent server blocks a read until
         // the cancel.
         options.set("rw_timeout", &READ_TIMEOUT.as_micros().to_string());
+        // As the publisher does (encoder-ffmpeg's stream.rs): the URL holds
+        // the stream key.
+        if url
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("rtmps://"))
+        {
+            options.set("tls_verify", "1");
+        }
         let cancelled = Arc::clone(cancel);
         let interrupt = move || cancelled.load(Ordering::Relaxed);
         match ff::format::input_with_interrupt_and_dictionary(url, interrupt, options) {

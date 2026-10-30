@@ -51,4 +51,9 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 SUCH DAMAGE.
 
-Copyright (c) 2021-2022 Alexei Sibidanov (CORE-MATH; the file is under the MIT license).
+From src/math/cbrt.rs:
+
+SPDX-License-Identifier: MIT
+origin: core-math/src/binary64/cbrt/cbrt.c
+Copyright (c) 2021-2022 Alexei Sibidanov.
+Ported to Rust in 2025 by Trevor Gross.

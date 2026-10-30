@@ -1,6 +1,13 @@
 Crates: winit 0.30.13
 Source: the header of src/keyboard.rs in the crate, whose Key and KeyCode enums come from W3C documents
 
+This file contains a substantial portion of the UI Events Specification by the W3C. In
+particular, the variant names within `Key` and `KeyCode` and their documentation are modified
+versions of contents of the aforementioned specification.
+
+The original documents are:
+
+### For `Key`
 UI Events KeyboardEvent key Values
 https://www.w3.org/TR/2017/CR-uievents-key-20170601/
 Copyright © 2017 W3C® (MIT, ERCIM, Keio, Beihang).

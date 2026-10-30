@@ -9653,7 +9653,26 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 SUCH DAMAGE.
 
-Copyright (c) 2021-2022 Alexei Sibidanov (CORE-MATH; the file is under the MIT license).
+From src/math/cbrt.rs:
+
+SPDX-License-Identifier: MIT
+origin: core-math/src/binary64/cbrt/cbrt.c
+Copyright (c) 2021-2022 Alexei Sibidanov.
+Ported to Rust in 2025 by Trevor Gross.
+
+--------------------------------------------------------------------------------
+
+Used by:
+- endi 1.1.1
+- x11-dl 2.21.0
+- zbus-lockstep 0.5.2
+- zbus-lockstep-macros 0.5.2
+- zmij 1.0.23
+
+Source: their licence files and their repositories at the commits they were published from (zeenix/endi 226224559725, AltF02/x11-rs fced94ef6eb5, luukvanderduim/zbus-lockstep 9bda5264dfe1, dtolnay/zmij 7b7cc48b5802)
+
+These crates ship the MIT terms (above) without a copyright line, and
+their repositories name no copyright holder either.
 
 --------------------------------------------------------------------------------
 
@@ -9749,6 +9768,13 @@ Used by:
 
 Source: the header of src/keyboard.rs in the crate, whose Key and KeyCode enums come from W3C documents
 
+This file contains a substantial portion of the UI Events Specification by the W3C. In
+particular, the variant names within `Key` and `KeyCode` and their documentation are modified
+versions of contents of the aforementioned specification.
+
+The original documents are:
+
+### For `Key`
 UI Events KeyboardEvent key Values
 https://www.w3.org/TR/2017/CR-uievents-key-20170601/
 Copyright © 2017 W3C® (MIT, ERCIM, Keio, Beihang).
@@ -9810,6 +9836,62 @@ FITNESS FOR A PARTICULAR PURPOSE.
 [1] http://www.w3.org/Consortium/Legal/copyright-software
 
 --------- END OF W3C SHORT NOTICE ---------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+
+Used by:
+- winnow 1.0.4
+
+Source: COPYRIGHT in https://github.com/winnow-rs/winnow at 7539ec0fc271, the commit 1.0.4 was published from; the crate ships the MIT terms without a copyright line
+
+Short version for non-lawyers:
+
+Winnow is licensed under MIT terms.
+
+Longer version:
+
+Copyrights in winnow are retained by their contributors. No
+copyright assignment is required to contribute to winnow.
+
+Except as otherwise noted (below and/or in individual files), winnow is
+licensed under the MIT license
+<LICENSE-MIT> or <http://opensource.org/licenses/MIT>, at your option.
+
+Winnow is forked from nom and, similarly, Geal and other nom contributors
+retain copyright on their contributions.
+
+--------------------------------------------------------------------------------
+
+Used by:
+- zvariant_utils 4.2.0
+
+Source: LICENSE-MIT in https://github.com/z-galaxy/zbus at 0f4db6980bc1, the commit 4.2.0 was published from; the crate ships the terms without this line
+
+Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 Copyright notices of the Wayland protocol descriptions

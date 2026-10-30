@@ -24,6 +24,7 @@ offline, so the result depends on Cargo.lock and this directory only.
 
 import difflib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -40,7 +41,15 @@ RULE = "-" * 80
 # Licences whose terms require the copyright notice in binary copies.
 NOTICE_LICENCES = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC"}
 # The standard texts' fields for the notice, left unfilled.
-PLACEHOLDER = re.compile(r"<(year|copyright holders?|owner|organization)>", re.IGNORECASE)
+PLACEHOLDER = re.compile(
+    r"[<\[](year|yyyy|copyright holders?|owner|organization|fullname|name of copyright owner)[>\]]",
+    re.IGNORECASE,
+)
+# A line that starts a copyright notice (not one of the terms' own lines,
+# such as "copyright notice and this permission notice").
+NOTICE_LINE = re.compile(
+    r"^\W*(copyright\b(?!\s+(notice|holder|owner|statement))|\(c\)|©)", re.IGNORECASE | re.MULTILINE
+)
 
 HEADER = """\
 Licences of the Rust crates in StreamForge
@@ -120,13 +129,17 @@ def read_notices(crates):
 
 def check_notices_cover(licences, notices):
     """Every crate whose licence needs its copyright notice, but whose text
-    has none (cargo-about gives the standard text when a crate ships no
-    file, and the file of a crate may be the template), has a notice."""
+    has none, has a notice: cargo-about gives the standard text when a
+    crate ships no file, and a crate's file may be the template or the
+    terms alone."""
     noticed = {name for _, named, _, _ in notices for name in named}
     lacking = set()
     for licence in licences:
+        text = licence["text"]
         if licence["id"] in NOTICE_LICENCES and (
-            licence.get("source_path") is None or PLACEHOLDER.search(licence["text"])
+            licence.get("source_path") is None
+            or PLACEHOLDER.search(text)
+            or not NOTICE_LINE.search(text)
         ):
             lacking.update(crate_id(user["crate"]) for user in licence["used_by"])
     missing = sorted(lacking - noticed)
@@ -137,21 +150,47 @@ def check_notices_cover(licences, notices):
         )
 
 
+def xml_files(crate):
+    """The crate's XML files, failing on what the walk cannot read."""
+    root = Path(crate["manifest_path"]).parent
+
+    def failed(err):
+        raise Failure(f"{crate_id(crate)}: cannot read {err.filename}: {err.strerror}")
+
+    for directory, subdirectories, files in os.walk(root, onerror=failed):
+        subdirectories.sort()
+        for name in sorted(files):
+            if name.lower().endswith(".xml"):
+                yield root, Path(directory) / name
+
+
 def protocol_notices(crates):
     """The crates with XML files that hold copyright elements, and each
-    element's text once, in the order of crates and files."""
+    element's text once, in the order of crates and files. Only plain,
+    UTF-8 files without a document type are read; anything else that
+    mentions a copyright fails, so that no notice is lost unseen."""
     named, blocks = [], {}
     for crate in sorted(crates, key=lambda crate: (crate["name"], crate["version"])):
-        root = Path(crate["manifest_path"]).parent
         found = False
-        for path in sorted(root.rglob("*.xml")):
-            if b"<copyright" not in path.read_bytes():
+        for root, path in xml_files(crate):
+            where = f"{crate_id(crate)}: {path.relative_to(root)}"
+            if path.is_symlink() or not path.is_file():
+                raise Failure(f"{where} is not a regular file")
+            data = path.read_bytes()
+            if data.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\0" in data:
+                raise Failure(f"{where} is not UTF-8")
+            if b"copyright" not in data.lower():
                 continue
+            if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+                raise Failure(f"{where} has a document type, which this script does not read")
             try:
-                tree = ElementTree.parse(path)
-            except ElementTree.ParseError as err:
-                raise Failure(f"{crate_id(crate)}: cannot read {path.relative_to(root)}: {err}")
-            for element in tree.iter("copyright"):
+                tree = ElementTree.fromstring(data)
+            except (ElementTree.ParseError, ValueError, LookupError) as err:
+                raise Failure(f"{where} cannot be read: {err}")
+            for element in tree.iter():
+                # By local name, with or without a namespace.
+                if not isinstance(element.tag, str) or element.tag.rsplit("}", 1)[-1] != "copyright":
+                    continue
                 lines = [line.strip() for line in "".join(element.itertext()).splitlines()]
                 text = "\n".join(lines).strip()
                 if text:

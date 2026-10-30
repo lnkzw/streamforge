@@ -42,6 +42,8 @@ cargo build --release -p streamforge-mcp   # then point an MCP client at target/
 
 The Windows package (ADR 0020) takes two steps. `packaging/windows/build-ffmpeg.sh <dir>` builds the FFmpeg it ships on Linux with mingw-w64, from the pinned archives in `packaging/ffmpeg/sources.txt` (`packaging/ffmpeg/fetch-sources.sh` downloads and checks them). On Ubuntu 24.04 it needs `sudo apt install gcc mingw-w64 nasm cmake ninja-build make pkg-config curl xz-utils`; on another system, run it in an `ubuntu:24.04` container with those packages. Then, on Windows, `packaging/windows/package.ps1 -FFmpeg <dir>` (PowerShell 7) builds the binaries against it, checks what they import, smoke-tests them and `install.ps1`, and packs `dist/streamforge-<version>-x86_64-windows.zip`. The release workflow runs both and attaches the source archives to the draft release. It caches the FFmpeg build by its script and sources, which helps reruns of a pull request; a tag run builds it again from the same sources (caches made for a pull request are not shared with tags).
 
+The macOS package (ADR 0020) builds on an arm64 Mac with Xcode 26 or newer and `brew install pkgconf`. `packaging/macos/build-ffmpeg.sh <dir>` builds its FFmpeg from the same archives, for macOS 14.2; `packaging/macos/package.sh <dir>` builds the binaries against it, puts them with the libraries into `StreamForge.app`, checks every Mach-O file (architecture, minimum macOS, linked libraries, run paths), signs the app ad hoc, runs `packaging/macos/smoke.sh` and packs `dist/streamforge-<version>-arm64-macos.zip`. The release workflow runs both on `macos-15`, with the same cache, and the smoke test again on `macos-14` with the downloaded package. The app's icon, `crates/streamforge-desktop/assets/icon/macos.icns`, is rendered from the SVG (the command is in the SVG).
+
 ## Repository layout
 
 - `crates/media-core`: platform-independent media types and time model
@@ -69,7 +71,8 @@ The Windows package (ADR 0020) takes two steps. `packaging/windows/build-ffmpeg.
 - `crates/streamforge-soak`: soak test harness (an engine process under load for an hour)
 - `packaging/linux`: release packaging, launcher and installer
 - `packaging/windows`: the Windows package, its FFmpeg build and `install.ps1`
-- `packaging/ffmpeg`: the pinned FFmpeg sources of the Windows (and macOS) packages
+- `packaging/macos`: the macOS package (`StreamForge.app`), its FFmpeg build, `Info.plist` and smoke test
+- `packaging/ffmpeg`: the pinned FFmpeg sources of the Windows and macOS packages
 - `docs/`: user guide, architecture, media model, control protocol, platforms, roadmap, testing strategy, decisions (ADRs in `docs/decisions`), UI design system (`docs/ui`)
 
 ## Rules

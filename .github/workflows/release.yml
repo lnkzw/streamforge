@@ -2,10 +2,11 @@ name: Release
 
 # Linux packages, one per distribution family: FFmpeg and PipeWire are
 # linked dynamically, and their library versions differ between
-# distributions (packaging/linux/package.sh). The Windows package brings
-# its own FFmpeg, built from pinned sources (ADR 0020), whose source
-# archives are attached to the release. Each package is built and
-# smoke-tested on its own system.
+# distributions (packaging/linux/package.sh). The Windows and macOS
+# packages bring their own FFmpeg, built from pinned sources (ADR 0020),
+# whose source archives are attached to the release. Each package is
+# built and smoke-tested on its own system; the macOS package also on
+# macOS 14, the oldest it supports.
 #
 # A pushed `v*` tag creates a *draft* release with the packages; a person
 # publishes it after checking. Manual runs and pull requests that change
@@ -16,10 +17,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
   pull_request:
-    # Besides the packaging, what the Windows package's checks catch and
-    # CI's tests would not (the runners have the Visual C++ runtime): the
-    # static C runtime, the dependencies, the desktop's resources and
-    # console.
+    # Besides the packaging, what the Windows and macOS packages' checks
+    # catch and CI's tests would not (the runners have the Visual C++
+    # runtime and Homebrew's FFmpeg): the static C runtime, the
+    # dependencies, the desktop's resources, console and startup, the
+    # macOS job's build setup.
     paths:
       - .github/workflows/release.yml
       - packaging/**
@@ -27,7 +29,10 @@ on:
       - Cargo.lock
       - crates/streamforge-desktop/build.rs
       - crates/streamforge-desktop/src/console.rs
+      - crates/streamforge-desktop/src/main.rs
+      - crates/streamforge-desktop/src/folder.rs
       - crates/streamforge-desktop/assets/icon/**
+      - .github/actions/build-setup/action.yml
 
 permissions:
   contents: read
@@ -184,10 +189,81 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  macos:
+    name: macos (arm64)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-setup
+        with:
+          # The package links the FFmpeg it ships, built here.
+          ffmpeg: none
+      - name: Key for the FFmpeg cache
+        # The Xcode that build-setup selected (the newest on the image):
+        # a new one builds FFmpeg again, with the build's checks.
+        id: toolchain
+        run: echo "xcode=$(xcodebuild -version | tr -s ' \n' '-')sdk-$(xcrun --sdk macosx --show-sdk-version)" >> "$GITHUB_OUTPUT"
+      - name: Cache the FFmpeg build
+        # Its sources are pinned, so the build changes only with the script,
+        # the list of sources or the toolchain. Its archives are a part of
+        # the Windows build's, which the ffmpeg-windows job attaches.
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/ffmpeg-macos
+          key: ffmpeg-macos-arm64-${{ steps.toolchain.outputs.xcode }}-${{ hashFiles('packaging/macos/build-ffmpeg.sh', 'packaging/ffmpeg/sources.txt', 'packaging/ffmpeg/fetch-sources.sh') }}
+      - name: Build FFmpeg
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          brew install pkgconf
+          packaging/macos/build-ffmpeg.sh build/ffmpeg-macos
+      - name: Build, check and pack
+        run: packaging/macos/package.sh build/ffmpeg-macos
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-macos
+          path: dist/*.zip*
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-14:
+    # The package as users download it, on the oldest macOS it supports
+    # and a Mac that did not build it.
+    name: macos 14 (smoke)
+    needs: macos
+    runs-on: macos-14
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-macos
+          path: ${{ runner.temp }}/package
+      - name: Unpack and smoke-test
+        run: |
+          cd "$RUNNER_TEMP/package"
+          shasum -a 256 -c ./*.zip.sha256
+          zip=$(ls ./*.zip)
+          ditto -x -k "$zip" .
+          "$GITHUB_WORKSPACE/packaging/macos/smoke.sh" "$(basename "$zip" .zip)"
+
   release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ubuntu, arch, ffmpeg-windows, windows]
+    needs: [ubuntu, arch, ffmpeg-windows, windows, macos, macos-14]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -218,6 +294,10 @@ jobs:
         run: |
           ls -l dist
           (cd dist && sha256sum -c ./*.sha256)
+          # Both FFmpeg builds take their archives from this list only.
+          awk '!/^#/ && NF { print $1 }' packaging/ffmpeg/sources.txt | while IFS= read -r archive; do
+            test -f "dist/$archive" || { echo "source archive $archive is not attached" >&2; exit 1; }
+          done
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --draft --verify-tag \

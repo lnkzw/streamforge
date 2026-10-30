@@ -88,9 +88,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest (arm64) was repeatedly not picked up for lack of
-        # capacity on 2026-10-19; the Intel image is a standard runner.
-        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        # macos-15 (Apple silicon) is what the macOS package is built for
+        # (ADR 0020); macos-15-intel keeps Intel Macs, which build from
+        # source, tested. (macos-latest went unscheduled for lack of
+        # capacity on 2026-10-19; if macos-15 does too, that is why.)
+        os: [ubuntu-latest, windows-latest, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:

@@ -2,7 +2,14 @@ name: Build setup
 description: >-
   Rust stable with clippy, and the system libraries StreamForge links on
   this runner (PipeWire and FFmpeg on Linux, Xcode and FFmpeg on macOS, a
-  checked FFmpeg build on Windows). Shared by the check and bench jobs.
+  checked FFmpeg build on Windows). Shared by the check and bench jobs, and
+  by the macOS package job, which links its own FFmpeg.
+inputs:
+  ffmpeg:
+    description: >-
+      `system` installs the FFmpeg the tests use (Homebrew's on macOS);
+      `none` leaves it out on macOS, for a job that builds its own.
+    default: system
 runs:
   using: composite
   steps:
@@ -60,7 +67,7 @@ runs:
         xcodebuild -version
         xcrun --sdk macosx --show-sdk-version
     - name: Install FFmpeg (macOS)
-      if: runner.os == 'macOS'
+      if: runner.os == 'macOS' && inputs.ffmpeg == 'system'
       # encoder-ffmpeg links the FFmpeg libraries found through pkg-config.
       shell: bash
       run: |

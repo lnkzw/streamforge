@@ -119,11 +119,21 @@ configure=(
   make install
 )
 
-# Every encoder the engine tries on Windows must be in the build.
-for encoder in libx264 h264_nvenc h264_qsv h264_amf aac; do
-  macro="CONFIG_$(tr '[:lower:]' '[:upper:]' <<< "$encoder")_ENCODER 1"
-  if ! grep -q "^#define $macro\$" "$work/$ffmpeg/config_components.h"; then
-    echo "build-ffmpeg.sh: the $encoder encoder is not enabled" >&2
+# Everything the engine uses on Windows must be in the build: the encoders
+# it tries, the muxers and protocols for recording and streaming, swscale
+# and Schannel.
+for macro in CONFIG_LIBX264_ENCODER CONFIG_H264_NVENC_ENCODER CONFIG_H264_QSV_ENCODER \
+  CONFIG_H264_AMF_ENCODER CONFIG_AAC_ENCODER CONFIG_MATROSKA_MUXER CONFIG_FLV_MUXER \
+  CONFIG_FILE_PROTOCOL CONFIG_TCP_PROTOCOL CONFIG_TLS_PROTOCOL CONFIG_RTMP_PROTOCOL \
+  CONFIG_RTMPS_PROTOCOL; do
+  if ! grep -q "^#define $macro 1\$" "$work/$ffmpeg/config_components.h"; then
+    echo "build-ffmpeg.sh: $macro is not enabled" >&2
+    exit 1
+  fi
+done
+for macro in CONFIG_SWSCALE CONFIG_SCHANNEL; do
+  if ! grep -q "^#define $macro 1\$" "$work/$ffmpeg/config.h"; then
+    echo "build-ffmpeg.sh: $macro is not enabled" >&2
     exit 1
   fi
 done

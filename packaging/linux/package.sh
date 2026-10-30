@@ -90,7 +90,7 @@ cat "$out/BUILD-INFO.txt"
 "$out/bin/streamforge" status --json
 response=$(printf '%s\n' '{"id":1,"command":"get_status"}' | "$out/bin/streamforge-engine")
 echo "$response"
-grep -q '"ok":true' <<< "$response"
+grep -qF '"id":1,"ok":true' <<< "$response"
 "$out/bin/streamforge-engine" --version
 "$out/bin/streamforge-mcp" --version
 

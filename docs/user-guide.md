@@ -74,7 +74,7 @@ mkdir -p ~/Videos ~/Documents/shows
 streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 ```
 
-- `--output-dir` is where recordings go, `--project-dir` where projects are saved and where image sources find their files. Both folders must exist. Both default to the working directory, which from the application menu is usually your home folder.
+- `--output-dir` is where recordings go, `--project-dir` where projects are saved and where image sources find their files. Both folders must exist. Both default to the working directory, which from the application menu is usually your home folder. When the working directory is the file system's root, as for an app opened from macOS's Finder or Dock, the app uses your home folder instead.
 - To use other folders from the menu as well, add the two flags to the `Exec=` line of `~/.local/share/applications/io.github.lnkzw.StreamForge.desktop`. Running `install.sh` again overwrites that file.
 
 ![The desktop app while recording](images/desktop.png)

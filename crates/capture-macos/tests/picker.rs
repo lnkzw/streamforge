@@ -4,7 +4,8 @@
 //! thread with no run loop, so this test has its own `main`
 //! (`harness = false`). Nobody picks on a CI runner, so every wait ends
 //! after a short timeout, or the picker reports that it cannot be shown
-//! there; a watchdog fails the test instead of hanging.
+//! there; a watchdog fails the test instead of hanging. That the picker
+//! appears, and what a pick captures, needs a human (hardware round).
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -26,9 +27,15 @@ fn main() {
         eprintln!("picker: timed out (a pick did not end?)");
         process::exit(1);
     });
-    // No main run loop runs yet: nothing would show the picker.
-    let screen = SckCapture::new().capability();
-    assert!(!screen.picker, "{screen:?}");
+    // Asked off the main thread, where a pick could wait: only while a
+    // main run loop runs.
+    let offered = || {
+        thread::spawn(|| SckCapture::new().capability().picker)
+            .join()
+            .expect("capability")
+    };
+    assert!(!offered(), "before the main run loop");
+    assert!(!SckCapture::new().capability().picker, "on the main thread");
     run_with_main_run_loop(|| {
         let mut capture = SckCapture::new().with_pick_timeout(PICK);
         let screen = capture.capability();
@@ -49,7 +56,11 @@ fn main() {
                 ),
                 "{what}: {error:?}"
             );
-            assert!(started.elapsed() < PICK + Duration::from_secs(10), "{what}");
+            let elapsed = started.elapsed();
+            assert!(elapsed < PICK + Duration::from_secs(10), "{what}");
+            if error.kind == CaptureErrorKind::Timeout {
+                assert!(elapsed >= PICK, "{what}: timed out early");
+            }
         };
         // Twice in a row, so the first pick leaves nothing behind that
         // keeps the second from showing or ending; then a probe, for one
@@ -73,6 +84,7 @@ fn main() {
             .err();
         ends("probe", started, error);
     });
+    assert!(!offered(), "after the main run loop");
     println!("picker: ok");
 }
 

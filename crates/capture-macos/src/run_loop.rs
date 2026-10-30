@@ -19,8 +19,7 @@ use objc2_core_foundation::CFRunLoop;
 /// work ran before.
 const STACK_BYTES: usize = 8 << 20;
 
-/// Set once [`run_with_main_run_loop`] runs the main run loop; the
-/// programs call it once, for all their work.
+/// Set while [`run_with_main_run_loop`] runs the main run loop.
 static RUNS_MAIN_RUN_LOOP: AtomicBool = AtomicBool::new(false);
 
 /// Whether the main run loop runs, or is about to (the work may start
@@ -39,7 +38,7 @@ pub fn run_with_main_run_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     if MainThreadMarker::new().is_none() {
         return work();
     }
-    RUNS_MAIN_RUN_LOOP.store(true, Ordering::Release);
+    let _runs = RunsMainRunLoop::start();
     let finished = Arc::new(AtomicBool::new(false));
     let outcome = thread::scope(|scope| {
         // Starts the work and joins it, so that the main run loop still
@@ -72,6 +71,23 @@ pub fn run_with_main_run_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
         Ok(Ok(Ok(value))) => value,
         Ok(Ok(Err(payload))) | Err(payload) => panic::resume_unwind(payload),
         Ok(Err(err)) => panic!("cannot start the work thread: {err}"),
+    }
+}
+
+/// Marks the main run loop as run by [`run_with_main_run_loop`], from
+/// before the work starts until it returns or panics.
+struct RunsMainRunLoop;
+
+impl RunsMainRunLoop {
+    fn start() -> Self {
+        RUNS_MAIN_RUN_LOOP.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for RunsMainRunLoop {
+    fn drop(&mut self) {
+        RUNS_MAIN_RUN_LOOP.store(false, Ordering::Release);
     }
 }
 

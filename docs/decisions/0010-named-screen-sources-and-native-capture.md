@@ -96,3 +96,4 @@ On the `windows-latest` CI runner, Windows.Graphics.Capture is available (the CI
 - Listed window sizes come from the window rectangle and are approximate (borders, display scaling); capture reports carry the real frame size.
 - WGC delivers frames when content changes. A static screen yields few frames; the compositor keeps showing the newest one.
 - The dependency adds `windows-capture` and its transitive crates (`windows`, `rayon`, `parking_lot`) on Windows only.
+- Since M15 step 4b (ADR 0020), macOS 14 or newer has a system picker too (`SCContentSharingPicker`), with these rules; Windows still has none.

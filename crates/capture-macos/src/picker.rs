@@ -52,10 +52,15 @@ struct Picking;
 
 impl Picking {
     fn start() -> Option<Self> {
-        PICKING
+        // Built only when taken: dropping one clears the flag.
+        if PICKING
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
-            .then_some(Self)
+        {
+            Some(Self)
+        } else {
+            None
+        }
     }
 }
 
@@ -189,5 +194,15 @@ mod tests {
             [SingleDisplay, SingleWindow]
         );
         assert_eq!(modes(&[]), [SingleDisplay, SingleWindow]);
+    }
+
+    #[test]
+    fn one_pick_runs_at_a_time() {
+        let first = Picking::start().expect("the first pick");
+        // Refused twice: a refused one must not free the slot.
+        assert!(Picking::start().is_none());
+        assert!(Picking::start().is_none());
+        drop(first);
+        assert!(Picking::start().is_some());
     }
 }

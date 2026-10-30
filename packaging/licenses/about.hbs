@@ -1,0 +1,30 @@
+Licences of the Rust crates in StreamForge
+==========================================
+
+The StreamForge programs are built from the Rust crates listed here,
+StreamForge's own among them. The list covers the Linux, Windows and
+macOS packages, so one package may not contain every crate. A crate
+that offers a choice of licences is listed under the one StreamForge
+uses for it. INSTALL.md says under which licence the programs as a
+whole are distributed.
+
+Generated from Cargo.lock by packaging/licenses/generate.sh.
+
+Overview: licence and number of crates
+--------------------------------------
+
+{{#each overview}}
+{{{name}}} ({{id}}): {{count}}
+{{/each}}
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

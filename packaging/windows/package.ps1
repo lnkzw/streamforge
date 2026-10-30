@@ -71,9 +71,11 @@ Copy-Item -LiteralPath LICENSE-MIT, LICENSE-APACHE, README.md, CHANGELOG.md, pac
 # The documentation the README and the user guide link to, at the same
 # relative paths as in the repository.
 Copy-Item -LiteralPath docs -Destination $out -Recurse
-# The desktop binary embeds IBM Plex, whose licence must travel with it;
-# FFmpeg's build brings its own and those of what is built into it.
+# The desktop binary embeds IBM Plex, whose licence must travel with it,
+# as must those of the Rust crates in the binaries; FFmpeg's build brings
+# its own and those of what is built into it.
 Copy-Item -LiteralPath crates\streamforge-desktop\assets\fonts\OFL.txt -Destination "$out\LICENSE-OFL-IBM-Plex.txt"
+Copy-Item -LiteralPath packaging\licenses\rust-crates.txt -Destination "$out\LICENSE-RUST-CRATES.txt"
 Copy-Item -LiteralPath "$FFmpeg\licenses" -Destination $out -Recurse
 
 # Every relative link in the user's entry points must resolve inside the
@@ -191,7 +193,7 @@ function Invoke-Installer([string] $Script, [string[]] $Arguments, [switch] $Ref
 }
 function Assert-Installed([string] $Prefix) {
     $null = Invoke-Program "$Prefix\bin\streamforge.exe" @('--version')
-    foreach ($file in @('docs\user-guide.md', 'CHANGELOG.md', 'BUILD-INFO.txt', 'licenses\FFmpeg\COPYING.GPLv3', 'install.ps1', 'installed-files.txt')) {
+    foreach ($file in @('docs\user-guide.md', 'CHANGELOG.md', 'BUILD-INFO.txt', 'licenses\FFmpeg\COPYING.GPLv3', 'LICENSE-RUST-CRATES.txt', 'install.ps1', 'installed-files.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Prefix $file))) {
             throw "$file is missing in $Prefix"
         }

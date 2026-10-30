@@ -74,9 +74,11 @@ cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md packaging/macos/INSTALL.md 
 # The documentation the README and the user guide link to, at the same
 # relative paths as in the repository.
 cp -R docs "$out/"
-# The desktop binary embeds IBM Plex, whose licence must travel with it;
-# FFmpeg's build brings its own and those of what is built into it.
+# The desktop binary embeds IBM Plex, whose licence must travel with it,
+# as must those of the Rust crates in the binaries; FFmpeg's build brings
+# its own and those of what is built into it.
 cp crates/streamforge-desktop/assets/fonts/OFL.txt "$out/LICENSE-OFL-IBM-Plex.txt"
+cp packaging/licenses/rust-crates.txt "$out/LICENSE-RUST-CRATES.txt"
 cp -R "$ffmpeg/licenses" "$out/"
 
 # Every relative link in the user's entry points must resolve inside the
@@ -190,7 +192,7 @@ cat "$out/BUILD-INFO.txt"
 # The installed app keeps its licences and build information: users copy
 # the bundle, not the folder around it.
 cp -R "$out/licenses" "$out/LICENSE-MIT" "$out/LICENSE-APACHE" "$out/LICENSE-OFL-IBM-Plex.txt" \
-  "$out/BUILD-INFO.txt" "$contents/Resources/"
+  "$out/LICENSE-RUST-CRATES.txt" "$out/BUILD-INFO.txt" "$contents/Resources/"
 
 # Signed ad hoc from the inside out: the libraries, the other programs,
 # then the bundle with its executable. No hardened runtime: its runtime

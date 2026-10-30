@@ -77,7 +77,7 @@ Projects and recordings stay where you saved them.
 
 ## License
 
-StreamForge is licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License 2.0 (`LICENSE-APACHE`), at your option. The desktop app embeds the IBM Plex fonts, licensed under the SIL Open Font License 1.1 (`LICENSE-OFL-IBM-Plex.txt`).
+StreamForge is licensed under either of the MIT license (`LICENSE-MIT`) or the Apache License 2.0 (`LICENSE-APACHE`), at your option. The desktop app embeds the IBM Plex fonts, licensed under the SIL Open Font License 1.1 (`LICENSE-OFL-IBM-Plex.txt`). The programs contain Rust crates under their own licences, listed with their licence texts in `LICENSE-RUST-CRATES.txt`.
 
 The package also contains FFmpeg, built with x264 and therefore under the GNU General Public License, version 2 or later (`licenses/FFmpeg`, `licenses/x264`). The programs in this package link that FFmpeg and also contain Rust libraries under the Apache License 2.0, which is compatible with version 3 of the GPL only; so the programs as a whole are distributed under the GNU General Public License, version 3 (`licenses/FFmpeg/COPYING.GPLv3`). The app keeps the same licences and `BUILD-INFO.txt` in `StreamForge.app/Contents/Resources`.
 

@@ -7,5 +7,7 @@
 *.mkv
 *.ppm
 
-# Release packages from packaging/linux/package.sh.
+# Release packages from packaging/*/package.*, and the Windows FFmpeg
+# build the release workflow keeps in build/.
 /dist/
+/build/

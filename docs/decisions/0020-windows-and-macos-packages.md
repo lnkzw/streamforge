@@ -121,3 +121,13 @@ Proposed with the plan and not objected to: no Windows picker in M15; the MCP se
 ## Not in M15
 
 Windows' system picker; a downmix of desktop audio beyond two channels; restarting the monitor on the same device after a rate change (unless the hardware test needs it); code signing and notarization; an installer, winget or Homebrew cask; an Intel or universal macOS package; settings that remember folders; zero-copy capture into the encoder.
+
+## Notes from the implementation
+
+Step 2 (Windows package, 2026-10-30):
+
+- **FFmpeg build:** cross-compiled with mingw-w64 on Ubuntu, not with MSYS2 on Windows. mingw's FFmpeg build writes import libraries the MSVC linker takes, the Linux runner is faster, and the script runs on any Linux machine (in an `ubuntu:24.04` container). The win32 thread model and static libgcc and libstdc++ keep the mingw runtime out of the DLLs. The TLS choice is Schannel.
+- **Licence:** the Decision's "version 2 or later" holds for FFmpeg and x264, but the programs also contain Rust crates under the Apache License 2.0 alone (cpal, winit, rmcp and others), which only version 3 of the GPL can be combined with. The Windows package therefore distributes its programs under the GPL version 3 and carries its text; FFmpeg's own licence files stay beside it.
+- **Source:** beside the FFmpeg archives attached to the release and the repository at the tag, the Rust crates the programs contain are the versions in `Cargo.lock` from crates.io; the package's `INSTALL.md` gives these directions.
+- **x264** comes from snapshot.debian.org: the Debian pool drops an upstream tarball once no suite has that version.
+- **Cache:** the FFmpeg build is cached by its script and sources, which serves reruns of a pull request; a tag run builds it again from the same sources, since caches made for pull requests are not shared with tags.

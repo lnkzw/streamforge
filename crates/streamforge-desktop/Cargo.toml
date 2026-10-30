@@ -26,6 +26,16 @@ quit-signal = { path = "../quit-signal" }
 # Local time for recording file names (already in the tree through rmcp).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+[target.'cfg(windows)'.dependencies]
+# Attaches the window program to the console it was started from
+# (src/console.rs); already in the tree through other crates.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the icon and version information into the .exe (build.rs,
+# ADR 0020); without default features it reads nothing from Cargo.toml.
+winresource = { version = "0.1.34", default-features = false }
+
 [dev-dependencies]
 # A capture backend for the tests that lists audio inputs (tests/support).
 capture-api = { path = "../capture-api" }

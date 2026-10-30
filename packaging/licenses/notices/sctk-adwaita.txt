@@ -1,0 +1,10 @@
+Crates: sctk-adwaita 0.10.1
+Source: src/lib.rs in the crate, whose author notes there that rounded_headerbar_shape is heavily inspired by snui (https://gitlab.com/snakedye/snui, under the Mozilla Public License 2.0) and so technically under that licence
+
+sctk-adwaita draws the title bar of windows on Wayland. Its function
+rounded_headerbar_shape (src/lib.rs) is, as its author notes there,
+heavily inspired by snui (https://gitlab.com/snakedye/snui) and so
+technically licensed under the Mozilla Public License, version 2.0.
+That function's source form is src/lib.rs of sctk-adwaita 0.10.1 on
+crates.io (https://crates.io/crates/sctk-adwaita/0.10.1). The licence's
+text is at https://mozilla.org/MPL/2.0/.

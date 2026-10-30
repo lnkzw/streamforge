@@ -81,6 +81,33 @@ jobs:
           rustup default stable
       - run: cargo fmt --all -- --check
 
+  licences:
+    # The licences of the Rust crates, which every package carries, must
+    # match Cargo.lock (packaging/licenses/generate.py).
+    name: licences of the rust crates
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install cargo-about
+        # The release's prebuilt binary, pinned by its checksum.
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cargo-about.tar.gz" \
+            https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.2/cargo-about-0.9.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9099a59e820c38a68b9d65f300662a567d56562f9a10f6aa4c7e86c17c2566af  $RUNNER_TEMP/cargo-about.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/cargo-about.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/cargo-about-0.9.2-x86_64-unknown-linux-musl/cargo-about" "$HOME/.cargo/bin/"
+      - run: cargo fetch --locked
+      - run: python3 packaging/licenses/generate.py --check
+
   check:
     name: clippy + test (${{ matrix.os }})
     needs: tested

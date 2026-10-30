@@ -283,6 +283,6 @@ Version 0.2.0 adds cameras, images and layers to the first stable base (0.1.0); 
 
 ## Licences
 
-StreamForge is licensed under either of the MIT licence or the Apache License 2.0, at your option. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1.
+StreamForge is licensed under either of the MIT licence or the Apache License 2.0, at your option. The desktop app embeds the IBM Plex fonts under the SIL Open Font License 1.1. The programs also contain Rust libraries (crates) under their own licences; every package lists them with their licence texts in `LICENSE-RUST-CRATES.txt`.
 
 The programs use the system's FFmpeg libraries, so a binary is also subject to the licence of the FFmpeg build it uses. Both supported distributions build FFmpeg with libx264, which makes that build GPL. If you pass StreamForge binaries on to others, the GPL's conditions apply to that distribution.

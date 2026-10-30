@@ -13,6 +13,7 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 
 - Windows: the desktop app is a window program with the app icon and version information, so no console window opens with it. Started from a console, it still prints `--version`, `--help` and startup errors there, but Ctrl+C in that console no longer closes it; closing the window does. The binaries link the C runtime statically.
 - The desktop app started in the file system's root, as an app opened from macOS's Finder or Dock is, saves recordings and projects in the home folder instead of the root.
+- Every package also carries `LICENSE-RUST-CRATES.txt`, the licences of the Rust crates the programs are built from, which the Linux packages of 0.1.0 and 0.2.0 lacked.
 
 ### Security
 

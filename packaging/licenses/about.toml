@@ -1,0 +1,88 @@
+# cargo-about's configuration for rust-crates.txt (generate.py): the
+# crates the four programs are built from, on the systems StreamForge
+# ships packages for.
+
+# The licences a crate may use, in the order StreamForge prefers them
+# when a crate offers a choice. Every one is compatible with version 3
+# of the GPL, under which the Windows and macOS packages distribute the
+# programs as a whole (ADR 0020); the fonts' licences cover fonts the
+# desktop embeds. A crate under any other licence makes generate.py
+# fail: check it before adding it here.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "WTFPL",
+    "Zlib",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Bitstream-Vera",
+]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+# Neither ends up in the programs.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# The test and measurement tools (publish = false) are not shipped.
+private = { ignore = true }
+
+# Clarifications name licence files cargo-about does not find or does
+# not recognise. A changed or missing file is only a warning to
+# cargo-about, which then leaves the crate's files out; generate.py fails
+# on it, so a new version of the crate fails until its files are checked
+# again. Crates that ship no copyright notice at all get one from
+# notices/ instead.
+
+# The fonts egui embeds by default. The crate's licence field names
+# OFL-1.1 (Noto Emoji) and the Ubuntu Font Licence; Hack is under MIT
+# and the Bitstream Vera licence, the emoji icon font under MIT, and
+# their licence files are where cargo-about does not look.
+[epaint_default_fonts.clarify]
+license = "(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 AND MIT AND Bitstream-Vera"
+
+[[epaint_default_fonts.clarify.files]]
+path = "fonts/OFL.txt"
+license = "OFL-1.1"
+checksum = "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+
+[[epaint_default_fonts.clarify.files]]
+path = "fonts/UFL.txt"
+license = "Ubuntu-font-1.0"
+checksum = "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002"
+
+[[epaint_default_fonts.clarify.files]]
+path = "fonts/Hack-Regular.txt"
+license = "MIT AND Bitstream-Vera"
+checksum = "47c0cccbeec7e8614548cc485588b28149e7874188df5f41b36efebcee285c87"
+
+[[epaint_default_fonts.clarify.files]]
+path = "fonts/emoji-icon-font-mit-license.txt"
+license = "MIT"
+checksum = "b9d2c1d909aa149996fd4c91dcb92b2362a04431640c1d200959da94caf8cde1"
+
+# libm's file holds the MIT terms followed by the notices of the code it
+# was ported from (musl, FreeBSD, Sun), which cargo-about does not
+# recognise as one licence.
+[libm.clarify]
+license = "MIT"
+
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+# dpi contains a part of libm under its own MIT notice.
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+
+[[dpi.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+
+[[dpi.clarify.files]]
+path = "LICENSE-LIBM-MIT"
+license = "MIT"
+checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997"

@@ -30,8 +30,10 @@ cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md packaging/linux/INSTALL.md 
 # The documentation the README and the user guide link to, at the same
 # relative paths as in the repository.
 cp -R docs "$out/"
-# The desktop binary embeds IBM Plex, whose licence must travel with it.
+# The desktop binary embeds IBM Plex, whose licence must travel with it,
+# as must those of the Rust crates in the binaries.
 cp crates/streamforge-desktop/assets/fonts/OFL.txt "$out/LICENSE-OFL-IBM-Plex.txt"
+cp packaging/licenses/rust-crates.txt "$out/LICENSE-RUST-CRATES.txt"
 # The launcher and its icon, named after the app id the desktop window
 # reports (crates/streamforge-desktop/src/identity.rs).
 install -D -m 0644 "packaging/linux/$app_id.desktop" "$out/share/applications/$app_id.desktop"

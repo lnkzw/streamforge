@@ -1,0 +1,5 @@
+Crates: endi 1.1.1, x11-dl 2.21.0, zbus-lockstep 0.5.2, zbus-lockstep-macros 0.5.2, zmij 1.0.23
+Source: their licence files and their repositories at the commits they were published from (zeenix/endi 226224559725, AltF02/x11-rs fced94ef6eb5, luukvanderduim/zbus-lockstep 9bda5264dfe1, dtolnay/zmij 7b7cc48b5802)
+
+These crates ship the MIT terms (above) without a copyright line, and
+their repositories name no copyright holder either.

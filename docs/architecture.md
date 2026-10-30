@@ -40,7 +40,7 @@
 | `capture-cpal` | lib | Windows and macOS `CpalCapture` (`AudioDevices`) (`cpal`: WASAPI, CoreAudio): capture converted to 48 kHz stereo, and the monitor's playback converted to the device, in the real-time callback without locks; only the converter builds on Linux | `capture-api`, `media-core` (Windows, macOS: `cpal`) |
 | `capture-windows` | lib | Windows `WgcCapture` (`ScreenCapture`): Windows.Graphics.Capture of monitors and windows named by `list_capture_targets` (ADR 0010); `MfCamera` (`CameraCapture`): Media Foundation cameras converted to RGB32 by the system, Media Foundation loaded at run time, its `unsafe` calls in `mf.rs` (ADR 0019); only the id and camera formats build elsewhere | `capture-api`, `media-core` (Windows: `windows-capture`, `windows`) |
 | `capture-macos` | lib | macOS `SckCapture` (`ScreenCapture`): ScreenCaptureKit capture of displays and windows named by `list_capture_targets` (ADR 0010); `AvfCamera` (`CameraCapture`): AVFoundation cameras converted to BGRA by the system, its `unsafe` calls in `avf.rs` and the pixel-buffer reads in `pixels.rs` (ADR 0019); only the id format and camera modes build elsewhere | `capture-api`, `media-core` (macOS: `screencapturekit`, `objc2` and its AVFoundation, Core Media and Core Video bindings, `dispatch2`, `block2`) |
-| `capture-platform` | lib | Builds `Capture` for the target OS (`cfg(target_os)`) from screen, audio and camera parts; the only crate that names platform backends (`docs/platforms.md`) | `capture-api`, `capture-linux` (Linux), `capture-cpal` (Windows, macOS), `capture-windows` (Windows), `capture-macos` (macOS) |
+| `capture-platform` | lib | Builds `Capture` for the target OS (`cfg(target_os)`) from screen, audio and camera parts; the only crate that names platform backends (`docs/platforms.md`); `run_with_main_run_loop` gives the programs without a UI framework a main run loop on macOS | `capture-api`, `capture-linux` (Linux), `capture-cpal` (Windows, macOS), `capture-windows` (Windows), `capture-macos` (macOS) |
 | `audio-engine` | lib | Audio routing graph (ADR 0017: channels, sends, aux and program buses, processing slots, gain ramps, meters, limit per output feed), test tones, mixer thread with bounded drift-absorbing input buffering, and the monitor's `PlaybackFeed` (drift resampling onto a device clock) | `media-core` |
 | `video-compositor` | lib | Scene graph, CPU reference renderer, render loop on its own thread, test patterns, PPM snapshots (ADR 0003) | `media-core` |
 | `encoder-api` | lib | Platform-neutral output vocabulary: recording and streaming settings, secret `StreamKey`, `StreamTarget` with redaction, reconnect policy, statistics, errors (no FFmpeg) | `media-core` (`Rational` frame rates) |
@@ -60,7 +60,7 @@
 
 `engine` and `control-protocol` do not depend on each other. Only the binaries combine them. A future socket transport, JSON-RPC or MCP adapter would be another crate that calls `CommandHandler`, next to `control-protocol`.
 
-The binaries are the composition roots. Each injects `capture_platform::capture()` with `Engine::with_capture`, so CLI and protocol server always use the same capture parts. On OSes without a backend, `capture-platform` returns `capture_api::Capture::for_unsupported_platform()`, which reports a reason instead of failing to build. `engine` never depends on a platform crate.
+The binaries are the composition roots. Each injects `capture_platform::capture()` with `Engine::with_capture`, so CLI and protocol server always use the same capture parts. The CLI, the engine process and the MCP server run their `main` through `capture_platform::run_with_main_run_loop`: on macOS their work moves to a thread of its own (8 MiB stack, as the main thread's) while the main thread runs the main run loop. On OSes without a backend, `capture-platform` returns `capture_api::Capture::for_unsupported_platform()`, which reports a reason instead of failing to build. `engine` never depends on a platform crate.
 
 ## Command boundary
 
@@ -74,7 +74,7 @@ adapter input ──decode──▶ Command ──CommandHandler::handle──�
 - Adapters must not compute results themselves; they translate input into a `Command` and output back to their medium.
 - Wire formats map `command_api::ErrorCode` to their own codes explicitly, so internal renames do not silently change a protocol.
 
-The headless process currently runs the engine and the protocol loop on the main thread and handles requests sequentially. Capture probes (M2) run their PipeWire loop on that same thread and block it for the probe duration; that is acceptable for diagnostics.
+The headless process currently runs the engine and the protocol loop on the main thread (on macOS on the thread that takes its place) and handles requests sequentially. Capture probes (M2) run their PipeWire loop on that same thread and block it for the probe duration; that is acceptable for diagnostics.
 
 Since M3, real-time work has its own threads:
 - **`screen-capture`:** PipeWire loop of a continuous screen stream. It converts frames into pooled buffers and publishes them to a `FrameMailbox`.

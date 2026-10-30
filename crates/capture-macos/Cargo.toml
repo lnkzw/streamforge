@@ -19,11 +19,13 @@ screencapturekit = { version = "=11.0.0", features = ["macos_14_0"] }
 # and Core Video for the sample and pixel buffers, dispatch2 for the
 # delegate's serial queue, block2 for the access request and the
 # runtime error observer. The unsafe calls are isolated in `src/avf.rs`.
+# The programs' main run loop (ADR 0020) uses Core Foundation's run loop,
+# dispatch2's main queue and objc2's main-thread check, all safe calls.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSNotification", "NSEnumerator", "NSOperation", "NSString", "NSValue", "NSObject", "block2"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession", "AVCaptureVideoDataOutput", "AVError", "AVMediaFormat", "block2", "dispatch2", "objc2-core-media", "objc2-core-video"] }
 objc2-core-media = { version = "0.3.2", default-features = false, features = ["std", "CMBase", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFRunLoop"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2", "block2"] }
 block2 = "0.6.2"

@@ -19,6 +19,17 @@ use objc2_core_foundation::CFRunLoop;
 /// work ran before.
 const STACK_BYTES: usize = 8 << 20;
 
+/// Set once [`run_with_main_run_loop`] runs the main run loop; the
+/// programs call it once, for all their work.
+static RUNS_MAIN_RUN_LOOP: AtomicBool = AtomicBool::new(false);
+
+/// Whether the main run loop runs, or is about to (the work may start
+/// before the loop does): this program's, or AppKit's in the desktop.
+pub(crate) fn main_run_loop_runs() -> bool {
+    RUNS_MAIN_RUN_LOOP.load(Ordering::Acquire)
+        || CFRunLoop::main().is_some_and(|main| main.current_mode().is_some())
+}
+
 /// Runs `work` on a thread of its own while the calling thread, the main
 /// thread, runs its run loop, and returns `work`'s result once that
 /// thread has ended; a panic in `work` continues on the calling thread.
@@ -28,6 +39,7 @@ pub fn run_with_main_run_loop<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     if MainThreadMarker::new().is_none() {
         return work();
     }
+    RUNS_MAIN_RUN_LOOP.store(true, Ordering::Release);
     let finished = Arc::new(AtomicBool::new(false));
     let outcome = thread::scope(|scope| {
         // Starts the work and joins it, so that the main run loop still

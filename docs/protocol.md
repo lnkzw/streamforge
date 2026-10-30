@@ -185,8 +185,8 @@ Commands that create or read a file (`start_recording`, `probe_composite`'s snap
 
 - `screen` has `portal_version`, `target_kinds` (subset of `monitor`, `window`, `virtual`) and `cursor_modes` (subset of `hidden`, `embedded`, `metadata`). An empty `cursor_modes` means the backend cannot select a cursor mode; the request is then ignored, with a warning.
 - `screen` also says how a source is chosen:
-  - `picker`: without `capture_target_id`, the user picks in a system dialog (Linux: the ScreenCast portal).
-  - `target_list`: `list_capture_targets` lists monitors and windows, and screen commands capture one by its `capture_target_id` without a dialog (Windows).
+  - `picker`: without `capture_target_id`, the user picks in a system dialog (Linux: the ScreenCast portal; macOS 14 or newer: `SCContentSharingPicker`).
+  - `target_list`: `list_capture_targets` lists monitors and windows, and screen commands capture one by its `capture_target_id` without a dialog (Windows, macOS).
 - `audio` has `server_version`.
 - `camera` (since M14 step 4b) has nothing more: `available` means cameras can be listed and captured, not that one is attached. Linux uses PipeWire (`backend` `pipewire`), Windows Media Foundation (`backend` `Media Foundation`, unavailable where it is not installed); macOS reports it unavailable until its camera step.
 
@@ -486,7 +486,7 @@ A project file holds the scenes with their ids, the active scene and the audio c
   - Result: `{"file_name", "path", "replaced", "scenes", "bytes"}`.
 - **`load_project {file_name}`:** replaces the scenes, the active scene and the audio with the file's, all or nothing.
   - Only while no preview or output runs (`invalid_state`). Unsaved scenes are lost, so it is destructive.
-  - Screen sources load without a capture target; a warning says so. Choose one with `set_capture_target`. Where a system picker exists (Linux), it can ask instead when the scene is rendered.
+  - Screen sources load without a capture target; a warning says so. Choose one with `set_capture_target`. Where a system picker exists (Linux, macOS), it can ask instead when the scene is rendered.
   - Image files are read as for `add_source`. One that is missing, broken or over a limit does not fail the load: its sources load and draw nothing, and a warning names them and the error. `restart_source` reads it again once it is there.
   - An invalid file loads nothing: `invalid_params`, with every problem in `details.problems` (`[{"path", "message"}]`, at most 100 plus one that counts the rest).
   - Result: the scene list, plus `file_name`, `mixer` (as `get_mixer`) and `warnings`.

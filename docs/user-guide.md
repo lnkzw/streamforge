@@ -273,7 +273,7 @@ The MCP server runs its own engine. It does not control a desktop app that is op
 
 Version 0.2.0 adds cameras, images and layers to the first stable base (0.1.0); it is not a complete production suite.
 
-- **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On both, screen capture works by target id only (no picker yet), and desktop audio from outputs with more than two channels is not downmixed.
+- **Systems:** packages only for Ubuntu 24.04 and Arch Linux on x86_64. Windows and macOS build from source and pass CI, but have not been tested by hand on real machines. On Windows, screen capture works by target id only (no picker yet); macOS has both. On both, desktop audio from outputs with more than two channels is not downmixed.
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
 - **Sources:** solid colours, colour bars, screen or window capture, PNG and JPEG images, and cameras. Cameras have been tried only with a virtual PipeWire camera on Linux, not with a real webcam, and not at all on Windows and macOS. No camera controls (focus, exposure), no cropping or flipping, and no text, media files or browser sources; images are not animated (GIF, APNG) and colour profiles in them are ignored.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.

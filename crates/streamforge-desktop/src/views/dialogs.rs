@@ -1090,7 +1090,12 @@ fn screen_source_picker(ui: &mut egui::Ui, model: &mut Model, form: &mut SourceF
     if form.screen_source.as_ref().is_some_and(|id| !listed(id)) {
         form.screen_source = None;
     }
-    const PICKER: &str = "System picker (if the platform has one)";
+    // Linux and macOS have a system picker; Windows has none yet.
+    const PICKER: &str = if cfg!(any(target_os = "linux", target_os = "macos")) {
+        "Choose in the system dialog"
+    } else {
+        "System picker (if the platform has one)"
+    };
     match &model.screen_sources {
         Some(Ok(sources)) if !sources.is_empty() => {
             let selected = form

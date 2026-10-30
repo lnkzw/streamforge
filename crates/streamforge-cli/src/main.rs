@@ -172,7 +172,13 @@ enum CaptureCommand {
     },
 }
 
+/// On macOS the work runs on a thread of its own while the main thread
+/// runs the main run loop (ADR 0020); elsewhere on this thread.
 fn main() -> Result<ExitCode> {
+    capture_platform::run_with_main_run_loop(run)
+}
+
+fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     // In-process engine; the CLI shares command handlers with the protocol
     // server instead of computing results itself.

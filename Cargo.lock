@@ -798,6 +798,7 @@ dependencies = [
  "capture-linux",
  "capture-macos",
  "capture-windows",
+ "dispatch2",
 ]
 
 [[package]]

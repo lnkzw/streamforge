@@ -40,7 +40,13 @@ struct Args {
     stream_key_env: Option<String>,
 }
 
+/// On macOS the work runs on a thread of its own while the main thread
+/// runs the main run loop (ADR 0020); elsewhere on this thread.
 fn main() -> ExitCode {
+    capture_platform::run_with_main_run_loop(run)
+}
+
+fn run() -> ExitCode {
     let args = Args::parse();
     let stream = match stream_target(&args) {
         Ok(stream) => stream,

@@ -1,3 +1,5 @@
 Crates: dispatch 0.2.0
-Source: neither the crate nor https://github.com/SSheldon/rust-dispatch at 82d6c7a5b75d, the commit 0.2.0 was published from, has a licence file or a copyright notice; its Cargo.toml declares the MIT license, whose text is above
+Source: https://github.com/SSheldon/rust-dispatch at 82d6c7a5b75d, the commit 0.2.0 was published from
 
+Neither the crate nor its repository has a licence file or a copyright
+notice. Its Cargo.toml declares the MIT license, whose terms are above.

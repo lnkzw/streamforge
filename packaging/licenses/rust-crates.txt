@@ -13,11 +13,12 @@ unicode-general-category, contain tables generated from the Unicode
 Character Database. That data is licensed under the Unicode License v3
 (Unicode-3.0, below): Copyright © 1991-2025 Unicode, Inc.
 
-After the licences come the notices of crates that ship none with
-their licence, and the copyright notices of the Wayland protocol
-descriptions the Wayland crates generate code from.
+After the licences come further notices: of crates that ship none with
+their licence, and those crates keep in their source files for code or
+documents they took from others; then the copyright notices of the
+Wayland protocol descriptions the Wayland crates generate code from.
 
-Generated from Cargo.lock by packaging/licenses/generate.sh.
+Generated from Cargo.lock by packaging/licenses/generate.py.
 
 Overview: licence and number of crates
 --------------------------------------
@@ -9445,7 +9446,7 @@ the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 --------------------------------------------------------------------------------
-Notices of crates that ship none
+Further notices
 
 --------------------------------------------------------------------------------
 
@@ -9478,10 +9479,181 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 --------------------------------------------------------------------------------
 
 Used by:
+- cursor-icon 1.2.0
+
+Source: the header of src/lib.rs in the crate, whose CursorIcon enum comes from a W3C document
+
+This file contains a portion of the CSS Basic User Interface Module Level 3
+specification. In particular, the names for the cursor from the #cursor
+section and documentation for some of the variants were taken.
+
+The original document is https://www.w3.org/TR/css-ui-3/#cursor.
+Copyright © 2018 W3C® (MIT, ERCIM, Keio, Beihang)
+
+These documents were used under the terms of the following license. This W3C
+license as well as the W3C short notice apply to the `CursorIcon` enum's
+variants and documentation attached to them.
+
+--------- BEGINNING OF W3C LICENSE
+--------------------------------------------------------------
+
+License
+
+By obtaining and/or copying this work, you (the licensee) agree that you have
+read, understood, and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without
+modification, for any purpose and without fee or royalty is hereby granted,
+provided that you include the following on ALL copies of the work or portions
+thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the
+  redistributed or derivative work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and
+  conditions. If none exist, the W3C Software and Document Short Notice
+  should be included.
+- Notice of any changes or modifications, through a copyright statement on
+  the new code or document such as "This software or document includes
+  material copied from or derived from [title and URI of the W3C document].
+  Copyright © [YEAR] W3C® (MIT, ERCIM, Keio, Beihang)."
+
+Disclaimers
+
+THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS
+OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES
+OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF
+THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS,
+COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR
+CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising
+or publicity pertaining to the work without specific, written prior
+permission. Title to copyright in this work will at all times remain with
+copyright holders.
+
+--------- END OF W3C LICENSE
+--------------------------------------------------------------------
+
+--------- BEGINNING OF W3C SHORT NOTICE
+---------------------------------------------------------
+
+winit: https://github.com/rust-windowing/cursor-icon
+
+Copyright © 2023 World Wide Web Consortium, (Massachusetts Institute of
+Technology, European Research Consortium for Informatics and Mathematics,
+Keio University, Beihang). All Rights Reserved. This work is distributed
+under the W3C® Software License [1] in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.
+
+[1] http://www.w3.org/Consortium/Legal/copyright-software
+
+--------- END OF W3C SHORT NOTICE
+--------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+
+Used by:
 - dispatch 0.2.0
 
-Source: neither the crate nor https://github.com/SSheldon/rust-dispatch at 82d6c7a5b75d, the commit 0.2.0 was published from, has a licence file or a copyright notice; its Cargo.toml declares the MIT license, whose text is above
+Source: https://github.com/SSheldon/rust-dispatch at 82d6c7a5b75d, the commit 0.2.0 was published from
 
+Neither the crate nor its repository has a licence file or a copyright
+notice. Its Cargo.toml declares the MIT license, whose terms are above.
+
+--------------------------------------------------------------------------------
+
+Used by:
+- futures-channel 0.3.34
+
+Source: the header of src/mpsc/queue.rs in the crate, whose queue is derived from Dmitry Vyukov's
+
+Copyright (c) 2010-2011 Dmitry Vyukov. All rights reserved.
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+   1. Redistributions of source code must retain the above copyright notice,
+      this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY DMITRY VYUKOV "AS IS" AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+SHALL DMITRY VYUKOV OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are
+those of the authors and should not be interpreted as representing official
+policies, either expressed or implied, of Dmitry Vyukov.
+
+--------------------------------------------------------------------------------
+
+Used by:
+- libm 0.2.16
+
+Source: the headers of the crate's src/math/*.rs files, which keep the notices of the code they were ported from (FreeBSD's and musl's, from Sun Microsystems, and CORE-MATH's); each notice once
+
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunSoft, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+Copyright 2004 Sun Microsystems, Inc.  All Rights Reserved.
+
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+
+Copyright (c) 2005 David Schultz <das@FreeBSD.ORG>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+
+Copyright (c) 2021-2022 Alexei Sibidanov (CORE-MATH; the file is under the MIT license).
 
 --------------------------------------------------------------------------------
 
@@ -9560,6 +9732,84 @@ that only works when you have the correct Xcode SDK available to provide the
 required `.tbd` files, which is why we choose to still use the normal SPDX
 identifiers in the crates (Xcode is required to use the crates, and when using
 Xcode you have already agreed to the Xcode license).
+
+--------------------------------------------------------------------------------
+
+Used by:
+- wayland-protocols-plasma 0.3.12
+
+Source: the crate's LICENSES/MIT.txt, which is the licence's template without a copyright line
+
+The copyright notices of the crate's protocol descriptions are in the last section, "Copyright notices of the Wayland protocol descriptions".
+
+--------------------------------------------------------------------------------
+
+Used by:
+- winit 0.30.13
+
+Source: the header of src/keyboard.rs in the crate, whose Key and KeyCode enums come from W3C documents
+
+UI Events KeyboardEvent key Values
+https://www.w3.org/TR/2017/CR-uievents-key-20170601/
+Copyright © 2017 W3C® (MIT, ERCIM, Keio, Beihang).
+
+### For `KeyCode`
+UI Events KeyboardEvent code Values
+https://www.w3.org/TR/2017/CR-uievents-code-20170601/
+Copyright © 2017 W3C® (MIT, ERCIM, Keio, Beihang).
+
+These documents were used under the terms of the following license. This W3C license as well as
+the W3C short notice apply to the `Key` and `KeyCode` enums and their variants and the
+documentation attached to their variants.
+
+--------- BEGINNING OF W3C LICENSE --------------------------------------------------------------
+
+License
+
+By obtaining and/or copying this work, you (the licensee) agree that you have read, understood,
+and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without modification, for any
+purpose and without fee or royalty is hereby granted, provided that you include the following on
+ALL copies of the work or portions thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the redistributed or derivative
+  work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none
+  exist, the W3C Software and Document Short Notice should be included.
+- Notice of any changes or modifications, through a copyright statement on the new code or
+  document such as "This software or document includes material copied from or derived from
+  [title and URI of the W3C document]. Copyright © [YEAR] W3C® (MIT, ERCIM, Keio, Beihang)."
+
+Disclaimers
+
+THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR
+ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD
+PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising or publicity
+pertaining to the work without specific, written prior permission. Title to copyright in this
+work will at all times remain with copyright holders.
+
+--------- END OF W3C LICENSE --------------------------------------------------------------------
+
+--------- BEGINNING OF W3C SHORT NOTICE ---------------------------------------------------------
+
+winit: https://github.com/rust-windowing/winit
+
+Copyright © 2021 World Wide Web Consortium, (Massachusetts Institute of Technology, European
+Research Consortium for Informatics and Mathematics, Keio University, Beihang). All Rights
+Reserved. This work is distributed under the W3C® Software License [1] in the hope that it will
+be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.
+
+[1] http://www.w3.org/Consortium/Legal/copyright-software
+
+--------- END OF W3C SHORT NOTICE ---------------------------------------------------------------
 
 --------------------------------------------------------------------------------
 Copyright notices of the Wayland protocol descriptions
@@ -10720,11 +10970,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-<![CDATA[
 SPDX-FileCopyrightText: 2015 Martin Gräßlin
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
 Copyright © 2008-2011  Kristian Høgsberg
 Copyright © 2010-2013  Intel Corporation
@@ -10750,32 +10998,23 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
-<![CDATA[
 SPDX-FileCopyrightText: 2017 David Edmundson
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2015 Martin Gräßlin
 SPDX-FileCopyrightText: 2015 Marco Martin
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2024 Xaver Hugl <xaver.hugl@gmail.com>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2022 Aleix Pol Gonzalez <aleixpol@kde.org>
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2008-2011 Kristian Høgsberg
 SPDX-FileCopyrightText: 2010-2011 Intel Corporation
 SPDX-FileCopyrightText: 2012-2013 Collabora, Ltd.
@@ -10783,9 +11022,7 @@ SPDX-FileCopyrightText: 2015 Sebastian Kügler <sebas@kde.org>
 SPDX-FileCopyrightText: 2021 Méven Car <meven.car@enioka.com>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2008-2011 Kristian Høgsberg
 SPDX-FileCopyrightText: 2010-2011 Intel Corporation
 SPDX-FileCopyrightText: 2012-2013 Collabora, Ltd.
@@ -10794,56 +11031,41 @@ SPDX-FileCopyrightText: 2021 Méven Car <meven.car@enioka.com>
 SPDX-FileCopyrightText: 2023 Xaver Hugl <xaver.hugl@kde.org>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2022 Xaver Hugl <xaver.hugl@gmail.com>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2021 Aleix Pol Gonzalez <aleixpol@kde.org>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
 SPDX-FileCopyrightText: 2023 Vlad Zahorodnii
 
 SPDX-License-Identifier: MIT-CMU
 
-<![CDATA[
 SPDX-FileCopyrightText: 2019 Aleix Pol Gonzalez <aleixpol@kde.org>
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2018 Marco Martin
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2008-2011 Kristian Høgsberg
 SPDX-FileCopyrightText: 2010-2011 Intel Corporation
 SPDX-FileCopyrightText: 2012-2013 Collabora, Ltd.
 SPDX-FileCopyrightText: 2015 Sebastian Kügler <sebas@kde.org>
 
 SPDX-License-Identifier: MIT-CMU
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2013-2014 Pier Luigi Fiorini
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
-<![CDATA[
 SPDX-FileCopyrightText: 2016 Oleg Chernovskiy
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
 This file is part of the plugins of the Qt Toolkit.
 SPDX-FileCopyrightText: 2012 Digia Plc and/or its subsidiary(-ies).
@@ -10864,11 +11086,9 @@ SPDX-FileCopyrightText: 2017-2018, NVIDIA CORPORATION. All rights reserved.
 
 SPDX-License-Identifier: MIT
 
-<![CDATA[
 SPDX-FileCopyrightText: 2020-2021 Aleix Pol Gonzalez <aleixpol@kde.org>
 
 SPDX-License-Identifier: LGPL-2.1-or-later
-]]>
 
 Copyright © 2018 Simon Ser
 Copyright © 2019 Ivan Molodetskikh

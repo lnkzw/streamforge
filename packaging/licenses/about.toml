@@ -1,4 +1,4 @@
-# cargo-about's configuration for rust-crates.txt (generate.sh): the
+# cargo-about's configuration for rust-crates.txt (generate.py): the
 # crates the four programs are built from, on the systems StreamForge
 # ships packages for.
 
@@ -6,7 +6,7 @@
 # when a crate offers a choice. Every one is compatible with version 3
 # of the GPL, under which the Windows and macOS packages distribute the
 # programs as a whole (ADR 0020); the fonts' licences cover fonts the
-# desktop embeds. A crate under any other licence makes generate.sh
+# desktop embeds. A crate under any other licence makes generate.py
 # fail: check it before adding it here.
 accepted = [
     "Apache-2.0",
@@ -31,7 +31,7 @@ private = { ignore = true }
 
 # Clarifications name licence files cargo-about does not find or does
 # not recognise. A changed or missing file is only a warning to
-# cargo-about, which then leaves the crate's files out; generate.sh fails
+# cargo-about, which then leaves the crate's files out; generate.py fails
 # on it, so a new version of the crate fails until its files are checked
 # again. Crates that ship no copyright notice at all get one from
 # notices/ instead.

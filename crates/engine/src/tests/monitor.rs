@@ -362,7 +362,7 @@ fn a_channel_that_captures_the_monitor_device_is_a_feedback_warning() {
     assert!(
         set.warnings
             .iter()
-            .any(|w| w.contains("channel `Loop` captures what the monitor plays")),
+            .any(|w| w.contains("channel `Loop` captures what the monitor plays on `Speakers`")),
         "{set:?}"
     );
     // Off, the warning goes; on again, it is back.

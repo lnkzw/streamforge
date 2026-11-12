@@ -130,9 +130,19 @@ fn a_monitor_captures_while_nothing_plays() {
         })
         .expect("capture the monitor");
     println!("{report:#?}");
-    // On Windows the capture plays silence on the output, so the loopback
-    // delivers even when nothing else plays.
+    // The capture plays silence on the output, so the loopback delivers
+    // even when nothing else plays.
     assert!(report.stats.frames > 0, "no audio arrived: {report:#?}");
+    // Silence warnings point at this system's settings only.
+    let other_system = if cfg!(target_os = "windows") {
+        "macOS"
+    } else {
+        "Windows"
+    };
+    assert!(
+        !report.warnings.iter().any(|w| w.contains(other_system)),
+        "{report:#?}"
+    );
     let format = report.format.as_ref().expect("format");
     assert!(format.sample_rate_hz > 0 && format.channels > 0);
 }
@@ -184,6 +194,15 @@ fn the_default_outputs_monitor_captures_what_it_plays() {
     // that the tone arrived.
     let peak = report.stats.peak_dbfs.expect("the tone was captured");
     assert!(peak > -60.0, "{report:#?}");
+    // The start's discontinuity is no glitch (WASAPI flags the loopback's
+    // first packet).
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.contains("underrun or overrun")),
+        "{report:#?}"
+    );
 }
 
 #[test]

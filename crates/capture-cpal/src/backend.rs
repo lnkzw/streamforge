@@ -17,12 +17,19 @@
 //! (14.6 or later, with the permission to record system audio). It records
 //! in the output's current format (on Windows, its mix format), converted
 //! like any input; so with more than two channels, only the first two.
-//! - WASAPI's loopback delivers nothing while nothing plays, so the input
-//!   would sit in warm-up and the mixer would count underruns. As OBS does,
-//!   the capture plays silence on the output for as long as it runs.
+//! - WASAPI's loopback delivers nothing while nothing plays, and neither
+//!   does macOS's tap of an output no app plays to, so the input would sit
+//!   in warm-up and the mixer would count underruns. As OBS does, the
+//!   capture plays silence on the output for as long as it runs.
 //! - On macOS, cpal opens an output that is an input too (a duplex device,
 //!   e.g. many USB interfaces) as that input, so such outputs have no
 //!   monitor. WASAPI endpoints are never both.
+//!
+//! A WASAPI loopback reports glitches from its first data on. WASAPI flags
+//! the first packet after the start as discontinuous; cpal leaves that out
+//! only when the packet's device position is 0, which a loopback's never is
+//! (it is the output's). Nothing was captured before it, so nothing is
+//! lost. Other captures report every glitch.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -503,16 +510,43 @@ pub(crate) fn may_end(kind: cpal::ErrorKind) -> bool {
     )
 }
 
+/// Whether a capture's first packet comes flagged as a discontinuity
+/// (see the module docs): a WASAPI loopback's. Everywhere else a glitch
+/// before the first data is reported like any other (a microphone's first
+/// packet has device position 0, which cpal leaves out itself).
+fn flags_its_start(loopback: bool) -> bool {
+    cfg!(target_os = "windows") && loopback
+}
+
+/// A stream error for reports and end reasons. WASAPI's message is only
+/// the call that failed and the system's code, so on Windows an endpoint
+/// that went away says so after it, as camera ends do (`what failed:
+/// wording (code); what it means`); CoreAudio's message says it already.
+/// WASAPI reports a changed format the same way, so the meaning covers it.
+pub(crate) fn stream_error(error: &cpal::Error) -> String {
+    if cfg!(target_os = "windows") && error.kind() == cpal::ErrorKind::DeviceNotAvailable {
+        format!("{error}; the device was disconnected, disabled or reconfigured")
+    } else {
+        error.to_string()
+    }
+}
+
 /// A stream's error callback. Errors are rare and not in the data path;
-/// it keeps the first few messages, each after `prefix`.
+/// it keeps the first few messages, each after `prefix`. With
+/// `start_flagged` (see [`flags_its_start`]), a glitch before the stream's
+/// first data is its start and left out.
 fn on_error(
     prefix: &'static str,
+    start_flagged: bool,
     errors: &Arc<Mutex<Vec<String>>>,
     liveness: &Arc<Liveness>,
 ) -> impl FnMut(cpal::Error) + Send + 'static {
     let (errors, liveness) = (Arc::clone(errors), Arc::clone(liveness));
     move |err| {
-        let message = format!("{prefix}{err}");
+        if start_flagged && err.kind() == cpal::ErrorKind::Xrun && !liveness.has_data() {
+            return;
+        }
+        let message = format!("{prefix}{}", stream_error(&err));
         if may_end(err.kind()) {
             liveness.error(&message);
         }
@@ -541,16 +575,17 @@ where
     )
 }
 
-/// Silence played on a loopback's output while it is captured, on Windows
-/// (see the module docs); `None` elsewhere. WASAPI opens outputs with
-/// `AUTOCONVERTPCM`, so `f32` works in any mix format. Its errors count as
+/// Silence played on a loopback's output while it is captured (see the
+/// module docs); `None` for an input. `config` is the output's current
+/// format. WASAPI opens outputs with `AUTOCONVERTPCM`, and CoreAudio's
+/// output unit converts, so `f32` works in any format. Its errors count as
 /// the capture's: without it, the loopback may stall.
 fn keep_playing(
     source: &Source,
     config: &cpal::StreamConfig,
     on_error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Option<cpal::Stream>, CaptureError> {
-    if !source.loopback || cfg!(not(target_os = "windows")) {
+    if !source.loopback {
         return Ok(None);
     }
     let stream = source
@@ -573,6 +608,27 @@ const LOOPBACK_OPEN: &str = if cfg!(target_os = "macos") {
     "cannot capture what the output plays (this needs macOS 14.6 or later)"
 } else {
     "cannot capture what the output plays"
+};
+
+/// The warning for a loopback that delivered only digital silence. On
+/// Windows it has no other cause; macOS also taps silence without the
+/// permission.
+const LOOPBACK_SILENT: &str = if cfg!(target_os = "macos") {
+    "the loopback delivered only digital silence: nothing played on the output, or the app \
+     that runs StreamForge may not record system audio (System Settings, Privacy & Security, \
+     Screen & System Audio Recording)"
+} else {
+    "the loopback delivered only digital silence: nothing played on the output"
+};
+
+/// The warning for an input that delivered only digital silence. Both
+/// systems deliver silence to an app without microphone access.
+const INPUT_SILENT: &str = if cfg!(target_os = "macos") {
+    "the input delivered only digital silence; allow microphone access (System Settings, \
+     Privacy & Security, Microphone) for the app that runs StreamForge"
+} else {
+    "the input delivered only digital silence; check that it is not muted and that desktop \
+     apps may use the microphone (Settings, Privacy & security, Microphone)"
 };
 
 fn run(
@@ -616,10 +672,10 @@ fn run(
         let silence = keep_playing(
             &source,
             &config,
-            on_error("silence on the output: ", &errors, liveness),
+            on_error("silence on the output: ", false, &errors, liveness),
         )?;
         let device = &source.device;
-        let on_error = on_error("", &errors, liveness);
+        let on_error = on_error("", flags_its_start(source.loopback), &errors, liveness);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(device, &config, callback, on_error),
             SampleFormat::F64 => build::<f64>(device, &config, callback, on_error),
@@ -701,12 +757,9 @@ fn run(
     if stats.frames > 0 && stats.peak_dbfs.is_none() {
         warnings.push(
             if loopback {
-                "the loopback delivered only digital silence: nothing played on the output; on \
-                 macOS, also allow the app that runs StreamForge to record system audio (System \
-                 Settings, Privacy & Security, Screen & System Audio Recording)"
+                LOOPBACK_SILENT
             } else {
-                "the input delivered only digital silence; on macOS, allow microphone access \
-                 (System Settings, Privacy & Security, Microphone) for the app that runs StreamForge"
+                INPUT_SILENT
             }
             .to_owned(),
         );
@@ -752,5 +805,67 @@ mod tests {
         assert!(may_end(cpal::ErrorKind::DeviceNotAvailable));
         assert!(may_end(cpal::ErrorKind::StreamInvalidated));
         assert!(may_end(cpal::ErrorKind::BackendError));
+    }
+
+    /// What `on_error` keeps of `kinds`, sent before and after the first
+    /// data.
+    fn kept(start_flagged: bool, before: &[cpal::ErrorKind], after: &[cpal::ErrorKind]) -> usize {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let liveness = Arc::new(Liveness::new());
+        let mut callback = on_error("", start_flagged, &errors, &liveness);
+        for &kind in before {
+            callback(kind.into());
+        }
+        liveness.data();
+        for &kind in after {
+            callback(kind.into());
+        }
+        errors.lock().expect("errors").len()
+    }
+
+    #[test]
+    fn only_a_flagged_start_leaves_out_its_first_glitch() {
+        use cpal::ErrorKind::{DeviceNotAvailable, Xrun};
+        // A WASAPI loopback: the glitch before the first data is its start.
+        assert_eq!(kept(true, &[Xrun], &[]), 0);
+        assert_eq!(kept(true, &[Xrun, DeviceNotAvailable], &[Xrun]), 2);
+        // Anything else (a microphone, CoreAudio, the silence on the
+        // output) reports every glitch.
+        assert_eq!(kept(false, &[Xrun], &[Xrun]), 2);
+        assert_eq!(flags_its_start(true), cfg!(target_os = "windows"));
+        assert!(!flags_its_start(false));
+    }
+
+    #[test]
+    fn a_removed_endpoint_says_so_on_windows() {
+        // As WASAPI reports a removed endpoint (`AUDCLNT_E_DEVICE_INVALIDATED`).
+        let removed = cpal::Error::with_message(
+            cpal::ErrorKind::DeviceNotAvailable,
+            "Failed to get current padding: OS Error -2004287484 (FormatMessageW() returned \
+             error 317) (os error -2004287484)",
+        );
+        let message = stream_error(&removed);
+        assert!(message.starts_with("Failed to get current padding: OS Error"));
+        assert_eq!(
+            message.ends_with(
+                "(os error -2004287484); the device was disconnected, disabled or reconfigured"
+            ),
+            cfg!(target_os = "windows"),
+            "{message}"
+        );
+        let other = cpal::Error::with_message(cpal::ErrorKind::BackendError, "it broke");
+        assert_eq!(stream_error(&other), "it broke");
+    }
+
+    #[test]
+    fn silence_warnings_name_only_this_systems_settings() {
+        for warning in [LOOPBACK_SILENT, INPUT_SILENT] {
+            assert_eq!(
+                warning.contains("System Settings"),
+                cfg!(target_os = "macos"),
+                "{warning}"
+            );
+            assert!(!warning.contains("on macOS"), "{warning}");
+        }
     }
 }

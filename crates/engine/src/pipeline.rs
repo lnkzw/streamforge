@@ -203,18 +203,36 @@ fn feedback_warnings(
             )];
         }
     };
-    audio::devices(audio)
+    let channels: Vec<&str> = audio::devices(audio)
         .filter(|(_, input)| {
             inputs.iter().any(|known| {
                 Some(&known.name) == input.as_ref() && known.loopback_of.as_ref() == Some(device)
             })
         })
-        .map(|(channel, _)| {
+        .map(|(channel, _)| channel.name.as_str())
+        .collect();
+    if channels.is_empty() {
+        return Vec::new();
+    }
+    // By its description where the backend has one: the listed name may be
+    // a device id (Windows, macOS) or a node name (PipeWire).
+    let shown = capture
+        .audio_outputs()
+        .ok()
+        .and_then(|outputs| {
+            outputs
+                .into_iter()
+                .find(|output| &output.name == device)
+                .and_then(|output| output.description)
+        })
+        .unwrap_or_else(|| device.clone());
+    channels
+        .into_iter()
+        .map(|channel| {
             format!(
-                "channel `{}` captures what the monitor plays on `{device}`: if the monitor's \
-                 bus has that channel, it feeds back; play the monitor elsewhere or take the \
-                 channel out of its bus",
-                channel.name
+                "channel `{channel}` captures what the monitor plays on `{shown}`: if the \
+                 monitor's bus has that channel, it feeds back; play the monitor elsewhere or \
+                 take the channel out of its bus"
             )
         })
         .collect()

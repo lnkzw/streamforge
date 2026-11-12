@@ -40,7 +40,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use media_core::SampleReader;
 
 use crate::backend::{
-    best_config, capture_error, description, device_name, host, is_named, may_end,
+    best_config, capture_error, description, device_name, host, is_named, may_end, stream_error,
 };
 use crate::convert::PlaybackConverter;
 use crate::liveness::Liveness;
@@ -139,15 +139,14 @@ pub(crate) fn start(
     Ok(Box::new(playback))
 }
 
-/// Names the output in errors and end reasons: the default output by the
-/// device it was when the playback started.
+/// Names the output in errors and end reasons by its description (the
+/// listed name is a device id on Windows and macOS); the default output by
+/// the device it was when the playback started.
 fn output_label(device: &cpal::Device, request: &PlaybackRequest) -> String {
+    let name = description(device).unwrap_or_else(|| device_name(device));
     match &request.output {
-        Some(name) => format!("audio output `{name}`"),
-        None => {
-            let name = description(device).unwrap_or_else(|| device_name(device));
-            format!("the default audio output (`{name}`)")
-        }
+        Some(_) => format!("audio output `{name}`"),
+        None => format!("the default audio output (`{name}`)"),
     }
 }
 
@@ -294,7 +293,7 @@ fn build<T: DeviceSample>(
         // the real-time thread) returns before anything is allocated.
         move |err| {
             if may_end(err.kind()) {
-                liveness.error(&err.to_string());
+                liveness.error(&stream_error(&err));
             }
         },
         None,

@@ -54,8 +54,11 @@ fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
         }
     } else {
         // A widget that went away mid-drag left its value; it must not
-        // show when the next drag starts.
-        ui.data_mut(|data| data.remove_temp::<f32>(dragged));
+        // show when the next drag starts. Read first: most frames have
+        // nothing to remove, and need no write.
+        if ui.data(|data| data.get_temp::<f32>(dragged).is_some()) {
+            ui.data_mut(|data| data.remove_temp::<f32>(dragged));
+        }
         response.changed().then_some(value)
     }
 }

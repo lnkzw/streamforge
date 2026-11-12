@@ -609,15 +609,17 @@ impl DesktopApp {
             });
             pressed
         });
+        let dragging = ctx.dragged_id().is_some();
         for shortcut in pressed {
             // An action may have opened a dialog; the keys after it wait.
             if self.dialog.is_none() {
-                self.shortcut(shortcut);
+                self.shortcut(shortcut, dragging);
             }
         }
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) {
+    /// Act on `shortcut`; `dragging`: a widget is being dragged.
+    fn shortcut(&mut self, shortcut: Shortcut, dragging: bool) {
         match shortcut {
             // The switch shows the engine's answer: a second press before
             // it would send the same state again.
@@ -639,7 +641,9 @@ impl DesktopApp {
                 }) else {
                     return;
                 };
-                if self.selected_scene.as_deref() != Some(&id) {
+                // Not in the middle of a drag (a field, a fader): that would
+                // remove the widget being dragged, and with it the edit.
+                if !dragging && self.selected_scene.as_deref() != Some(&id) {
                     // The inspector belongs to the scene selected before.
                     self.select_source(None);
                     self.selected_scene = Some(id.clone());

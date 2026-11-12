@@ -200,7 +200,9 @@ impl DesktopApp {
     /// In a narrow window, the inspector is a drawer: this opens it on the
     /// selected source after it was closed, and closes it.
     fn drawer_button(&mut self, ui: &mut egui::Ui) {
-        let selected = self.selected_source_spec().is_some();
+        // The same condition the drawer is shown on: it may show its
+        // empty state for a source that is gone, and this still closes it.
+        let selected = self.selected_source.is_some();
         let open = selected && self.drawer_open;
         let hint = if open {
             "Close the inspector (Esc)"

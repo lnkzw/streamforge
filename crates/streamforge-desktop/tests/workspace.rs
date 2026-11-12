@@ -219,7 +219,14 @@ fn selecting_a_source_opens_it_in_the_inspector() {
 #[test]
 fn dragging_a_position_in_the_inspector_moves_the_source() {
     let dir = TempDir::new("drag");
-    let mut harness = harness(model(&dir));
+    let mut model = model(&dir);
+    model.create_scene("Second");
+    wait(&mut model, "the second scene", |m| {
+        m.scenes
+            .as_ref()
+            .is_some_and(|list| list.scenes.iter().any(|scene| scene.name == "Second"))
+    });
+    let mut harness = harness(model);
     harness.get_by_label("lower third").click();
     step_until(&mut harness, "the inspector", |h| {
         h.query_by_label("Remove source…").is_some()
@@ -251,6 +258,10 @@ fn dragging_a_position_in_the_inspector_moves_the_source() {
         harness.step();
         assert_eq!(x_value(&harness).as_deref(), Some("130"), "mid-drag");
     }
+    // A scene key mid-drag puts its scene on program but leaves the
+    // selection (and with it the field being dragged) alone.
+    command(&mut harness, egui::Key::Num2);
+    assert_eq!(x_value(&harness).as_deref(), Some("130"), "after Ctrl+2");
     // Released where it rests: the engine takes the dragged value, and the
     // field shows its answer.
     harness.drop_at(x + egui::vec2(50.0, 0.0));
@@ -260,6 +271,10 @@ fn dragging_a_position_in_the_inspector_moves_the_source() {
     // It stays there: no stale value comes back with the engine's answers.
     settle(&mut harness, 5);
     assert_eq!(x_value(&harness).as_deref(), Some("130"));
+    assert!(is_selected(&harness, "Test pattern"));
+    step_until(&mut harness, "the second scene on program", |h| {
+        clickable(h, "Put on program")
+    });
 }
 
 #[test]

@@ -717,18 +717,20 @@ pub fn list_step(index: usize, len: usize, steps: isize) -> usize {
 }
 
 /// A capture's end reason where room is short (the inspector): without
-/// the system's error codes, and where the reason has the form
-/// `what happened: the system's wording; remedy`, without that wording,
-/// so the remedy follows what happened. The full reason belongs in a
-/// tooltip beside it.
+/// the system's error codes, and where the system's wording and code come
+/// right before StreamForge's remedy (`what happened: wording (CODE);
+/// remedy`), without that wording, so the remedy follows what happened.
+/// StreamForge's own words stay. The full reason belongs in a tooltip.
 pub fn short_reason(reason: &str) -> String {
-    let plain = without_codes(reason);
-    if let Some(colon) = outside_backticks(&plain, ": ")
-        && let Some((_, remedy)) = plain[colon..].rsplit_once("; ")
+    let groups = code_groups(reason);
+    if let Some(&(start, end)) = groups
+        .iter()
+        .find(|(_, end)| reason[*end..].starts_with("; "))
+        && let Some(colon) = outside_backticks(&reason[..start], ": ")
     {
-        return format!("{}; {remedy}", &plain[..colon]);
+        return without_codes(&format!("{}{}", &reason[..colon], &reason[end..]));
     }
-    plain
+    without_codes(reason)
 }
 
 /// Where `pattern` first occurs in `text` outside backticks (a quoted
@@ -745,10 +747,11 @@ fn outside_backticks(text: &str, pattern: &str) -> Option<usize> {
     None
 }
 
-/// `text` without the parenthesised error codes the systems append:
-/// ` (HRESULT 0x80070005)`, ` (os error 2)`, ` (FormatMessageW() …)`,
-/// ` (AVFoundationErrorDomain -11819)`. Other parentheses stay.
-fn without_codes(text: &str) -> String {
+/// The parenthesised error codes the systems append (` (HRESULT
+/// 0x80070005)`, ` (os error 2)`, ` (FormatMessageW() …)`,
+/// ` (AVFoundationErrorDomain -11819)`) in `text`, in order, each from the
+/// space before its `(` to after its `)`.
+fn code_groups(text: &str) -> Vec<(usize, usize)> {
     let is_code = |inner: &str| {
         inner.starts_with("HRESULT ")
             || inner.starts_with("os error ")
@@ -758,31 +761,42 @@ fn without_codes(text: &str) -> String {
                 .next()
                 .is_some_and(|word| word.ends_with("ErrorDomain"))
     };
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find(" (") {
-        let group = &rest[open + 2..];
+    let mut groups = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(" (") {
+        let inner = from + found + 2;
         // The group's end, nested parentheses included.
         let mut depth = 1;
-        let Some(close) = group.char_indices().find_map(|(index, c)| {
+        let close = text[inner..].char_indices().find_map(|(index, c)| {
             match c {
                 '(' => depth += 1,
                 ')' => depth -= 1,
                 _ => {}
             }
-            (depth == 0).then_some(index)
-        }) else {
-            break;
-        };
-        let end = open + 2 + close + 1;
-        if is_code(&group[..close]) {
-            out.push_str(&rest[..open]);
-        } else {
-            out.push_str(&rest[..end]);
+            (depth == 0).then_some(inner + index)
+        });
+        match close {
+            Some(close) if is_code(&text[inner..close]) => {
+                groups.push((inner - 2, close + 1));
+                from = close + 1;
+            }
+            // Other parentheses stay, and so does an unclosed one; codes
+            // inside or after them are still found.
+            _ => from = inner,
         }
-        rest = &rest[end..];
     }
-    out.push_str(rest);
+    groups
+}
+
+/// `text` without its [`code_groups`]. Other parentheses stay.
+fn without_codes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in code_groups(text) {
+        out.push_str(&text[at..start]);
+        at = end;
+    }
+    out.push_str(&text[at..]);
     out
 }
 
@@ -1478,7 +1492,35 @@ mod tests {
             short_reason("the captured window was closed (by its app)"),
             "the captured window was closed (by its app)"
         );
-        // An unbalanced parenthesis is left as it is.
+        // An unbalanced parenthesis is left as it is; codes after it go.
         assert_eq!(short_reason("stopped (HRESULT 0x1"), "stopped (HRESULT 0x1");
+        assert_eq!(
+            short_reason("stopped (partial frame: Access is denied. (HRESULT 0x80070005)"),
+            "stopped (partial frame: Access is denied."
+        );
+        // StreamForge's own diagnosis before a remedy stays: only wording
+        // that ends in a system code goes.
+        assert_eq!(
+            short_reason(
+                "display 1: screen recording is not permitted (The user declined TCCs); \
+                 allow screen recording"
+            ),
+            "display 1: screen recording is not permitted (The user declined TCCs); allow \
+             screen recording"
+        );
+        assert_eq!(
+            short_reason("cannot pick: no portal implements ScreenCast; install one"),
+            "cannot pick: no portal implements ScreenCast; install one"
+        );
+        // A remedy with a semicolon of its own stays whole; a semicolon in
+        // a quoted name is no separator.
+        assert_eq!(
+            short_reason("camera `A` stopped: Busy (HRESULT 0x1); close app B; then restart"),
+            "camera `A` stopped; close app B; then restart"
+        );
+        assert_eq!(
+            short_reason("camera stopped: device `Cam; 2` vanished"),
+            "camera stopped: device `Cam; 2` vanished"
+        );
     }
 }

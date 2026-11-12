@@ -227,7 +227,9 @@ mod tests {
         // A new size: once a frame has it, none of the old size follows.
         preview.resize(preview_scaler((320, 180)).expect("scaler"));
         let mut seen_new = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
         while seen_new < 5 {
+            assert!(Instant::now() < deadline, "the new size did not arrive");
             let frame = next_frame(&mut preview, &mailbox, &canvas, &mut offered);
             let size = (frame.width(), frame.height());
             if size == (320, 180) {

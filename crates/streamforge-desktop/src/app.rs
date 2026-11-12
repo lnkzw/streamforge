@@ -609,15 +609,17 @@ impl DesktopApp {
             });
             pressed
         });
+        let dragging = ctx.dragged_id().is_some();
         for shortcut in pressed {
             // An action may have opened a dialog; the keys after it wait.
             if self.dialog.is_none() {
-                self.shortcut(shortcut);
+                self.shortcut(shortcut, dragging);
             }
         }
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) {
+    /// Act on `shortcut`; `dragging`: a widget is being dragged.
+    fn shortcut(&mut self, shortcut: Shortcut, dragging: bool) {
         match shortcut {
             // The switch shows the engine's answer: a second press before
             // it would send the same state again.
@@ -625,15 +627,28 @@ impl DesktopApp {
             Shortcut::Preview => self.model.set_preview(!self.model.preview_enabled),
             Shortcut::Record => self.record_action(),
             Shortcut::Live => self.live_action(),
+            // The key also selects the scene: the operator sees the scene
+            // they switched to, as in a switcher without a separate preview.
             Shortcut::Program(index) => {
-                let scene = self.model.scenes.as_ref().and_then(|scenes| {
-                    scenes
-                        .scenes
-                        .get(index)
-                        .filter(|scene| scene.id != scenes.active_scene_id)
-                        .map(|scene| (scene.id.clone(), scene.name.clone()))
-                });
-                if let Some((id, name)) = scene {
+                let Some((id, name, on_air)) = self.model.scenes.as_ref().and_then(|scenes| {
+                    scenes.scenes.get(index).map(|scene| {
+                        (
+                            scene.id.clone(),
+                            scene.name.clone(),
+                            scene.id == scenes.active_scene_id,
+                        )
+                    })
+                }) else {
+                    return;
+                };
+                // Not in the middle of a drag (a field, a fader): that would
+                // remove the widget being dragged, and with it the edit.
+                if !dragging && self.selected_scene.as_deref() != Some(&id) {
+                    // The inspector belongs to the scene selected before.
+                    self.select_source(None);
+                    self.selected_scene = Some(id.clone());
+                }
+                if !on_air {
                     self.model.activate_scene(&id, &name);
                 }
             }
@@ -828,7 +843,7 @@ impl eframe::App for DesktopApp {
 
         fill(ui, "top bar", &top_bar, |ui| self.top_bar(ui));
         fill(ui, "browser", &browser, |ui| self.browser(ui));
-        let header = fill(ui, "program", &program, |ui| self.program_dock(ui));
+        let header = fill(ui, "program", &program, |ui| self.program_dock(ui, narrow));
         if let Some(inspector) = &inspector {
             fill(ui, "inspector", inspector, |ui| self.inspector_dock(ui));
         } else if self.drawer_open && self.selected_source.is_some() {

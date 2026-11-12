@@ -14,6 +14,13 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 - Windows: the desktop app is a window program with the app icon and version information, so no console window opens with it. Started from a console, it still prints `--version`, `--help` and startup errors there, but Ctrl+C in that console no longer closes it; closing the window does. The binaries link the C runtime statically.
 - The desktop app started in the file system's root, as an app opened from macOS's Finder or Dock is, saves recordings and projects in the home folder instead of the root.
 - Every package also carries `LICENSE-RUST-CRATES.txt`, the licences of the Rust crates the programs are built from, which the Linux packages of 0.1.0 and 0.2.0 lacked.
+- Desktop app: Ctrl+1 … Ctrl+9 (Cmd on macOS) also select the scene they put on program, so the scene list's highlight follows.
+- Desktop app: an ended camera or screen capture says in the inspector what happened and what to do, without the system's error codes and wording; the full reason shows on hover.
+
+### Fixed
+
+- Desktop app: dragging the inspector's X, Y, W and H fields (and the routing matrix's level fields) jumped back to the old value whenever the pointer rested during the drag, and could set that old value on release.
+- Desktop app: in a window narrower than 1360 px, nothing showed how to open the inspector drawer again after its × closed it (only clicking a source did); **Inspector** in the program header now opens and closes it.
 
 ### Security
 

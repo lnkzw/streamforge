@@ -38,9 +38,10 @@ const CAMERAS_REFRESH: Duration = Duration::from_secs(5);
 /// Views rebuild `value` from the model every frame, and some widgets
 /// (`DragValue`) apply a drag only while the pointer moves, so on the
 /// release frame `value` is the model's again. The value seen during the
-/// drag is therefore kept and sent when the drag ends.
+/// drag is therefore kept and sent when the drag ends; a `DragValue`
+/// shows it meanwhile through [`live_drag_value`].
 fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
-    let dragged = response.id.with("dragged value");
+    let dragged = dragged_key(response.id);
     if response.dragged() {
         ui.data_mut(|data| data.insert_temp(dragged, value));
         None
@@ -52,8 +53,40 @@ fn commit(ui: &egui::Ui, response: &egui::Response, value: f32) -> Option<f32> {
             seen
         }
     } else {
+        // A widget that went away mid-drag left its value; it must not
+        // show when the next drag starts. Read first: most frames have
+        // nothing to remove, and need no write.
+        if ui.data(|data| data.get_temp::<f32>(dragged).is_some()) {
+            ui.data_mut(|data| data.remove_temp::<f32>(dragged));
+        }
         response.changed().then_some(value)
     }
+}
+
+/// Where [`commit`] keeps the value a drag of widget `id` has reached.
+fn dragged_key(id: egui::Id) -> egui::Id {
+    id.with("dragged value")
+}
+
+/// A `DragValue` (built by `field` on `value`) in a live edit, whose
+/// response goes to [`commit`]. While it is dragged it shows the value the
+/// drag has reached: `DragValue` moves the value only in frames where the
+/// pointer moves, and in the others (a repaint while the pointer rests) it
+/// would show the model's value, and `commit` would keep that one for the
+/// release.
+fn live_drag_value<'a>(
+    ui: &mut egui::Ui,
+    value: &'a mut f32,
+    field: impl FnOnce(&'a mut f32) -> egui::DragValue<'a>,
+) -> egui::Response {
+    // The id the field's response will have.
+    let id = ui.next_auto_id();
+    if ui.ctx().is_being_dragged(id)
+        && let Some(dragged) = ui.data(|data| data.get_temp::<f32>(dragged_key(id)))
+    {
+        *value = dragged;
+    }
+    ui.add(field(value))
 }
 
 /// Name a widget that has no label of its own (a number field in a

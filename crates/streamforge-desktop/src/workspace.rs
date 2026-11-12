@@ -584,7 +584,8 @@ pub enum Shortcut {
     Record,
     /// Ctrl+L: go live; stopping asks.
     Live,
-    /// Ctrl+1 … Ctrl+9: put the scene at this index (from 0) on program.
+    /// Ctrl+1 … Ctrl+9: select the scene at this index (from 0) and put it
+    /// on program.
     Program(usize),
     /// Delete: remove the selected source; asks first.
     RemoveSource,
@@ -713,6 +714,90 @@ pub fn list_step(index: usize, len: usize, steps: isize) -> usize {
     index
         .saturating_add_signed(steps)
         .min(len.saturating_sub(1))
+}
+
+/// A capture's end reason where room is short (the inspector): without
+/// the system's error codes, and where the system's wording and code come
+/// right before StreamForge's remedy (`what happened: wording (CODE);
+/// remedy`), without that wording, so the remedy follows what happened.
+/// StreamForge's own words stay. The full reason belongs in a tooltip.
+pub fn short_reason(reason: &str) -> String {
+    let groups = code_groups(reason);
+    if let Some(&(start, end)) = groups
+        .iter()
+        .find(|(_, end)| reason[*end..].starts_with("; "))
+        && let Some(colon) = outside_backticks(&reason[..start], ": ")
+    {
+        return without_codes(&format!("{}{}", &reason[..colon], &reason[end..]));
+    }
+    without_codes(reason)
+}
+
+/// Where `pattern` first occurs in `text` outside backticks (a quoted
+/// name may contain anything).
+fn outside_backticks(text: &str, pattern: &str) -> Option<usize> {
+    let mut quoted = false;
+    for (index, c) in text.char_indices() {
+        if c == '`' {
+            quoted = !quoted;
+        } else if !quoted && text[index..].starts_with(pattern) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// The parenthesised error codes the systems append (` (HRESULT
+/// 0x80070005)`, ` (os error 2)`, ` (FormatMessageW() …)`,
+/// ` (AVFoundationErrorDomain -11819)`) in `text`, in order, each from the
+/// space before its `(` to after its `)`.
+fn code_groups(text: &str) -> Vec<(usize, usize)> {
+    let is_code = |inner: &str| {
+        inner.starts_with("HRESULT ")
+            || inner.starts_with("os error ")
+            || inner.starts_with("FormatMessageW")
+            || inner
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| word.ends_with("ErrorDomain"))
+    };
+    let mut groups = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(" (") {
+        let inner = from + found + 2;
+        // The group's end, nested parentheses included.
+        let mut depth = 1;
+        let close = text[inner..].char_indices().find_map(|(index, c)| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(inner + index)
+        });
+        match close {
+            Some(close) if is_code(&text[inner..close]) => {
+                groups.push((inner - 2, close + 1));
+                from = close + 1;
+            }
+            // Other parentheses stay, and so does an unclosed one; codes
+            // inside or after them are still found.
+            _ => from = inner,
+        }
+    }
+    groups
+}
+
+/// `text` without its [`code_groups`]. Other parentheses stay.
+fn without_codes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in code_groups(text) {
+        out.push_str(&text[at..start]);
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 #[cfg(test)]
@@ -1356,5 +1441,86 @@ mod tests {
         // Automatic stays automatic; an unknown camera keeps nothing.
         assert_eq!(mode_for_camera(None, Some(&desk)), None);
         assert_eq!(mode_for_camera(Some(&hd), None), None);
+    }
+
+    #[test]
+    fn a_short_reason_drops_the_systems_codes_and_wording_before_a_remedy() {
+        // Media Foundation (Windows): the remedy follows what happened.
+        assert_eq!(
+            short_reason(
+                "camera `Elgato Facecam` stopped delivering: Access is denied. \
+                 (HRESULT 0x80070005); allow camera access for desktop apps in \
+                 Settings > Privacy & security > Camera"
+            ),
+            "camera `Elgato Facecam` stopped delivering; allow camera access for desktop \
+             apps in Settings > Privacy & security > Camera"
+        );
+        assert_eq!(
+            short_reason(
+                "camera `Elgato Facecam` stopped delivering: The video recording device is \
+                 no longer present. (HRESULT 0xc00d3ea2); the camera was disconnected"
+            ),
+            "camera `Elgato Facecam` stopped delivering; the camera was disconnected"
+        );
+        // No remedy: the wording stays, the code goes.
+        assert_eq!(
+            short_reason("camera `Cam` stopped delivering: Unspecified error (HRESULT 0x80004005)"),
+            "camera `Cam` stopped delivering: Unspecified error"
+        );
+        // AVFoundation (macOS) and cpal's OS errors, nested parentheses too.
+        assert_eq!(
+            short_reason(
+                "the camera stopped: The operation could not be completed \
+                 (AVFoundationErrorDomain -11819)"
+            ),
+            "the camera stopped: The operation could not be completed"
+        );
+        assert_eq!(
+            short_reason(
+                "Failed to get current padding: OS Error -2004287484 \
+                 (FormatMessageW() returned error 317) (os error -2004287484)"
+            ),
+            "Failed to get current padding: OS Error -2004287484"
+        );
+        // A colon or semicolon inside a quoted name is not a separator, and
+        // other parentheses stay.
+        assert_eq!(
+            short_reason("camera `Cam: 2; left (USB)` went away"),
+            "camera `Cam: 2; left (USB)` went away"
+        );
+        assert_eq!(
+            short_reason("the captured window was closed (by its app)"),
+            "the captured window was closed (by its app)"
+        );
+        // An unbalanced parenthesis is left as it is; codes after it go.
+        assert_eq!(short_reason("stopped (HRESULT 0x1"), "stopped (HRESULT 0x1");
+        assert_eq!(
+            short_reason("stopped (partial frame: Access is denied. (HRESULT 0x80070005)"),
+            "stopped (partial frame: Access is denied."
+        );
+        // StreamForge's own diagnosis before a remedy stays: only wording
+        // that ends in a system code goes.
+        assert_eq!(
+            short_reason(
+                "display 1: screen recording is not permitted (The user declined TCCs); \
+                 allow screen recording"
+            ),
+            "display 1: screen recording is not permitted (The user declined TCCs); allow \
+             screen recording"
+        );
+        assert_eq!(
+            short_reason("cannot pick: no portal implements ScreenCast; install one"),
+            "cannot pick: no portal implements ScreenCast; install one"
+        );
+        // A remedy with a semicolon of its own stays whole; a semicolon in
+        // a quoted name is no separator.
+        assert_eq!(
+            short_reason("camera `A` stopped: Busy (HRESULT 0x1); close app B; then restart"),
+            "camera `A` stopped; close app B; then restart"
+        );
+        assert_eq!(
+            short_reason("camera stopped: device `Cam; 2` vanished"),
+            "camera stopped: device `Cam; 2` vanished"
+        );
     }
 }

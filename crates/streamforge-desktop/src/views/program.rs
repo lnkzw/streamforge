@@ -7,7 +7,7 @@ use eframe::egui;
 use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
-use crate::ui::widgets::{self, BadgeKind, Transport};
+use crate::ui::widgets::{self, BadgeKind, Button, ButtonKind, Transport};
 use crate::workspace::{self, Shortcut, fit};
 
 use super::{right_to_left, scene, with_keys};
@@ -17,8 +17,9 @@ const FACTS_HEIGHT: f32 = 22.0;
 
 impl DesktopApp {
     /// Returns where the header ends: a drawer opens below it, so the
-    /// on-air marks and the preview switch stay in view.
-    pub(crate) fn program_dock(&mut self, ui: &mut egui::Ui) -> f32 {
+    /// on-air marks and the preview switch stay in view. In a `narrow`
+    /// window the header also opens and closes that drawer.
+    pub(crate) fn program_dock(&mut self, ui: &mut egui::Ui, narrow: bool) -> f32 {
         let recording = self.on_air(Transport::Record);
         let live = self.on_air(Transport::Live);
         let program_name = self
@@ -31,6 +32,10 @@ impl DesktopApp {
         let actions = widgets::section_header(ui, "Program", None);
         right_to_left(ui, actions, |ui| {
             ui.spacing_mut().item_spacing.x = size::SPACE_6;
+            if narrow {
+                self.drawer_button(ui);
+                ui.add_space(size::SPACE_12);
+            }
             let mut preview = self.model.preview_enabled;
             if widgets::toggle(ui, &mut preview, "Preview")
                 .on_hover_ui(|ui| {
@@ -189,6 +194,32 @@ impl DesktopApp {
                 egui::Stroke::new(size::STROKE, color::ACCENT),
                 egui::StrokeKind::Inside,
             );
+        }
+    }
+
+    /// In a narrow window, the inspector is a drawer: this opens it on the
+    /// selected source after it was closed, and closes it.
+    fn drawer_button(&mut self, ui: &mut egui::Ui) {
+        // The same condition the drawer is shown on: it may show its
+        // empty state for a source that is gone, and this still closes it.
+        let selected = self.selected_source.is_some();
+        let open = selected && self.drawer_open;
+        let hint = if open {
+            "Close the inspector (Esc)"
+        } else {
+            "Open the selected source in the inspector"
+        };
+        if ui
+            .add(
+                Button::new(ButtonKind::Ghost, "Inspector")
+                    .icon(Icon::Layers)
+                    .enabled(selected),
+            )
+            .on_hover_text(hint)
+            .on_disabled_hover_text("Select a source to open it in the inspector")
+            .clicked()
+        {
+            self.drawer_open = !open;
         }
     }
 

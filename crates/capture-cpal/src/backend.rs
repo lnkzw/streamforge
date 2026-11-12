@@ -25,10 +25,11 @@
 //!   e.g. many USB interfaces) as that input, so such outputs have no
 //!   monitor. WASAPI endpoints are never both.
 //!
-//! Glitches are reported from the first data on. WASAPI flags the first
-//! packet after the start as discontinuous; cpal leaves that out only when
-//! the packet's device position is 0, which a loopback's never is (it is
-//! the output's). Nothing was captured before it, so nothing is lost.
+//! A WASAPI loopback reports glitches from its first data on. WASAPI flags
+//! the first packet after the start as discontinuous; cpal leaves that out
+//! only when the packet's device position is 0, which a loopback's never is
+//! (it is the output's). Nothing was captured before it, so nothing is
+//! lost. Other captures report every glitch.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -509,34 +510,40 @@ pub(crate) fn may_end(kind: cpal::ErrorKind) -> bool {
     )
 }
 
-/// Whether an error is the glitch that starts a stream (see the module
-/// docs): one before the first data.
-fn is_start_glitch(kind: cpal::ErrorKind, liveness: &Liveness) -> bool {
-    kind == cpal::ErrorKind::Xrun && !liveness.has_data()
+/// Whether a capture's first packet comes flagged as a discontinuity
+/// (see the module docs): a WASAPI loopback's. Everywhere else a glitch
+/// before the first data is reported like any other (a microphone's first
+/// packet has device position 0, which cpal leaves out itself).
+fn flags_its_start(loopback: bool) -> bool {
+    cfg!(target_os = "windows") && loopback
 }
 
 /// A stream error for reports and end reasons. WASAPI's message is only
 /// the call that failed and the system's code, so on Windows an endpoint
 /// that went away says so after it, as camera ends do (`what failed:
 /// wording (code); what it means`); CoreAudio's message says it already.
+/// WASAPI reports a changed format the same way, so the meaning covers it.
 pub(crate) fn stream_error(error: &cpal::Error) -> String {
     if cfg!(target_os = "windows") && error.kind() == cpal::ErrorKind::DeviceNotAvailable {
-        format!("{error}; the device was disconnected or disabled")
+        format!("{error}; the device was disconnected, disabled or reconfigured")
     } else {
         error.to_string()
     }
 }
 
 /// A stream's error callback. Errors are rare and not in the data path;
-/// it keeps the first few messages, each after `prefix`.
+/// it keeps the first few messages, each after `prefix`. With
+/// `start_flagged` (see [`flags_its_start`]), a glitch before the stream's
+/// first data is its start and left out.
 fn on_error(
     prefix: &'static str,
+    start_flagged: bool,
     errors: &Arc<Mutex<Vec<String>>>,
     liveness: &Arc<Liveness>,
 ) -> impl FnMut(cpal::Error) + Send + 'static {
     let (errors, liveness) = (Arc::clone(errors), Arc::clone(liveness));
     move |err| {
-        if is_start_glitch(err.kind(), &liveness) {
+        if start_flagged && err.kind() == cpal::ErrorKind::Xrun && !liveness.has_data() {
             return;
         }
         let message = format!("{prefix}{}", stream_error(&err));
@@ -665,10 +672,10 @@ fn run(
         let silence = keep_playing(
             &source,
             &config,
-            on_error("silence on the output: ", &errors, liveness),
+            on_error("silence on the output: ", false, &errors, liveness),
         )?;
         let device = &source.device;
-        let on_error = on_error("", &errors, liveness);
+        let on_error = on_error("", flags_its_start(source.loopback), &errors, liveness);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(device, &config, callback, on_error),
             SampleFormat::F64 => build::<f64>(device, &config, callback, on_error),
@@ -800,16 +807,33 @@ mod tests {
         assert!(may_end(cpal::ErrorKind::BackendError));
     }
 
-    #[test]
-    fn only_a_glitch_before_the_first_data_starts_the_stream() {
-        let liveness = Liveness::new();
-        assert!(is_start_glitch(cpal::ErrorKind::Xrun, &liveness));
-        assert!(!is_start_glitch(
-            cpal::ErrorKind::DeviceNotAvailable,
-            &liveness
-        ));
+    /// What `on_error` keeps of `kinds`, sent before and after the first
+    /// data.
+    fn kept(start_flagged: bool, before: &[cpal::ErrorKind], after: &[cpal::ErrorKind]) -> usize {
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let liveness = Arc::new(Liveness::new());
+        let mut callback = on_error("", start_flagged, &errors, &liveness);
+        for &kind in before {
+            callback(kind.into());
+        }
         liveness.data();
-        assert!(!is_start_glitch(cpal::ErrorKind::Xrun, &liveness));
+        for &kind in after {
+            callback(kind.into());
+        }
+        errors.lock().expect("errors").len()
+    }
+
+    #[test]
+    fn only_a_flagged_start_leaves_out_its_first_glitch() {
+        use cpal::ErrorKind::{DeviceNotAvailable, Xrun};
+        // A WASAPI loopback: the glitch before the first data is its start.
+        assert_eq!(kept(true, &[Xrun], &[]), 0);
+        assert_eq!(kept(true, &[Xrun, DeviceNotAvailable], &[Xrun]), 2);
+        // Anything else (a microphone, CoreAudio, the silence on the
+        // output) reports every glitch.
+        assert_eq!(kept(false, &[Xrun], &[Xrun]), 2);
+        assert_eq!(flags_its_start(true), cfg!(target_os = "windows"));
+        assert!(!flags_its_start(false));
     }
 
     #[test]
@@ -823,7 +847,9 @@ mod tests {
         let message = stream_error(&removed);
         assert!(message.starts_with("Failed to get current padding: OS Error"));
         assert_eq!(
-            message.ends_with("(os error -2004287484); the device was disconnected or disabled"),
+            message.ends_with(
+                "(os error -2004287484); the device was disconnected, disabled or reconfigured"
+            ),
             cfg!(target_os = "windows"),
             "{message}"
         );

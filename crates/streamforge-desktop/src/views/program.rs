@@ -133,7 +133,7 @@ impl DesktopApp {
             (Some(texture), true) => {
                 painter.image(
                     texture.id(),
-                    monitor,
+                    picture_rect(monitor, texture.size(), ui.ctx().pixels_per_point()),
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -280,9 +280,39 @@ fn on_pixels(monitor: egui::Rect, pixels_per_point: f32) -> (egui::Rect, Option<
     (monitor, size)
 }
 
+/// Where the preview picture goes: at its own size in pixels when that is
+/// the monitor's, give or take the pixel by which the engine's fit to the
+/// canvas's aspect ratio can differ, so it is drawn 1:1; stretched over
+/// the monitor otherwise (while a new size is on its way).
+fn picture_rect(monitor: egui::Rect, texture: [usize; 2], pixels_per_point: f32) -> egui::Rect {
+    let picture = egui::vec2(texture[0] as f32, texture[1] as f32);
+    let off = (picture - monitor.size() * pixels_per_point).abs();
+    if off.x <= 1.5 && off.y <= 1.5 {
+        egui::Rect::from_min_size(monitor.min, picture / pixels_per_point)
+    } else {
+        monitor
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_picture_is_drawn_at_its_own_size_once_it_has_the_monitors() {
+        // 1000x562 pixels at 125 %; the engine fits that to 999x562.
+        let monitor = egui::Rect::from_min_size(egui::pos2(12.0, 20.0), egui::vec2(800.0, 449.6));
+        let picture = picture_rect(monitor, [999, 562], 1.25);
+        assert_eq!(picture.min, monitor.min);
+        assert!((picture.width() * 1.25 - 999.0).abs() < 1e-3, "{picture:?}");
+        assert!(
+            (picture.height() * 1.25 - 562.0).abs() < 1e-3,
+            "{picture:?}"
+        );
+        // A frame of the size before (or the default) is stretched.
+        assert_eq!(picture_rect(monitor, [480, 270], 1.25), monitor);
+        assert_eq!(picture_rect(monitor, [996, 560], 1.25), monitor);
+    }
 
     #[test]
     fn the_monitor_lands_on_whole_pixels_and_asks_for_its_size() {

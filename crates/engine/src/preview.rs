@@ -5,17 +5,19 @@
 //! down to the size the viewer asked for and publishes it to a newest-wins
 //! mailbox. Scaling a large preview takes a few milliseconds; on its own
 //! thread it never delays the render, and so never the outputs. A preview
-//! that falls behind drops its own frames, counted.
+//! that falls behind drops its own frames, counted. A new size reaches the
+//! running thread as a new scaler: the render thread's buffers stay.
 
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use command_api::{CommandError, ErrorCode};
+use command_api::CommandError;
 use media_core::{FrameMailbox, FramePool, VideoFrame};
 use video_compositor::Downscaler;
 
 use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH};
+use crate::pipeline::{internal, lock};
 
 /// Preview frames are every second rendered frame (30 FPS).
 pub(crate) const PREVIEW_EVERY: u64 = 2;
@@ -53,35 +55,57 @@ pub(crate) fn fit_preview_size(width: u32, height: u32) -> (u32, u32) {
     (width.max(1) as u32, height.max(1) as u32)
 }
 
-/// A running preview: what the render thread holds in the fan-out.
+/// The scaler from the canvas to a preview `size` that fits it (see
+/// [`fit_preview_size`]); it allocates its tables, so build it off the
+/// render thread.
+pub(crate) fn preview_scaler(size: (u32, u32)) -> Result<Downscaler, CommandError> {
+    Downscaler::new(CANVAS_WIDTH, CANVAS_HEIGHT, size.0, size.1)
+        .map_err(|error| internal(format!("cannot size the preview: {error}")))
+}
+
+/// A running preview: what the render thread holds in the fan-out. Its
+/// thread and buffers last as long as the preview; a new size only swaps
+/// the scaler.
 pub(crate) struct PreviewOut {
     frames: SyncSender<VideoFrame>,
     copies: FramePool,
+    /// A scaler for a new size, taken by the preview thread before its
+    /// next frame.
+    resize: Arc<Mutex<Option<Downscaler>>>,
     /// No free copy, or the preview thread still busy with the last frame.
     dropped: u64,
     thread: JoinHandle<(u64, u64)>,
 }
 
 impl PreviewOut {
-    /// Start the preview thread, publishing `size` frames to `mailbox`.
-    /// `size` must fit the canvas (see [`fit_preview_size`]).
+    /// Start the preview thread, publishing frames scaled by `scaler` to
+    /// `mailbox`.
     pub(crate) fn start(
         mailbox: Arc<FrameMailbox>,
-        size: (u32, u32),
+        scaler: Downscaler,
     ) -> Result<Self, CommandError> {
-        let scaler = Downscaler::new(CANVAS_WIDTH, CANVAS_HEIGHT, size.0, size.1)
-            .map_err(|error| internal(format!("cannot size the preview: {error}")))?;
         let (frames, receive) = sync_channel(1);
+        let resize = Arc::new(Mutex::new(None));
         let thread = thread::Builder::new()
             .name("preview".to_owned())
-            .spawn(move || run(&receive, scaler, &mailbox))
+            .spawn({
+                let resize = Arc::clone(&resize);
+                move || run(&receive, scaler, &resize, &mailbox)
+            })
             .map_err(|error| internal(format!("cannot start the preview thread: {error}")))?;
         Ok(Self {
             frames,
             copies: FramePool::new(COPIES),
+            resize,
             dropped: 0,
             thread,
         })
+    }
+
+    /// Scale with `scaler` from the next frame on. Frames already scaled
+    /// keep their size, but none of the old size follows one of the new.
+    pub(crate) fn resize(&self, scaler: Downscaler) {
+        *lock(&self.resize) = Some(scaler);
     }
 
     /// On the render thread: hand a copy of `frame` to the preview thread,
@@ -114,7 +138,7 @@ impl PreviewOut {
         }
     }
 
-    /// Stop the preview thread after the frame it is on; returns the frames
+    /// Stop the preview thread after the frames it has; returns the frames
     /// published and dropped. Call it without holding the fan-out's lock.
     pub(crate) fn stop(self) -> (u64, u64) {
         let Self {
@@ -137,11 +161,16 @@ impl PreviewOut {
 fn run(
     frames: &Receiver<VideoFrame>,
     mut scaler: Downscaler,
+    resize: &Mutex<Option<Downscaler>>,
     mailbox: &FrameMailbox,
 ) -> (u64, u64) {
+    // Buffers grow to a larger size once and are reused after.
     let pool = FramePool::new(PREVIEW_BUFFERS);
     let (mut published, mut dropped) = (0, 0);
     while let Ok(frame) = frames.recv() {
+        if let Some(resized) = lock(resize).take() {
+            scaler = resized;
+        }
         // Only a frame of another size fails, and the canvas never changes.
         match pool
             .acquire(scaler.frame_len())
@@ -155,10 +184,6 @@ fn run(
         }
     }
     (published, dropped)
-}
-
-fn internal(message: String) -> CommandError {
-    CommandError::new(ErrorCode::Internal, message)
 }
 
 #[cfg(test)]
@@ -190,31 +215,57 @@ mod tests {
     #[test]
     fn frames_are_scaled_on_the_preview_thread_and_counted() {
         let mailbox = Arc::new(FrameMailbox::new());
-        let mut preview = PreviewOut::start(Arc::clone(&mailbox), (640, 360)).expect("start");
+        let scaler = preview_scaler((640, 360)).expect("scaler");
+        let mut preview = PreviewOut::start(Arc::clone(&mailbox), scaler).expect("start");
         let canvas = pattern::solid(CANVAS_WIDTH, CANVAS_HEIGHT, [1, 2, 3, 255]).expect("canvas");
-        let deadline = Instant::now() + Duration::from_secs(5);
         let mut offered = 0;
-        let small = loop {
-            preview.offer(&canvas);
-            offered += 1;
+        let small = next_frame(&mut preview, &mailbox, &canvas, &mut offered);
+        assert_eq!((small.width(), small.height()), (640, 360));
+        assert_eq!(small.pixel(639, 359), [1, 2, 3, 255]);
+        drop(small);
+
+        // A new size: once a frame has it, none of the old size follows.
+        preview.resize(preview_scaler((320, 180)).expect("scaler"));
+        let mut seen_new = 0;
+        while seen_new < 5 {
+            let frame = next_frame(&mut preview, &mailbox, &canvas, &mut offered);
+            let size = (frame.width(), frame.height());
+            if size == (320, 180) {
+                seen_new += 1;
+            } else {
+                assert_eq!((seen_new, size), (0, (640, 360)), "old size after new");
+            }
+        }
+        let (published, dropped) = preview.stop();
+        assert!(published >= 6, "{published}");
+        // Every offered frame was published or dropped, at both sizes.
+        assert_eq!(published + dropped, offered);
+    }
+
+    /// Offer `canvas` until the preview publishes a frame (bounded).
+    fn next_frame(
+        preview: &mut PreviewOut,
+        mailbox: &FrameMailbox,
+        canvas: &VideoFrame,
+        offered: &mut u64,
+    ) -> VideoFrame {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            preview.offer(canvas);
+            *offered += 1;
             if let Some(frame) = mailbox.take() {
-                break frame;
+                return frame;
             }
             assert!(Instant::now() < deadline, "no preview frame");
             thread::sleep(Duration::from_millis(5));
-        };
-        assert_eq!((small.width(), small.height()), (640, 360));
-        assert_eq!(small.pixel(639, 359), [1, 2, 3, 255]);
-        let (published, dropped) = preview.stop();
-        assert!(published >= 1, "{published}");
-        // Every offered frame was published or dropped.
-        assert_eq!(published + dropped, offered);
+        }
     }
 
     #[test]
     fn a_busy_preview_thread_drops_and_counts() {
         let mailbox = Arc::new(FrameMailbox::new());
-        let mut preview = PreviewOut::start(mailbox, (480, 270)).expect("start");
+        let scaler = preview_scaler(DEFAULT_PREVIEW_SIZE).expect("scaler");
+        let mut preview = PreviewOut::start(mailbox, scaler).expect("start");
         let canvas = pattern::solid(CANVAS_WIDTH, CANVAS_HEIGHT, [0, 0, 0, 255]).expect("canvas");
         // Back to back, faster than the thread scales: one copy waits, one is
         // being scaled, the rest are dropped.

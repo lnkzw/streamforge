@@ -3,10 +3,13 @@
 //! Each output pixel is the average of the source pixels it covers, each
 //! weighted by how much of it is covered (a box filter). Unlike bilinear
 //! sampling this does not skip source pixels, so thin lines and text stay
-//! even at any ratio. Weights are computed once per size pair in fixed
-//! point (8 bits vertically, 14 horizontally, each axis's summing exactly
-//! to one), so a flat colour stays exact and the output does not depend on
-//! the platform. Cost (1920×1080 source, release build, see
+//! even. Weights are computed once per size pair in fixed point, each
+//! axis's summing exactly to one, so a flat colour stays exact and the
+//! output does not depend on the platform: 14 bits horizontally, and
+//! vertically 8 bits while an output row covers at most five source rows
+//! (a ratio up to 4, the preview's sizes), 14 bits beyond. A weight is zero
+//! only beyond 16384 source pixels per output pixel. Cost (1920×1080
+//! source, release build, see
 //! `examples/render_bench.rs`): about 2 ms to 1280×720 on the development
 //! machine; equal sizes are a copy.
 
@@ -16,8 +19,15 @@ use thiserror::Error;
 const BPP: usize = PixelFormat::BYTES_PER_PIXEL;
 /// The vertical weights sum to this, so a vertical sum (at most
 /// `255 * ROW_ONE`) fits in a `u16`: the vertical pass, which runs over
-/// whole rows of bytes, vectorizes in 16-bit lanes.
+/// whole rows of bytes, vectorizes in 16-bit lanes...
 const ROW_ONE: u32 = 1 << 8;
+/// ...while an output row covers at most this many source rows; with
+/// more, 8-bit weights get too coarse.
+const NARROW_ROWS: usize = 5;
+/// Beyond that, the vertical weights sum to this, in `u32` sums (at most
+/// `255 * WIDE_ROW_ONE`) cut to 16 bits by `WIDE_SHIFT`.
+const WIDE_ROW_ONE: u32 = 1 << 14;
+const WIDE_SHIFT: u32 = 6;
 /// The horizontal weights sum to this; a horizontal sum (at most
 /// `65280 * COLUMN_ONE`) fits in a `u32`.
 const COLUMN_ONE: u32 = 1 << 14;
@@ -61,6 +71,9 @@ pub struct Downscaler {
     rows: Axis,
     /// One source-wide row of vertical sums, four channels per pixel.
     columns_sum: Vec<u16>,
+    /// The same in `u32` with 14-bit row weights, for ratios beyond
+    /// `NARROW_ROWS`; empty otherwise.
+    wide_sums: Vec<u32>,
 }
 
 impl Downscaler {
@@ -80,14 +93,18 @@ impl Downscaler {
                 height,
             });
         }
+        let wide = Axis::taps(src_height, height) > NARROW_ROWS;
+        let row_one = if wide { WIDE_ROW_ONE } else { ROW_ONE };
+        let row_len = src_width as usize * BPP;
         Ok(Self {
             src_width,
             src_height,
             width,
             height,
             columns: Axis::new(src_width, width, COLUMN_ONE),
-            rows: Axis::new(src_height, height, ROW_ONE),
-            columns_sum: vec![0; src_width as usize * BPP],
+            rows: Axis::new(src_height, height, row_one),
+            columns_sum: vec![0; row_len],
+            wide_sums: if wide { vec![0; row_len] } else { Vec::new() },
         })
     }
 
@@ -138,15 +155,31 @@ impl Downscaler {
             // vectorizes; the horizontal pass then has one row to reduce.
             let (first, weights) = self.rows.span(y as usize);
             let sums = &mut self.columns_sum;
-            sums.fill(0);
-            for (k, &wy) in weights.iter().enumerate() {
-                if wy == 0 {
-                    continue;
+            let rows = weights
+                .iter()
+                .enumerate()
+                .filter(|(_, wy)| **wy > 0)
+                .map(|(k, &wy)| (src.row(first + k as u32), wy));
+            if self.wide_sums.is_empty() {
+                sums.fill(0);
+                for (row, wy) in rows {
+                    // Weights sum to ROW_ONE, so the sum stays within a u16.
+                    let wy = wy as u16;
+                    for (sum, &value) in sums.iter_mut().zip(row) {
+                        *sum += wy * u16::from(value);
+                    }
                 }
-                // Weights sum to ROW_ONE, so the sum stays within a u16.
-                let wy = wy as u16;
-                for (sum, &value) in sums.iter_mut().zip(src.row(first + k as u32)) {
-                    *sum += wy * u16::from(value);
+            } else {
+                let wide = &mut self.wide_sums;
+                wide.fill(0);
+                for (row, wy) in rows {
+                    for (sum, &value) in wide.iter_mut().zip(row) {
+                        *sum += wy * u32::from(value);
+                    }
+                }
+                for (sum, &wide) in sums.iter_mut().zip(wide.iter()) {
+                    // <= 65280.5, so it fits in a u16.
+                    *sum = ((wide + (1 << (WIDE_SHIFT - 1))) >> WIDE_SHIFT) as u16;
                 }
             }
             reduce_row(out, &self.columns, sums);
@@ -209,22 +242,12 @@ impl Axis {
     /// weights sum exactly to `one` and none is negative, at any ratio
     /// (with more source pixels than `one`, some get no weight).
     fn new(src: u32, dst: u32, one: u32) -> Self {
+        let taps = Self::taps(src, dst);
         let (src, dst) = (u64::from(src), u64::from(dst));
-        let span = |i: u64| {
-            let (lo, hi) = (i * src, (i + 1) * src);
-            (lo, hi, lo / dst, (hi - 1) / dst)
-        };
-        let taps = (0..dst)
-            .map(|i| {
-                let (_, _, first, last) = span(i);
-                (last - first + 1) as usize
-            })
-            .max()
-            .unwrap_or(1);
         let mut firsts = Vec::with_capacity(dst as usize);
         let mut weights = vec![0; dst as usize * taps];
         for (i, padded) in (0..dst).zip(weights.chunks_exact_mut(taps)) {
-            let (lo, hi, first, last) = span(i);
+            let (lo, hi, first, last) = span(src, dst, i);
             // Near the end, the padding goes in front.
             let start = first.min(src - taps as u64);
             let skip = (first - start) as usize;
@@ -244,9 +267,28 @@ impl Axis {
         }
     }
 
+    /// The most source pixels one output pixel covers.
+    fn taps(src: u32, dst: u32) -> usize {
+        let (src, dst) = (u64::from(src), u64::from(dst));
+        (0..dst)
+            .map(|i| {
+                let (_, _, first, last) = span(src, dst, i);
+                (last - first + 1) as usize
+            })
+            .max()
+            .unwrap_or(1)
+    }
+
     fn span(&self, i: usize) -> (u32, &[u32]) {
         (self.firsts[i], &self.weights[i * self.taps..][..self.taps])
     }
+}
+
+/// Output pixel `i`'s cover in units of `1 / dst` source pixel, and its
+/// first and last source pixel.
+fn span(src: u64, dst: u64, i: u64) -> (u64, u64, u64, u64) {
+    let (lo, hi) = (i * src, (i + 1) * src);
+    (lo, hi, lo / dst, (hi - 1) / dst)
 }
 
 #[cfg(test)]
@@ -298,6 +340,94 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The exact box average of `src` at `width`×`height`, in floating
+    /// point: an independent reference.
+    fn reference(src: &VideoFrame, width: u32, height: u32) -> Vec<[f64; 4]> {
+        // How much of source pixel `j` the output pixel `i` covers, of `n`
+        // source pixels shown on `m`.
+        let cover = |i: u32, j: u32, n: u32, m: u32| {
+            let ratio = f64::from(n) / f64::from(m);
+            let (lo, hi) = (f64::from(i) * ratio, f64::from(i + 1) * ratio);
+            (hi.min(f64::from(j + 1)) - lo.max(f64::from(j))).max(0.0) / ratio
+        };
+        let mut out = vec![[0.0; 4]; (width * height) as usize];
+        for (index, pixel) in out.iter_mut().enumerate() {
+            let (x, y) = (index as u32 % width, index as u32 / width);
+            for sy in 0..src.height() {
+                let wy = cover(y, sy, src.height(), height);
+                if wy == 0.0 {
+                    continue;
+                }
+                for sx in 0..src.width() {
+                    let w = wy * cover(x, sx, src.width(), width);
+                    for (value, &byte) in pixel.iter_mut().zip(&src.pixel(sx, sy)) {
+                        *value += w * f64::from(byte);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Bytes that vary from pixel to pixel and channel to channel.
+    fn noise(width: u32, height: u32) -> VideoFrame {
+        let mut frame = VideoFrame::zeroed(width, height, PixelFormat::Bgra8).expect("frame");
+        let mut state = 0x2545_f491_u32;
+        for byte in frame.data_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = (state >> 24) as u8;
+        }
+        frame
+    }
+
+    #[test]
+    fn matches_the_exact_area_average_at_any_ratio() {
+        let src = noise(97, 61);
+        for (width, height) in [
+            (96, 60),
+            (65, 41),
+            (50, 31),
+            (24, 15),
+            (13, 7),
+            (5, 2),
+            (1, 1),
+            (97, 1),
+            (1, 61),
+        ] {
+            let small = scale(&src, width, height);
+            let exact = reference(&src, width, height);
+            for (index, expected) in exact.iter().enumerate() {
+                let (x, y) = (index as u32 % width, index as u32 / width);
+                for (&got, &want) in small.pixel(x, y).iter().zip(expected) {
+                    assert!(
+                        (f64::from(got) - want).abs() <= 1.5,
+                        "{width}x{height} at ({x}, {y}): {got} vs {want:.2}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_tall_source_on_one_row_averages_every_row() {
+        // Two of every three rows white: 1080 rows into one average 170.
+        let mut src = VideoFrame::zeroed(2, 1080, PixelFormat::Bgra8).expect("frame");
+        for y in 0..1080 {
+            let value = if y % 3 == 0 { 0 } else { 255 };
+            let at = y * src.stride();
+            src.data_mut()[at..at + 8].fill(value);
+        }
+        let small = scale(&src, 2, 1);
+        assert_eq!(small.pixel(0, 0), [170, 170, 170, 170]);
+        // Just past the narrow path: six rows per row.
+        let small = scale(&src, 2, 180);
+        for y in 0..180 {
+            assert_eq!(small.pixel(1, y), [170, 170, 170, 170], "row {y}");
         }
     }
 

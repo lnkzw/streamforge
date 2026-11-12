@@ -249,11 +249,13 @@ pub struct MoveSourceRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PreviewState {
     pub enabled: bool,
+    /// The preview frames' size (after turning off, the size they had).
     pub width: u32,
     pub height: u32,
     pub fps: capture_api::Rational,
     /// When turning the preview off: frames published, and frames dropped
-    /// because no buffer was free (the viewer held them).
+    /// because no buffer was free (the viewer held them) or the preview
+    /// thread was still busy, at every size since it was turned on.
     pub frames_published: Option<u64>,
     pub frames_dropped: Option<u64>,
     /// When turning the preview off stopped the pipeline: its report.

@@ -225,8 +225,10 @@ pub struct Model {
     /// size on screen, so the picture is drawn 1:1. `None` until it is
     /// drawn; the engine fits it to the canvas.
     pub preview_size_wanted: Option<(u32, u32)>,
-    /// The size last asked of the engine, and when.
-    preview_size_asked: Option<((u32, u32), Instant)>,
+    /// The size last asked of the engine...
+    preview_size_asked: Option<(u32, u32)>,
+    /// ...and when a size was last asked for (also if the engine was busy).
+    preview_resize_at: Option<Instant>,
     pub recording: Option<RecordingStarted>,
     pub streaming: Option<StreamingStarted>,
     /// Sources that can be captured by id, or why there are none (e.g. the
@@ -283,6 +285,7 @@ impl Model {
             preview_enabled: false,
             preview_size_wanted: None,
             preview_size_asked: None,
+            preview_resize_at: None,
             recording: None,
             streaming: None,
             screen_sources: None,
@@ -765,12 +768,15 @@ impl Model {
 
     pub fn set_preview(&mut self, enabled: bool) {
         let mut params = json!({ "enabled": enabled });
-        if enabled && let Some((width, height)) = self.preview_size_wanted {
+        let size = self.preview_size_wanted.filter(|_| enabled);
+        if let Some((width, height)) = size {
             params["width"] = width.into();
             params["height"] = height.into();
-            self.preview_size_asked = Some(((width, height), Instant::now()));
         }
-        self.act("set_preview", params);
+        if self.act("set_preview", params) && size.is_some() {
+            self.preview_size_asked = size;
+            self.preview_resize_at = Some(Instant::now());
+        }
     }
 
     /// While the preview runs, ask the engine for the size the program
@@ -792,17 +798,21 @@ impl Model {
         {
             return;
         }
-        match self.preview_size_asked {
-            Some((asked, _)) if asked == wanted => return,
-            Some((_, at)) if at.elapsed() < PREVIEW_RESIZE_EVERY => return,
-            _ => {}
+        if self.preview_size_asked == Some(wanted)
+            || self
+                .preview_resize_at
+                .is_some_and(|at| at.elapsed() < PREVIEW_RESIZE_EVERY)
+        {
+            return;
         }
-        self.preview_size_asked = Some((wanted, Instant::now()));
-        self.submit(
-            "set_preview",
-            json!({ "enabled": true, "width": wanted.0, "height": wanted.1 }),
-            Pending::PreviewSize,
-        );
+        self.preview_resize_at = Some(Instant::now());
+        let params = json!({ "enabled": true, "width": wanted.0, "height": wanted.1 });
+        // Not the user's action: a busy engine is asked again later,
+        // without a line in the log.
+        if let Ok(id) = self.worker.submit("set_preview", params) {
+            self.pending.insert(id, Pending::PreviewSize);
+            self.preview_size_asked = Some(wanted);
+        }
     }
 
     /// Add a channel playing `input`; it sends to the program bus. Needs
@@ -1084,6 +1094,14 @@ impl Model {
                     });
                     continue;
                 }
+                Some(Pending::PreviewSize) => {
+                    // Answers can come after a later switch's: a resize
+                    // never says whether the preview is on.
+                    if let Err(error) = response.result {
+                        self.failed(&response.name, &error);
+                    }
+                    continue;
+                }
                 Some(Pending::Cameras) => {
                     self.cameras = Some(match response.result {
                         Ok(CommandOutput::Cameras(list)) => Ok(list.cameras),
@@ -1187,7 +1205,9 @@ impl Model {
                 if let Some(dropped) = preview.frames_dropped.filter(|dropped| *dropped > 0) {
                     self.push(
                         Level::Warning,
-                        format!("{dropped} preview frame(s) dropped (the UI fell behind)"),
+                        format!(
+                            "{dropped} preview frame(s) dropped (the preview or the UI fell behind)"
+                        ),
                     );
                 }
                 for warning in preview.warnings {

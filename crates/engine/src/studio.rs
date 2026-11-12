@@ -18,7 +18,9 @@ use crate::composite::FPS;
 use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
 use crate::pipeline::Pipeline;
-use crate::preview::{DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, fit_preview_size};
+use crate::preview::{
+    DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, PreviewOut, fit_preview_size, preview_scaler,
+};
 use crate::scenes::{self, SceneCollection};
 use crate::{Engine, audio};
 
@@ -697,7 +699,7 @@ impl Engine {
 
     /// Turn the preview on or off. `size` is the largest frame the viewer
     /// wants (fitted to the canvas); while the preview runs, a new size
-    /// replaces its thread, without stopping the pipeline.
+    /// reaches its thread without stopping anything.
     pub(crate) fn set_preview(
         &mut self,
         enabled: bool,
@@ -716,44 +718,34 @@ impl Engine {
         let size = size.map(|(width, height)| fit_preview_size(width, height));
         if enabled && !self.preview_enabled {
             let size = size.unwrap_or(DEFAULT_PREVIEW_SIZE);
-            let started = self.ensure_pipeline()?;
+            // Started before the pipeline: if it cannot start, nothing
+            // else has.
+            let preview =
+                PreviewOut::start(Arc::clone(&self.preview_frames), preview_scaler(size)?)?;
+            if let Err(error) = self.ensure_pipeline() {
+                preview.stop();
+                return Err(error);
+            }
             if let Some(pipeline) = &self.pipeline {
-                if let Err(error) =
-                    pipeline.set_preview(Some((Arc::clone(&self.preview_frames), size)))
-                {
-                    if started {
-                        // Nothing else uses it yet; its report of no run
-                        // has nothing to tell.
-                        let _ = self.release_pipeline();
-                    }
-                    return Err(error);
-                }
+                pipeline.attach_preview(preview);
                 state.warnings.extend(pipeline.capture_warnings());
                 state.warnings.extend(pipeline.audio_warnings());
             }
             self.preview_enabled = true;
             self.preview_size = size;
-            self.preview_counts = (0, 0);
         } else if enabled {
             if let Some(size) = size.filter(|size| *size != self.preview_size)
                 && let Some(pipeline) = &self.pipeline
             {
-                let replaced =
-                    pipeline.set_preview(Some((Arc::clone(&self.preview_frames), size)))?;
-                if let Some((published, dropped)) = replaced {
-                    self.preview_counts.0 += published;
-                    self.preview_counts.1 += dropped;
-                }
+                pipeline.resize_preview(preview_scaler(size)?);
                 self.preview_size = size;
             }
         } else if self.preview_enabled {
-            let stopped = match &self.pipeline {
-                Some(pipeline) => pipeline.set_preview(None)?,
-                None => None,
-            };
-            if let Some((published, dropped)) = stopped {
-                state.frames_published = Some(self.preview_counts.0 + published);
-                state.frames_dropped = Some(self.preview_counts.1 + dropped);
+            if let Some((published, dropped)) =
+                self.pipeline.as_ref().and_then(Pipeline::stop_preview)
+            {
+                state.frames_published = Some(published);
+                state.frames_dropped = Some(dropped);
             }
             self.preview_enabled = false;
             // A drained mailbox does not show a stale last frame later.

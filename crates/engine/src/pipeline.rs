@@ -33,7 +33,9 @@ use command_api::{
 };
 use encoder_ffmpeg::{MAX_AUDIO_TRACKS, OutputInput};
 use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame, sample_ring};
-use video_compositor::{Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats};
+use video_compositor::{
+    Compositor, CompositorConfig, CpuRenderer, Downscaler, FrameSink, LiveRenderStats,
+};
 
 use crate::composite::FPS;
 use crate::images::ImageStore;
@@ -849,22 +851,36 @@ impl Pipeline {
         lock(&self.fanout.audio).retain(|out| out.id != id);
     }
 
-    /// Start publishing preview frames of `size` (which must fit the
-    /// canvas) to the mailbox, replacing the preview running before at its
-    /// size (`Some`), or stop (`None`). Returns how many frames the
-    /// replaced or stopped preview published and dropped (no free buffer,
-    /// e.g. a viewer holding frames, or a preview thread behind).
-    pub fn set_preview(
-        &self,
-        preview: Option<(Arc<FrameMailbox>, (u32, u32))>,
-    ) -> Result<Option<(u64, u64)>, CommandError> {
-        // Started before the swap, so a failed start keeps the old one.
-        let started = preview
-            .map(|(mailbox, size)| PreviewOut::start(mailbox, size))
-            .transpose()?;
-        let previous = std::mem::replace(&mut *lock(&self.fanout.preview), started);
+    /// Publish preview frames through `preview`, started by the caller
+    /// (the preview must be off).
+    pub(crate) fn attach_preview(&self, preview: PreviewOut) {
+        let previous = lock(&self.fanout.preview).replace(preview);
+        debug_assert!(previous.is_none(), "a preview was already attached");
         // Joined outside the lock, so the render thread never waits on it.
-        Ok(previous.map(PreviewOut::stop))
+        if let Some(previous) = previous {
+            previous.stop();
+        }
+    }
+
+    /// Scale preview frames with `scaler` from the next one on, without
+    /// stopping the preview thread; `false` if no preview runs.
+    pub(crate) fn resize_preview(&self, scaler: Downscaler) -> bool {
+        match lock(&self.fanout.preview).as_ref() {
+            Some(preview) => {
+                preview.resize(scaler);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stop publishing preview frames; returns how many the preview
+    /// published and dropped (no free buffer, e.g. a viewer holding frames,
+    /// or a preview thread behind).
+    pub(crate) fn stop_preview(&self) -> Option<(u64, u64)> {
+        let previous = lock(&self.fanout.preview).take();
+        // Joined outside the lock, so the render thread never waits on it.
+        previous.map(PreviewOut::stop)
     }
 
     /// The run's channels and buses with their levels, and its silent
@@ -1270,7 +1286,7 @@ impl Progress {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panicking producer leaves a consistent list behind.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -1415,7 +1431,7 @@ pub(crate) fn since(t0: Instant, at: Instant) -> Option<MediaTimestamp> {
     })
 }
 
-fn internal(error: impl std::fmt::Display) -> CommandError {
+pub(crate) fn internal(error: impl std::fmt::Display) -> CommandError {
     CommandError::new(
         ErrorCode::Internal,
         format!("media pipeline failed: {error}"),

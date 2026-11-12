@@ -57,9 +57,6 @@ pub struct Engine {
     /// The preview frames' size: what the viewer asked for, fitted to the
     /// canvas (the default until it asks).
     preview_size: (u32, u32),
-    /// Preview frames published and dropped at sizes before the current
-    /// one, since the preview was turned on.
-    preview_counts: (u64, u64),
     status: EngineStatus,
     capture: Capture,
     /// Where commands may create files (snapshots); clients only name files.
@@ -101,7 +98,6 @@ impl Engine {
             preview_enabled: false,
             preview_frames: Arc::new(FrameMailbox::new()),
             preview_size: preview::DEFAULT_PREVIEW_SIZE,
-            preview_counts: (0, 0),
             pipeline: None,
             recording: None,
             streaming: None,

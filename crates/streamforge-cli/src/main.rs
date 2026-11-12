@@ -729,7 +729,7 @@ fn stream(
             output.insert("streaming".into(), serde_json::to_value(&report)?);
         }
         Err(err) => {
-            report_error(&err);
+            print_error(&err);
             failed = true;
         }
     }
@@ -739,7 +739,7 @@ fn stream(
                 output.insert("recording".into(), serde_json::to_value(&report)?);
             }
             Err(err) => {
-                report_error(&err);
+                print_error(&err);
                 failed = true;
             }
         }
@@ -903,11 +903,15 @@ fn progress_line(health: &command_api::HealthReport, elapsed: Duration) -> Strin
 }
 
 fn report_error(err: &command_api::CommandError) -> ExitCode {
+    print_error(err);
+    ExitCode::FAILURE
+}
+
+fn print_error(err: &command_api::CommandError) {
     eprintln!("error: {err}");
     if let Some(details) = &err.details {
         eprintln!("details: {details}");
     }
-    ExitCode::FAILURE
 }
 
 fn run_command(engine: &mut Engine, name: &str, params: Map<String, Value>) -> Result<ExitCode> {

@@ -17,14 +17,17 @@ use serde_json::Value;
 use crate::composite::FPS;
 use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
-use crate::pipeline::{PREVIEW_EVERY, PREVIEW_HEIGHT, PREVIEW_WIDTH, Pipeline};
+use crate::pipeline::Pipeline;
+use crate::preview::{
+    DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, PreviewOut, fit_preview_size, preview_scaler,
+};
 use crate::scenes::{self, SceneCollection};
 use crate::{Engine, audio};
 
 impl Engine {
-    /// The in-process preview: the newest quarter-resolution frame while
-    /// `set_preview` is enabled. This is the media plane for embedding UIs;
-    /// all control goes through commands.
+    /// The in-process preview: the newest frame, at the size `set_preview`
+    /// asked for, while the preview is enabled. This is the media plane for
+    /// embedding UIs; all control goes through commands.
     pub fn preview_frames(&self) -> Arc<FrameMailbox> {
         Arc::clone(&self.preview_frames)
     }
@@ -694,30 +697,52 @@ impl Engine {
         Ok(self.mixer_state())
     }
 
-    pub(crate) fn set_preview(&mut self, enabled: bool) -> Result<PreviewState, CommandError> {
+    /// Turn the preview on or off. `size` is the largest frame the viewer
+    /// wants (fitted to the canvas); while the preview runs, a new size
+    /// reaches its thread without stopping anything.
+    pub(crate) fn set_preview(
+        &mut self,
+        enabled: bool,
+        size: Option<(u32, u32)>,
+    ) -> Result<PreviewState, CommandError> {
         let mut state = PreviewState {
             enabled: self.preview_enabled,
-            width: PREVIEW_WIDTH,
-            height: PREVIEW_HEIGHT,
+            width: 0,
+            height: 0,
             fps: Rational::integer((u64::from(FPS) / PREVIEW_EVERY) as u32),
             frames_published: None,
             frames_dropped: None,
             pipeline: None,
             warnings: Vec::new(),
         };
+        let size = size.map(|(width, height)| fit_preview_size(width, height));
         if enabled && !self.preview_enabled {
-            self.ensure_pipeline()?;
-            self.preview_enabled = true;
+            let size = size.unwrap_or(DEFAULT_PREVIEW_SIZE);
+            // Started before the pipeline: if it cannot start, nothing
+            // else has.
+            let preview =
+                PreviewOut::start(Arc::clone(&self.preview_frames), preview_scaler(size)?)?;
+            if let Err(error) = self.ensure_pipeline() {
+                preview.stop();
+                return Err(error);
+            }
             if let Some(pipeline) = &self.pipeline {
-                pipeline.set_preview(Some(Arc::clone(&self.preview_frames)));
+                pipeline.attach_preview(preview);
                 state.warnings.extend(pipeline.capture_warnings());
                 state.warnings.extend(pipeline.audio_warnings());
             }
-        } else if !enabled && self.preview_enabled {
-            if let Some((published, dropped)) = self
-                .pipeline
-                .as_ref()
-                .and_then(|pipeline| pipeline.set_preview(None))
+            self.preview_enabled = true;
+            self.preview_size = size;
+        } else if enabled {
+            if let Some(size) = size.filter(|size| *size != self.preview_size)
+                && let Some(pipeline) = &self.pipeline
+            {
+                pipeline.resize_preview(preview_scaler(size)?);
+                self.preview_size = size;
+            }
+        } else if self.preview_enabled {
+            if let Some((published, dropped)) =
+                self.pipeline.as_ref().and_then(Pipeline::stop_preview)
             {
                 state.frames_published = Some(published);
                 state.frames_dropped = Some(dropped);
@@ -732,6 +757,7 @@ impl Engine {
             state.warnings = warnings;
         }
         state.enabled = self.preview_enabled;
+        (state.width, state.height) = self.preview_size;
         Ok(state)
     }
 }

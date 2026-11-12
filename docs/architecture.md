@@ -100,7 +100,7 @@ Scenes, mixer and preview (ADR 0007):
 - **Scene state:** scenes are engine state, changed only through scene commands. The pipeline renders the active scene (default: the reference scene `Test pattern`).
 - **Live scene edits:** an edit to the rendered scene reaches the running compositor through a newest-wins slot that the render thread only try-locks (`Compositor::update`); a failed live edit is undone.
 - **Mixer control:** gain changes reach the running mixer the same way (`MixerControl`), and levels come back as atomics.
-- **Preview:** the preview is a fan-out consumer that publishes downscaled frames to a mailbox (`Engine::preview_frames`). It runs on the media plane; control goes through commands.
+- **Preview:** the preview is a fan-out consumer that publishes frames, scaled to the size the viewer asked for on a thread of its own, to a mailbox (`Engine::preview_frames`). It runs on the media plane; control (including the size) goes through commands.
 
 Access control (ADR 0008):
 - **Policy:** `command_api::AccessPolicy` allows commands up to a level chosen by whoever starts an adapter. `Command::required_access` refines the level per call; `add_source` needs only `control` for non-capturing sources.

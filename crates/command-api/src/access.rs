@@ -114,7 +114,10 @@ mod tests {
             name: "Show".to_owned(),
         };
         let stop = Command::StopRecording;
-        let preview = Command::SetPreview { enabled: true };
+        let preview = Command::SetPreview {
+            enabled: true,
+            size: None,
+        };
         let read_only = AccessPolicy::READ_ONLY;
         assert!(read_only.authorize(&status).is_ok());
         let denied = read_only.authorize(&create).unwrap_err();

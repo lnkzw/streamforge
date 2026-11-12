@@ -12,6 +12,7 @@ mod images;
 mod mix;
 mod outputs;
 mod pipeline;
+mod preview;
 mod project;
 mod refs;
 mod scenes;
@@ -53,6 +54,9 @@ pub struct Engine {
     preview_enabled: bool,
     /// Where preview frames go (see `Engine::preview_frames`).
     preview_frames: Arc<FrameMailbox>,
+    /// The preview frames' size: what the viewer asked for, fitted to the
+    /// canvas (the default until it asks).
+    preview_size: (u32, u32),
     status: EngineStatus,
     capture: Capture,
     /// Where commands may create files (snapshots); clients only name files.
@@ -93,6 +97,7 @@ impl Engine {
             profiles: OutputProfiles::default(),
             preview_enabled: false,
             preview_frames: Arc::new(FrameMailbox::new()),
+            preview_size: preview::DEFAULT_PREVIEW_SIZE,
             pipeline: None,
             recording: None,
             streaming: None,
@@ -264,8 +269,8 @@ impl CommandHandler for Engine {
             Command::SetMonitorDevice { device } => self
                 .set_monitor_device(device)
                 .map(CommandOutput::OutputProfiles),
-            Command::SetPreview { enabled } => self
-                .set_preview(enabled)
+            Command::SetPreview { enabled, size } => self
+                .set_preview(enabled, size)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),
             Command::SetCaptureTarget {
                 source,
@@ -1142,6 +1147,73 @@ mod tests {
         run(&mut engine, "set_preview", json!({"enabled": false}));
         assert!(!status(&mut engine).preview_active);
         assert!(engine.preview_frames().take().is_none());
+    }
+
+    /// Wait for a preview frame of `size` (frames of the size before may
+    /// still come first).
+    fn wait_for_preview_size(engine: &Engine, size: (u32, u32)) {
+        let frames = engine.preview_frames();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut last = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(frame) = frames.take() {
+                last = Some((frame.width(), frame.height()));
+                if last == Some(size) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("preview frames are {last:?}, expected {size:?}");
+    }
+
+    fn set_preview(engine: &mut Engine, params: serde_json::Value) -> command_api::PreviewState {
+        match run(engine, "set_preview", params) {
+            CommandOutput::PreviewState(state) => *state,
+            other => panic!("unexpected output {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_preview_follows_the_viewers_size_live() {
+        let _media = media_test_lock();
+        let mut engine = Engine::new();
+        // A 2.5:1 viewer gets the canvas's 16:9 fitted inside.
+        let on = set_preview(
+            &mut engine,
+            json!({"enabled": true, "width": 1000, "height": 400}),
+        );
+        assert!(on.enabled);
+        assert_eq!((on.width, on.height), (711, 400));
+        wait_for_preview_size(&engine, (711, 400));
+        // Live, without stopping the pipeline; at most the canvas.
+        let bigger = set_preview(
+            &mut engine,
+            json!({"enabled": true, "width": 4000, "height": 3000}),
+        );
+        assert!(bigger.enabled);
+        assert_eq!((bigger.width, bigger.height), (1920, 1080));
+        assert!(bigger.pipeline.is_none() && bigger.frames_published.is_none());
+        // Without a size, a running preview keeps its own.
+        let same = set_preview(&mut engine, json!({"enabled": true}));
+        assert_eq!((same.width, same.height), (1920, 1080));
+        wait_for_preview_size(&engine, (1920, 1080));
+        assert!(status(&mut engine).pipeline_running);
+        // Off: the frames of both sizes are counted.
+        let off = set_preview(&mut engine, json!({"enabled": false}));
+        assert!(!off.enabled);
+        assert!(
+            off.frames_published >= Some(2),
+            "{:?}",
+            off.frames_published
+        );
+        assert_eq!((off.width, off.height), (1920, 1080));
+        assert!(off.pipeline.is_some_and(|pipeline| pipeline.stopped));
+        // On again without a size: the default.
+        let on = set_preview(&mut engine, json!({"enabled": true}));
+        assert_eq!((on.width, on.height), (480, 270));
+        wait_for_preview_size(&engine, (480, 270));
+        set_preview(&mut engine, json!({"enabled": false}));
     }
 
     #[test]

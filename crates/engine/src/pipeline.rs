@@ -5,8 +5,8 @@
 //! ([`Pipeline::apply_scene`]). Outputs attach and detach while it runs.
 //! Each attached output has its own copy pool, queue and epoch, so a
 //! stalled output (a slow network) only drops its own frames, never another
-//! output's. The preview gets quarter-resolution frames at half the frame
-//! rate through a newest-wins mailbox.
+//! output's. The preview gets every second frame, scaled on its own thread
+//! to the viewer's size, through a newest-wins mailbox (`preview`).
 //!
 //! Timestamps: the producers report the nominal time of each frame/block on
 //! the monotonic clock; the fan-out converts it to media time relative to
@@ -34,11 +34,12 @@ use command_api::{
 use encoder_ffmpeg::{MAX_AUDIO_TRACKS, OutputInput};
 use media_core::{AudioRing, FrameMailbox, FramePool, MediaTimestamp, VideoFrame, sample_ring};
 use video_compositor::{
-    Compositor, CompositorConfig, CpuRenderer, FrameSink, LiveRenderStats, downscale,
+    Compositor, CompositorConfig, CpuRenderer, Downscaler, FrameSink, LiveRenderStats,
 };
 
-use crate::composite::{CANVAS_HEIGHT, CANVAS_WIDTH, FPS};
+use crate::composite::FPS;
 use crate::images::ImageStore;
+use crate::preview::{PREVIEW_EVERY, PreviewOut};
 use crate::scenes::{self, FrameCache, LiveFrames};
 use crate::{audio, mix};
 
@@ -49,12 +50,6 @@ const VIDEO_COPY_BUFFERS: usize = 8;
 const MAX_OUTPUTS: usize = 2;
 /// Sizes the mixer's latency trend buffer (one entry per 10 s).
 const EXPECTED_MAX_DURATION: Duration = Duration::from_secs(4 * 60 * 60);
-/// Preview frames are a quarter of the canvas in each dimension...
-pub(crate) const PREVIEW_FACTOR: u32 = 4;
-/// ...at every second frame (30 FPS).
-pub(crate) const PREVIEW_EVERY: u64 = 2;
-/// The newest preview frame, one in the mailbox and one being drawn.
-const PREVIEW_BUFFERS: usize = 3;
 /// Capture outcomes of removed screen and camera sources kept for the
 /// report (the most recent ones; older ones are counted).
 const MAX_RETIRED_CAPTURES: usize = 64;
@@ -856,20 +851,36 @@ impl Pipeline {
         lock(&self.fanout.audio).retain(|out| out.id != id);
     }
 
-    /// Start (`Some`) or stop (`None`) publishing preview frames. Stopping
-    /// returns how many frames were published and dropped (no free buffer,
-    /// e.g. a viewer holding frames).
-    pub fn set_preview(&self, mailbox: Option<Arc<FrameMailbox>>) -> Option<(u64, u64)> {
-        let previous = std::mem::replace(
-            &mut *lock(&self.fanout.preview),
-            mailbox.map(|mailbox| PreviewOut {
-                mailbox,
-                pool: FramePool::new(PREVIEW_BUFFERS),
-                published: 0,
-                dropped: 0,
-            }),
-        );
-        previous.map(|out| (out.published, out.dropped))
+    /// Publish preview frames through `preview`, started by the caller
+    /// (the preview must be off).
+    pub(crate) fn attach_preview(&self, preview: PreviewOut) {
+        let previous = lock(&self.fanout.preview).replace(preview);
+        debug_assert!(previous.is_none(), "a preview was already attached");
+        // Joined outside the lock, so the render thread never waits on it.
+        if let Some(previous) = previous {
+            previous.stop();
+        }
+    }
+
+    /// Scale preview frames with `scaler` from the next one on, without
+    /// stopping the preview thread; `false` if no preview runs.
+    pub(crate) fn resize_preview(&self, scaler: Downscaler) -> bool {
+        match lock(&self.fanout.preview).as_ref() {
+            Some(preview) => {
+                preview.resize(scaler);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stop publishing preview frames; returns how many the preview
+    /// published and dropped (no free buffer, e.g. a viewer holding frames,
+    /// or a preview thread behind).
+    pub(crate) fn stop_preview(&self) -> Option<(u64, u64)> {
+        let previous = lock(&self.fanout.preview).take();
+        // Joined outside the lock, so the render thread never waits on it.
+        previous.map(PreviewOut::stop)
     }
 
     /// The run's channels and buses with their levels, and its silent
@@ -1275,20 +1286,13 @@ impl Progress {
     }
 }
 
-struct PreviewOut {
-    mailbox: Arc<FrameMailbox>,
-    pool: FramePool,
-    published: u64,
-    dropped: u64,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panicking producer leaves a consistent list behind.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Copies each rendered frame into a pooled buffer per output, and a
-/// downscaled one for the preview.
+/// Copies each rendered frame into a pooled buffer per output, and every
+/// second one for the preview.
 struct VideoTap {
     fanout: Arc<Fanout>,
     frame: u64,
@@ -1325,23 +1329,9 @@ impl FrameSink for VideoTap {
         if !self.frame.is_multiple_of(PREVIEW_EVERY) {
             return;
         }
+        // The preview is best effort, but drops are counted.
         if let Some(preview) = lock(&self.fanout.preview).as_mut() {
-            let len = (frame.width() / PREVIEW_FACTOR) as usize
-                * (frame.height() / PREVIEW_FACTOR) as usize
-                * 4;
-            // No free buffer means the viewer holds frames; the preview is
-            // best effort, but drops are counted.
-            match preview
-                .pool
-                .acquire(len)
-                .map(|buffer| downscale(frame, PREVIEW_FACTOR, buffer))
-            {
-                Some(Ok(small)) => {
-                    preview.mailbox.publish(small);
-                    preview.published += 1;
-                }
-                _ => preview.dropped += 1,
-            }
+            preview.offer(frame);
         }
     }
 }
@@ -1441,11 +1431,7 @@ pub(crate) fn since(t0: Instant, at: Instant) -> Option<MediaTimestamp> {
     })
 }
 
-/// Preview frame size.
-pub(crate) const PREVIEW_WIDTH: u32 = CANVAS_WIDTH / PREVIEW_FACTOR;
-pub(crate) const PREVIEW_HEIGHT: u32 = CANVAS_HEIGHT / PREVIEW_FACTOR;
-
-fn internal(error: impl std::fmt::Display) -> CommandError {
+pub(crate) fn internal(error: impl std::fmt::Display) -> CommandError {
     CommandError::new(
         ErrorCode::Internal,
         format!("media pipeline failed: {error}"),

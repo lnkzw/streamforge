@@ -23,6 +23,8 @@ use crate::worker::{EngineWorker, RequestId};
 
 /// Lines kept in the activity log.
 const LOG_LINES: usize = 200;
+/// Least time between two preview size changes.
+const PREVIEW_RESIZE_EVERY: Duration = Duration::from_millis(150);
 
 /// Commands that change what a project file holds (scenes, audio, output
 /// profiles): once one succeeds, the project has unsaved changes. What a
@@ -198,6 +200,9 @@ enum Pending {
     Cameras,
     /// `validate_project` of this file, before it is opened.
     Validation(String),
+    /// `set_preview` that only changes the running preview's size; not a
+    /// user action, so it does not make the UI busy.
+    PreviewSize,
 }
 
 pub struct Model {
@@ -216,6 +221,14 @@ pub struct Model {
     pub health_items: Vec<HealthItem>,
     health_received: Option<Instant>,
     pub preview_enabled: bool,
+    /// The preview size the program view wants, in pixels: its monitor's
+    /// size on screen, so the picture is drawn 1:1. `None` until it is
+    /// drawn; the engine fits it to the canvas.
+    pub preview_size_wanted: Option<(u32, u32)>,
+    /// The size last asked of the engine...
+    preview_size_asked: Option<(u32, u32)>,
+    /// ...and when a size was last asked for (also if the engine was busy).
+    preview_resize_at: Option<Instant>,
     pub recording: Option<RecordingStarted>,
     pub streaming: Option<StreamingStarted>,
     /// Sources that can be captured by id, or why there are none (e.g. the
@@ -270,6 +283,9 @@ impl Model {
             health_items: Vec::new(),
             health_received: None,
             preview_enabled: false,
+            preview_size_wanted: None,
+            preview_size_asked: None,
+            preview_resize_at: None,
             recording: None,
             streaming: None,
             screen_sources: None,
@@ -751,7 +767,52 @@ impl Model {
     }
 
     pub fn set_preview(&mut self, enabled: bool) {
-        self.act("set_preview", json!({ "enabled": enabled }));
+        let mut params = json!({ "enabled": enabled });
+        let size = self.preview_size_wanted.filter(|_| enabled);
+        if let Some((width, height)) = size {
+            params["width"] = width.into();
+            params["height"] = height.into();
+        }
+        if self.act("set_preview", params) && size.is_some() {
+            self.preview_size_asked = size;
+            self.preview_resize_at = Some(Instant::now());
+        }
+    }
+
+    /// While the preview runs, ask the engine for the size the program
+    /// view wants when that changed: one request at a time, at most one per
+    /// `PREVIEW_RESIZE_EVERY`, so dragging a window edge does not flood
+    /// the engine. Call it once per frame.
+    pub fn follow_preview_size(&mut self) {
+        let Some(wanted) = self.preview_size_wanted else {
+            return;
+        };
+        // While the preview is switched on or off, a resize (which asks
+        // for `enabled: true`) could undo the switch.
+        if !self.preview_enabled
+            || self.pending("set_preview")
+            || self
+                .pending
+                .values()
+                .any(|pending| matches!(pending, Pending::PreviewSize))
+        {
+            return;
+        }
+        if self.preview_size_asked == Some(wanted)
+            || self
+                .preview_resize_at
+                .is_some_and(|at| at.elapsed() < PREVIEW_RESIZE_EVERY)
+        {
+            return;
+        }
+        self.preview_resize_at = Some(Instant::now());
+        let params = json!({ "enabled": true, "width": wanted.0, "height": wanted.1 });
+        // Not the user's action: a busy engine is asked again later,
+        // without a line in the log.
+        if let Ok(id) = self.worker.submit("set_preview", params) {
+            self.pending.insert(id, Pending::PreviewSize);
+            self.preview_size_asked = Some(wanted);
+        }
     }
 
     /// Add a channel playing `input`; it sends to the program bus. Needs
@@ -1033,6 +1094,14 @@ impl Model {
                     });
                     continue;
                 }
+                Some(Pending::PreviewSize) => {
+                    // Answers can come after a later switch's: a resize
+                    // never says whether the preview is on.
+                    if let Err(error) = response.result {
+                        self.failed(&response.name, &error);
+                    }
+                    continue;
+                }
                 Some(Pending::Cameras) => {
                     self.cameras = Some(match response.result {
                         Ok(CommandOutput::Cameras(list)) => Ok(list.cameras),
@@ -1136,7 +1205,9 @@ impl Model {
                 if let Some(dropped) = preview.frames_dropped.filter(|dropped| *dropped > 0) {
                     self.push(
                         Level::Warning,
-                        format!("{dropped} preview frame(s) dropped (the UI fell behind)"),
+                        format!(
+                            "{dropped} preview frame(s) dropped (the preview or the UI fell behind)"
+                        ),
                     );
                 }
                 for warning in preview.warnings {

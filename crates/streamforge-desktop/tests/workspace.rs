@@ -239,14 +239,27 @@ fn dragging_a_position_in_the_inspector_moves_the_source() {
         harness.hover_at(x + egui::vec2(10.0 * step as f32, 0.0));
         harness.step();
     }
-    harness.drop_at(x + egui::vec2(50.0, 0.0));
-    // The engine takes the dragged value; the field shows its answer.
-    step_until(&mut harness, "the moved source", |h| {
+    let x_value = |h: &Harness<'static, DesktopApp>| {
         h.get_all_by_role(Role::SpinButton)
             .next()
             .and_then(|field| field.value())
-            .is_some_and(|value| value.trim() == "130")
+            .map(|value| value.trim().to_owned())
+    };
+    // The pointer rests while the app repaints (it does ~30 times a second
+    // while the preview runs): the field keeps the dragged value.
+    for _ in 0..3 {
+        harness.step();
+        assert_eq!(x_value(&harness).as_deref(), Some("130"), "mid-drag");
+    }
+    // Released where it rests: the engine takes the dragged value, and the
+    // field shows its answer.
+    harness.drop_at(x + egui::vec2(50.0, 0.0));
+    step_until(&mut harness, "the moved source", |h| {
+        x_value(h).as_deref() == Some("130")
     });
+    // It stays there: no stale value comes back with the engine's answers.
+    settle(&mut harness, 5);
+    assert_eq!(x_value(&harness).as_deref(), Some("130"));
 }
 
 #[test]
@@ -702,6 +715,70 @@ fn input_of(harness: &Harness<'static, DesktopApp>, channel: &str) -> Option<Str
     harness
         .query_by_label(&format!("Input of {channel}"))
         .and_then(|node| node.accesskit_node().value())
+}
+
+/// Type `text` into the focused field as a keyboard does: each letter is
+/// a key press, its text, and the key's release in one frame.
+fn type_keys(harness: &mut Harness<'static, DesktopApp>, text: &str) {
+    for c in text.chars() {
+        let key = egui::Key::from_name(&c.to_ascii_uppercase().to_string());
+        let modifiers = if c.is_uppercase() {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
+        };
+        let events = &mut harness.input_mut().events;
+        if let Some(key) = key {
+            events.push(egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+        }
+        events.push(egui::Event::Text(c.to_string()));
+        if let Some(key) = key {
+            events.push(egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed: false,
+                repeat: false,
+                modifiers,
+            });
+        }
+        harness.step();
+    }
+}
+
+#[test]
+fn every_letter_types_into_the_channel_name() {
+    // Reported on Windows: a lowercase "c" did not type here. No key of
+    // StreamForge's takes it; this keeps it that way on every OS.
+    let dir = TempDir::new("channel-name");
+    let mut harness = harness(model(&dir));
+    harness.get_by_label("Routing").click();
+    step_until(&mut harness, "the matrix", |h| {
+        clickable(h, "Add a channel")
+    });
+    harness.get_by_label("Add a channel").click();
+    step_until(&mut harness, "the channel dialog", |h| {
+        h.query_by_label("New channel").is_some()
+    });
+    harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .expect("the text field")
+        .focus();
+    harness.step();
+    let text = "Cc abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789";
+    type_keys(&mut harness, text);
+    settle(&mut harness, 2);
+    let typed = harness
+        .get_all_by_role(Role::TextInput)
+        .next()
+        .and_then(|field| field.value());
+    assert_eq!(typed.as_deref(), Some(text));
 }
 
 #[test]
@@ -1231,17 +1308,35 @@ fn ctrl_and_a_digit_put_a_scene_on_program_and_arrows_move_in_the_lists() {
     // The selected scene is the program scene until another is chosen;
     // putting it on program again is not offered.
     assert!(!clickable(&harness, "Put on program"));
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the inspector", |h| {
+        h.query_by_label("Remove source…").is_some()
+    });
+    // The key selects the scene (the inspector leaves the old scene's
+    // source) and puts it on program: the selection is the program scene.
     command(&mut harness, egui::Key::Num2);
-    step_until(&mut harness, "the second scene on program", |h| {
-        clickable(h, "Put on program")
+    step_until(&mut harness, "the second scene selected, on program", |h| {
+        is_selected(h, "Second")
+            && !clickable(h, "Put on program")
+            && h.query_by_label("Remove source…").is_none()
+    });
+    // On the scene already on program, the key only selects it.
+    row(&harness, "Test pattern").expect("the row").click();
+    step_until(&mut harness, "the first scene selected", |h| {
+        is_selected(h, "Test pattern") && clickable(h, "Put on program")
+    });
+    command(&mut harness, egui::Key::Num2);
+    step_until(&mut harness, "the second scene selected again", |h| {
+        is_selected(h, "Second") && !clickable(h, "Put on program")
     });
     command(&mut harness, egui::Key::Num1);
-    step_until(&mut harness, "the first scene on program", |h| {
-        !clickable(h, "Put on program")
+    step_until(&mut harness, "the first scene selected, on program", |h| {
+        is_selected(h, "Test pattern") && !clickable(h, "Put on program")
     });
     // No third scene: nothing changes.
     command(&mut harness, egui::Key::Num3);
     settle(&mut harness, 10);
+    assert!(is_selected(&harness, "Test pattern"));
     assert!(!clickable(&harness, "Put on program"));
 
     // Down in the focused scene list selects the next scene and keeps the
@@ -1518,6 +1613,29 @@ fn escape_closes_the_inspector_drawer() {
     step_until(&mut harness, "the drawer to close", |h| {
         h.query_by_label("Close the inspector (Esc)").is_none()
     });
+}
+
+#[test]
+fn the_program_header_opens_the_inspector_drawer_again() {
+    let dir = TempDir::new("drawer-again");
+    let mut harness = harness_sized(model(&dir), [1280.0, 720.0]);
+    let drawer =
+        |h: &Harness<'static, DesktopApp>| h.query_by_label("Close the inspector (Esc)").is_some();
+    // Nothing selected: nothing to open.
+    assert!(!clickable(&harness, "Inspector"));
+    row(&harness, "lower third").expect("the row").click();
+    step_until(&mut harness, "the drawer", drawer);
+    // Closed with its X, the header opens it again, and closes it.
+    harness.get_by_label("Close the inspector (Esc)").click();
+    step_until(&mut harness, "the drawer to close", |h| !drawer(h));
+    harness.get_by_label("Inspector").click();
+    step_until(&mut harness, "the drawer again", drawer);
+    harness.get_by_label("Inspector").click();
+    step_until(&mut harness, "the drawer to close again", |h| !drawer(h));
+    // A wide window has the inspector as a dock, and no such button.
+    let dir = TempDir::new("drawer-wide");
+    let wide = self::harness(model(&dir));
+    assert!(wide.query_by_label("Inspector").is_none());
 }
 
 /// Press at `from`, move to `to` and release there, a frame per event.

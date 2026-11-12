@@ -109,7 +109,7 @@ impl DesktopApp {
                 .on_hover_ui(|ui| {
                     let keys = |index| key_hint(ui.ctx(), Shortcut::Program(index)).unwrap_or_default();
                     ui.label(format!(
-                        "Show the selected scene on program (or double-click it; {} … {} put scene 1 to 9 on program)",
+                        "Show the selected scene on program (or double-click it; {} … {} select scene 1 to 9 and put it on program)",
                         keys(0),
                         keys(8),
                     ));

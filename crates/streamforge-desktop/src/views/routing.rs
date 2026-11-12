@@ -22,7 +22,7 @@ use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets;
 use crate::workspace::{self, InputLabel};
 
-use super::{commit, labelled};
+use super::{commit, labelled, live_drag_value};
 
 /// Every column is at least this wide, so a cell keeps its place when its
 /// send is switched on.
@@ -543,7 +543,7 @@ fn send_cell(ui: &mut egui::Ui, channel: &str, bus: &str, send: &SendSpec) -> Se
             return;
         }
         let mut level = send.level_db;
-        let field = ui.add(level_field(&mut level));
+        let field = live_drag_value(ui, &mut level, level_field);
         let field = labelled(ui, field, &format!("Level of {channel} to {bus} (dB)"));
         change.level_db = commit(ui, &field, level);
         let pre = send.tap == SendTap::PreFader;
@@ -580,7 +580,7 @@ fn assign_cell(ui: &mut egui::Ui, bus: &BusState) -> Option<Option<f32>> {
             return Some(on.then_some(0.0));
         }
         let mut level = bus.assign_db?;
-        let field = ui.add(level_field(&mut level));
+        let field = live_drag_value(ui, &mut level, level_field);
         let field = labelled(
             ui,
             field,

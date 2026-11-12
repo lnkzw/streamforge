@@ -14,8 +14,8 @@ use crate::ui::widgets::{self, Button, ButtonKind, StatusLevel};
 use crate::workspace::{self, Shortcut};
 
 use super::{
-    camera_mode_picker, commit, coordinate_range, kind_label, named, opacity_row, refresh_cameras,
-    right_to_left, with_keys,
+    camera_mode_picker, commit, coordinate_range, kind_label, live_drag_value, named, opacity_row,
+    refresh_cameras, right_to_left, with_keys,
 };
 
 impl DesktopApp {
@@ -97,16 +97,16 @@ impl DesktopApp {
                     for (column, (label, name)) in labels.iter().enumerate() {
                         let index = row * 2 + column;
                         ui.label(TextRole::Label.text(*label));
-                        let field = ui.add(
-                            egui::DragValue::new(&mut rect[index])
+                        let field = live_drag_value(ui, &mut rect[index], |value| {
+                            egui::DragValue::new(value)
                                 .range(coordinate_range(row == 1))
                                 // A value set elsewhere stays as it is
                                 // until the operator edits it.
                                 .clamp_existing_to_range(false)
                                 .speed(1.0)
                                 .max_decimals(1)
-                                .update_while_editing(false),
-                        );
+                                .update_while_editing(false)
+                        });
                         // Named for assistive technology; the label beside
                         // it says the same on screen.
                         named(ui, &field, name);
@@ -227,7 +227,13 @@ impl DesktopApp {
                 false
             }
             SourceHealth::Ended { reason } => {
-                widgets::status_line(ui, StatusLevel::Error, &format!("Ended: {reason}"));
+                // The system's wording and codes only on hover: the remedy
+                // is what the operator needs here.
+                let short = workspace::short_reason(&reason);
+                let line = widgets::status_line(ui, StatusLevel::Error, &format!("Ended: {short}"));
+                if short != reason {
+                    line.on_hover_text(reason);
+                }
                 true
             }
         };

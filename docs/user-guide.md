@@ -85,13 +85,13 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 - **Scenes** (left, top): your scenes. The one marked **PGM** is on program, which is what the recording and the stream show.
 - **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture or camera keeps running, so showing it again is immediate.
 - **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming; the line below shows the frame rate and render time.
-- **Inspector** (right): position, size and opacity of the selected source, an image source's file, and a camera source's camera and mode.
+- **Inspector** (right): position, size and opacity of the selected source, an image source's file, and a camera source's camera and mode. In a window narrower than 1360 px it is a drawer over the program view: selecting a source opens it, Esc or its **×** closes it, and **Inspector** in the program header opens it again.
 - **Mixer** (bottom): the **Console** with a strip per channel and bus, and the **Routing** matrix.
 - **Outputs** (bottom right): **Record**, **Stream** and **Monitor**, each with its state and a settings button (the gear).
 
 ### A first recording
 
-1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine.
+1. **Scenes.** A new setup starts with one scene, *Test pattern* (colour bars and a moving overlay). Add more with **+** above the list. Select a scene and use **Put on program**, or press Ctrl+1 to Ctrl+9 for the first nine (the key also selects the scene).
 2. **Sources.** With a scene selected, press **+** above the sources. A source is a **solid colour**, **colour bars**, a **screen capture**, an **image**, or a **camera**. Choose its colour (for a solid colour), whether it fills the canvas, and its opacity; set its exact rectangle in the inspector. A source added later is drawn on top; drag it in the list to put it lower.
 3. **Audio.** Open **Routing** in the mixer. A new setup has one channel, **Tone**, a 1 kHz test tone on the program bus; mute or remove it before a real recording, or switch its input to your microphone.
    - Add a channel with **+** next to *Channels*, then choose its input in the *Input* column: a microphone or other device, the desktop audio of an output (listed separately, as `<output>.monitor`), the system's default input, or a test tone.
@@ -145,7 +145,7 @@ A project opens only while nothing records, streams or previews. Before you open
 | Space | Preview on or off |
 | Ctrl+R | Start recording, or stop it (asks first) |
 | Ctrl+L | Go live, or end the stream (asks first) |
-| Ctrl+1 … Ctrl+9 | Put scene 1 … 9 on program |
+| Ctrl+1 … Ctrl+9 | Select scene 1 … 9 and put it on program |
 | Delete, Backspace | Remove the selected source (asks first) |
 | Ctrl+Up, Ctrl+Down | Move the selected source one layer up or down |
 | Ctrl+O, Ctrl+S, Ctrl+Shift+S | Open, save, save as |

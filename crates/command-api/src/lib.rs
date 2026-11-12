@@ -185,9 +185,12 @@ pub enum Command {
         device: Option<String>,
     },
     /// Run the pipeline for a preview (frames go to the in-process
-    /// preview mailbox) or stop doing so.
+    /// preview mailbox) or stop doing so. `size` (width, height) is the
+    /// largest preview frame the viewer wants; while the preview runs, it
+    /// changes the size live.
     SetPreview {
         enabled: bool,
+        size: Option<(u32, u32)>,
     },
 }
 

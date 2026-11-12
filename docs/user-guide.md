@@ -84,7 +84,7 @@ streamforge-desktop --output-dir ~/Videos --project-dir ~/Documents/shows
 - **Top bar:** the project menu and its name (a dot means unsaved changes), the **REC** and **LIVE** buttons with their running time, and the health summary on the right. Click the summary for details and the activity log.
 - **Scenes** (left, top): your scenes. The one marked **PGM** is on program, which is what the recording and the stream show.
 - **Sources** (left, bottom): the layers of the selected scene, top layer first. Drag a row to change the order, or move the selected source with Ctrl+Up and Ctrl+Down. The eye hides a layer; a hidden screen capture or camera keeps running, so showing it again is immediate.
-- **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming; the line below shows the frame rate and render time.
+- **Program** (centre): the program monitor. The **Preview** switch renders it without recording or streaming, at the monitor's size on screen (up to the canvas's), so it stays sharp; the line below shows the frame rate and render time.
 - **Inspector** (right): position, size and opacity of the selected source, an image source's file, and a camera source's camera and mode. In a window narrower than 1360 px it is a drawer over the program view: selecting a source opens it, Esc or its **×** closes it, and **Inspector** in the program header opens it again.
 - **Mixer** (bottom): the **Console** with a strip per channel and bus, and the **Routing** matrix.
 - **Outputs** (bottom right): **Record**, **Stream** and **Monitor**, each with its state and a settings button (the gear).
@@ -277,7 +277,7 @@ Version 0.2.0 adds cameras, images and layers to the first stable base (0.1.0); 
 - **Video:** one canvas of 1920×1080 at 60 fps, shared by every output. H.264 only; recordings in Matroska only; streaming to one RTMP or RTMPS server at a time. Scene changes are cuts, without transitions.
 - **Sources:** solid colours, colour bars, screen or window capture, PNG and JPEG images, and cameras. Cameras have been tried only with a virtual PipeWire camera on Linux, not with a real webcam, and not at all on Windows and macOS. No camera controls (focus, exposure), no cropping or flipping, and no text, media files or browser sources; images are not animated (GIF, APNG) and colour profiles in them are ignored.
 - **Audio:** 48 kHz stereo. No effects (EQ, compressor, gate, ducking) yet; the mixer has places reserved for them. Channels and buses are added and removed only while nothing records, streams or previews; levels, mutes and sends change live.
-- **Desktop app:** the preview is 480×270, so it looks soft on a large monitor. The recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
+- **Desktop app:** the recordings folder shows only while recording (in the tooltip of the file name and in the activity log). Screen capture targets and the stream URL and key are not saved in projects. English only.
 - **Hardware encoding:** verified on an AMD graphics card with VAAPI; NVENC has not been tested on real hardware.
 - **Not in 0.2.0:** plugins, scripting inside the app, per-output scenes, automation. Later versions add them on the same commands.
 

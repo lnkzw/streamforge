@@ -479,8 +479,10 @@ const SET_MONITOR_DEVICE: CommandDescriptor = CommandDescriptor {
 
 const SET_PREVIEW: CommandDescriptor = CommandDescriptor {
     name: "set_preview",
-    summary: "Run the pipeline for an in-process preview (quarter resolution, 30 FPS) or stop. \
-              Params: enabled.",
+    summary: "Run the pipeline for an in-process preview (30 FPS) or stop. Params: enabled; \
+              width and height (together, optional): the largest frame wanted, fitted to the \
+              canvas's aspect ratio and at most the canvas (default a quarter of it); while \
+              the preview runs, they change its size.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,
@@ -690,9 +692,8 @@ impl Command {
             }
             "set_monitor_device" => decode_set_monitor_device(name, params)
                 .map(|device| Self::SetMonitorDevice { device }),
-            "set_preview" => {
-                decode_preview(name, params).map(|enabled| Self::SetPreview { enabled })
-            }
+            "set_preview" => decode_preview(name, params)
+                .map(|(enabled, size)| Self::SetPreview { enabled, size }),
             _ => Err(CommandError::new(
                 ErrorCode::UnknownCommand,
                 format!("unknown command `{name}`"),
@@ -2206,11 +2207,41 @@ fn decode_set_monitor_device(
 struct PreviewParams {
     /// Whether the preview keeps the pipeline running.
     enabled: bool,
+    /// Largest preview frame wanted, in pixels (with `height`, only with
+    /// `enabled: true`): e.g. the size the viewer shows it at.
+    width: Option<u32>,
+    /// Largest preview frame wanted, in pixels (with `width`).
+    height: Option<u32>,
 }
 
-fn decode_preview(command: &str, params: Option<&Value>) -> Result<bool, CommandError> {
+fn decode_preview(
+    command: &str,
+    params: Option<&Value>,
+) -> Result<(bool, Option<(u32, u32)>), CommandError> {
     let params: PreviewParams = decode_params(command, params)?;
-    Ok(params.enabled)
+    let size = match (params.width, params.height) {
+        (None, None) => None,
+        (Some(width), Some(height)) if width > 0 && height > 0 => Some((width, height)),
+        (Some(_), Some(_)) => {
+            return Err(invalid_params(
+                command,
+                "`width` and `height` must be at least 1",
+            ));
+        }
+        _ => {
+            return Err(invalid_params(
+                command,
+                "pass `width` and `height` together, or neither",
+            ));
+        }
+    };
+    if size.is_some() && !params.enabled {
+        return Err(invalid_params(
+            command,
+            "`width` and `height` size a running preview; they need `enabled: true`",
+        ));
+    }
+    Ok((params.enabled, size))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3698,6 +3729,48 @@ mod tests {
         // A wrong value of a known parameter has nothing unexpected.
         let err = Command::decode("set_preview", Some(&json!({"enabled": 1}))).unwrap_err();
         assert_eq!(err.details, Some(json!({"command": "set_preview"})));
+    }
+
+    #[test]
+    fn preview_size_params() {
+        let decode = |params| Command::decode("set_preview", Some(&params));
+        assert_eq!(
+            decode(json!({"enabled": true})),
+            Ok(Command::SetPreview {
+                enabled: true,
+                size: None
+            })
+        );
+        assert_eq!(
+            decode(json!({"enabled": true, "width": 1280, "height": 720})),
+            Ok(Command::SetPreview {
+                enabled: true,
+                size: Some((1280, 720))
+            })
+        );
+        for (params, needle) in [
+            (json!({"enabled": true, "width": 1280}), "together"),
+            (json!({"enabled": true, "height": 720}), "together"),
+            (
+                json!({"enabled": true, "width": 0, "height": 720}),
+                "at least 1",
+            ),
+            (
+                json!({"enabled": true, "width": 1, "height": 0}),
+                "at least 1",
+            ),
+            (
+                json!({"enabled": false, "width": 1280, "height": 720}),
+                "enabled: true",
+            ),
+        ] {
+            let err = decode(params.clone()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams, "{params}");
+            assert!(err.message.contains(needle), "{params}: {}", err.message);
+        }
+        // Not a size.
+        let err = decode(json!({"enabled": true, "width": -1, "height": 720})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
     }
 
     #[test]

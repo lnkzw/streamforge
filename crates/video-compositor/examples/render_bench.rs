@@ -1,4 +1,5 @@
-//! Measures CPU render time for the M3 reference scene.
+//! Measures CPU render time for the M3 reference scene, and the time to
+//! downscale a rendered frame for the preview at a few sizes.
 //!
 //! ```text
 //! cargo run --release -p video-compositor --example render_bench [frames]
@@ -6,12 +7,15 @@
 //!
 //! Scene: 1920x1080 color bars, a 2560x1440 BGRx source scaled into
 //! 1152x648 at 90 % opacity, and a 160x160 half-transparent overlay.
+//! Preview sizes: a quarter (the old fixed size), half, two thirds, five
+//! sixths and the
+//! canvas itself (a copy).
 
 use std::time::Instant;
 
-use media_core::{FrameBuffer, PixelFormat, VideoFrame};
+use media_core::{FrameBuffer, FramePool, PixelFormat, VideoFrame};
 use video_compositor::stats::LatencyHistogram;
-use video_compositor::{CpuRenderer, Layer, Rect, Scene, SourceId, Transform, pattern};
+use video_compositor::{CpuRenderer, Downscaler, Layer, Rect, Scene, SourceId, Transform, pattern};
 
 fn main() {
     let frames: u32 = std::env::args()
@@ -65,6 +69,29 @@ fn main() {
         let s = histogram.summary().expect("summary");
         println!(
             "threads={threads:<2} frames={frames} mean={:.2} ms p95={:.2} ms p99={:.2} ms max={:.2} ms  (60 FPS budget 16.67 ms)",
+            s.mean_ms, s.p95_ms, s.p99_ms, s.max_ms
+        );
+    }
+    for (width, height) in [
+        (480, 270),
+        (960, 540),
+        (1280, 720),
+        (1600, 900),
+        (1920, 1080),
+    ] {
+        let mut scaler = Downscaler::new(1920, 1080, width, height).expect("scaler");
+        let pool = FramePool::new(1);
+        let mut histogram = LatencyHistogram::new();
+        for _ in 0..frames {
+            let start = Instant::now();
+            let buffer = pool.acquire(scaler.frame_len()).expect("buffer");
+            let small = scaler.scale(&target, buffer).expect("scale");
+            histogram.record(start.elapsed());
+            drop(small);
+        }
+        let s = histogram.summary().expect("summary");
+        println!(
+            "preview {width}x{height}: mean={:.2} ms p95={:.2} ms p99={:.2} ms max={:.2} ms",
             s.mean_ms, s.p95_ms, s.p99_ms, s.max_ms
         );
     }

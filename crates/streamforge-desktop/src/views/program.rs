@@ -3,6 +3,7 @@
 //! line of technical facts under it.
 
 use eframe::egui;
+use eframe::egui::emath::GuiRounding as _;
 
 use crate::app::DesktopApp;
 use crate::ui::icons::Icon;
@@ -90,6 +91,10 @@ impl DesktopApp {
             0.0,
             space.top() + size::STROKE_HEAVY - monitor.top(),
         ));
+        // The preview asked for at the monitor's size is drawn 1:1, so it
+        // stays sharp at any window size and display scaling.
+        let (monitor, pixels) = on_pixels(monitor, ui.ctx().pixels_per_point());
+        self.model.preview_size_wanted = pixels;
         // A click selects the source under the pointer. Not focusable: the
         // monitor has nothing to do by keyboard.
         let response = ui.allocate_rect(space, egui::Sense::CLICK);
@@ -262,5 +267,38 @@ impl DesktopApp {
             facts.push(format!("{} late", render.late_frames));
         }
         facts.join(" · ")
+    }
+}
+
+/// `monitor` moved onto whole pixels, and its size in pixels (`None` when
+/// it has none).
+fn on_pixels(monitor: egui::Rect, pixels_per_point: f32) -> (egui::Rect, Option<(u32, u32)>) {
+    let monitor = monitor.round_to_pixels(pixels_per_point);
+    let pixels = monitor.size() * pixels_per_point;
+    let size = (pixels.x >= 1.0 && pixels.y >= 1.0)
+        .then(|| (pixels.x.round() as u32, pixels.y.round() as u32));
+    (monitor, size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_monitor_lands_on_whole_pixels_and_asks_for_its_size() {
+        let rect = egui::Rect::from_min_size(egui::pos2(10.3, 20.0), egui::vec2(800.0, 450.0));
+        let (monitor, pixels) = on_pixels(rect, 1.0);
+        assert_eq!(monitor.min, egui::pos2(10.0, 20.0));
+        assert_eq!(pixels, Some((800, 450)));
+        // At 150 % a point is 1.5 pixels: the edges move to whole pixels
+        // (10.3 pt = 15.45 px -> 15 px = 10 pt).
+        let (monitor, pixels) = on_pixels(rect, 1.5);
+        assert_eq!(monitor.min, egui::pos2(10.0, 20.0));
+        assert_eq!(pixels, Some((1200, 675)));
+        let (_, pixels) = on_pixels(rect, 1.25);
+        assert_eq!(pixels, Some((1000, 563)));
+        // Nothing to show, nothing to ask for.
+        let empty = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::Vec2::ZERO);
+        assert_eq!(on_pixels(empty, 2.0).1, None);
     }
 }

@@ -467,10 +467,12 @@ Mixer (ADR 0017):
 - **Live:** **`update_channel {channel_id | channel_name, gain_db?, mute?, balance?}`**, **`update_bus {bus_id | bus_name, gain_db?, mute?, assign_db?}`** (`assign_db: null` makes an aux bus a separate mix; on the program bus it is `invalid_params`) and **`set_send {channel_id | channel_name, bus_id | bus_name, enabled?, level_db?, tap?}`** apply while running, ramped over one block so nothing clicks; a tap change fades out on the old tap, then in on the new one. They are kept in the configuration, which is what every run mixes.
 
 Preview:
-- **What it does:** `set_preview {enabled}` keeps the pipeline running for a preview. Frames (480×270, 30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
+- **What it does:** `set_preview {enabled, width?, height?}` keeps the pipeline running for a preview. Frames (30 FPS) go to an in-process mailbox that embedding UIs read through `Engine::preview_frames`. Over this protocol no frames are sent; the command only controls the pipeline.
+- **Size:** `width` and `height` (together, each at least 1, only with `enabled: true`) are the largest frame the viewer wants, e.g. the size in pixels it shows the preview at. The frames get the canvas's aspect ratio fitted inside, rounded to whole pixels and never larger than the canvas. Without them, turning the preview on gives a quarter of the canvas (480×270). While the preview runs, `set_preview {enabled: true, width, height}` changes the size without stopping the pipeline, and `{enabled: true}` alone keeps it. The result's `width` and `height` are the frames' size (after turning off, the size they had).
+- **Cost:** the render thread copies every second frame; a thread of the preview's own scales it (averaging the canvas pixels each preview pixel covers), so a large preview never delays the render or the outputs. A preview that falls behind drops its own frames, counted.
 - **Access:** `sensitive`, because it renders (and can capture) private content.
 - **Lifecycle:** the pipeline stops when the preview and all outputs are off.
-- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames). If that stopped the pipeline, `pipeline` (as in output reports, with `stopped: true`) and `warnings` carry its report; otherwise `pipeline` is `null`. `fps` is `{"num", "den"}`.
+- **Turning the preview off:** reports `frames_published` and `frames_dropped` (no free buffer because the viewer held frames, or the preview thread was still busy), at every size since it was turned on. If that stopped the pipeline, `pipeline` (as in output reports, with `stopped: true`) and `warnings` carry its report; otherwise `pipeline` is `null`. `fps` is `{"num", "den"}`.
 
 ### Projects
 
@@ -566,6 +568,8 @@ Key order inside `result` and `details` is not part of the contract. `capture_av
   - M14 step 3, ADR 0019: `list_images`; the source kind `image` with `file` (`add_source`, `list_scenes`, project files of schema 4); `update_source`'s `file`; `restart_source` of an image source. A build of step 2 refuses a project file with an image source.
   - M14 step 4b1, ADR 0019: `list_cameras`; `get_capture_capabilities` gained `camera`.
   - M14 step 4b2, ADR 0019: the source kind `camera` with `camera_id` and `mode` (`add_source`, `list_scenes`, project files of schema 4); `update_source`'s `camera_id` and `mode`; `restart_source` of a camera source; the scene list's `warnings`; `get_health.captures` of kind `camera` with `format`; `kind` in `pipeline.scene_captures`. A build of step 4b1 refuses a project file with a camera source.
+- Additions after 0.2.0, for 0.3.0:
+  - M15 step 5: `set_preview`'s `width` and `height`. A 0.2.0 engine refuses them as unknown parameters.
 - Adding a command, adding optional fields to a result, adding a value to an enumerated result field (e.g. a source `kind`), or adding an error code is backward compatible within v1. Clients must ignore unknown result fields, show or skip objects of an unknown kind, and treat unknown error codes as generic failures.
 - Removing or renaming a field, command or error code, changing a field's type, or accepting new request envelope fields requires v2.
 - Update the contract tests in `crates/control-protocol` and the pinned result shapes (`crates/command-api/tests/wire_shapes.txt`, see `docs/testing.md`) together with this document.

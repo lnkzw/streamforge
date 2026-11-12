@@ -20,6 +20,6 @@ pub use runner::{
     LIVE_PUBLISH_MS, LiveRenderStats, LiveSourceStats, RenderStats, SceneUpdate, SourceConfig,
     SourceInput, SourceStats,
 };
-pub use scale::downscale;
+pub use scale::{Downscaler, ScaleError};
 pub use scene::{Layer, Scene, SceneError, SourceId};
 pub use stats::LatencySummary;

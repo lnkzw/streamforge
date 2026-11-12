@@ -893,6 +893,9 @@ impl eframe::App for DesktopApp {
         }
         self.dialogs(&ctx);
 
+        // The program view asked for its size while it was drawn.
+        self.model.follow_preview_size();
+
         // Smooth preview and meters while something is live; otherwise just
         // often enough to pick up status changes (responses also repaint).
         let live = self.model.preview_enabled

@@ -247,6 +247,57 @@ fn preview_frames_reach_the_ui() {
     wait(&mut model, "the preview to stop", |m| !m.preview_enabled);
 }
 
+/// Follow the program view's size and take preview frames until one of
+/// `size` arrives (bounded).
+fn wait_for_preview_size(model: &mut Model, size: (u32, u32)) {
+    let frames = std::sync::Arc::clone(model.preview_frames());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = None;
+    while Instant::now() < deadline {
+        model.follow_preview_size();
+        model.update();
+        if let Some(frame) = frames.take() {
+            last = Some((frame.width(), frame.height()));
+            if last == Some(size) {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "preview frames are {last:?}, expected {size:?}; log: {:?}",
+        model.log
+    );
+}
+
+#[test]
+fn the_preview_follows_the_program_views_size() {
+    let dir = TempDir::new("preview-size");
+    let mut model = model(&dir);
+    // The program view drew its monitor at 1000×563 pixels.
+    model.preview_size_wanted = Some((1000, 563));
+    model.set_preview(true);
+    wait(&mut model, "the preview to start", |m| m.preview_enabled);
+    wait_for_preview_size(&mut model, (1000, 563));
+    // The window grows past the canvas: the running preview follows, at
+    // most at the canvas size.
+    model.preview_size_wanted = Some((2560, 1440));
+    wait_for_preview_size(&mut model, (1920, 1080));
+    // A change while the preview is being switched off is not sent: it
+    // would switch the preview back on.
+    model.preview_size_wanted = Some((640, 360));
+    model.set_preview(false);
+    model.follow_preview_size();
+    wait(&mut model, "the preview to stop", |m| !m.preview_enabled);
+    for _ in 0..20 {
+        model.follow_preview_size();
+        model.update();
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!model.preview_enabled);
+    assert!(errors(&model).is_empty(), "{:?}", model.log);
+}
+
 #[test]
 fn screen_sources_are_listed_or_explained_without_logging_an_error() {
     let dir = TempDir::new("sources");

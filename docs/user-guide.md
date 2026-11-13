@@ -130,7 +130,7 @@ Recording and streaming run at the same time and independently. If the connectio
 
 ### Monitoring
 
-The **Monitor** row plays a bus on a headphone or speaker output, by default the program bus. Choose the device with the gear while nothing records, streams or previews, and switch the monitor on in the routing matrix (the switch in the *Monitor* row). If a channel captures the desktop audio of the device the monitor plays on, the sound feeds back. StreamForge warns about that when you switch the monitor on, but only for a device you chose: with the system default output it cannot tell.
+The **Monitor** row plays a bus on a headphone or speaker output, by default the program bus. Choose the device with the gear, and switch the monitor on in the routing matrix (the switch in the *Monitor* row). A monitor that plays moves to a new device at once. If its device goes away (headphones unplugged), the row says *ended*: plug it back in and switch the monitor off and on, or choose another device. If a channel captures the desktop audio of the device the monitor plays on, the sound feeds back. StreamForge warns about that when you switch the monitor on, but only for a device you chose: with the system default output it cannot tell.
 
 ### Projects
 

@@ -38,6 +38,27 @@ impl DesktopApp {
         {
             self.model.find_audio_outputs();
         }
+        // The rows scroll where the dock is too short for them, e.g. for
+        // the reason of a monitor that ended.
+        let (record_settings, stream_settings, monitor_settings) = egui::ScrollArea::vertical()
+            .id_salt("outputs")
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.outputs_rows(ui))
+            .inner;
+        if record_settings {
+            self.open_record_settings();
+        }
+        if stream_settings {
+            self.open_stream_settings(false);
+        }
+        if monitor_settings {
+            self.open_monitor_settings();
+        }
+    }
+
+    /// Each output's row; returns whether the record, stream and monitor
+    /// settings were asked for.
+    fn outputs_rows(&self, ui: &mut egui::Ui) -> (bool, bool, bool) {
         let health = self.model.health.as_ref();
 
         // Recording.
@@ -119,15 +140,7 @@ impl DesktopApp {
 
         // Monitor.
         let monitor_settings = self.monitor_row(ui);
-        if record_settings {
-            self.open_record_settings();
-        }
-        if stream_settings {
-            self.open_stream_settings(false);
-        }
-        if monitor_settings {
-            self.open_monitor_settings();
-        }
+        (record_settings, stream_settings, monitor_settings)
     }
 
     /// The monitor's state, the bus it plays and its device, once the
@@ -163,12 +176,35 @@ impl DesktopApp {
             MonitorState::On if device.missing => {
                 widgets::status_line(ui, StatusLevel::Warn, &device.detail);
             }
+            MonitorState::Playing => {
+                let numbers = self
+                    .model
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.monitor.as_ref())
+                    .and_then(workspace::monitor_numbers);
+                if let Some((numbers, gaps)) = numbers {
+                    ui.label(TextRole::Numeric.text(numbers).color(color::TEXT_TERTIARY));
+                    if let Some(gaps) = gaps {
+                        widgets::status_line(ui, StatusLevel::Warn, &gaps);
+                    }
+                }
+            }
+            // As in the inspector: the system's codes and wording only on
+            // hover, so the reason fits the dock.
             MonitorState::Ended(reason) => {
-                widgets::status_line(
+                let short = workspace::short_reason(&reason);
+                let line = widgets::status_line(
                     ui,
                     StatusLevel::Error,
-                    &format!("Ended: {reason}. Switch it off and on to open the device again."),
+                    &format!(
+                        "Ended: {short}. Switch the monitor off and on to retry, or choose \
+                         another device."
+                    ),
                 );
+                if short != reason {
+                    line.on_hover_text(reason);
+                }
             }
             _ => {}
         }

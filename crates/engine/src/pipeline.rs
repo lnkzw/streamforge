@@ -18,12 +18,12 @@ use std::time::{Duration, Instant};
 
 use audio_engine::{
     BLOCK_FRAMES, BlockSink, BusBlocks, CHANNELS, LiveMixStats, MixerConfig, MixerControl,
-    MixerThread, PlaybackFeed, RATE,
+    MixerThread, PlaybackFeed, PlaybackFeedStats, RATE,
 };
 use capture_api::{
-    AudioDevices, AudioStream, CameraCapture, CameraRequest, Capture, CaptureErrorKind,
-    CaptureState, PlaybackRequest, PlaybackStream, ScreenCapture, ScreenSelection, VideoFormatInfo,
-    VideoStream,
+    AudioDevices, AudioStream, CameraCapture, CameraRequest, Capture, CaptureError,
+    CaptureErrorKind, CaptureState, PlaybackRequest, PlaybackStream, ScreenCapture,
+    ScreenSelection, VideoFormatInfo, VideoStream,
 };
 use command_api::{
     AudioGraphSpec, CameraModeSpec, CaptureHealth, CaptureKind, CaptureOutcome, CommandError,
@@ -58,6 +58,9 @@ const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// The monitor feed's ring: half a second, far above any device quantum
 /// (PipeWire's largest is 8192 frames, 170 ms) plus the trim margin.
 const MONITOR_RING_FRAMES: usize = RATE as usize / 2;
+/// Warnings about the monitor's earlier devices in a run (gaps, an end),
+/// kept for the stop report; later ones are counted.
+const MAX_RETIRED_MONITOR_WARNINGS: usize = 8;
 /// Frames and mixer blocks per second (both exact integers).
 const FRAMES_PER_SECOND: i128 = FPS as i128;
 const BLOCKS_PER_SECOND: i128 = (audio_engine::RATE as usize / audio_engine::BLOCK_FRAMES) as i128;
@@ -172,10 +175,34 @@ impl DeviceCapture {
 }
 
 /// `` `name` ``, or `default` (e.g. "the default input"), for messages.
-fn label(device: &Option<String>, default: &str) -> String {
+pub(crate) fn label(device: &Option<String>, default: &str) -> String {
     device
         .as_deref()
         .map_or_else(|| default.to_owned(), |name| format!("`{name}`"))
+}
+
+/// What a monitor device lost (silence played where it ran short, audio
+/// left out where the mixer was ahead) and how it ended, for a stop
+/// report; `subject` names it ("the monitor").
+fn monitor_warnings(
+    subject: &str,
+    feed: Option<&PlaybackFeedStats>,
+    state: &CaptureState,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(feed) = feed {
+        let ring = &feed.ring;
+        if ring.underrun_frames + ring.overrun_frames + feed.trimmed_frames > 0 {
+            warnings.push(format!(
+                "{subject} ran short or over: {} underrun, {} overrun and {} trimmed frame(s)",
+                ring.underrun_frames, ring.overrun_frames, feed.trimmed_frames
+            ));
+        }
+    }
+    if let CaptureState::Ended { reason } = state {
+        warnings.push(format!("{subject} ended: {reason}"));
+    }
+    warnings
 }
 
 /// One warning per device channel that captures what `device` plays (a
@@ -247,8 +274,13 @@ pub(crate) struct Pipeline {
     retired_captures: Vec<SceneCaptureOutcome>,
     retired_omitted: u64,
     audio_streams: Vec<DeviceCapture>,
-    /// The monitor's device, once it was switched on in this run; after the
-    /// mixer, which feeds it.
+    /// What the monitor's earlier devices in this run lost or how they
+    /// ended, for the stop report, and how many such warnings were left out.
+    retired_monitor: Vec<String>,
+    retired_monitor_omitted: u64,
+    /// The monitor's device, once it was switched on in this run (`None`
+    /// again after its device changed while it was off); after the mixer,
+    /// which feeds it.
     monitor: Option<MonitorPlayback>,
     /// What this run mixes; fader, mute and balance follow live changes.
     /// `audio_streams` are its device channels' captures, in order.
@@ -339,6 +371,8 @@ impl Pipeline {
             retired_captures: Vec::new(),
             retired_omitted: 0,
             audio_streams,
+            retired_monitor: Vec::new(),
+            retired_monitor_omitted: 0,
             monitor: None,
             audio,
             cache,
@@ -357,6 +391,32 @@ impl Pipeline {
         device: &Option<String>,
         mix: usize,
     ) -> Vec<String> {
+        match self.monitor_open(capture, device, mix, false) {
+            Ok(warnings) => warnings,
+            Err(_) => unreachable!("without keep_playing, a device that does not open warns"),
+        }
+    }
+
+    /// Move a monitor that is on to `device`, playing bus `mix`. A device
+    /// that plays now keeps playing until the new one is open; if the new
+    /// one does not open, it stays and nothing changes (`Err`). Otherwise as
+    /// [`Pipeline::monitor_on`].
+    pub fn monitor_switch(
+        &mut self,
+        capture: &mut dyn AudioDevices,
+        device: &Option<String>,
+        mix: usize,
+    ) -> Result<Vec<String>, CaptureError> {
+        self.monitor_open(capture, device, mix, true)
+    }
+
+    fn monitor_open(
+        &mut self,
+        capture: &mut dyn AudioDevices,
+        device: &Option<String>,
+        mix: usize,
+        keep_playing: bool,
+    ) -> Result<Vec<String>, CaptureError> {
         if let Some(monitor) = &mut self.monitor
             && monitor.device == *device
             && monitor.device_running()
@@ -366,28 +426,27 @@ impl Pipeline {
                 switch_mix(&mut out.mix, &mut out.fading_from, mix);
                 out.feed.set_enabled(true);
             }
-            return monitor.warnings.clone();
+            return Ok(monitor.warnings.clone());
         }
-        // A fresh start: the old feed and device go first.
-        drop(lock(&self.fanout.monitor).take());
-        let mut warnings = Vec::new();
-        if let Some(MonitorPlayback {
-            stream: Ok(stream), ..
-        }) = self.monitor.take()
-            && let Err(error) = stream.stop()
-        {
-            warnings.push(format!(
-                "the monitor's previous device did not stop cleanly: {error}"
-            ));
-        }
+        // A fresh start: the old feed and device go first, unless one that
+        // plays should keep playing until the new one is open.
+        let keep = keep_playing && self.monitor_device_running();
+        let mut warnings = if keep {
+            Vec::new()
+        } else {
+            self.monitor_close()
+        };
         let (writer, reader) = sample_ring(CHANNELS, MONITOR_RING_FRAMES);
         let request = PlaybackRequest {
             output: device.clone(),
             rate: RATE,
             channels: CHANNELS,
         };
-        let stream = match capture.start_playback(&request, reader) {
+        // The device's own warnings are repeated while it is on; a
+        // previous device's are said once.
+        let (stream, device_warnings) = match capture.start_playback(&request, reader) {
             Ok(stream) => {
+                warnings.extend(self.monitor_close());
                 let mut feed = PlaybackFeed::new(writer, false);
                 feed.set_enabled(true);
                 *lock(&self.fanout.monitor) = Some(MonitorOut {
@@ -396,27 +455,69 @@ impl Pipeline {
                     fading_from: None,
                     faded: vec![0.0; BLOCK_FRAMES * CHANNELS as usize],
                 });
-                warnings.extend(feedback_warnings(capture, &self.audio, device));
-                Ok(stream)
+                (Ok(stream), feedback_warnings(capture, &self.audio, device))
             }
+            Err(error) if keep => return Err(error),
             Err(error) => {
-                warnings.push(format!(
-                    "the monitor is silent: {} did not open ({}); connect it, or choose \
-                     another with set_monitor_device while the pipeline is idle, then switch \
-                     the monitor on again",
+                let warning = format!(
+                    "the monitor is silent: {} did not open ({}); connect it and switch the \
+                     monitor on again, or choose another with set_monitor_device",
                     label(device, "the default output"),
                     error.message
-                ));
-                Err(ErrorSummary::from(error))
+                );
+                (Err(ErrorSummary::from(error)), vec![warning])
             }
         };
+        warnings.extend(device_warnings.iter().cloned());
         self.monitor = Some(MonitorPlayback {
             device: device.clone(),
             stream,
             enabled: true,
-            warnings: warnings.clone(),
+            warnings: device_warnings,
         });
-        warnings
+        Ok(warnings)
+    }
+
+    /// Close the monitor's device unless it is `device`, for a monitor
+    /// that is off: the new device opens when it is switched on. Returns a
+    /// warning if the old device did not stop cleanly.
+    pub fn monitor_close_unless(&mut self, device: &Option<String>) -> Vec<String> {
+        match &self.monitor {
+            Some(monitor) if monitor.device != *device => self.monitor_close(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Stop the monitor's feed, then its device. What it lost, or that it
+    /// ended, goes into the stop report; returns a warning if the device
+    /// did not stop cleanly.
+    fn monitor_close(&mut self) -> Vec<String> {
+        let feed = lock(&self.fanout.monitor)
+            .take()
+            .map(|out| out.feed.stats());
+        let Some(monitor) = self.monitor.take() else {
+            return Vec::new();
+        };
+        let subject = format!(
+            "the monitor on {}",
+            label(&monitor.device, "the default output")
+        );
+        for warning in monitor_warnings(&subject, feed.as_ref(), &monitor.state()) {
+            if self.retired_monitor.len() == MAX_RETIRED_MONITOR_WARNINGS {
+                self.retired_monitor_omitted += 1;
+            } else {
+                self.retired_monitor.push(warning);
+            }
+        }
+        match monitor.stream {
+            Ok(stream) => match stream.stop() {
+                Ok(()) => Vec::new(),
+                Err(error) => vec![format!(
+                    "the monitor's previous device did not stop cleanly: {error}"
+                )],
+            },
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Play silence on the monitor (ramped out); the device stays open.
@@ -967,6 +1068,8 @@ impl Pipeline {
             mut retired_captures,
             retired_omitted,
             audio_streams,
+            retired_monitor,
+            retired_monitor_omitted,
             monitor,
             audio,
             cache: _,
@@ -982,6 +1085,14 @@ impl Pipeline {
             .stop()
             .map_err(|err| warnings.push(format!("mixer failed: {err}")))
             .ok();
+        // Devices the monitor left during the run, oldest first.
+        warnings.extend(retired_monitor);
+        if retired_monitor_omitted > 0 {
+            warnings.push(format!(
+                "{retired_monitor_omitted} more warning(s) about the monitor's earlier devices \
+                 left out"
+            ));
+        }
         // The mixer fed the monitor; now its device stops.
         let monitor = monitor.map(|monitor| {
             let feed = lock(&fanout.monitor).take().map(|out| out.feed.stats());
@@ -991,19 +1102,7 @@ impl Pipeline {
             {
                 warnings.push(format!("the monitor did not stop cleanly: {error}"));
             }
-            if let Some(feed) = &feed {
-                let ring = &feed.ring;
-                if ring.underrun_frames + ring.overrun_frames + feed.trimmed_frames > 0 {
-                    warnings.push(format!(
-                        "the monitor ran short or over: {} underrun, {} overrun and {} trimmed \
-                         frame(s)",
-                        ring.underrun_frames, ring.overrun_frames, feed.trimmed_frames
-                    ));
-                }
-            }
-            if let CaptureState::Ended { reason } = &state {
-                warnings.push(format!("the monitor ended: {reason}"));
-            }
+            warnings.extend(monitor_warnings("the monitor", feed.as_ref(), &state));
             MonitorHealth {
                 device: monitor.device,
                 enabled: monitor.enabled,

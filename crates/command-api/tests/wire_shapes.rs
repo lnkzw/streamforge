@@ -382,11 +382,11 @@ fn samples() -> Vec<(&'static [&'static str], Value)> {
             output(CommandOutput::MixerState(mixer())),
         ),
         (
-            &["get_output_profiles", "set_monitor_device"],
+            &["get_output_profiles"],
             output(CommandOutput::OutputProfiles(profiles())),
         ),
         (
-            &["set_output_profile"],
+            &["set_monitor_device", "set_output_profile"],
             output(CommandOutput::OutputProfileSet(OutputProfileSet {
                 profiles: profiles(),
                 applied_now: vec!["mix"],

@@ -268,7 +268,7 @@ impl CommandHandler for Engine {
                 .map(CommandOutput::OutputProfileSet),
             Command::SetMonitorDevice { device } => self
                 .set_monitor_device(device)
-                .map(CommandOutput::OutputProfiles),
+                .map(CommandOutput::OutputProfileSet),
             Command::SetPreview { enabled, size } => self
                 .set_preview(enabled, size)
                 .map(|state| CommandOutput::PreviewState(Box::new(state))),

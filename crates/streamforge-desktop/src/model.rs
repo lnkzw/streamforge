@@ -971,8 +971,8 @@ impl Model {
         );
     }
 
-    /// Choose the monitor's device (`None`: the system default); only
-    /// while the pipeline is idle.
+    /// Choose the monitor's device (`None`: the system default), also while
+    /// the pipeline runs: a monitor that is on moves to it at once.
     pub fn set_monitor_device(&mut self, device: Option<&str>) {
         self.act("set_monitor_device", json!({ "device": device }));
     }
@@ -1159,7 +1159,14 @@ impl Model {
                 }
             }
             CommandOutput::OutputProfileSet(set) => {
-                if !set.next_start.is_empty() {
+                // Only `set_monitor_device` waits with `device`: for a
+                // monitor that is off, not for a start.
+                if set.next_start.contains(&"device") {
+                    self.push(
+                        Level::Info,
+                        "Monitor device saved; it opens when the monitor is switched on".to_owned(),
+                    );
+                } else if !set.next_start.is_empty() {
                     self.push(
                         Level::Info,
                         format!(
@@ -1171,7 +1178,11 @@ impl Model {
                 for warning in set.warnings {
                     self.push(Level::Warning, warning);
                 }
-                self.profiles = Some(set.profiles);
+                // As for a reading: a profile change still on its way
+                // carries newer profiles, and must not be undone meanwhile.
+                if !self.pending("set_output_profile") {
+                    self.profiles = Some(set.profiles);
+                }
             }
             CommandOutput::Health(health) => self.set_health(Some(*health)),
             CommandOutput::ProjectSaved(saved) => {

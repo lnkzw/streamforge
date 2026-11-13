@@ -7,7 +7,7 @@ use audio_engine::BusRef as GraphBus;
 use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
     ErrorCode, MixerState, MoveSourceRequest, OutputKind, OutputMix, OutputProfileSet,
-    OutputProfiles, PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
+    PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
     SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRef, SourceSpec, UpdateBusRequest,
     UpdateChannelRequest, UpdateSourceRequest,
 };
@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::composite::FPS;
 use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, label};
 use crate::preview::{
     DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, PreviewOut, fit_preview_size, preview_scaler,
 };
@@ -409,20 +409,55 @@ impl Engine {
         }
     }
 
-    /// Only while idle, like a channel's device.
+    /// Choose the monitor's device, also while the pipeline runs. A monitor
+    /// that is on moves to it now: a device that plays keeps playing until
+    /// the new one is open, and stays if the new one does not open (the
+    /// error; nothing changes). One that ended or did not open is closed
+    /// first, and a new device that does not open leaves the monitor silent,
+    /// with a warning, as switching on does; naming the same device opens it
+    /// anew. A monitor that is off closes its old device, and the new one
+    /// opens when it is switched on.
     pub(crate) fn set_monitor_device(
         &mut self,
         device: Option<String>,
-    ) -> Result<OutputProfiles, CommandError> {
-        if self.pipeline.is_some() {
-            return Err(CommandError::new(
-                ErrorCode::InvalidState,
-                "the monitor's device can only change while the pipeline is idle; stop the \
-                 preview and outputs first (switching the monitor on or off is live)",
-            ));
+    ) -> Result<OutputProfileSet, CommandError> {
+        let mut applied_now = Vec::new();
+        let mut next_start = Vec::new();
+        let mut warnings = Vec::new();
+        // A pipeline that stopped on its own feeds no device; the device is
+        // only stored, as while idle.
+        if let Some(pipeline) = self
+            .pipeline
+            .as_mut()
+            .filter(|pipeline| pipeline.is_running())
+        {
+            if self.profiles.monitor.enabled {
+                let column = mix_column(pipeline, &self.profiles, OutputKind::Monitor);
+                warnings = pipeline
+                    .monitor_switch(self.capture.audio.as_mut(), &device, column)
+                    .map_err(|error| {
+                        let mut error = CommandError::from(error);
+                        error.message = format!(
+                            "the monitor stays on {}: {} did not open: {}",
+                            label(&self.profiles.monitor.device, "the default output"),
+                            label(&device, "the default output"),
+                            error.message
+                        );
+                        error
+                    })?;
+                applied_now.push("device");
+            } else {
+                warnings = pipeline.monitor_close_unless(&device);
+                next_start.push("device");
+            }
         }
         self.profiles.monitor.device = device;
-        Ok(self.profiles.clone())
+        Ok(OutputProfileSet {
+            profiles: self.profiles.clone(),
+            applied_now,
+            next_start,
+            warnings,
+        })
     }
 
     /// Change an output's profile. The whole new profile is checked

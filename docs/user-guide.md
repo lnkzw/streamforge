@@ -154,6 +154,8 @@ A project opens only while nothing records, streams or previews. Before you open
 
 The keys work while no dialog or menu is open and no text field has the focus. Space toggles the preview only when no control has the focus; otherwise it presses the focused control. Menus and tooltips show the keys too.
 
+A program with system-wide hotkeys gets its keys before StreamForge does. On Windows, AMD Software: Adrenalin Edition uses Ctrl+Shift+S for Instant Replay; choose **Save as…** in the project menu instead, or change or remove that hotkey in AMD Software (search for *Hotkey*; Delete removes one).
+
 ## Command line
 
 `streamforge` checks the system and makes quick test recordings and streams. It records and streams a built-in reference scene (colour bars and a moving overlay at 1920×1080, 60 fps); for your own scenes, use the desktop app, the engine or an agent. The commands print their results as JSON (`status` only with `--json`), progress and errors as text on stderr, and each has `--help`.

@@ -52,7 +52,15 @@ The package is signed ad hoc, not with an Apple Developer ID, and not notarized,
 2. Under Security, next to "StreamForge was blocked", choose **Open Anyway** and confirm with your password.
 3. Open StreamForge again and choose **Open**.
 
-macOS remembers this for this copy of the app. Alternatively, remove the download mark from the app before opening it, which skips the check: `xattr -dr com.apple.quarantine /Applications/StreamForge.app`. Do the same if Terminal refuses to run the command-line programs.
+macOS remembers this for this copy of the app.
+
+If StreamForge still does not open, or Terminal refuses to run the command-line programs, remove the download mark from the app and everything in it, which skips the check (with the path you moved the app to):
+
+```sh
+xattr -dr com.apple.quarantine /Applications/StreamForge.app
+```
+
+`-r` matters: the command-line programs inside the app carry the mark too, and without it only the app itself is cleared. A newly downloaded version carries the mark again.
 
 ## Permissions
 

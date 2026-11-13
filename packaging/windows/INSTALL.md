@@ -52,11 +52,14 @@ Start with the user guide, `docs\user-guide.md`.
 The package is not signed, so Windows does not know its publisher:
 
 - **SmartScreen** may show "Windows protected your PC" when you first start a program. Choose **More info**, then **Run anyway**.
+- **Smart App Control** (Windows 11) blocks programs it does not know and offers no way to run them anyway, so while it is on, StreamForge does not start. Windows Security → App & browser control → Smart App Control settings shows whether it is on, and turns it off. Decide that yourself: it then protects no program, and on some versions of Windows 11 it cannot be turned on again without reinstalling Windows.
 - Some antivirus programs check unknown programs before they start them the first time, which can take a few seconds.
 
 ## The desktop app and the console
 
-`streamforge-desktop.exe` is a window program: started from the Start menu, it opens no console window. Started from a console, `--version`, `--help` and startup errors print in that console, after the prompt has returned (the console does not wait for window programs). Once its window is open, the app no longer uses the console: Ctrl+C there does not reach it, and closing the window ends it (asking first while it records or streams).
+`streamforge-desktop.exe` is a window program: started from the Start menu, it opens no console window. Started from a console, `--version`, `--help` and startup errors print in that console, but the console does not wait for window programs: its prompt comes back at once, and the text follows below it. The program has ended by then and nothing waits for input; press Enter for a fresh prompt. To have the console wait and print in order, pipe the output: `streamforge-desktop --version | Out-Host` in PowerShell, `streamforge-desktop --version | more` in the Command Prompt.
+
+Once its window is open, the app no longer uses the console: Ctrl+C there does not reach it, and closing the window ends it (asking first while it records or streams).
 
 ## License
 

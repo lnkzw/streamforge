@@ -5,8 +5,9 @@ name: Release
 # distributions (packaging/linux/package.sh). The Windows and macOS
 # packages bring their own FFmpeg, built from pinned sources (ADR 0020),
 # whose source archives are attached to the release. Each package is
-# built and smoke-tested on its own system; the macOS package also on
-# macOS 14, the oldest it supports.
+# built and smoke-tested on its own system. No job runs the macOS package
+# on macOS 14, the oldest it supports: GitHub retired those runners, so
+# package.sh checks each binary's minimum version instead (ADR 0020).
 #
 # A pushed `v*` tag creates a *draft* release with the packages; a person
 # publishes it after checking. Manual runs and pull requests that change
@@ -234,36 +235,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  macos-14:
-    # The package as users download it, on the oldest macOS it supports
-    # and a Mac that did not build it.
-    name: macos 14 (smoke)
-    needs: macos
-    runs-on: macos-14
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: package-macos
-          path: ${{ runner.temp }}/package
-      - name: Unpack and smoke-test
-        run: |
-          cd "$RUNNER_TEMP/package"
-          shasum -a 256 -c ./*.zip.sha256
-          zip=$(ls ./*.zip)
-          ditto -x -k "$zip" .
-          "$GITHUB_WORKSPACE/packaging/macos/smoke.sh" "$(basename "$zip" .zip)"
-
   release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ubuntu, arch, ffmpeg-windows, windows, macos, macos-14]
+    needs: [ubuntu, arch, ffmpeg-windows, windows, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

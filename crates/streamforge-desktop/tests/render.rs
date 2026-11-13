@@ -111,6 +111,9 @@ enum Situation {
     CameraDialog,
     /// Live, with the camera source selected.
     CameraInspector,
+    /// Live, with a second camera that is not plugged in selected: the
+    /// program view marks where it would be.
+    NoPicture,
 }
 
 /// What the render does before it is taken, in order.
@@ -266,6 +269,7 @@ fn model(dir: &Path, situation: Situation) -> Model {
             | Situation::Quit
             | Situation::ImageInspector
             | Situation::CameraInspector
+            | Situation::NoPicture
     );
     project_files(&dir);
     let worker = EngineWorker::spawn(
@@ -348,6 +352,29 @@ fn model(dir: &Path, situation: Situation) -> Model {
                     .any(|scene| scene.name == "Interview" && scene.sources.len() == 5)
             })
         });
+        if matches!(situation, Situation::NoPicture) {
+            model.add_source(
+                &interview,
+                &SourceForm {
+                    name: "guest cam".to_owned(),
+                    kind: SourceType::Camera,
+                    color: [0, 0, 0, 255],
+                    rect: Some([1060.0, 420.0, 760.0, 428.0]),
+                    opacity: 1.0,
+                    screen_source: None,
+                    image_file: None,
+                    camera_id: Some("v4l2_input.usb-unplugged".to_owned()),
+                    camera_mode: None,
+                },
+            );
+            wait(&mut model, "the guest camera", |m| {
+                m.scenes.as_ref().is_some_and(|list| {
+                    list.scenes
+                        .iter()
+                        .any(|scene| scene.name == "Interview" && scene.sources.len() == 6)
+                })
+            });
+        }
         // One hidden layer, to show its row.
         let bars = |m: &Model| {
             m.scenes
@@ -436,6 +463,7 @@ fn render(out: &Path, name: &str, situation: Situation, size: [f32; 2]) {
             Step::Click("Camera mode"),
         ],
         Situation::CameraInspector => vec![Step::Click("host cam")],
+        Situation::NoPicture => vec![Step::Click("guest cam")],
     };
     for step in steps {
         match step {
@@ -564,6 +592,17 @@ fn render_the_workspace() {
         Situation::CameraInspector,
         [1400.0, 900.0],
     );
+    for (size, label) in [
+        ([1280.0, 720.0], "1280x720"),
+        ([1920.0, 1080.0], "1920x1080"),
+    ] {
+        render(
+            &out,
+            &format!("no-picture-{label}"),
+            Situation::NoPicture,
+            size,
+        );
+    }
     for (size, label) in [
         ([1280.0, 720.0], "1280x720"),
         ([1920.0, 1080.0], "1920x1080"),

@@ -16,6 +16,8 @@ All notable changes to StreamForge are listed here. The format follows [Keep a C
 - Every package also carries `LICENSE-RUST-CRATES.txt`, the licences of the Rust crates the programs are built from, which the Linux packages of 0.1.0 and 0.2.0 lacked.
 - Desktop app: Ctrl+1 … Ctrl+9 (Cmd on macOS) also select the scene they put on program, so the scene list's highlight follows.
 - Desktop app: an ended camera or screen capture says in the inspector what happened and what to do, without the system's error codes and wording; the full reason shows on hover.
+- A camera that does not open no longer keeps the preview, a recording, a stream or a scene change from starting, whatever the reason (used by another application, no picture within 5 s, no permission): its source stays empty with a warning, as for a camera that is not plugged in, and **Restart capture** opens it later. Restarting it, or switching a source to it, still reports the error (ADR 0019, amended).
+- Desktop app: the program view marks a screen or camera source whose capture ended with a dashed frame and *no picture* (it did not start) or *stopped* (it keeps its last frame); the recording and stream are not affected.
 
 ### Fixed
 

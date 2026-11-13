@@ -168,3 +168,12 @@ All on 2026-10-27, each the recommended option:
 ## Not in M14
 
 Text, media file and browser sources; cropping, flipping and rotating a source; camera controls (exposure, focus, white balance); an image import or file dialog; per-output scenes.
+
+## Amendment in M15: a camera never keeps a show from starting
+
+In the M15 hardware round, a MacBook's built-in camera in clamshell mode, and a camera Photo Booth held, delivered no frame, so `set_preview` failed after 5 s and nothing could be previewed. The project owner decided that a camera without a picture must not block anything (2026-11-12), for every error (2026-11-13). This replaces the lifecycle rule above that any error but not found fails the command:
+
+- Starting the pipeline (`set_preview`, `start_recording`, `start_streaming`), a scene change and a scene edit (`add_source`, …) leave a camera that does not open empty, whatever the reason (not found, busy, no frame within 5 s, no permission, a system error). The command's warnings say why, `get_health` lists the capture as `ended` with `could not start: …`, and `restart_source` opens it later.
+- Opening a camera again on request stays strict: `restart_source` and a camera or mode switch in `update_source` return the error (a camera that is not found still only warns), so a switch keeps the camera the source had.
+- The desktop app marks such a source in its program view with a dashed frame and *no picture*, and a screen or camera whose capture ended while it ran (its last frame stays) with *stopped*. The marks are only in the app; the program and the outputs are as before.
+- Each camera that does not start still takes up to 5 s, one after another, so a scene with several such cameras delays its command by that much each.

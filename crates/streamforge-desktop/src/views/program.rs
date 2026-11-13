@@ -2,10 +2,12 @@
 //! canvas's aspect ratio, with a tally frame while an output runs, and one
 //! line of technical facts under it.
 
+use command_api::{SourceKind, SourceSpec};
 use eframe::egui;
 use eframe::egui::emath::GuiRounding as _;
 
 use crate::app::DesktopApp;
+use crate::model::SourceHealth;
 use crate::ui::icons::Icon;
 use crate::ui::theme::{TextRole, color, size};
 use crate::ui::widgets::{self, BadgeKind, Button, ButtonKind, Transport};
@@ -98,7 +100,14 @@ impl DesktopApp {
         // A click selects the source under the pointer. Not focusable: the
         // monitor has nothing to do by keyboard.
         let response = ui.allocate_rect(space, egui::Sense::CLICK);
-        self.paint_monitor(ui, monitor, recording || live);
+        let marks = self.paint_monitor(ui, monitor, recording || live);
+        let response = match response
+            .hover_pos()
+            .and_then(|pointer| marks.iter().rev().find(|(mark, _)| mark.contains(pointer)))
+        {
+            Some((_, why)) => response.on_hover_text_at_pointer(why),
+            None => response,
+        };
         if response.clicked()
             && let Some(pointer) = response.interact_pointer_pos()
             && monitor.contains(pointer)
@@ -126,9 +135,16 @@ impl DesktopApp {
         header_bottom
     }
 
-    fn paint_monitor(&self, ui: &egui::Ui, monitor: egui::Rect, on_air: bool) {
+    /// Returns the marks of sources whose capture ended, each with why.
+    fn paint_monitor(
+        &self,
+        ui: &egui::Ui,
+        monitor: egui::Rect,
+        on_air: bool,
+    ) -> Vec<(egui::Rect, String)> {
         let painter = ui.painter();
         painter.rect_filled(monitor, 0.0, color::BG_INSET);
+        let mut marks = Vec::new();
         match (&self.preview, self.model.preview_enabled) {
             (Some(texture), true) => {
                 painter.image(
@@ -137,6 +153,7 @@ impl DesktopApp {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
+                marks = self.paint_no_picture(ui, monitor);
                 self.paint_selection(ui, monitor);
             }
             _ => {
@@ -166,6 +183,57 @@ impl DesktopApp {
                 egui::StrokeKind::Outside,
             );
         }
+        marks
+    }
+
+    /// Mark where the program scene's sources whose capture ended are (see
+    /// [`ended_captures`]): a dashed frame and, where it fits, a label.
+    /// Only in the app; the program and every output stay as they are.
+    /// Returns each mark with its tooltip.
+    fn paint_no_picture(&self, ui: &egui::Ui, monitor: egui::Rect) -> Vec<(egui::Rect, String)> {
+        let Some(scenes) = &self.model.scenes else {
+            return Vec::new();
+        };
+        let Some(program) = scene(scenes, &scenes.active_scene_id) else {
+            return Vec::new();
+        };
+        let scale = monitor.width() / scenes.canvas_width.max(1) as f32;
+        let painter = ui.painter_at(monitor);
+        let mut marks = Vec::new();
+        for ended in ended_captures(&program.sources, |id| self.model.source_health(id)) {
+            let rect = on_monitor(monitor, scale, ended.source);
+            if !rect.is_positive() {
+                continue;
+            }
+            let frame = rect.shrink(size::STROKE / 2.0);
+            painter.extend(egui::Shape::dashed_line(
+                &[
+                    frame.left_top(),
+                    frame.right_top(),
+                    frame.right_bottom(),
+                    frame.left_bottom(),
+                    frame.left_top(),
+                ],
+                egui::Stroke::new(size::STROKE, color::STATE_WARN),
+                6.0,
+                4.0,
+            ));
+            paint_no_picture_label(&painter, rect, &ended);
+            let what = if ended.empty {
+                "has no picture"
+            } else {
+                "stopped, its last frame stays"
+            };
+            marks.push((
+                rect,
+                format!(
+                    "`{}` {what}: {}\nSelect it and choose Restart capture in the inspector.",
+                    ended.source.name,
+                    workspace::short_reason(&ended.reason)
+                ),
+            ));
+        }
+        marks
     }
 
     /// Outline the selected source when its scene is the one on air, so
@@ -187,11 +255,7 @@ impl DesktopApp {
             return;
         };
         let scale = monitor.width() / scenes.canvas_width.max(1) as f32;
-        let rect = egui::Rect::from_min_size(
-            monitor.min + egui::vec2(source.rect.x, source.rect.y) * scale,
-            egui::vec2(source.rect.width, source.rect.height) * scale,
-        )
-        .intersect(monitor);
+        let rect = on_monitor(monitor, scale, source);
         if rect.is_positive() {
             ui.painter().rect_stroke(
                 rect,
@@ -270,6 +334,114 @@ impl DesktopApp {
     }
 }
 
+/// Where `source` is on `monitor`, which shows the canvas at `scale`
+/// points per canvas pixel; cut to the monitor.
+fn on_monitor(monitor: egui::Rect, scale: f32, source: &SourceSpec) -> egui::Rect {
+    egui::Rect::from_min_size(
+        monitor.min + egui::vec2(source.rect.x, source.rect.y) * scale,
+        egui::vec2(source.rect.width, source.rect.height) * scale,
+    )
+    .intersect(monitor)
+}
+
+/// How the engine's health begins the end reason of a camera that did not
+/// open (`docs/protocol.md`, Cameras): its source draws nothing.
+const NOT_STARTED: &str = "could not start: ";
+
+/// A visible screen or camera source whose capture ended.
+#[derive(Debug, PartialEq)]
+struct EndedCapture<'a> {
+    source: &'a SourceSpec,
+    reason: String,
+    /// It did not start (or a restart failed), so it draws nothing; a
+    /// capture that ended while it ran keeps its last frame.
+    empty: bool,
+}
+
+/// The visible screen and camera sources of a scene (in drawing order)
+/// whose capture ended, with why.
+fn ended_captures(
+    sources: &[SourceSpec],
+    health: impl Fn(&str) -> SourceHealth,
+) -> Vec<EndedCapture<'_>> {
+    sources
+        .iter()
+        .filter(|source| {
+            source.visible
+                && matches!(
+                    source.kind,
+                    SourceKind::Screen { .. } | SourceKind::Camera { .. }
+                )
+        })
+        .filter_map(|source| match health(&source.id) {
+            SourceHealth::Ended { reason } => Some(EndedCapture {
+                source,
+                empty: reason.starts_with(NOT_STARTED),
+                reason,
+            }),
+            SourceHealth::NotCapturing | SourceHealth::Capturing { .. } => None,
+        })
+        .collect()
+}
+
+/// A label in the middle of `rect`: the source's kind and "`name`: no
+/// picture" (or "stopped" over its last frame), cut to fit; only the icon
+/// where the text does not fit, and nothing where that does not either.
+fn paint_no_picture_label(painter: &egui::Painter, rect: egui::Rect, ended: &EndedCapture<'_>) {
+    let source = ended.source;
+    let pad = size::SPACE_6;
+    let height = size::CONTROL;
+    if rect.width() < height || rect.height() < height {
+        return;
+    }
+    let icon = if matches!(source.kind, SourceKind::Camera { .. }) {
+        Icon::Camera
+    } else {
+        Icon::Screen
+    };
+    let room = rect.width() - 2.0 * size::SPACE_4 - 2.0 * pad - size::ICON - pad;
+    let galley = (room >= 4.0 * size::ICON).then(|| {
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            format!(
+                "{}: {}",
+                source.name,
+                if ended.empty { "no picture" } else { "stopped" }
+            ),
+            TextRole::Meta.font(),
+            color::TEXT_SECONDARY,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        painter.layout_job(job)
+    });
+    let width = match &galley {
+        Some(galley) => pad + size::ICON + pad + galley.size().x + pad,
+        None => height,
+    };
+    let chip = egui::Rect::from_center_size(rect.center(), egui::vec2(width, height));
+    painter.rect(
+        chip,
+        size::RADIUS_CONTROL,
+        color::BG_RAISED,
+        egui::Stroke::new(size::STROKE, color::LINE_STRONG),
+        egui::StrokeKind::Inside,
+    );
+    let icon_rect = match &galley {
+        Some(_) => egui::Rect::from_min_size(
+            egui::pos2(chip.left() + pad, chip.center().y - size::ICON / 2.0),
+            egui::Vec2::splat(size::ICON),
+        ),
+        None => egui::Rect::from_center_size(chip.center(), egui::Vec2::splat(size::ICON)),
+    };
+    icon.paint(painter, icon_rect, color::STATE_WARN);
+    if let Some(galley) = galley {
+        let at = egui::pos2(
+            icon_rect.right() + pad,
+            chip.center().y - galley.size().y / 2.0,
+        );
+        painter.galley(at, galley, color::TEXT_SECONDARY);
+    }
+}
+
 /// `monitor` moved onto whole pixels, and its size in pixels (`None` when
 /// it has none).
 fn on_pixels(monitor: egui::Rect, pixels_per_point: f32) -> (egui::Rect, Option<(u32, u32)>) {
@@ -330,5 +502,77 @@ mod tests {
         // Nothing to show, nothing to ask for.
         let empty = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::Vec2::ZERO);
         assert_eq!(on_pixels(empty, 2.0).1, None);
+    }
+
+    #[test]
+    fn captures_that_ended_are_marked_where_their_source_is() {
+        let source = |id: &str, kind: SourceKind, visible: bool| SourceSpec {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            kind,
+            rect: command_api::SourceRect {
+                x: 960.0,
+                y: 540.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+            opacity: 1.0,
+            visible,
+        };
+        let camera = || SourceKind::Camera {
+            camera_id: "cam:1".to_owned(),
+            mode: None,
+        };
+        let sources = [
+            source("bars", SourceKind::ColorBars, true),
+            source("cam", camera(), true),
+            source("hidden", camera(), false),
+            source("running", camera(), true),
+            source(
+                "screen",
+                SourceKind::Screen {
+                    target_kinds: Vec::new(),
+                    cursor_mode: capture_api::CursorMode::Embedded,
+                    capture_target_id: None,
+                },
+                true,
+            ),
+            source("idle", camera(), true),
+        ];
+        let health = |id: &str| match id {
+            "running" => SourceHealth::Capturing {
+                last_frame_age_ms: None,
+                frames_consumed: 0,
+            },
+            "idle" => SourceHealth::NotCapturing,
+            "screen" => SourceHealth::Ended {
+                reason: "the captured window was closed".to_owned(),
+            },
+            _ => SourceHealth::Ended {
+                reason: format!("could not start: {id} is busy"),
+            },
+        };
+        // Visible screens and cameras whose capture ended, in drawing
+        // order; not a hidden one, one that runs (also without a frame
+        // yet) or one that does not capture. One that did not start draws
+        // nothing; one that ended while it ran keeps its last frame.
+        let marked: Vec<_> = ended_captures(&sources, health)
+            .into_iter()
+            .map(|ended| (ended.source.id.as_str(), ended.reason, ended.empty))
+            .collect();
+        assert_eq!(
+            marked,
+            [
+                ("cam", "could not start: cam is busy".to_owned(), true),
+                ("screen", "the captured window was closed".to_owned(), false),
+            ]
+        );
+        // At the source's place on the monitor, cut to it: the lower
+        // right quarter of a 960-point monitor of a 1920-pixel canvas.
+        let monitor = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(960.0, 540.0));
+        assert_eq!(
+            on_monitor(monitor, 0.5, &sources[1]),
+            egui::Rect::from_min_max(egui::pos2(490.0, 290.0), egui::pos2(970.0, 560.0))
+        );
     }
 }

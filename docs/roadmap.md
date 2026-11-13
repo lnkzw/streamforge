@@ -345,6 +345,6 @@ Packages for Windows and macOS, tested on real machines, then 0.3.0 for all thre
 Acceptance:
 - The Windows and macOS packages install from the draft release on the project owner's machines, and the desktop, CLI, engine and MCP server work there from the installed package.
 - The hardware test round passes, or each failure is fixed or documented as a known limitation.
-- The release workflow builds and smoke-tests all four packages (two Linux, Windows, macOS) and runs the macOS package on macOS 14.
+- The release workflow builds and smoke-tests all four packages (two Linux, Windows, macOS). It no longer runs the macOS package on macOS 14: GitHub retired the `macos-14` runners on 2026-11-02, and the project owner chose the static check of every binary's minimum version instead (2026-11-13, ADR 0020).
 
 Not in M15: Windows' system picker, code signing and notarization, an installer or package manager, an Intel or universal macOS package, the desktop-audio downmix beyond two channels, settings that remember folders.

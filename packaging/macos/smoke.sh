@@ -4,8 +4,8 @@
 #   packaging/macos/smoke.sh <package-dir>
 #
 # <package-dir> holds StreamForge.app. package.sh runs this on the Mac
-# that built the package, the release workflow again on macOS 14. Needs
-# jq (part of macOS 15; the runners have it).
+# that built the package. Needs jq (part of macOS 15; the runners have
+# it).
 set -euo pipefail
 
 dir=$(cd "${1:?usage: packaging/macos/smoke.sh <package-dir>}" && pwd)

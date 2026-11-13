@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::composite::FPS;
 use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
-use crate::pipeline::{Pipeline, label};
+use crate::pipeline::{CameraOpen, Pipeline, label};
 use crate::preview::{
     DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, PreviewOut, fit_preview_size, preview_scaler,
 };
@@ -99,6 +99,7 @@ impl Engine {
                     &self.images,
                     &keep,
                     allow_new_captures,
+                    CameraOpen::Tolerant,
                 ) {
                     Ok(started) => warnings = started,
                     Err(error) => {

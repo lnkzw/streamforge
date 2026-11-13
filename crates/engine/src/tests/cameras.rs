@@ -93,8 +93,8 @@ fn shows_no_camera(engine: &Engine) {
 
 /// `cam:1` and `cam:2` run in 1280x720 or 640x480 at 30 fps, each stream
 /// in its own colour ([`color`]); `cam:busy` (and a held one) does not
-/// start in time, as one another application holds; every other camera
-/// (and an unplugged one) is not found.
+/// start in time, as one another application holds; `cam:denied` may not
+/// be used; every other camera (and an unplugged one) is not found.
 struct FakeCamera(CameraLog);
 
 impl CameraCapture for FakeCamera {
@@ -140,6 +140,12 @@ impl CameraCapture for FakeCamera {
                 "camera `{id}` did not start within 5000 ms; another application may hold it"
             ))
             .with_detail("capture_error", "device busy"));
+        }
+        if id == "cam:denied" {
+            return Err(CaptureError::new(
+                CaptureErrorKind::PermissionDenied,
+                format!("camera `{id}`: no camera access for this app"),
+            ));
         }
         if !["cam:1", "cam:2"].contains(&id)
             || log.unplugged.lock().expect("unplugged").contains(id)
@@ -567,32 +573,107 @@ fn a_camera_that_is_not_found_shows_nothing_and_warns() {
 }
 
 #[test]
-fn a_busy_camera_fails_the_command_that_starts_it() {
+fn a_camera_that_does_not_open_shows_nothing_and_never_blocks_the_show() {
     let _media = media_test_lock();
     let (mut engine, log) = engine_with_cameras();
-    add_camera(&mut engine, "Test pattern", "cam", "cam:busy").expect("added while idle");
-    let error = try_run(&mut engine, "set_preview", json!({"enabled": true})).unwrap_err();
-    assert_eq!(error.code, ErrorCode::Timeout);
-    assert!(!health(&mut engine).pipeline_running);
-
-    run(
-        &mut engine,
-        "remove_source",
-        json!({"scene_name": "Test pattern", "source_name": "cam"}),
-    );
-    run(&mut engine, "set_preview", json!({"enabled": true}));
-    let error = add_camera(&mut engine, "Test pattern", "cam", "cam:busy").unwrap_err();
-    assert_eq!(error.code, ErrorCode::Timeout);
-    // Nothing changed.
-    let list = scene_list(&mut engine);
+    log.hold("cam:1", true);
+    add_camera(&mut engine, "Test pattern", "cam", "cam:1").expect("added while idle");
+    // Held by another application (or delivering no frame): the preview
+    // starts anyway, and says why the source is empty (start 0).
+    let CommandOutput::PreviewState(preview) =
+        run(&mut engine, "set_preview", json!({"enabled": true}))
+    else {
+        panic!("unexpected output");
+    };
     assert!(
-        !list.scenes[0]
+        preview.warnings.iter().any(|warning| warning
+            .contains("camera source `cam` shows nothing")
+            && warning.contains("another application may hold it")),
+        "{:?}",
+        preview.warnings
+    );
+    assert!(health(&mut engine).pipeline_running);
+    assert!(matches!(
+        &camera_health(&health(&mut engine), "cam").state,
+        CaptureState::Ended { reason } if reason.starts_with("could not start: camera `cam:1` did not start")
+    ));
+    shows_no_camera(&engine);
+
+    // Any other error too: one without permission is added while the
+    // preview runs (start 1), above `cam`.
+    let added = add_camera(&mut engine, "Test pattern", "denied", "cam:denied").expect("add");
+    assert!(
+        added.warnings.iter().any(|warning| warning
+            .contains("camera source `denied` shows nothing")
+            && warning.contains("no camera access")),
+        "{:?}",
+        added.warnings
+    );
+    assert!(
+        added.scenes[0]
             .sources
             .iter()
-            .any(|source| source.name == "cam")
+            .any(|source| source.name == "denied")
     );
+    // A scene with a busy camera goes on program (start 2), and back.
+    run(&mut engine, "create_scene", json!({"name": "Other"}));
+    add_camera(&mut engine, "Other", "other", "cam:busy").expect("added to another scene");
+    let switched = scenes(run(
+        &mut engine,
+        "set_active_scene",
+        json!({"scene_name": "Other"}),
+    ));
+    assert_eq!(switched.active_scene_id, switched.scenes[1].id);
+    assert!(
+        switched
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("camera source `other` shows nothing")),
+        "{:?}",
+        switched.warnings
+    );
+    run(
+        &mut engine,
+        "set_active_scene",
+        json!({"scene_name": "Test pattern"}),
+    );
+    assert_eq!(log.starts().len(), 3, "a kept camera opened again");
+
+    // Opening it again on request is strict: the error is returned while
+    // it is held (start 3), and it shows once it is free (start 4).
+    let cam = json!({"scene_name": "Test pattern", "source_name": "cam"});
+    let error = try_run(&mut engine, "restart_source", cam.clone()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Timeout);
+    log.hold("cam:1", false);
+    run(&mut engine, "restart_source", cam);
+    assert_eq!(
+        camera_health(&health(&mut engine), "cam").state,
+        CaptureState::Running
+    );
+    shows(&engine, 4);
+    assert_eq!(log.open(), 1);
+
+    // The stop report has each camera that did not start, with why.
+    let CommandOutput::PreviewState(preview) =
+        run(&mut engine, "set_preview", json!({"enabled": false}))
+    else {
+        panic!("unexpected output");
+    };
+    let outcomes = preview.pipeline.expect("pipeline report").scene_captures;
+    let error_of = |name: &str| {
+        outcomes
+            .iter()
+            .find(|outcome| outcome.name == name)
+            .and_then(|outcome| outcome.error.as_ref())
+            .map(|error| error.code)
+    };
+    assert_eq!(
+        error_of("denied"),
+        Some(ErrorCode::PermissionDenied),
+        "{outcomes:?}"
+    );
+    assert_eq!(error_of("other"), Some(ErrorCode::Timeout), "{outcomes:?}");
     assert_eq!(log.open(), 0);
-    run(&mut engine, "set_preview", json!({"enabled": false}));
 }
 
 #[test]

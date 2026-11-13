@@ -71,14 +71,29 @@ pub(crate) enum OutputId {
     Streaming,
 }
 
+/// What a camera that does not open does to the command that opens it
+/// (ADR 0019, amended in M15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CameraOpen {
+    /// Starting the pipeline, a scene change or a scene edit: every error
+    /// leaves the source empty with a warning, so a camera never keeps a
+    /// show from starting or a scene from going on program.
+    Tolerant,
+    /// Opening that camera again on request (`restart_source`, a camera or
+    /// mode switch in `update_source`): only a camera that is not found
+    /// leaves the source empty; any other error fails the command, so a
+    /// switch can keep the camera it had.
+    Strict,
+}
+
 /// The capture of a screen or camera source.
 struct SceneCapture {
     /// The scene source's id.
     id: String,
     name: String,
     kind: CaptureKind,
-    /// `Err`: a camera that did not start (it was not found, or a restart
-    /// failed); the source draws nothing until `restart_source`.
+    /// `Err`: a camera that did not start (see [`CameraOpen`]); the source
+    /// draws nothing until `restart_source`.
     stream: Result<Box<dyn VideoStream>, ErrorSummary>,
     /// A camera's negotiated format.
     format: Option<VideoFormatInfo>,
@@ -324,7 +339,7 @@ impl Pipeline {
         images: &ImageStore,
         audio: AudioGraphSpec,
     ) -> Result<Self, CommandError> {
-        let scene_captures = start_captures(capture, scene, &[])?;
+        let scene_captures = start_captures(capture, scene, &[], CameraOpen::Tolerant)?;
         // On an error, the captures already started are dropped, which
         // stops them.
         let audio_streams = audio::devices(&audio)
@@ -601,8 +616,9 @@ impl Pipeline {
     /// forth between scenes does not ask again or reopen a camera). Starting
     /// a picker source waits for the picker, which `allow_new_captures:
     /// false` refuses (open outputs must not stall behind a human); named
-    /// sources and cameras start without one. Returns the started cameras'
-    /// warnings (e.g. one was not found). On error nothing changes.
+    /// sources and cameras start without one. `cameras` says what a camera
+    /// that does not open does. Returns the started cameras' warnings (e.g.
+    /// one shows nothing). On error nothing changes.
     pub fn apply_scene(
         &mut self,
         capture: &mut Capture,
@@ -610,6 +626,7 @@ impl Pipeline {
         images: &ImageStore,
         keep: &[String],
         allow_new_captures: bool,
+        cameras: CameraOpen,
     ) -> Result<Vec<String>, CommandError> {
         if !allow_new_captures
             && let Some(source) = scene.sources.iter().find(|source| {
@@ -635,7 +652,7 @@ impl Pipeline {
                 ),
             ));
         }
-        let started = start_captures(capture, scene, &self.scene_captures)?;
+        let started = start_captures(capture, scene, &self.scene_captures, cameras)?;
         let mut live = mailboxes(&self.scene_captures);
         live.extend(mailboxes(&started));
         match self.render(scene, &live, images) {
@@ -689,8 +706,9 @@ impl Pipeline {
     /// the old one keeps running (a new one that started first is stopped
     /// and reported). A camera ends first, since a camera that runs hands a
     /// new stream its running mode (and Windows and macOS open a camera
-    /// once); on error the source shows nothing until it is restarted.
-    /// Returns a camera's warnings (e.g. it was not found).
+    /// once); it opens [`CameraOpen::Strict`], and on error the source shows
+    /// nothing until it is restarted. Returns a camera's warnings (e.g. it
+    /// was not found).
     ///
     /// A camera that had not started is replaced without a report entry:
     /// its failure was returned or warned about when it happened.
@@ -747,14 +765,21 @@ impl Pipeline {
         };
         let shown = rendered.sources.iter().any(|other| other.id == source.id);
         let started = if shown {
-            self.apply_scene(capture, rendered, images, keep, allow_new_captures)
+            self.apply_scene(
+                capture,
+                rendered,
+                images,
+                keep,
+                allow_new_captures,
+                CameraOpen::Strict,
+            )
         } else {
             let alone = SceneSpec {
                 id: String::new(),
                 name: String::new(),
                 sources: vec![source.clone()],
             };
-            start_captures(capture, &alone, &[]).map(|started| {
+            start_captures(capture, &alone, &[], CameraOpen::Strict).map(|started| {
                 let warnings = started
                     .iter()
                     .flat_map(|started| started.warnings.iter().cloned())
@@ -1176,6 +1201,7 @@ fn start_captures(
     capture: &mut Capture,
     scene: &SceneSpec,
     running: &[SceneCapture],
+    cameras: CameraOpen,
 ) -> Result<Vec<SceneCapture>, CommandError> {
     let mut started = Vec::new();
     for source in &scene.sources {
@@ -1201,6 +1227,7 @@ fn start_captures(
                     source,
                     camera_id,
                     mode.as_ref(),
+                    cameras,
                 )?);
             }
             SourceKind::ColorBars | SourceKind::Solid { .. } | SourceKind::Image { .. } => {}
@@ -1229,12 +1256,15 @@ fn start_screen(
 
 /// Open the camera of `source`. One that is not found leaves the source
 /// empty, with a warning (ADR 0019): an unplugged camera must not keep a
-/// show from starting. Every other error (busy, no permission) fails.
+/// show from starting. So does every other error (busy, no frame, no
+/// permission) when `cameras` is [`CameraOpen::Tolerant`]; when it is
+/// [`CameraOpen::Strict`], those fail.
 fn start_camera(
     capture: &mut dyn CameraCapture,
     source: &SourceSpec,
     camera_id: &str,
     mode: Option<&CameraModeSpec>,
+    cameras: CameraOpen,
 ) -> Result<SceneCapture, CommandError> {
     let request = CameraRequest {
         camera_id: camera_id.to_owned(),
@@ -1254,7 +1284,9 @@ fn start_camera(
                 .map(|warning| format!("camera source `{}`: {warning}", source.name))
                 .collect(),
         }),
-        Err(error) if error.kind == CaptureErrorKind::NotFound => {
+        Err(error)
+            if error.kind == CaptureErrorKind::NotFound || cameras == CameraOpen::Tolerant =>
+        {
             Ok(SceneCapture::failed(source, ErrorSummary::from(error)))
         }
         Err(error) => Err(in_source(CommandError::from(error), source)),

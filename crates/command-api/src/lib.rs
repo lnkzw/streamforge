@@ -55,7 +55,9 @@ pub use scenes::{
 
 /// Live mix snapshot types in [`HealthReport`], for adapters that do not
 /// use `audio-engine`.
-pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats};
+/// `MIX_RATE_HZ`: the mixer's rate, which the mix and monitor counters
+/// (frames) are in.
+pub use audio_engine::{LiveInputStats, LiveMixStats, PlaybackFeedStats, RATE as MIX_RATE_HZ};
 use std::path::PathBuf;
 
 use capture_api::{

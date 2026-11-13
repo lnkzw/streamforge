@@ -579,13 +579,15 @@ pub fn monitor_state(profile: &MonitorProfile, health: Option<&HealthReport>) ->
 /// left out where the mixer was ahead. `None` without a feed.
 pub fn monitor_numbers(monitor: &MonitorHealth) -> Option<(String, Option<String>)> {
     let feed = monitor.feed.as_ref()?;
-    // The feed counts frames at the mixer's 48 kHz.
-    let ms = |frames: u64| (frames as f64 / 48.0).ceil();
+    // The feed counts frames at the mixer's rate.
+    let ms = |frames: u64| (frames as f64 * 1000.0 / f64::from(command_api::MIX_RATE_HZ)).ceil();
     let latency = monitor.latency_ms.map_or_else(
         || "latency –".to_owned(),
         |ms| format!("latency {ms:.0} ms"),
     );
-    let numbers = format!("{latency} · drift {:+.0} ppm", feed.drift_ppm);
+    // Rounded first, so a device in step does not flip between -0 and +0.
+    let drift = feed.drift_ppm.round() as i64;
+    let numbers = format!("{latency} · drift {drift:+} ppm");
     let short = feed.ring.underrun_frames;
     let left_out = feed.ring.overrun_frames + feed.trimmed_frames;
     let mut gaps = Vec::new();
@@ -1271,6 +1273,14 @@ mod tests {
         assert_eq!(
             monitor_numbers(&monitor(0, 0, 0)),
             Some(("latency 32 ms · drift -12 ppm".to_owned(), None))
+        );
+        let mut in_step = monitor(0, 0, 0);
+        if let Some(feed) = &mut in_step.feed {
+            feed.drift_ppm = -0.3;
+        }
+        assert_eq!(
+            monitor_numbers(&in_step).map(|(numbers, _)| numbers),
+            Some("latency 32 ms · drift +0 ppm".to_owned())
         );
         assert_eq!(
             monitor_numbers(&monitor(4800, 0, 0)).and_then(|(_, gaps)| gaps),

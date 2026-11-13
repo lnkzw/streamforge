@@ -932,6 +932,13 @@ fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<St
     )));
     let current = profile.map(|profile| profile.device.clone());
     let on = profile.is_some_and(|profile| profile.enabled);
+    // A device that ended opens anew when it is chosen again.
+    let ended = profile.is_some_and(|profile| {
+        matches!(
+            workspace::monitor_state(profile, model.health.as_ref()),
+            workspace::MonitorState::Ended(_)
+        )
+    });
     let opens = match (model.pipeline_idle(), on) {
         (true, _) => "The device opens when the monitor is on and the pipeline runs.",
         (false, true) => "The monitor moves to the device at once.",
@@ -941,7 +948,7 @@ fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<St
     output_picker(ui, model, device, opens);
     ui.add_space(size::SPACE_8);
     let changed = current.is_some_and(|current| current != *device);
-    match buttons(ui, ButtonKind::Primary, "Use device", changed) {
+    match buttons(ui, ButtonKind::Primary, "Use device", changed || ended) {
         Some(true) => {
             model.set_monitor_device(device.as_deref());
             Outcome::Done

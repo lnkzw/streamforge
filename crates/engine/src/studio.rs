@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::composite::FPS;
 use crate::images::Replaced;
 use crate::outputs::{mix_column, output_id};
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, label};
 use crate::preview::{
     DEFAULT_PREVIEW_SIZE, PREVIEW_EVERY, PreviewOut, fit_preview_size, preview_scaler,
 };
@@ -409,11 +409,14 @@ impl Engine {
         }
     }
 
-    /// Choose the monitor's device, also while the pipeline runs: a monitor
-    /// that is on moves to it now (the old device closes first, and one
-    /// that ended is opened anew); one that is off closes its old device,
-    /// and the new one opens when it is switched on. A device that does not
-    /// open leaves the monitor silent, with a warning, as switching on does.
+    /// Choose the monitor's device, also while the pipeline runs. A monitor
+    /// that is on moves to it now: a device that plays keeps playing until
+    /// the new one is open, and stays if the new one does not open (the
+    /// error; nothing changes). One that ended or did not open is closed
+    /// first, and a new device that does not open leaves the monitor silent,
+    /// with a warning, as switching on does; naming the same device opens it
+    /// anew. A monitor that is off closes its old device, and the new one
+    /// opens when it is switched on.
     pub(crate) fn set_monitor_device(
         &mut self,
         device: Option<String>,
@@ -421,10 +424,27 @@ impl Engine {
         let mut applied_now = Vec::new();
         let mut next_start = Vec::new();
         let mut warnings = Vec::new();
-        if let Some(pipeline) = &mut self.pipeline {
+        // A pipeline that stopped on its own feeds no device; the device is
+        // only stored, as while idle.
+        if let Some(pipeline) = self
+            .pipeline
+            .as_mut()
+            .filter(|pipeline| pipeline.is_running())
+        {
             if self.profiles.monitor.enabled {
                 let column = mix_column(pipeline, &self.profiles, OutputKind::Monitor);
-                warnings = pipeline.monitor_on(self.capture.audio.as_mut(), &device, column);
+                warnings = pipeline
+                    .monitor_switch(self.capture.audio.as_mut(), &device, column)
+                    .map_err(|error| {
+                        let mut error = CommandError::from(error);
+                        error.message = format!(
+                            "the monitor stays on {}: {} did not open: {}",
+                            label(&self.profiles.monitor.device, "the default output"),
+                            label(&device, "the default output"),
+                            error.message
+                        );
+                        error
+                    })?;
                 applied_now.push("device");
             } else {
                 warnings = pipeline.monitor_close_unless(&device);

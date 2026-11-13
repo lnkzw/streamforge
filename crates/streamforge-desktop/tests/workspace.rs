@@ -725,6 +725,8 @@ fn the_monitor_device_is_chosen_also_while_it_runs_and_an_ended_monitor_says_why
             .is_some()
     });
     assert!(clickable(&harness, "Audio output"));
+    // The device that ended can be opened anew as it is.
+    assert!(clickable(&harness, "Use device"));
     harness.get_by_label("Audio output").click();
     step_until(&mut harness, "the output list", |h| {
         h.query_by_label("Speakers").is_some()

@@ -305,20 +305,21 @@ fn the_monitor_device_changes_while_the_pipeline_runs() {
     assert_eq!(monitor_health(&mut engine).device, None);
 
     // On: the monitor moves to the new device now.
+    // (`flaky` ends 300 ms after it opens, so its state is only waited for.)
     let set = device_set(&mut engine, json!({"device": "flaky"}));
     assert_eq!(set.applied_now, ["device"]);
-    let monitor = monitor_health(&mut engine);
-    assert_eq!(monitor.device.as_deref(), Some("flaky"));
-    assert_eq!(monitor.state, CaptureState::Running);
-    std::thread::sleep(Duration::from_millis(600));
-    assert!(matches!(
-        monitor_health(&mut engine).state,
-        CaptureState::Ended { .. }
-    ));
+    assert!(set.warnings.is_empty(), "{set:?}");
+    assert_eq!(monitor_health(&mut engine).device.as_deref(), Some("flaky"));
+    wait_until("the flaky device ends", || {
+        matches!(
+            monitor_health(&mut engine).state,
+            CaptureState::Ended { .. }
+        )
+    });
     // Naming the device that ended opens it anew.
     let set = device_set(&mut engine, json!({"device": "flaky"}));
     assert_eq!(set.applied_now, ["device"]);
-    assert_eq!(monitor_health(&mut engine).state, CaptureState::Running);
+    assert!(set.warnings.is_empty(), "{set:?}");
 
     // Off: the old device closes, and the new one waits for the switch.
     profile_set(&mut engine, json!({"output": "monitor", "enabled": false}));
@@ -332,16 +333,60 @@ fn the_monitor_device_changes_while_the_pipeline_runs() {
     let monitor = monitor_health(&mut engine);
     assert_eq!(monitor.device.as_deref(), Some("speakers"));
     assert_eq!(monitor.state, CaptureState::Running);
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(played_len(&played) > before, "the new device plays");
+    wait_until("the new device plays", || played_len(&played) > before);
 
-    // The recording never noticed.
+    // A device that does not open while one plays: the monitor stays on
+    // the device that plays, and nothing changes.
+    let error = try_run(&mut engine, "set_monitor_device", json!({"device": "gone"}))
+        .expect_err("a device that does not open");
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert!(
+        error
+            .message
+            .starts_with("the monitor stays on `speakers`: `gone` did not open"),
+        "{error:?}"
+    );
+    let monitor = monitor_health(&mut engine);
+    assert_eq!(monitor.device.as_deref(), Some("speakers"));
+    assert_eq!(monitor.state, CaptureState::Running);
+    let CommandOutput::OutputProfiles(profiles) =
+        run(&mut engine, "get_output_profiles", json!({}))
+    else {
+        panic!("profiles");
+    };
+    assert_eq!(profiles.monitor.device.as_deref(), Some("speakers"));
+    let before = played_len(&played);
+    wait_until("the device still plays", || played_len(&played) > before);
+
+    // The recording never noticed, and its report keeps how the earlier
+    // device ended.
     assert_eq!(
         status(&mut engine).recording_state,
         Some(RecordingState::Running)
     );
     let report = stop_recording(&mut engine);
     assert!(report.recording.audio_tracks[0].samples_encoded > 0);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w == "the monitor on `flaky` ended: the device was unplugged"),
+        "{:?}",
+        report.warnings
+    );
+    assert_eq!(
+        report.pipeline.monitor.expect("monitor").device.as_deref(),
+        Some("speakers")
+    );
+}
+
+/// Poll `done` until it holds, for at most 5 s.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

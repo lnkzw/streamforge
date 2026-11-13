@@ -469,9 +469,9 @@ const SET_OUTPUT_PROFILE: CommandDescriptor = CommandDescriptor {
 
 const SET_MONITOR_DEVICE: CommandDescriptor = CommandDescriptor {
     name: "set_monitor_device",
-    summary: "Choose the audio device the monitor plays on, while the pipeline is idle. Params: \
-              device (a name from list_audio_outputs, or null or absent for the system default). \
-              Returns the profiles.",
+    summary: "Choose the audio device the monitor plays on; a running monitor moves to it now. \
+              Params: device (a name from list_audio_outputs, or null or absent for the system \
+              default). Returns the profiles, applied_now, next_start and warnings.",
     access: CommandAccess::Sensitive,
     destructive: true,
     open_world: false,

@@ -680,7 +680,7 @@ fn the_stream_video_settings_reach_the_engine() {
 }
 
 #[test]
-fn the_monitor_device_is_chosen_while_idle_and_an_ended_monitor_says_why() {
+fn the_monitor_device_is_chosen_also_while_it_runs_and_an_ended_monitor_says_why() {
     let dir = TempDir::new("monitor");
     let mut harness = harness(model(&dir));
     harness.get_by_label("Monitor settings").click();
@@ -712,17 +712,38 @@ fn the_monitor_device_is_chosen_while_idle_and_an_ended_monitor_says_why() {
         .get_by_role_and_label(Role::CheckBox, "Preview")
         .click();
     step_until(&mut harness, "the ended monitor", |h| {
-        h.query_by_label_contains("Switch it off and on to open the device again")
-            .is_some()
+        h.query_by_label_contains(
+            "Switch the monitor off and on to retry, or choose another device",
+        )
+        .is_some()
     });
-    // The device changes only while the pipeline is idle.
+    // While the preview runs, another device can be chosen; the monitor
+    // moves to it at once.
     harness.get_by_label("Monitor settings").click();
-    step_until(&mut harness, "the idle note", |h| {
-        h.query_by_label("Stop the preview and the outputs to choose another device.")
+    step_until(&mut harness, "the running note", |h| {
+        h.query_by_label("The monitor moves to the device at once.")
             .is_some()
     });
-    assert!(!clickable(&harness, "Audio output"));
-    assert!(!clickable(&harness, "Use device"));
+    assert!(clickable(&harness, "Audio output"));
+    harness.get_by_label("Audio output").click();
+    step_until(&mut harness, "the output list", |h| {
+        h.query_by_label("Speakers").is_some()
+    });
+    harness.get_by_label("Speakers").click();
+    harness.step();
+    assert!(clickable(&harness, "Use device"));
+    harness.get_by_label("Use device").click();
+    step_until(&mut harness, "the new device", |h| {
+        h.query_by_label("Use device").is_none()
+            && h.query_by_label("Speakers").is_some()
+            && h.query_by_label("USB Headset").is_none()
+    });
+    // The test backend cannot play there either (the engine tests cover
+    // a device that plays), and the dock still says why.
+    step_until(&mut harness, "the monitor still ended", |h| {
+        h.query_by_label_contains("Switch the monitor off and on to retry")
+            .is_some()
+    });
 }
 
 /// What the matrix says channel `channel` plays.

@@ -918,8 +918,9 @@ fn encoder_picker(ui: &mut egui::Ui, encoder: &mut EncoderPreference) {
     ui.label(TextRole::Meta.text(note));
 }
 
-/// Choose the monitor's device while the pipeline is idle, as the engine
-/// requires; the bus it plays is chosen in the routing matrix.
+/// Choose the monitor's device, also while the pipeline runs (a monitor
+/// that is on moves to it at once); the bus it plays is chosen in the
+/// routing matrix.
 fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>) -> Outcome {
     ui.label(TextRole::Title.text("Monitor"));
     let profile = model.profiles.as_ref().map(|profiles| &profiles.monitor);
@@ -930,12 +931,17 @@ fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<St
         bus.unwrap_or("its mix")
     )));
     let current = profile.map(|profile| profile.device.clone());
-    let idle = model.pipeline_idle();
+    let on = profile.is_some_and(|profile| profile.enabled);
+    let opens = match (model.pipeline_idle(), on) {
+        (true, _) => "The device opens when the monitor is on and the pipeline runs.",
+        (false, true) => "The monitor moves to the device at once.",
+        (false, false) => "The device opens when the monitor is switched on.",
+    };
     ui.label(TextRole::Label.text("Output device"));
-    ui.add_enabled_ui(idle, |ui| output_picker(ui, model, device, idle));
+    output_picker(ui, model, device, opens);
     ui.add_space(size::SPACE_8);
     let changed = current.is_some_and(|current| current != *device);
-    match buttons(ui, ButtonKind::Primary, "Use device", idle && changed) {
+    match buttons(ui, ButtonKind::Primary, "Use device", changed) {
         Some(true) => {
             model.set_monitor_device(device.as_deref());
             Outcome::Done
@@ -946,8 +952,9 @@ fn monitor_settings(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<St
 }
 
 /// Choose a listed audio output, or the system's default one. A device
-/// that is not listed (unplugged) stays choosable under its name.
-fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>, idle: bool) {
+/// that is not listed (unplugged) stays choosable under its name. `opens`
+/// says when a chosen device opens, once the outputs are listed.
+fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<String>, opens: &str) {
     const DEFAULT: &str = "System default output";
     let listed = model.listed_audio_outputs();
     let chosen = workspace::output_label(device.as_deref(), listed);
@@ -977,11 +984,10 @@ fn output_picker(ui: &mut egui::Ui, model: &mut Model, device: &mut Option<Strin
     .on_hover_text("Audio output");
     // One line, always there: the dialog is centred and must not jump.
     let note = match &model.audio_outputs {
-        _ if !idle => "Stop the preview and the outputs to choose another device.".to_owned(),
         None => "Looking for audio outputs…".to_owned(),
         Some(Err(reason)) => format!("The audio outputs could not be listed: {reason}"),
         Some(Ok(outputs)) if outputs.is_empty() => "No audio outputs found.".to_owned(),
-        Some(Ok(_)) => "The device opens when the monitor is on and the pipeline runs.".to_owned(),
+        Some(Ok(_)) => opens.to_owned(),
     };
     ui.horizontal(|ui| {
         if ui

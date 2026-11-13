@@ -10,7 +10,8 @@ use std::time::Duration;
 use chrono::Timelike;
 use command_api::{
     AudioInput, AudioOutput, Camera, CameraMode, CameraModeSpec, CaptureState, ChannelInput,
-    HealthReport, MonitorProfile, OutputHealth, RecordingState, SceneList, SourceSpec, StreamState,
+    HealthReport, MonitorHealth, MonitorProfile, OutputHealth, RecordingState, SceneList,
+    SourceSpec, StreamState,
 };
 use eframe::egui::{Key, KeyboardShortcut, Modifiers, Rect, vec2};
 use media_core::Rational;
@@ -570,6 +571,37 @@ pub fn monitor_state(profile: &MonitorProfile, health: Option<&HealthReport>) ->
         Some(CaptureState::Running) => MonitorState::Playing,
         None => MonitorState::On,
     }
+}
+
+/// A playing monitor's numbers for its row: the delay it adds and its
+/// device's clock offset; then, since its device opened, the gaps a
+/// listener hears, if any: silence where the device ran short, and audio
+/// left out where the mixer was ahead. `None` without a feed.
+pub fn monitor_numbers(monitor: &MonitorHealth) -> Option<(String, Option<String>)> {
+    let feed = monitor.feed.as_ref()?;
+    // The feed counts frames at the mixer's 48 kHz.
+    let ms = |frames: u64| (frames as f64 / 48.0).ceil();
+    let latency = monitor.latency_ms.map_or_else(
+        || "latency –".to_owned(),
+        |ms| format!("latency {ms:.0} ms"),
+    );
+    let numbers = format!("{latency} · drift {:+.0} ppm", feed.drift_ppm);
+    let short = feed.ring.underrun_frames;
+    let left_out = feed.ring.overrun_frames + feed.trimmed_frames;
+    let mut gaps = Vec::new();
+    if short > 0 {
+        gaps.push(format!(
+            "{} ms of silence (the device ran short)",
+            ms(short)
+        ));
+    }
+    if left_out > 0 {
+        gaps.push(format!(
+            "{} ms left out (the device fell behind)",
+            ms(left_out)
+        ));
+    }
+    Some((numbers, (!gaps.is_empty()).then(|| gaps.join("; "))))
 }
 
 /// A key of the workspace (`docs/ui/design-system.md`, Keyboard). The
@@ -1211,6 +1243,54 @@ mod tests {
     }
 
     #[test]
+    fn a_playing_monitor_shows_its_delay_and_the_gaps_a_listener_hears() {
+        let monitor = |underrun_frames, overrun_frames, trimmed_frames| MonitorHealth {
+            device: None,
+            enabled: true,
+            state: CaptureState::Running,
+            latency_ms: Some(31.6),
+            feed: Some(command_api::PlaybackFeedStats {
+                ring: media_core::SampleRingStats {
+                    capacity_frames: 24_000,
+                    written_frames: 96_000,
+                    read_frames: 95_000,
+                    warmup_frames: 512,
+                    underrun_frames,
+                    overrun_frames,
+                    max_read_frames: 480,
+                },
+                fill_frames: 1000,
+                pull_frames: 480,
+                target_frames: 960,
+                drift_ppm: -12.4,
+                padded_frames: 1440,
+                trimmed_frames,
+            }),
+        };
+        // The start's warm-up and padding are no gaps.
+        assert_eq!(
+            monitor_numbers(&monitor(0, 0, 0)),
+            Some(("latency 32 ms · drift -12 ppm".to_owned(), None))
+        );
+        assert_eq!(
+            monitor_numbers(&monitor(4800, 0, 0)).and_then(|(_, gaps)| gaps),
+            Some("100 ms of silence (the device ran short)".to_owned())
+        );
+        // Overrun and trim are both audio left out; a part of a
+        // millisecond counts as one.
+        assert_eq!(
+            monitor_numbers(&monitor(1, 480, 480)).and_then(|(_, gaps)| gaps),
+            Some(
+                "1 ms of silence (the device ran short); 20 ms left out (the device fell behind)"
+                    .to_owned()
+            )
+        );
+        let mut silent = monitor(0, 0, 0);
+        silent.feed = None;
+        assert_eq!(monitor_numbers(&silent), None);
+    }
+
+    #[test]
     fn keys_map_to_shortcuts_with_exactly_their_modifiers() {
         let command = Modifiers::COMMAND;
         // On Linux and Windows, Ctrl sets both `ctrl` and `command`.
@@ -1461,6 +1541,17 @@ mod tests {
                  no longer present. (HRESULT 0xc00d3ea2); the camera was disconnected"
             ),
             "camera `Elgato Facecam` stopped delivering; the camera was disconnected"
+        );
+        // WASAPI (Windows): a monitor device unplugged, two codes in a row.
+        assert_eq!(
+            short_reason(
+                "audio output `Speakers (Realtek(R) Audio)` stopped playing: Failed to get \
+                 current padding: OS Error -2004287484 (FormatMessageW() returned error 317) \
+                 (os error -2004287484); the device was disconnected, disabled or \
+                 reconfigured; no audio since"
+            ),
+            "audio output `Speakers (Realtek(R) Audio)` stopped playing; the device was \
+             disconnected, disabled or reconfigured; no audio since"
         );
         // No remedy: the wording stays, the code goes.
         assert_eq!(

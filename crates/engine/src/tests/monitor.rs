@@ -111,6 +111,13 @@ fn profile_set(engine: &mut Engine, params: serde_json::Value) -> OutputProfileS
     }
 }
 
+fn device_set(engine: &mut Engine, params: serde_json::Value) -> OutputProfileSet {
+    match run(engine, "set_monitor_device", params) {
+        CommandOutput::OutputProfileSet(set) => set,
+        other => panic!("unexpected output: {other:?}"),
+    }
+}
+
 fn monitor_health(engine: &mut Engine) -> command_api::MonitorHealth {
     health(engine).monitor.expect("monitor health")
 }
@@ -215,7 +222,7 @@ fn the_monitor_plays_its_bus_live_beside_a_recording() {
 }
 
 #[test]
-fn a_monitor_device_that_does_not_open_only_warns() {
+fn a_monitor_device_that_does_not_open_only_warns_until_another_is_chosen() {
     let _media = media_test_lock();
     let dir = TempDir::new("monitor-gone");
     let (mut engine, _played) = engine_with_speakers(&dir);
@@ -252,30 +259,89 @@ fn a_monitor_device_that_does_not_open_only_warns() {
             .iter()
             .any(|w| w.contains("monitor is silent"))
     );
-    // The device changes only while idle.
-    let busy = try_run(
-        &mut engine,
-        "set_monitor_device",
-        json!({"device": "speakers"}),
-    );
-    assert_eq!(busy.unwrap_err().code, ErrorCode::InvalidState);
     // Switching on again tries again, and says so.
     let set = profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
     assert_eq!(set.applied_now, ["enabled"]);
     assert!(!set.warnings.is_empty(), "{set:?}");
+    // Another device, chosen while the recording runs, plays at once, and
+    // the warning goes.
+    let set = device_set(&mut engine, json!({"device": "speakers"}));
+    assert_eq!(set.applied_now, ["device"]);
+    assert!(set.warnings.is_empty(), "{set:?}");
+    assert_eq!(set.profiles.monitor.device.as_deref(), Some("speakers"));
+    let monitor = monitor_health(&mut engine);
+    assert_eq!(monitor.device.as_deref(), Some("speakers"));
+    assert_eq!(monitor.state, CaptureState::Running);
+    let CommandOutput::MixerState(mixer) = run(&mut engine, "get_mixer", json!({})) else {
+        panic!("mixer");
+    };
+    assert!(mixer.outputs[2].running);
+    assert!(mixer.warnings.is_empty(), "{:?}", mixer.warnings);
     assert_eq!(
         status(&mut engine).recording_state,
         Some(RecordingState::Running)
     );
     stop_recording(&mut engine);
 
-    // Idle: the default device works.
-    let CommandOutput::OutputProfiles(profiles) =
-        run(&mut engine, "set_monitor_device", json!({"device": null}))
-    else {
-        panic!("profiles");
-    };
-    assert_eq!(profiles.monitor.device, None);
+    // Idle: the device is only stored.
+    let set = device_set(&mut engine, json!({"device": null}));
+    assert!(set.applied_now.is_empty(), "{set:?}");
+    assert!(set.next_start.is_empty(), "{set:?}");
+    assert!(set.warnings.is_empty(), "{set:?}");
+    assert_eq!(set.profiles.monitor.device, None);
+}
+
+#[test]
+fn the_monitor_device_changes_while_the_pipeline_runs() {
+    let _media = media_test_lock();
+    let dir = TempDir::new("monitor-switch");
+    let (mut engine, played) = engine_with_speakers(&dir);
+    profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
+    run(
+        &mut engine,
+        "start_recording",
+        json!({"file_name": "take.mkv"}),
+    );
+    assert_eq!(monitor_health(&mut engine).device, None);
+
+    // On: the monitor moves to the new device now.
+    let set = device_set(&mut engine, json!({"device": "flaky"}));
+    assert_eq!(set.applied_now, ["device"]);
+    let monitor = monitor_health(&mut engine);
+    assert_eq!(monitor.device.as_deref(), Some("flaky"));
+    assert_eq!(monitor.state, CaptureState::Running);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(matches!(
+        monitor_health(&mut engine).state,
+        CaptureState::Ended { .. }
+    ));
+    // Naming the device that ended opens it anew.
+    let set = device_set(&mut engine, json!({"device": "flaky"}));
+    assert_eq!(set.applied_now, ["device"]);
+    assert_eq!(monitor_health(&mut engine).state, CaptureState::Running);
+
+    // Off: the old device closes, and the new one waits for the switch.
+    profile_set(&mut engine, json!({"output": "monitor", "enabled": false}));
+    let set = device_set(&mut engine, json!({"device": "speakers"}));
+    assert!(set.applied_now.is_empty(), "{set:?}");
+    assert_eq!(set.next_start, ["device"]);
+    assert!(health(&mut engine).monitor.is_none());
+    let before = played_len(&played);
+    let set = profile_set(&mut engine, json!({"output": "monitor", "enabled": true}));
+    assert!(set.warnings.is_empty(), "{set:?}");
+    let monitor = monitor_health(&mut engine);
+    assert_eq!(monitor.device.as_deref(), Some("speakers"));
+    assert_eq!(monitor.state, CaptureState::Running);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(played_len(&played) > before, "the new device plays");
+
+    // The recording never noticed.
+    assert_eq!(
+        status(&mut engine).recording_state,
+        Some(RecordingState::Running)
+    );
+    let report = stop_recording(&mut engine);
+    assert!(report.recording.audio_tracks[0].samples_encoded > 0);
 }
 
 #[test]

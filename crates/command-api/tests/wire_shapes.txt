@@ -203,7 +203,7 @@ running: bool
 warnings: array
 warnings[]: string
 
-== get_output_profiles, set_monitor_device
+== get_output_profiles
 monitor: object
 monitor.device: string
 monitor.enabled: bool
@@ -663,7 +663,7 @@ path: string
 replaced: bool
 scenes: number
 
-== set_output_profile
+== set_monitor_device, set_output_profile
 applied_now: array
 applied_now[]: string
 monitor: object

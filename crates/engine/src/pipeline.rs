@@ -247,8 +247,9 @@ pub(crate) struct Pipeline {
     retired_captures: Vec<SceneCaptureOutcome>,
     retired_omitted: u64,
     audio_streams: Vec<DeviceCapture>,
-    /// The monitor's device, once it was switched on in this run; after the
-    /// mixer, which feeds it.
+    /// The monitor's device, once it was switched on in this run (`None`
+    /// again after its device changed while it was off); after the mixer,
+    /// which feeds it.
     monitor: Option<MonitorPlayback>,
     /// What this run mixes; fader, mute and balance follow live changes.
     /// `audio_streams` are its device channels' captures, in order.
@@ -369,17 +370,7 @@ impl Pipeline {
             return monitor.warnings.clone();
         }
         // A fresh start: the old feed and device go first.
-        drop(lock(&self.fanout.monitor).take());
-        let mut warnings = Vec::new();
-        if let Some(MonitorPlayback {
-            stream: Ok(stream), ..
-        }) = self.monitor.take()
-            && let Err(error) = stream.stop()
-        {
-            warnings.push(format!(
-                "the monitor's previous device did not stop cleanly: {error}"
-            ));
-        }
+        let mut warnings = self.monitor_close();
         let (writer, reader) = sample_ring(CHANNELS, MONITOR_RING_FRAMES);
         let request = PlaybackRequest {
             output: device.clone(),
@@ -401,9 +392,8 @@ impl Pipeline {
             }
             Err(error) => {
                 warnings.push(format!(
-                    "the monitor is silent: {} did not open ({}); connect it, or choose \
-                     another with set_monitor_device while the pipeline is idle, then switch \
-                     the monitor on again",
+                    "the monitor is silent: {} did not open ({}); connect it and switch the \
+                     monitor on again, or choose another with set_monitor_device",
                     label(device, "the default output"),
                     error.message
                 ));
@@ -416,6 +406,32 @@ impl Pipeline {
             enabled: true,
             warnings: warnings.clone(),
         });
+        warnings
+    }
+
+    /// Close the monitor's device unless it is `device`, for a monitor
+    /// that is off: the new device opens when it is switched on. Returns a
+    /// warning if the old device did not stop cleanly.
+    pub fn monitor_close_unless(&mut self, device: &Option<String>) -> Vec<String> {
+        match &self.monitor {
+            Some(monitor) if monitor.device != *device => self.monitor_close(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Stop the monitor's feed, then its device.
+    fn monitor_close(&mut self) -> Vec<String> {
+        drop(lock(&self.fanout.monitor).take());
+        let mut warnings = Vec::new();
+        if let Some(MonitorPlayback {
+            stream: Ok(stream), ..
+        }) = self.monitor.take()
+            && let Err(error) = stream.stop()
+        {
+            warnings.push(format!(
+                "the monitor's previous device did not stop cleanly: {error}"
+            ));
+        }
         warnings
     }
 

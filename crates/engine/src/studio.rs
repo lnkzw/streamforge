@@ -7,7 +7,7 @@ use audio_engine::BusRef as GraphBus;
 use command_api::{
     AddBusRequest, AddChannelRequest, AddSourceRequest, BusRef, ChannelRef, CommandError,
     ErrorCode, MixerState, MoveSourceRequest, OutputKind, OutputMix, OutputProfileSet,
-    OutputProfiles, PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
+    PROGRAM_BUS_ID, PreviewState, SceneList, SceneRef, SetChannelInputRequest,
     SetOutputProfileRequest, SetSendRequest, SourceKind, SourceRef, SourceSpec, UpdateBusRequest,
     UpdateChannelRequest, UpdateSourceRequest,
 };
@@ -409,20 +409,35 @@ impl Engine {
         }
     }
 
-    /// Only while idle, like a channel's device.
+    /// Choose the monitor's device, also while the pipeline runs: a monitor
+    /// that is on moves to it now (the old device closes first, and one
+    /// that ended is opened anew); one that is off closes its old device,
+    /// and the new one opens when it is switched on. A device that does not
+    /// open leaves the monitor silent, with a warning, as switching on does.
     pub(crate) fn set_monitor_device(
         &mut self,
         device: Option<String>,
-    ) -> Result<OutputProfiles, CommandError> {
-        if self.pipeline.is_some() {
-            return Err(CommandError::new(
-                ErrorCode::InvalidState,
-                "the monitor's device can only change while the pipeline is idle; stop the \
-                 preview and outputs first (switching the monitor on or off is live)",
-            ));
+    ) -> Result<OutputProfileSet, CommandError> {
+        let mut applied_now = Vec::new();
+        let mut next_start = Vec::new();
+        let mut warnings = Vec::new();
+        if let Some(pipeline) = &mut self.pipeline {
+            if self.profiles.monitor.enabled {
+                let column = mix_column(pipeline, &self.profiles, OutputKind::Monitor);
+                warnings = pipeline.monitor_on(self.capture.audio.as_mut(), &device, column);
+                applied_now.push("device");
+            } else {
+                warnings = pipeline.monitor_close_unless(&device);
+                next_start.push("device");
+            }
         }
         self.profiles.monitor.device = device;
-        Ok(self.profiles.clone())
+        Ok(OutputProfileSet {
+            profiles: self.profiles.clone(),
+            applied_now,
+            next_start,
+            warnings,
+        })
     }
 
     /// Change an output's profile. The whole new profile is checked
